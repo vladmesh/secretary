@@ -273,6 +273,84 @@ class CliTests(unittest.TestCase):
         self.assertIn("secretary data raw-kanboard-dump: could not create raw dump", output)
         self.assertNotIn("Traceback", output)
 
+    def test_export_commands_report_bad_data_dir_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            source = root / "panelmem-kb"
+            state = root / "state"
+            transcript_root = root / "transcripts"
+            instance_dir.mkdir()
+            data_dir.write_text("not a directory", encoding="utf-8")
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "fact.md").write_text("fact\n", encoding="utf-8")
+            (state / "pipeline").mkdir(parents=True)
+            (state / "pipeline" / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+            (state / "pipeline" / "cards.json").write_text("{}", encoding="utf-8")
+            transcript_root.mkdir()
+            (transcript_root / "session.jsonl").write_text("{}\n", encoding="utf-8")
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            commands = [
+                (
+                    ["data", "export", "--instance", str(instance_dir)],
+                    "secretary data export: cannot prepare board data dir",
+                ),
+                (
+                    ["data", "export-board", "--instance", str(instance_dir)],
+                    "secretary data export-board: cannot prepare board data dir",
+                ),
+                (
+                    [
+                        "data",
+                        "export-memory",
+                        "--instance",
+                        str(instance_dir),
+                        "--source-dir",
+                        str(source),
+                    ],
+                    "secretary data export-memory: cannot prepare memory data dir",
+                ),
+                (
+                    [
+                        "data",
+                        "export-runs",
+                        "--instance",
+                        str(instance_dir),
+                        "--state-dir",
+                        str(state),
+                    ],
+                    "secretary data export-runs: cannot prepare runs data dir",
+                ),
+                (
+                    [
+                        "data",
+                        "export-transcripts",
+                        "--instance",
+                        str(instance_dir),
+                        "--root",
+                        str(transcript_root),
+                    ],
+                    "secretary data export-transcripts: cannot prepare transcripts data dir",
+                ),
+            ]
+
+            for argv, expected in commands:
+                with self.subTest(argv=argv):
+                    code, output = self.run_cli(argv)
+
+                self.assertEqual(code, 1)
+                self.assertIn(expected, output)
+                self.assertNotIn("Traceback", output)
+
     def test_export_memory_command_uses_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

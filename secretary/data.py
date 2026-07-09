@@ -150,7 +150,7 @@ def export_board(
 ) -> DataExport:
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
-    board_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(board_dir, "board data dir")
 
     cards = _pipeline_json(["list"], pipeline_worktree=pipeline_worktree, command=command)
     if not isinstance(cards, list):
@@ -248,7 +248,7 @@ def export_memory(
 
     memory_dir = data_dir / "memory"
     facts_dir = memory_dir / "facts"
-    memory_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(memory_dir, "memory data dir")
     _replace_dir_from_tree(source_memory, facts_dir)
 
     facts = []
@@ -286,10 +286,13 @@ def export_runs(
         raise RuntimeError(f"state source not found: {state_dir}")
 
     runs_dir = data_dir / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(runs_dir, "runs data dir")
     records: list[dict[str, Any]] = []
     watermarks: list[dict[str, Any]] = []
-    snapshot = Path(tempfile.mkdtemp(prefix=".state-", suffix=".tmp", dir=runs_dir))
+    try:
+        snapshot = Path(tempfile.mkdtemp(prefix=".state-", suffix=".tmp", dir=runs_dir))
+    except OSError as exc:
+        raise RuntimeError(f"could not create runs snapshot: {exc}") from None
     try:
         _copy_tree(state_dir, snapshot)
         for path in sorted(snapshot.rglob("*")):
@@ -354,7 +357,7 @@ def export_transcripts(
     data_dir = data_dir.expanduser().resolve()
     roots = roots or [CLAUDE_PROJECTS_DIR, CODEX_SESSIONS_DIR]
     transcripts_dir = data_dir / "transcripts"
-    transcripts_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(transcripts_dir, "transcripts data dir")
 
     entries = []
     for root in roots:
@@ -378,7 +381,10 @@ def export_transcripts(
     _write_ndjson(transcripts_dir / "inventory.ndjson", entries)
     if copy:
         copy_dir = transcripts_dir / "copies"
-        staging = Path(tempfile.mkdtemp(prefix=".copies-", suffix=".tmp", dir=transcripts_dir))
+        try:
+            staging = Path(tempfile.mkdtemp(prefix=".copies-", suffix=".tmp", dir=transcripts_dir))
+        except OSError as exc:
+            raise RuntimeError(f"could not create transcripts copy staging: {exc}") from None
         try:
             for entry in entries:
                 destination = staging / _safe_relative_copy_path(entry["root"], entry["relative_path"])
@@ -389,7 +395,10 @@ def export_transcripts(
             _cleanup_staging_dir(staging)
             raise RuntimeError(f"could not copy transcripts: {exc}") from None
     elif (transcripts_dir / "copies").exists():
-        shutil.rmtree(transcripts_dir / "copies")
+        try:
+            shutil.rmtree(transcripts_dir / "copies")
+        except OSError as exc:
+            raise RuntimeError(f"could not remove transcript copies: {exc}") from None
     return DataExport(path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots))
 
 
@@ -476,9 +485,9 @@ def _write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _write_text_atomic(path: Path, payload: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{path.name}.",
             suffix=".tmp",
@@ -500,7 +509,12 @@ def _write_text_atomic(path: Path, payload: str) -> None:
 
 
 def _replace_dir_from_tree(source: Path, destination: Path) -> None:
-    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent))
+    try:
+        staging = Path(
+            tempfile.mkdtemp(prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent)
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not mirror {source}: {exc}") from None
     try:
         _copy_tree(source, staging)
         _replace_dir(staging, destination)
@@ -524,9 +538,9 @@ def _copy_tree(source: Path, destination: Path) -> None:
 
 def _replace_dir(staging: Path, destination: Path) -> None:
     backup = destination.with_name(f".{destination.name}.old")
-    if backup.exists():
-        shutil.rmtree(backup)
     try:
+        if backup.exists():
+            shutil.rmtree(backup)
         if destination.exists():
             os.replace(destination, backup)
         os.replace(staging, destination)
@@ -536,6 +550,13 @@ def _replace_dir(staging: Path, destination: Path) -> None:
         if not destination.exists() and backup.exists():
             os.replace(backup, destination)
         raise
+
+
+def _ensure_dir(path: Path, label: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"cannot prepare {label}: {exc}") from None
 
 
 def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | None:
