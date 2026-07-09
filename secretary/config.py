@@ -7,6 +7,7 @@ to the offending field, so ``doctor`` never shows a traceback for bad input.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
@@ -15,6 +16,16 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
+
+# A property/field name is safe to echo only if it looks like an ordinary
+# config identifier. Anything longer or token-like is redacted so a secret that
+# lands in a field name can't reach stdout, logs or board comments.
+_SAFE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+
+
+def _redact_name(name: Any) -> str:
+    text = name if isinstance(name, str) else str(name)
+    return text if _SAFE_NAME.match(text) else "<redacted>"
 
 # schema name -> file in secretary/schemas/
 SCHEMAS = {
@@ -59,15 +70,30 @@ def load_config(path: Path) -> Any:
         raise ConfigError(f"config is not a file: {path}")
     try:
         text = path.read_text(encoding="utf-8")
-    except UnicodeError as exc:
-        raise ConfigError(f"cannot decode config as UTF-8: {exc}") from exc
+    except UnicodeError:
+        # str(exc) would carry offending bytes; keep the message content-free.
+        raise ConfigError("cannot decode config as UTF-8") from None
     except OSError as exc:
-        raise ConfigError(f"cannot read config: {exc}") from exc
+        # strerror is the OS reason (e.g. "Permission denied"), never file body.
+        raise ConfigError(f"cannot read config: {exc.strerror or 'unreadable'}") from None
     try:
         # YAML is a JSON superset, so this loads both .yaml and .json.
         return yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"cannot parse config: {exc}") from exc
+        raise ConfigError(f"cannot parse config: {_safe_yaml_error(exc)}") from None
+
+
+def _safe_yaml_error(exc: yaml.YAMLError) -> str:
+    """Describe a YAML parse failure without echoing the source snippet.
+
+    ``str(exc)`` embeds the offending config line, which can hold a secret.
+    We keep only the parser's own problem text and its line/column.
+    """
+    problem = getattr(exc, "problem", None) or "invalid YAML"
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return f"{problem} (line {mark.line + 1}, column {mark.column + 1})"
+    return problem
 
 
 def _field_path(absolute_path: Any) -> str:
@@ -106,16 +132,15 @@ def _safe_message(error: Any) -> str:
 
     if keyword == "required":
         instance = error.instance if isinstance(error.instance, dict) else {}
-        missing = [p for p in expected if p not in instance]
-        names = ", ".join(missing) or ", ".join(expected)
+        missing = [p for p in expected if p not in instance] or list(expected)
         noun = "property" if len(missing) == 1 else "properties"
-        return f"missing required {noun}: {names}"
+        return f"missing required {noun}: {', '.join(_redact_name(p) for p in missing)}"
     if keyword == "additionalProperties":
         allowed = set(error.schema.get("properties", {}))
         instance = error.instance if isinstance(error.instance, dict) else {}
         extra = sorted(k for k in instance if k not in allowed)
         noun = "property" if len(extra) == 1 else "properties"
-        return f"unexpected {noun}: {', '.join(extra)}"
+        return f"unexpected {noun}: {', '.join(_redact_name(k) for k in extra)}"
     if keyword == "type":
         names = expected if isinstance(expected, str) else "/".join(expected)
         return f"expected type {names}"

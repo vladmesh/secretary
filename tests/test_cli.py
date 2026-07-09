@@ -97,6 +97,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("config not found", output)
         self.assertNotIn("Traceback", output)
 
+    def test_doctor_yaml_parse_error_does_not_leak_source(self):
+        secret = "sk-live-DO-NOT-LEAK-9f3a2b"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            # Unterminated quoted scalar: PyYAML's raw message would echo the line.
+            instance.write_text(f'name: "{secret}\n', encoding="utf-8")
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance)]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("cannot parse config", output)
+        self.assertIn("line", output)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("Traceback", output)
+
     def test_doctor_reports_non_utf8_instance_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir) / "instance.yaml"

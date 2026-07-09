@@ -161,6 +161,22 @@ class ErrorLeakTests(unittest.TestCase):
         blob = "\n".join(str(e) for e in errors)
         self.assertNotIn("SECRET_ID_LEAK", blob, blob)
 
+    def test_token_like_unknown_field_name_is_redacted(self):
+        secret = "sk-live-AbCd1234EFGH5678ijkl9012mnop3456qrst"
+        data = copy.deepcopy(VALID_INSTANCE)
+        data[secret] = True
+        errors = validate(data, "instance", "instance.yaml")
+        blob = "\n".join(str(e) for e in errors)
+        self.assertNotIn(secret, blob, blob)
+        self.assertIn("<redacted>", blob)
+
+    def test_ordinary_unknown_field_name_is_shown(self):
+        data = copy.deepcopy(VALID_INSTANCE)
+        data["mystery"] = True
+        errors = validate(data, "instance", "instance.yaml")
+        blob = "\n".join(str(e) for e in errors)
+        self.assertIn("mystery", blob)
+
 
 class ExampleInstanceTests(unittest.TestCase):
     def test_example_instance_is_valid(self):
