@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary.cli import main
 
@@ -66,6 +67,115 @@ class CliTests(unittest.TestCase):
         # Missing required 'data_dir' / 'offsite' surfaced at the root.
         self.assertIn("data_dir", output)
         self.assertNotIn("Traceback", output)
+
+    def test_doctor_warns_when_data_manifest_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+            strict_code, strict_output = self.run_cli(
+                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("data manifest: absent", output)
+        self.assertIn("warnings: 1", output)
+        self.assertEqual(strict_code, 1, strict_output)
+        self.assertIn("status: warnings", strict_output)
+
+    def test_data_init_generates_manifest_that_doctor_finds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            init_code, init_output = self.run_cli(
+                ["data", "init", "--instance", str(instance_dir)]
+            )
+            doctor_code, doctor_output = self.run_cli(
+                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+            )
+            manifest_exists = (data_dir / "data-manifest.json").is_file()
+
+        self.assertEqual(init_code, 0, init_output)
+        self.assertTrue(manifest_exists)
+        self.assertEqual(doctor_code, 0, doctor_output)
+        self.assertIn("data manifest: present", doctor_output)
+        self.assertNotIn("warnings:", doctor_output)
+
+    def test_data_init_overwrites_broken_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            data_dir.mkdir()
+            (data_dir / "data-manifest.json").write_text("{not-json", encoding="utf-8")
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            doctor_code, doctor_output = self.run_cli(
+                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(doctor_code, 0, doctor_output)
+
+    @mock.patch("secretary.data.subprocess.run")
+    def test_raw_kanboard_dump_command_uses_data_dir(self, run):
+        def fake_run(command, **_kwargs):
+            destination = Path(command[-1])
+            destination.mkdir(parents=True)
+            (destination / "db.sqlite").write_bytes(b"sqlite")
+
+        run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+            code, output = self.run_cli(
+                ["data", "raw-kanboard-dump", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("kanboard raw dump:", output)
+        self.assertEqual(run.call_args.args[0][0:2], ["docker", "cp"])
 
     def test_doctor_reports_bad_nested_field_with_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:

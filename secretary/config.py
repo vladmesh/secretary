@@ -165,7 +165,9 @@ class InstanceReport:
     projects: int
     adapters: int
     has_manifest: bool
+    manifest_path: Path | None
     errors: list[SchemaError]
+    warnings: list[SchemaError]
     bindings: list[dict[str, Any]]
     host: dict[str, Any]
 
@@ -200,7 +202,9 @@ def validate_instance(path: Path) -> InstanceReport:
             projects=0,
             adapters=0,
             has_manifest=False,
+            manifest_path=None,
             errors=[SchemaError(str(instance_file), "<file>", str(exc))],
+            warnings=[],
             bindings=[],
             host={},
         )
@@ -215,8 +219,9 @@ def validate_instance(path: Path) -> InstanceReport:
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
     bindings = _load_bindings(instance_dir / "projects")
 
-    manifest_file = instance_dir / "data-manifest.json"
-    has_manifest = manifest_file.exists()
+    manifest_file = _find_manifest(instance_dir, instance)
+    has_manifest = manifest_file is not None
+    warnings: list[SchemaError] = []
     if has_manifest:
         try:
             manifest = load_config(manifest_file)
@@ -224,6 +229,14 @@ def validate_instance(path: Path) -> InstanceReport:
             errors.append(SchemaError(manifest_file.name, "<file>", str(exc)))
         else:
             errors += validate(manifest, "data-manifest", manifest_file.name)
+    else:
+        warnings.append(
+            SchemaError(
+                "data-manifest.json",
+                "<file>",
+                "data manifest absent",
+            )
+        )
 
     return InstanceReport(
         instance_path=instance_file,
@@ -231,10 +244,26 @@ def validate_instance(path: Path) -> InstanceReport:
         projects=projects,
         adapters=adapters,
         has_manifest=has_manifest,
+        manifest_path=manifest_file,
         errors=errors,
+        warnings=warnings,
         bindings=bindings,
         host=host,
     )
+
+
+def _find_manifest(instance_dir: Path, instance: Any) -> Path | None:
+    if isinstance(instance, dict):
+        data_dir = instance.get("data_dir")
+        if isinstance(data_dir, str) and data_dir:
+            data_manifest = Path(data_dir).expanduser() / "data-manifest.json"
+            if data_manifest.exists():
+                return data_manifest
+
+    legacy_manifest = instance_dir / "data-manifest.json"
+    if legacy_manifest.exists():
+        return legacy_manifest
+    return None
 
 
 def _load_bindings(directory: Path) -> list[dict[str, Any]]:
