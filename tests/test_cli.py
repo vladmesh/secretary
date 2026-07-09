@@ -386,6 +386,41 @@ class CliTests(unittest.TestCase):
         self.assertIn("memory facts: 1", output)
         self.assertTrue(export_exists)
 
+    def test_export_memory_command_reports_decode_error_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            fact = source / "memory" / "secretary" / "bad.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_bytes(b"\xff\xfe")
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+            code, output = self.run_cli(
+                [
+                    "data",
+                    "export-memory",
+                    "--instance",
+                    str(instance_dir),
+                    "--source-dir",
+                    str(source),
+                ]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary data export-memory: could not decode memory fact", output)
+        self.assertNotIn("Traceback", output)
+
     def test_export_transcripts_command_accepts_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

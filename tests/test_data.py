@@ -366,6 +366,39 @@ class ExportTests(unittest.TestCase):
         self.assertIn("fact one", exported)
         self.assertNotIn("changed after snapshot", exported)
 
+    def test_export_memory_skips_symlinked_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            secret = root / "secret.env"
+            secret.write_text("TOKEN=do-not-export\n", encoding="utf-8")
+            facts = source / "memory" / "secretary"
+            facts.mkdir(parents=True)
+            (facts / "one.md").write_text("fact one\n", encoding="utf-8")
+            (facts / "secret.md").symlink_to(secret)
+
+            result = export_memory(root / "secretary-data", source_dir=source)
+            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
+                encoding="utf-8"
+            )
+            mirrored_secret = root / "secretary-data" / "memory" / "facts" / "secretary" / "secret.md"
+
+        self.assertEqual(result.count, 1)
+        self.assertIn("fact one", exported)
+        self.assertNotIn("TOKEN=do-not-export", exported)
+        self.assertFalse(mirrored_secret.exists())
+
+    def test_export_memory_wraps_decode_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            fact = source / "memory" / "secretary" / "bad.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_bytes(b"\xff\xfe")
+
+            with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
+                export_memory(root / "secretary-data", source_dir=source)
+
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -430,6 +463,27 @@ class ExportTests(unittest.TestCase):
         self.assertFalse(no_copy)
         self.assertEqual(copied.count, 1)
         self.assertTrue(copied_dir)
+
+    def test_export_transcripts_skips_symlinks_when_copying(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            transcripts = root / "claude"
+            transcripts.mkdir()
+            secret = root / "secret.txt"
+            secret.write_text("TOKEN=do-not-copy\n", encoding="utf-8")
+            (transcripts / "session.jsonl").write_text("{}\n", encoding="utf-8")
+            (transcripts / "linked.jsonl").symlink_to(secret)
+
+            result = export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
+            copy_root = root / "secretary-data" / "transcripts" / "copies"
+            copied_files = [path.name for path in copy_root.rglob("*.jsonl")]
+            copied_payload = "\n".join(
+                path.read_text(encoding="utf-8") for path in copy_root.rglob("*.jsonl")
+            )
+
+        self.assertEqual(result.count, 1)
+        self.assertEqual(copied_files, ["session.jsonl"])
+        self.assertNotIn("TOKEN=do-not-copy", copied_payload)
 
     def test_export_all_passes_copy_transcripts_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:

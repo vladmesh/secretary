@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -252,18 +253,22 @@ def export_memory(
     _replace_dir_from_tree(source_memory, facts_dir)
 
     facts = []
-    for path in sorted(facts_dir.rglob("*.md")):
-        if any(part == ".git" for part in path.parts):
+    for path, file_stat in _regular_files_under(facts_dir, context="memory snapshot"):
+        if path.suffix != ".md":
             continue
         relative = path.relative_to(facts_dir).as_posix()
-        text = path.read_text(encoding="utf-8")
-        stat = path.stat()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"could not read memory fact {relative}: {exc}") from None
+        except UnicodeError as exc:
+            raise RuntimeError(f"could not decode memory fact {relative}: {exc}") from None
         facts.append(
             {
                 "id": relative.removesuffix(".md"),
                 "path": relative,
-                "bytes": stat.st_size,
-                "mtime": int(stat.st_mtime),
+                "bytes": file_stat.st_size,
+                "mtime": int(file_stat.st_mtime),
                 "text": text,
             }
         )
@@ -295,21 +300,21 @@ def export_runs(
         raise RuntimeError(f"could not create runs snapshot: {exc}") from None
     try:
         _copy_tree(state_dir, snapshot)
-        for path in sorted(snapshot.rglob("*")):
-            if (
-                not path.is_file()
-                or path.name.endswith(".lock")
-                or path.suffix not in {".json", ".jsonl"}
-            ):
+        for path, file_stat in _regular_files_under(snapshot, context="runs snapshot"):
+            if path.name.endswith(".lock") or path.suffix not in {".json", ".jsonl"}:
                 continue
             relative = path.relative_to(snapshot).as_posix()
-            stat = path.stat()
-            lines = path.read_text(encoding="utf-8").splitlines()
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                raise RuntimeError(f"could not read state file {relative}: {exc}") from None
+            except UnicodeError as exc:
+                raise RuntimeError(f"could not decode state file {relative}: {exc}") from None
             watermarks.append(
                 {
                     "path": relative,
-                    "bytes": stat.st_size,
-                    "mtime": int(stat.st_mtime),
+                    "bytes": file_stat.st_size,
+                    "mtime": int(file_stat.st_mtime),
                     "lines": len(lines),
                 }
             )
@@ -364,16 +369,15 @@ def export_transcripts(
         root = root.expanduser().resolve()
         if not root.exists():
             continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix != ".jsonl":
+        for path, file_stat in _regular_files_under(root, context="transcript source"):
+            if path.suffix != ".jsonl":
                 continue
-            stat = path.stat()
             entry = {
                 "path": str(path),
                 "root": str(root),
                 "relative_path": path.relative_to(root).as_posix(),
-                "bytes": stat.st_size,
-                "mtime": int(stat.st_mtime),
+                "bytes": file_stat.st_size,
+                "mtime": int(file_stat.st_mtime),
             }
             entries.append(entry)
 
@@ -389,7 +393,7 @@ def export_transcripts(
             for entry in entries:
                 destination = staging / _safe_relative_copy_path(entry["root"], entry["relative_path"])
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(entry["path"], destination)
+                shutil.copy2(entry["path"], destination, follow_symlinks=False)
             _replace_dir(staging, copy_dir)
         except OSError as exc:
             _cleanup_staging_dir(staging)
@@ -518,22 +522,78 @@ def _replace_dir_from_tree(source: Path, destination: Path) -> None:
     try:
         _copy_tree(source, staging)
         _replace_dir(staging, destination)
+    except RuntimeError:
+        _cleanup_staging_dir(staging)
+        raise
     except OSError as exc:
         _cleanup_staging_dir(staging)
         raise RuntimeError(f"could not mirror {source}: {exc}") from None
 
 
 def _copy_tree(source: Path, destination: Path) -> None:
-    for path in sorted(source.rglob("*")):
-        if any(part == ".git" for part in path.parts):
+    try:
+        paths = sorted(source.rglob("*"))
+    except OSError as exc:
+        raise RuntimeError(f"could not list source tree {source}: {exc}") from None
+    for path in paths:
+        if _has_git_part(source, path):
             continue
         relative = path.relative_to(source)
         target = destination / relative
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif path.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target)
+        try:
+            mode = path.lstat().st_mode
+        except OSError as exc:
+            raise RuntimeError(f"could not inspect source file {relative}: {exc}") from None
+        if stat_module.S_ISLNK(mode):
+            continue
+        if stat_module.S_ISDIR(mode):
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise RuntimeError(f"could not copy source directory {relative}: {exc}") from None
+        elif stat_module.S_ISREG(mode):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target, follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"could not copy source file {relative}: {exc}") from None
+
+
+def _regular_files_under(root: Path, *, context: str) -> list[tuple[Path, os.stat_result]]:
+    files: list[tuple[Path, os.stat_result]] = []
+    try:
+        paths = sorted(root.rglob("*"))
+    except OSError as exc:
+        raise RuntimeError(f"could not list {context} {root}: {exc}") from None
+    for path in paths:
+        if _has_git_part(root, path):
+            continue
+        try:
+            file_stat = path.lstat()
+        except OSError as exc:
+            relative = _display_relative(root, path)
+            raise RuntimeError(f"could not inspect {context} {relative}: {exc}") from None
+        mode = file_stat.st_mode
+        if stat_module.S_ISLNK(mode):
+            continue
+        if stat_module.S_ISREG(mode):
+            files.append((path, file_stat))
+    return files
+
+
+def _has_git_part(root: Path, path: Path) -> bool:
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        parts = path.parts
+    return ".git" in parts
+
+
+def _display_relative(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _replace_dir(staging: Path, destination: Path) -> None:
