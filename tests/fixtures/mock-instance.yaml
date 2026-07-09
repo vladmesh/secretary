@@ -1,0 +1,5 @@
+name: mock-instance
+projects:
+  - sample-project
+adapters:
+  - sample-adapter
