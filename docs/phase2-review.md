@@ -15,34 +15,9 @@ python3 -m secretary doctor --dry-run --host --instance /home/dev/secretary-inst
 Output:
 
 ```text
-secretary doctor: 1 config problem(s):
-  /home/dev/secretary-instance/instance.yaml: <file>: config not found: /home/dev/secretary-instance/instance.yaml
-```
-
-Exit code: 1.
-
-The working tree at `/home/dev/secretary-instance` is still on `main` at the
-initial commit and contains only `README.md`. The filled Phase 2 instance exists
-in git as `origin/pipeline/secretary-instance-345`, but it is not checked out at
-the live path.
-
-Checked the filled Phase 2 instance commit through a temporary git archive
-export, without modifying `/home/dev/secretary-instance`:
-
-```bash
-tmpdir=$(mktemp -d)
-git -C /home/dev/secretary-instance archive origin/pipeline/secretary-instance-345 | tar -x -C "$tmpdir"
-python3 -m secretary doctor --dry-run --host --instance "$tmpdir"
-code=$?
-rm -rf "$tmpdir"
-```
-
-Output:
-
-```text
 Secretary doctor report
 mode: dry-run
-instance: /tmp/tmp.hHi8P59Rdc/instance.yaml
+instance: /home/dev/secretary-instance/instance.yaml
 name: vladmesh-secretary
 projects: 16
 adapters: 8
@@ -65,10 +40,14 @@ status: host inventory incomplete
 
 Exit code: 1.
 
-Checked the same archive without host inventory:
+Schema validation passed on the live instance: doctor loaded `instance.yaml`,
+16 project bindings and 8 adapters. The non-zero exit comes from incomplete
+host inventory, not from config schema errors.
+
+Checked the design-doc command without explicit host inventory:
 
 ```bash
-python3 -m secretary doctor --dry-run --instance "$tmpdir"
+python3 -m secretary doctor --dry-run --instance /home/dev/secretary-instance
 ```
 
 Output:
@@ -76,7 +55,7 @@ Output:
 ```text
 Secretary doctor report
 mode: dry-run
-instance: /tmp/tmp.Dl9ngxaX7a/instance.yaml
+instance: /home/dev/secretary-instance/instance.yaml
 name: vladmesh-secretary
 projects: 16
 adapters: 8
@@ -86,6 +65,9 @@ status: ok
 ```
 
 Exit code: 0.
+
+This command validates the live instance but does not print the host diff.
+Current CLI behavior still requires `--host` for host inventory.
 
 Local product tests:
 
@@ -99,29 +81,28 @@ Result: 60 tests passed.
 
 `secretary doctor --dry-run` shows current differences without changes.
 
-Status: partial.
+Status: partial, with schemas green.
 
-The actual live path `/home/dev/secretary-instance` does not contain
-`instance.yaml`, so the required live command fails before schema or host diff
-work can start. The filled Phase 2 commit validates schemas, but host inventory
-is incomplete because the instance config does not declare enough host surface
-for a complete comparison.
+The live path `/home/dev/secretary-instance` now contains the filled Phase 2
+instance. `doctor --dry-run --host` validates the live schemas and prints the
+actual host diff without changing host state. The host comparison is incomplete
+because the instance config does not declare enough host surface for a complete
+matched, missing and unmanaged comparison. `doctor --dry-run` without `--host`
+does not print the host diff.
 
 Connected projects are described in the instance, not the product repo.
 
-Status: done in the filled Phase 2 commit, not applied to the live checkout.
+Status: done on the live checkout.
 
-The archive from `origin/pipeline/secretary-instance-345` contains 16 project
-bindings under `projects/` and no live project bindings in the product repo.
-The live checkout at `/home/dev/secretary-instance` does not currently expose
-those files.
+The live `/home/dev/secretary-instance` checkout contains 16 project bindings
+under `projects/` and no live project bindings in the product repo.
 
 External adapters cover at least `control-panel`, `triggered-agents` and one
 ordinary project.
 
-Status: done in the filled Phase 2 commit.
+Status: done on the live checkout.
 
-The archive contains adapters for `control-panel`, `triggered-agents`,
+The live instance contains adapters for `control-panel`, `triggered-agents`,
 `agent-kanban`, `public-profile`, `secretary`, `secretary-instance`,
 `vladmesh`, plus the generic `inventory-only` adapter.
 
@@ -130,23 +111,20 @@ Nothing on the host was changed.
 Status: done for this review.
 
 The live instance repo was not checked out, reset, rebased or edited. Host
-inventory used read-only `doctor --dry-run --host` probes and temporary archive
-exports. Product validation used `python3 -m unittest`.
+inventory used read-only `doctor --dry-run --host` probes. Product validation
+used `python3 -m unittest`.
 
 ## Real Gaps
 
-The live path is stale. `/home/dev/secretary-instance` is on `main` at the
-initial commit and has no `instance.yaml`, while the filled Phase 2 instance is
-only present in branch history.
+The live path is now populated, but the host inventory contract is still
+incomplete. The live instance has no `host` block. Because of that, doctor
+cannot inspect project repos (`host.projects_root not set`) and has no expected
+Orca registrations, so all current Orca repos are reported as unmanaged.
 
 The design doc says `secretary doctor --dry-run` compares instance config with
 the current host, but the implemented CLI requires `--host` for that comparison.
 Without `--host`, the filled instance validates and exits 0 while doing no host
 diff.
-
-The filled instance config has no `host` block. Because of that, doctor cannot
-inspect project repos (`host.projects_root not set`) and has no expected Orca
-registrations, so all current Orca repos are reported as unmanaged.
 
 No systemd unit expectations are declared. Doctor reports no unit differences,
 but this is an empty comparison rather than evidence that the current process
@@ -168,10 +146,9 @@ a completed onboarding gate for those projects.
 
 ## Suggested Design Doc Edits
 
-Clarify whether Phase 2 requires the filled instance to be checked out on
-`/home/dev/secretary-instance`, merged to `main`, or merely present in a branch
-before phase review. The acceptance text currently implies the live path itself
-must be usable.
+Keep Phase 2 explicit that the filled instance must be available at the live
+path `/home/dev/secretary-instance` before review. That is true now and should
+remain the acceptance boundary for future phase reviews.
 
 Align the `doctor` command contract. Either make `--host` part of the Phase 2
 acceptance command or change the CLI so `secretary doctor --dry-run` includes
