@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "instance.schema.json",
+  "title": "Secretary instance config",
+  "description": "Top-level instance.yaml for a single secretary installation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "data_dir", "offsite"],
+  "properties": {
+    "version": {
+      "description": "Instance schema version.",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human name of this installation, e.g. 'secretary-home'."
+    },
+    "description": {
+      "type": "string"
+    },
+    "data_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the secretary-data directory on the host."
+    },
+    "offsite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_remote"],
+      "description": "Offsite / restore-chain settings. The instance repo needs a private remote off the VPS.",
+      "properties": {
+        "instance_remote": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Private git remote URL for this instance repo."
+        },
+        "backup_pull_max_age_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "doctor warns if the last backup pull to an offsite machine is older than this."
+        }
+      }
+    },
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pointer to the installation persona. Rules live in persona/, not here.",
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "style": {"type": "string"}
+      }
+    },
+    "heads": {
+      "type": "array",
+      "description": "Model heads bound to orchestrator roles.",
+      "items": {"$ref": "#/$defs/head"}
+    },
+    "policies": {
+      "type": "object",
+      "description": "Free-form installation policies rendered by reconcile."
+    }
+  },
+  "$defs": {
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "model"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["worker", "reviewer", "curator", "secretary", "steward"]
+        },
+        "model": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

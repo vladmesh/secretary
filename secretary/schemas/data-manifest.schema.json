@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "data-manifest.schema.json",
+  "title": "Data manifest",
+  "description": "Describes the secretary-data directory layout for backup/restore.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "data_dir", "components"],
+  "properties": {
+    "version": {"const": 1},
+    "data_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path of the secretary-data directory."
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["board", "memory", "runs", "transcripts", "artifacts", "backups"],
+      "properties": {
+        "board": {"$ref": "#/$defs/component"},
+        "memory": {"$ref": "#/$defs/memory"},
+        "runs": {"$ref": "#/$defs/component"},
+        "transcripts": {"$ref": "#/$defs/component"},
+        "artifacts": {"$ref": "#/$defs/component"},
+        "backups": {"$ref": "#/$defs/component"}
+      }
+    }
+  },
+  "$defs": {
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path relative to data_dir."
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "facts", "export", "index"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "facts": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Local git journal of markdown facts."
+        },
+        "export": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical ndjson export."
+        },
+        "index": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Derived sqlite index, rebuilt from facts."
+        }
+      }
+    }
+  }
+}

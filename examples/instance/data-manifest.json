@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "data_dir": "/var/lib/secretary-data",
+  "components": {
+    "board": {"path": "board"},
+    "memory": {
+      "path": "memory",
+      "facts": "memory/facts",
+      "export": "memory/export.ndjson",
+      "index": "memory/index.sqlite"
+    },
+    "runs": {"path": "runs"},
+    "transcripts": {"path": "transcripts"},
+    "artifacts": {"path": "artifacts"},
+    "backups": {"path": "backups"}
+  }
+}
