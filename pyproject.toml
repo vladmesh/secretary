@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secretary"
+version = "0.1.0"
+description = "Portable secretary appliance CLI skeleton."
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+secretary = "secretary.cli:main"
