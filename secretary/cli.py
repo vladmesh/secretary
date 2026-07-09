@@ -266,9 +266,7 @@ def run_data_export(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        exports = export_all(data_dir)
-        if args.copy_transcripts:
-            exports["transcripts"] = export_transcripts(data_dir, copy=True)
+        exports = export_all(data_dir, copy_transcripts=args.copy_transcripts)
     except RuntimeError as exc:
         print(f"secretary data export: {exc}")
         return 1

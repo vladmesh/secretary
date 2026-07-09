@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import secretary.data as data_module
 from secretary.data import (
     export_board,
+    export_all,
     export_memory,
     export_runs,
     export_transcripts,
@@ -259,12 +261,25 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(first_payload, second_payload)
         self.assertEqual(len(calls), 4)
 
-    def test_export_board_records_active_raw_count_when_dump_exists(self):
+    def test_export_board_records_matching_active_raw_count_when_dump_exists(self):
         def fake_run(command, **_kwargs):
             if command[-1] == "list":
-                stdout = json.dumps([])
+                stdout = json.dumps(
+                    [
+                        {"id": 1, "reference": "secretary-1", "title": "One"},
+                        {"id": 2, "reference": "secretary-2", "title": "Two"},
+                    ]
+                )
             else:
-                stdout = json.dumps({})
+                stdout = json.dumps(
+                    {
+                        "id": 1,
+                        "reference": command[-1],
+                        "title": command[-1],
+                        "metadata": {},
+                        "comments": [],
+                    }
+                )
             return subprocess_completed(stdout)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -286,6 +301,29 @@ class ExportTests(unittest.TestCase):
 
         self.assertEqual(summary["raw_active_task_count"], 2)
 
+    def test_export_board_fails_when_raw_count_disagrees(self):
+        def fake_run(command, **_kwargs):
+            if command[-1] == "list":
+                stdout = json.dumps([])
+            else:
+                stdout = json.dumps({})
+            return subprocess_completed(stdout)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
+            database.parent.mkdir(parents=True)
+            with sqlite3.connect(database) as conn:
+                conn.execute("create table projects (id integer primary key, name text)")
+                conn.execute(
+                    "create table tasks (id integer primary key, project_id integer, is_active integer)"
+                )
+                conn.execute("insert into projects (id, name) values (1, 'Pipeline')")
+                conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1)")
+            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "board export count mismatch"):
+                    export_board(data_dir, command=["pipeline"])
+
     def test_export_memory_mirrors_facts_and_ndjson(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -305,6 +343,28 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(second.count, 2)
         self.assertIn("secretary/one.md", first_payload)
         self.assertTrue(mirrored)
+
+    def test_export_memory_ndjson_comes_from_mirrored_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            fact = source / "memory" / "secretary" / "one.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_text("fact one\n", encoding="utf-8")
+            original_replace = data_module._replace_dir_from_tree
+
+            def replace_then_mutate(source_memory, facts_dir):
+                original_replace(source_memory, facts_dir)
+                fact.write_text("changed after snapshot\n", encoding="utf-8")
+
+            with mock.patch("secretary.data._replace_dir_from_tree", side_effect=replace_then_mutate):
+                export_memory(root / "secretary-data", source_dir=source)
+            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("fact one", exported)
+        self.assertNotIn("changed after snapshot", exported)
 
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -332,6 +392,28 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(watermarks["files"][0]["path"], "pipeline/cards.json")
         self.assertIn("secretary-353", cards["cards"])
 
+    def test_export_runs_fails_on_invalid_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state = root / "state"
+            (state / "pipeline").mkdir(parents=True)
+            (state / "pipeline" / "runs.jsonl").write_text('{"event":', encoding="utf-8")
+            (state / "pipeline" / "cards.json").write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "invalid JSONL"):
+                export_runs(root / "secretary-data", state_dir=state)
+
+    def test_export_runs_fails_on_invalid_card_mapping(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state = root / "state"
+            (state / "pipeline").mkdir(parents=True)
+            (state / "pipeline" / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+            (state / "pipeline" / "cards.json").write_text("{not-json", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                export_runs(root / "secretary-data", state_dir=state)
+
     def test_export_transcripts_inventory_and_optional_copy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -348,6 +430,32 @@ class ExportTests(unittest.TestCase):
         self.assertFalse(no_copy)
         self.assertEqual(copied.count, 1)
         self.assertTrue(copied_dir)
+
+    def test_export_all_passes_copy_transcripts_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+
+            with (
+                mock.patch(
+                    "secretary.data.export_board",
+                    return_value=data_module.DataExport(data_dir / "board.json", 1, "board"),
+                ),
+                mock.patch(
+                    "secretary.data.export_memory",
+                    return_value=data_module.DataExport(data_dir / "memory.ndjson", 1, "memory"),
+                ),
+                mock.patch(
+                    "secretary.data.export_runs",
+                    return_value=data_module.DataExport(data_dir / "runs.ndjson", 1, "runs"),
+                ),
+                mock.patch(
+                    "secretary.data.export_transcripts",
+                    return_value=data_module.DataExport(data_dir / "inventory.json", 1, "transcripts"),
+                ) as transcripts,
+            ):
+                export_all(data_dir, copy_transcripts=True)
+
+        transcripts.assert_called_once_with(data_dir, copy=True)
 
 
 def subprocess_completed(stdout: str):

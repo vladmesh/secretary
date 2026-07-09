@@ -170,14 +170,21 @@ def export_board(
             raise RuntimeError(f"pipeline show returned invalid payload for {reference}")
         normalized.append(normalize_board_card(card, shown))
 
+    raw_active_task_count = _latest_raw_active_task_count(
+        board_dir,
+        board_name=os.environ.get("TA_PIPELINE_BOARD", "Pipeline"),
+    )
+    if raw_active_task_count is not None and raw_active_task_count != len(normalized):
+        raise RuntimeError(
+            "board export count mismatch: "
+            f"pipeline={len(normalized)} raw_active={raw_active_task_count}"
+        )
+
     summary = {
         "version": 1,
         "source": "triggered_agents pipeline",
         "card_count": len(normalized),
-        "raw_active_task_count": _latest_raw_active_task_count(
-            board_dir,
-            board_name=os.environ.get("TA_PIPELINE_BOARD", "Pipeline"),
-        ),
+        "raw_active_task_count": raw_active_task_count,
     }
     _write_json(board_dir / "cards.json", {"version": 1, "cards": normalized})
     _write_ndjson(board_dir / "cards.ndjson", normalized)
@@ -245,10 +252,10 @@ def export_memory(
     _replace_dir_from_tree(source_memory, facts_dir)
 
     facts = []
-    for path in sorted(source_memory.rglob("*.md")):
+    for path in sorted(facts_dir.rglob("*.md")):
         if any(part == ".git" for part in path.parts):
             continue
-        relative = path.relative_to(source_memory).as_posix()
+        relative = path.relative_to(facts_dir).as_posix()
         text = path.read_text(encoding="utf-8")
         stat = path.stat()
         facts.append(
@@ -282,28 +289,46 @@ def export_runs(
     runs_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
     watermarks: list[dict[str, Any]] = []
-    for path in sorted(state_dir.rglob("*")):
-        if not path.is_file() or path.name.endswith(".lock") or path.suffix not in {".json", ".jsonl"}:
-            continue
-        relative = path.relative_to(state_dir).as_posix()
-        stat = path.stat()
-        lines = path.read_text(encoding="utf-8").splitlines()
-        watermarks.append(
-            {
-                "path": relative,
-                "bytes": stat.st_size,
-                "mtime": int(stat.st_mtime),
-                "lines": len(lines),
-            }
-        )
-        if path.suffix == ".jsonl":
-            for number, line in enumerate(lines, start=1):
-                if not line.strip():
-                    continue
-                records.append({"source": relative, "line": number, "record": _json_or_text(line)})
+    snapshot = Path(tempfile.mkdtemp(prefix=".state-", suffix=".tmp", dir=runs_dir))
+    try:
+        _copy_tree(state_dir, snapshot)
+        for path in sorted(snapshot.rglob("*")):
+            if (
+                not path.is_file()
+                or path.name.endswith(".lock")
+                or path.suffix not in {".json", ".jsonl"}
+            ):
+                continue
+            relative = path.relative_to(snapshot).as_posix()
+            stat = path.stat()
+            lines = path.read_text(encoding="utf-8").splitlines()
+            watermarks.append(
+                {
+                    "path": relative,
+                    "bytes": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                    "lines": len(lines),
+                }
+            )
+            if path.suffix == ".jsonl":
+                for number, line in enumerate(lines, start=1):
+                    if not line.strip():
+                        continue
+                    records.append(
+                        {
+                            "source": relative,
+                            "line": number,
+                            "record": _parse_jsonl_line(line, relative, number),
+                        }
+                    )
 
-    cards_path = state_dir / "pipeline" / "cards.json"
-    cards = _read_json_file(cards_path) if cards_path.is_file() else {}
+        cards_path = snapshot / "pipeline" / "cards.json"
+        cards = _read_json_file_strict(cards_path) if cards_path.is_file() else {}
+        if not isinstance(cards, dict):
+            raise RuntimeError(f"state card mapping must be an object: {cards_path}")
+    finally:
+        _cleanup_staging_dir(snapshot)
+
     _write_ndjson(runs_dir / "runs.ndjson", records)
     _write_json(runs_dir / "watermarks.json", {"version": 1, "files": watermarks})
     _write_json(runs_dir / "cards.json", {"version": 1, "cards": cards})
@@ -368,12 +393,12 @@ def export_transcripts(
     return DataExport(path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots))
 
 
-def export_all(data_dir: Path) -> dict[str, DataExport]:
+def export_all(data_dir: Path, *, copy_transcripts: bool = False) -> dict[str, DataExport]:
     return {
         "board": export_board(data_dir),
         "memory": export_memory(data_dir),
         "runs": export_runs(data_dir),
-        "transcripts": export_transcripts(data_dir),
+        "transcripts": export_transcripts(data_dir, copy=copy_transcripts),
     }
 
 
@@ -477,20 +502,24 @@ def _write_text_atomic(path: Path, payload: str) -> None:
 def _replace_dir_from_tree(source: Path, destination: Path) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent))
     try:
-        for path in sorted(source.rglob("*")):
-            if any(part == ".git" for part in path.parts):
-                continue
-            relative = path.relative_to(source)
-            target = staging / relative
-            if path.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif path.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
+        _copy_tree(source, staging)
         _replace_dir(staging, destination)
     except OSError as exc:
         _cleanup_staging_dir(staging)
         raise RuntimeError(f"could not mirror {source}: {exc}") from None
+
+
+def _copy_tree(source: Path, destination: Path) -> None:
+    for path in sorted(source.rglob("*")):
+        if any(part == ".git" for part in path.parts):
+            continue
+        relative = path.relative_to(source)
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
 
 
 def _replace_dir(staging: Path, destination: Path) -> None:
@@ -546,18 +575,20 @@ def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | 
     return None
 
 
-def _json_or_text(line: str) -> Any:
+def _parse_jsonl_line(line: str, relative: str, number: int) -> Any:
     try:
         return json.loads(line)
-    except json.JSONDecodeError:
-        return line
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSONL in state file {relative}:{number}: {exc}") from None
 
 
-def _read_json_file(path: Path) -> Any:
+def _read_json_file_strict(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        return {}
+    except OSError as exc:
+        raise RuntimeError(f"could not read state file {path}: {exc}") from None
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise RuntimeError(f"invalid JSON in state file {path}: {exc}") from None
 
 
 def _int_or_none(value: Any) -> int | None:
