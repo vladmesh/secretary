@@ -174,6 +174,14 @@ class LiveSourceErrorTests(unittest.TestCase):
         self.assertEqual(projects, set())
         self.assertTrue(reason)
 
+    def test_projects_root_error_does_not_echo_value(self):
+        secret = "/srv/sk-live-projects-root-DO-NOT-LEAK-8c1d"
+        expected = Expectations(projects={"a"}, projects_root=secret)
+        _, reason = LiveHostSource()._projects(expected)
+        self.assertTrue(reason)
+        self.assertNotIn(secret, reason)
+        self.assertIn("host.projects_root", reason)
+
     def test_run_reports_missing_binary(self):
         result = LiveHostSource()._run(["definitely-no-such-binary-xyz"])
         self.assertFalse(result.ran)
@@ -271,6 +279,42 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("status: host inventory incomplete", output)
         # A kind that did read is still reported normally.
         self.assertIn("projects:\n  matched", output)
+
+    def test_projects_root_value_never_reaches_output(self):
+        secret = "/srv/sk-live-projects-root-DO-NOT-LEAK-8c1d"
+        import tempfile
+
+        # Tools stubbed to a clean empty read, so only projects can error and we
+        # isolate the config-value leak the reviewer found.
+        class QuietHost(LiveHostSource):
+            def _run(self, cmd):
+                return CmdResult(True, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp) / "instance.yaml"
+            instance.write_text(
+                "version: 1\n"
+                "name: leak-check\n"
+                "data_dir: /var/lib/secretary-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n"
+                "host:\n"
+                f"  projects_root: {secret}\n",
+                encoding="utf-8",
+            )
+
+            original = cli.LiveHostSource
+            cli.LiveHostSource = QuietHost
+            try:
+                code, output = run_cli(
+                    ["doctor", "--dry-run", "--instance", str(instance), "--host"]
+                )
+            finally:
+                cli.LiveHostSource = original
+
+        self.assertEqual(code, 1, output)
+        self.assertNotIn(secret, output)
+        self.assertIn("projects:\n  unavailable:", output)
 
     def test_output_excludes_env_file_contents(self):
         secret = "sk-live-host-inventory-DO-NOT-LEAK-71af"

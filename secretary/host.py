@@ -232,11 +232,13 @@ class LiveHostSource(HostSource):
             return set(), ""
         path = Path(root)
         if not path.is_dir():
-            return set(), f"projects_root not a directory: {root}"
+            # Never echo the configured value: it comes from private instance
+            # config and could carry a secret-like path. Name the field only.
+            return set(), "host.projects_root is not a directory"
         try:
             return _names_from_dir(path), ""
         except OSError:
-            return set(), f"cannot read projects_root: {root}"
+            return set(), "host.projects_root is not readable"
 
     def _units(self, expected: Expectations) -> tuple[set[str], str]:
         prefix = expected.unit_prefix
