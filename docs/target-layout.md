@@ -96,6 +96,19 @@ files, memory indexes and board schema. In Phase 1 it is an explicit stub.
 board export, memory facts and export, run state, transcripts, artifacts and
 debug snapshots where allowed. In Phase 1 `backup` is an explicit stub.
 
+Before full backup exists, Phase 3 exposes two narrow data commands:
+
+```bash
+secretary data init --instance ~/secretary-instance
+secretary data raw-kanboard-dump --instance ~/secretary-instance
+```
+
+`data init` creates the target `secretary-data` directories and writes the
+schema-validated `data-manifest.json` under `data_dir`. `data raw-kanboard-dump`
+copies the Kanboard container data directory into a fresh timestamped directory
+under `secretary-data/board/`; repeated runs keep earlier dumps intact. This is a
+raw layer for later backup/export work, not a normalized board export.
+
 `secretary backup verify` will check backup structure and version compatibility
 before restore or offsite retention decisions. It is planned after Phase 1.
 

@@ -2,7 +2,8 @@
 
 Product repository for the portable secretary appliance.
 
-Phase 1 contains a CLI skeleton and the config schemas only. It does not own host
+Phase 3 contains the first data-layout commands on top of the original CLI
+skeleton. It still does not own host
 processes, live project bindings, board data, memory data, secrets, transcripts, or
 instance-specific paths.
 
@@ -35,9 +36,13 @@ python3 -m secretary doctor --dry-run --instance examples/instance
 ```
 
 `doctor --dry-run` validates `instance.yaml` plus every binding, adapter and the data
-manifest it finds, and never touches the host. `--instance` accepts an instance
-directory or a direct path to an `instance.yaml`. An invalid config prints one problem
-per line with a path to the offending field, and exits non-zero:
+manifest it finds, and never touches the host. The canonical manifest location is
+`<data_dir>/data-manifest.json`; the old example-local `data-manifest.json` is still
+accepted for fixture compatibility. A missing manifest is a migration warning, so
+plain `doctor --dry-run` stays green and `--strict` returns non-zero. `--instance`
+accepts an instance directory or a direct path to an `instance.yaml`. An invalid
+config prints one problem per line with a path to the offending field, and exits
+non-zero:
 
 ```text
 secretary doctor: 1 config problem(s):
@@ -73,8 +78,30 @@ python3 -m secretary doctor --dry-run --instance examples/instance \
 ```
 
 The Phase 1 command surface is present, but only `doctor --dry-run` does useful work.
-`reconcile`, `backup`, `restore`, `project add`, `task`, and `memory` return an explicit
-`not implemented` message.
+`reconcile`, `backup`, `restore`, `project add`, `task`, and `memory` return an
+explicit `not implemented` message.
+
+## Data layout
+
+Create the target data directory and manifest from an instance:
+
+```bash
+python3 -m secretary data init --instance /home/dev/secretary-instance
+```
+
+This creates `board/`, `memory/`, `runs/`, `transcripts/`, `artifacts/`,
+`backups/` and writes `data-manifest.json` in the data directory. The command is
+idempotent and overwrites only the generated manifest.
+
+Capture a raw Kanboard storage dump into the board data layer:
+
+```bash
+python3 -m secretary data raw-kanboard-dump --instance /home/dev/secretary-instance
+```
+
+The dump uses `docker cp cp-kanboard:/var/www/app/data` and writes a new
+`board/kanboard-raw-<timestamp>/` directory each time. It does not call the
+Kanboard API and does not write into the live container.
 
 ## Documentation
 
