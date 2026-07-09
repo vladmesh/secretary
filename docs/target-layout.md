@@ -79,6 +79,14 @@ need attention without changing the host. In Phase 1 it reads the mock instance
 under `examples/instance` and validates `instance.yaml`, project bindings,
 adapters and the data manifest.
 
+With `--host` it also runs a Phase 2 read-only inventory: for project repos,
+systemd units and Orca repo registrations it reports what is matched, described
+but missing on the host, and present on the host but unmanaged. The instance
+declares its owned host surface under `host` (`projects_root`, `unit_prefix`,
+`units`, `orca_repos`); project names come from the bindings. The inventory only
+lists resource names, never reads secrets or env files, and changes nothing.
+`--host-fixture DIR` points the same comparison at a fixture host for offline use.
+
 `secretary reconcile` will render desired process state from product and instance
 config, then create or update only resources marked as managed by secretary.
 Planned managed resources include systemd units, Orca bindings, generated env

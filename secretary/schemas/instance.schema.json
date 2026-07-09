@@ -59,6 +59,44 @@
     "policies": {
       "type": "object",
       "description": "Free-form installation policies rendered by reconcile."
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Host resources this installation owns, used by doctor's read-only inventory. Names only; no secret values.",
+      "properties": {
+        "projects_root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Directory on the host that holds project repos, enumerated to find repos not described here."
+        },
+        "unit_prefix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "systemd unit namespace secretary manages, e.g. 'secretary-'. Scopes which host units count as ours."
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"
+          },
+          "description": "Full systemd unit file names this installation expects on the host, e.g. 'secretary-pipeline.service' or 'secretary-pipeline.timer', matching 'systemctl list-unit-files' output exactly. A suffixless name would never match the host, so the type suffix is required. Requires unit_prefix so unmanaged-on-host can be computed."
+        },
+        "orca_repos": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Orca repo registrations this installation expects."
+        }
+      },
+      "if": {
+        "properties": {"units": {"type": "array", "minItems": 1}},
+        "required": ["units"]
+      },
+      "then": {
+        "required": ["unit_prefix"]
+      }
     }
   },
   "$defs": {
