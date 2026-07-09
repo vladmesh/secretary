@@ -1,7 +1,7 @@
 # Example project binding. Points at a placeholder repo, not a real project.
 id: example-project
 repo: /srv/projects/example-project
-enabled: true
+enabled: false
 adapter: example-project
 default_branch: main
 plane: project
