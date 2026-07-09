@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretary.local/schemas/instance.schema.json",
+  "title": "Secretary instance config",
+  "type": "object",
+  "required": ["schema_version", "appliance", "paths", "policies"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "appliance": {
+      "type": "object",
+      "required": ["name", "mode"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "mode": { "type": "string", "enum": ["empty", "live"] }
+      },
+      "additionalProperties": false
+    },
+    "paths": {
+      "type": "object",
+      "required": ["product_repo", "instance_repo", "data_dir"],
+      "properties": {
+        "product_repo": { "type": "string", "minLength": 1 },
+        "instance_repo": { "type": "string", "minLength": 1 },
+        "data_dir": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "policies": { "type": "object" }
+  },
+  "additionalProperties": false
+}

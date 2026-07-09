@@ -1,0 +1,11 @@
+{
+  "$schema": "../../schemas/project-binding.schema.json",
+  "id": "example-project",
+  "repo": "../example-project",
+  "enabled": false,
+  "adapter": "example-project",
+  "default_branch": "main",
+  "policy": {
+    "code_concurrency": 1
+  }
+}

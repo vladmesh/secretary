@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/instance.schema.json",
+  "schema_version": 1,
+  "appliance": {
+    "name": "example-secretary",
+    "mode": "empty"
+  },
+  "paths": {
+    "product_repo": "~/secretary",
+    "instance_repo": "~/secretary-instance",
+    "data_dir": "~/secretary-data"
+  },
+  "policies": {
+    "task_backend": "mock",
+    "memory_backend": "mock"
+  }
+}

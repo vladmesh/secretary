@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local environments and secrets
+.venv/
+.env
+.env.*
+!.env.example
+
+# Product runtime data does not belong in this repo
+secretary-data/
+.secretary-data/
+artifacts/

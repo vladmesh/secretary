@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secretary.local/schemas/data-manifest.schema.json",
+  "title": "Secretary data manifest",
+  "type": "object",
+  "required": ["schema_version", "layout", "backups"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "layout": { "type": "object" },
+    "backups": { "type": "object" }
+  },
+  "additionalProperties": false
+}
