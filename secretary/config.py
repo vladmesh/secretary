@@ -7,7 +7,6 @@ to the offending field, so ``doctor`` never shows a traceback for bad input.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
@@ -16,16 +15,6 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
-
-# A property/field name is safe to echo only if it looks like an ordinary
-# config identifier. Anything longer or token-like is redacted so a secret that
-# lands in a field name can't reach stdout, logs or board comments.
-_SAFE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
-
-
-def _redact_name(name: Any) -> str:
-    text = name if isinstance(name, str) else str(name)
-    return text if _SAFE_NAME.match(text) else "<redacted>"
 
 # schema name -> file in secretary/schemas/
 SCHEMAS = {
@@ -84,16 +73,16 @@ def load_config(path: Path) -> Any:
 
 
 def _safe_yaml_error(exc: yaml.YAMLError) -> str:
-    """Describe a YAML parse failure without echoing the source snippet.
+    """Describe a YAML parse failure with only a generic category and location.
 
-    ``str(exc)`` embeds the offending config line, which can hold a secret.
-    We keep only the parser's own problem text and its line/column.
+    Neither ``str(exc)`` (which embeds the source snippet) nor ``exc.problem``
+    (which can embed an alias/token name) is safe to print, so we report just
+    "invalid YAML syntax" plus the line/column where the parser stopped.
     """
-    problem = getattr(exc, "problem", None) or "invalid YAML"
     mark = getattr(exc, "problem_mark", None)
     if mark is not None:
-        return f"{problem} (line {mark.line + 1}, column {mark.column + 1})"
-    return problem
+        return f"invalid YAML syntax (line {mark.line + 1}, column {mark.column + 1})"
+    return "invalid YAML syntax"
 
 
 def _field_path(absolute_path: Any) -> str:
@@ -131,16 +120,18 @@ def _safe_message(error: Any) -> str:
     expected = error.validator_value
 
     if keyword == "required":
+        # Missing names come from the schema's own required list, not user input.
         instance = error.instance if isinstance(error.instance, dict) else {}
         missing = [p for p in expected if p not in instance] or list(expected)
         noun = "property" if len(missing) == 1 else "properties"
-        return f"missing required {noun}: {', '.join(_redact_name(p) for p in missing)}"
+        return f"missing required {noun}: {', '.join(missing)}"
     if keyword == "additionalProperties":
+        # Extra keys are user-controlled, so report the count only, never the name.
         allowed = set(error.schema.get("properties", {}))
         instance = error.instance if isinstance(error.instance, dict) else {}
-        extra = sorted(k for k in instance if k not in allowed)
+        extra = [k for k in instance if k not in allowed]
         noun = "property" if len(extra) == 1 else "properties"
-        return f"unexpected {noun}: {', '.join(_redact_name(k) for k in extra)}"
+        return f"{len(extra)} unexpected {noun}"
     if keyword == "type":
         names = expected if isinstance(expected, str) else "/".join(expected)
         return f"expected type {names}"

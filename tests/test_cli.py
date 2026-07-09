@@ -114,6 +114,22 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(secret, output)
         self.assertNotIn("Traceback", output)
 
+    def test_doctor_yaml_alias_error_does_not_leak_alias_name(self):
+        secret = "sk_live_alias_do_not_leak_9f3a"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            # Undefined alias: PyYAML's raw problem text names the alias.
+            instance.write_text(f"name: *{secret}\n", encoding="utf-8")
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance)]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("cannot parse config", output)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("Traceback", output)
+
     def test_doctor_reports_non_utf8_instance_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir) / "instance.yaml"
