@@ -4,7 +4,9 @@ import errno
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +18,11 @@ from secretary.config import validate
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
+PIPELINE_WORKTREE = Path("/home/dev/orca/workspaces/triggered-agents/pipeline")
+PANELMEM_KB = Path("/home/dev/panelmem-kb")
+PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state"
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,13 @@ class DataLayout:
 @dataclass(frozen=True)
 class KanboardDump:
     dump_dir: Path
+    source: str
+
+
+@dataclass(frozen=True)
+class DataExport:
+    path: Path
+    count: int
     source: str
 
 
@@ -128,6 +142,241 @@ def raw_kanboard_dump(
     return KanboardDump(dump_dir=dump_dir, source=f"{container}:{source_path}")
 
 
+def export_board(
+    data_dir: Path,
+    *,
+    pipeline_worktree: Path = PIPELINE_WORKTREE,
+    command: list[str] | None = None,
+) -> DataExport:
+    data_dir = data_dir.expanduser().resolve()
+    board_dir = data_dir / "board"
+    board_dir.mkdir(parents=True, exist_ok=True)
+
+    cards = _pipeline_json(["list"], pipeline_worktree=pipeline_worktree, command=command)
+    if not isinstance(cards, list):
+        raise RuntimeError("pipeline list did not return a card list")
+
+    normalized = []
+    for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
+        reference = str(card.get("reference") or "")
+        if not reference:
+            continue
+        shown = _pipeline_json(
+            ["show", "--ref", reference],
+            pipeline_worktree=pipeline_worktree,
+            command=command,
+        )
+        if not isinstance(shown, dict):
+            raise RuntimeError(f"pipeline show returned invalid payload for {reference}")
+        normalized.append(normalize_board_card(card, shown))
+
+    summary = {
+        "version": 1,
+        "source": "triggered_agents pipeline",
+        "card_count": len(normalized),
+        "raw_active_task_count": _latest_raw_active_task_count(
+            board_dir,
+            board_name=os.environ.get("TA_PIPELINE_BOARD", "Pipeline"),
+        ),
+    }
+    _write_json(board_dir / "cards.json", {"version": 1, "cards": normalized})
+    _write_ndjson(board_dir / "cards.ndjson", normalized)
+    _write_json(board_dir / "export.json", summary)
+    return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
+
+
+def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) -> dict[str, Any]:
+    metadata = shown_card.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    comments = shown_card.get("comments")
+    if not isinstance(comments, list):
+        comments = []
+    return {
+        "id": _int_or_none(shown_card.get("id", list_card.get("id"))),
+        "reference": str(shown_card.get("reference") or list_card.get("reference") or ""),
+        "title": str(shown_card.get("title") or list_card.get("title") or ""),
+        "description": str(shown_card.get("description") or ""),
+        "swimlane": str(list_card.get("swimlane") or ""),
+        "column": str(shown_card.get("column") or list_card.get("column") or ""),
+        "position": _int_or_none(list_card.get("position")) or 0,
+        "date_moved": _int_or_none(list_card.get("date_moved")),
+        "metadata": {str(k): str(v) for k, v in sorted(metadata.items())},
+        "fields": {
+            "task_type": str(shown_card.get("task_type") or list_card.get("task_type") or ""),
+            "project": str(shown_card.get("project") or list_card.get("project") or ""),
+            "blocked_by": str(shown_card.get("blocked_by") or list_card.get("blocked_by") or ""),
+            "head": str(shown_card.get("head") or list_card.get("head") or ""),
+            "effective_head": str(
+                shown_card.get("effective_head") or list_card.get("effective_head") or ""
+            ),
+            "review_head": str(shown_card.get("review_head") or list_card.get("review_head") or ""),
+            "effective_review_head": str(
+                shown_card.get("effective_review_head")
+                or list_card.get("effective_review_head")
+                or ""
+            ),
+            "claim": str(shown_card.get("claim") or list_card.get("claim") or ""),
+            "slug": str(shown_card.get("slug") or list_card.get("slug") or ""),
+            "base_branch": str(shown_card.get("base_branch") or list_card.get("base_branch") or ""),
+        },
+        "comments": [
+            {"ts": str(comment.get("ts", "")), "text": str(comment.get("text", ""))}
+            for comment in comments
+            if isinstance(comment, dict)
+        ],
+    }
+
+
+def export_memory(
+    data_dir: Path,
+    *,
+    source_dir: Path = PANELMEM_KB,
+) -> DataExport:
+    data_dir = data_dir.expanduser().resolve()
+    source_dir = source_dir.expanduser().resolve()
+    source_memory = source_dir / "memory"
+    if not source_memory.is_dir():
+        raise RuntimeError(f"memory source not found: {source_memory}")
+
+    memory_dir = data_dir / "memory"
+    facts_dir = memory_dir / "facts"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    _replace_dir_from_tree(source_memory, facts_dir)
+
+    facts = []
+    for path in sorted(source_memory.rglob("*.md")):
+        if any(part == ".git" for part in path.parts):
+            continue
+        relative = path.relative_to(source_memory).as_posix()
+        text = path.read_text(encoding="utf-8")
+        stat = path.stat()
+        facts.append(
+            {
+                "id": relative.removesuffix(".md"),
+                "path": relative,
+                "bytes": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "text": text,
+            }
+        )
+    _write_ndjson(memory_dir / "export.ndjson", facts)
+    _write_json(
+        memory_dir / "export.json",
+        {"version": 1, "source": str(source_memory), "fact_count": len(facts)},
+    )
+    return DataExport(path=memory_dir / "export.ndjson", count=len(facts), source=str(source_memory))
+
+
+def export_runs(
+    data_dir: Path,
+    *,
+    state_dir: Path = PIPELINE_STATE_DIR,
+) -> DataExport:
+    data_dir = data_dir.expanduser().resolve()
+    state_dir = state_dir.expanduser().resolve()
+    if not state_dir.is_dir():
+        raise RuntimeError(f"state source not found: {state_dir}")
+
+    runs_dir = data_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+    watermarks: list[dict[str, Any]] = []
+    for path in sorted(state_dir.rglob("*")):
+        if not path.is_file() or path.name.endswith(".lock") or path.suffix not in {".json", ".jsonl"}:
+            continue
+        relative = path.relative_to(state_dir).as_posix()
+        stat = path.stat()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        watermarks.append(
+            {
+                "path": relative,
+                "bytes": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "lines": len(lines),
+            }
+        )
+        if path.suffix == ".jsonl":
+            for number, line in enumerate(lines, start=1):
+                if not line.strip():
+                    continue
+                records.append({"source": relative, "line": number, "record": _json_or_text(line)})
+
+    cards_path = state_dir / "pipeline" / "cards.json"
+    cards = _read_json_file(cards_path) if cards_path.is_file() else {}
+    _write_ndjson(runs_dir / "runs.ndjson", records)
+    _write_json(runs_dir / "watermarks.json", {"version": 1, "files": watermarks})
+    _write_json(runs_dir / "cards.json", {"version": 1, "cards": cards})
+    _write_json(
+        runs_dir / "export.json",
+        {
+            "version": 1,
+            "source": str(state_dir),
+            "run_record_count": len(records),
+            "watermark_count": len(watermarks),
+            "card_mapping_count": len(cards) if isinstance(cards, dict) else 0,
+        },
+    )
+    return DataExport(path=runs_dir / "runs.ndjson", count=len(records), source=str(state_dir))
+
+
+def export_transcripts(
+    data_dir: Path,
+    *,
+    roots: list[Path] | None = None,
+    copy: bool = False,
+) -> DataExport:
+    data_dir = data_dir.expanduser().resolve()
+    roots = roots or [CLAUDE_PROJECTS_DIR, CODEX_SESSIONS_DIR]
+    transcripts_dir = data_dir / "transcripts"
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+
+    entries = []
+    for root in roots:
+        root = root.expanduser().resolve()
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix != ".jsonl":
+                continue
+            stat = path.stat()
+            entry = {
+                "path": str(path),
+                "root": str(root),
+                "relative_path": path.relative_to(root).as_posix(),
+                "bytes": stat.st_size,
+                "mtime": int(stat.st_mtime),
+            }
+            entries.append(entry)
+
+    _write_json(transcripts_dir / "inventory.json", {"version": 1, "transcripts": entries})
+    _write_ndjson(transcripts_dir / "inventory.ndjson", entries)
+    if copy:
+        copy_dir = transcripts_dir / "copies"
+        staging = Path(tempfile.mkdtemp(prefix=".copies-", suffix=".tmp", dir=transcripts_dir))
+        try:
+            for entry in entries:
+                destination = staging / _safe_relative_copy_path(entry["root"], entry["relative_path"])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(entry["path"], destination)
+            _replace_dir(staging, copy_dir)
+        except OSError as exc:
+            _cleanup_staging_dir(staging)
+            raise RuntimeError(f"could not copy transcripts: {exc}") from None
+    elif (transcripts_dir / "copies").exists():
+        shutil.rmtree(transcripts_dir / "copies")
+    return DataExport(path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots))
+
+
+def export_all(data_dir: Path) -> dict[str, DataExport]:
+    return {
+        "board": export_board(data_dir),
+        "memory": export_memory(data_dir),
+        "runs": export_runs(data_dir),
+        "transcripts": export_transcripts(data_dir),
+    }
+
+
 def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
     payload = json.dumps(manifest, indent=2, sort_keys=False) + "\n"
     temp_path: Path | None = None
@@ -158,6 +407,171 @@ def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def _pipeline_json(
+    args: list[str],
+    *,
+    pipeline_worktree: Path,
+    command: list[str] | None,
+) -> Any:
+    cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
+    env = os.environ.copy()
+    pythonpath = str(pipeline_worktree)
+    if env.get("PYTHONPATH"):
+        pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
+    env["PYTHONPATH"] = pythonpath
+    try:
+        result = subprocess.run(
+            [*cmd, *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None
+    except subprocess.CalledProcessError as exc:
+        reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
+        raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    _write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
+    body = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    _write_text_atomic(path, body)
+
+
+def _write_text_atomic(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            text=True,
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        raise RuntimeError(f"could not write export file {path}: {exc}") from None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _replace_dir_from_tree(source: Path, destination: Path) -> None:
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent))
+    try:
+        for path in sorted(source.rglob("*")):
+            if any(part == ".git" for part in path.parts):
+                continue
+            relative = path.relative_to(source)
+            target = staging / relative
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif path.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+        _replace_dir(staging, destination)
+    except OSError as exc:
+        _cleanup_staging_dir(staging)
+        raise RuntimeError(f"could not mirror {source}: {exc}") from None
+
+
+def _replace_dir(staging: Path, destination: Path) -> None:
+    backup = destination.with_name(f".{destination.name}.old")
+    if backup.exists():
+        shutil.rmtree(backup)
+    try:
+        if destination.exists():
+            os.replace(destination, backup)
+        os.replace(staging, destination)
+        if backup.exists():
+            shutil.rmtree(backup)
+    except OSError:
+        if not destination.exists() and backup.exists():
+            os.replace(backup, destination)
+        raise
+
+
+def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | None:
+    dumps = sorted(board_dir.glob("kanboard-raw-*"), key=lambda path: path.name, reverse=True)
+    for dump in dumps:
+        database = dump / "data" / "db.sqlite"
+        if not database.is_file():
+            continue
+        try:
+            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute("pragma table_info(tasks)").fetchall()
+                }
+                project_columns = {
+                    row[1]
+                    for row in conn.execute("pragma table_info(projects)").fetchall()
+                }
+                project = None
+                if {"id", "name"}.issubset(project_columns):
+                    project = conn.execute(
+                        "select id from projects where name = ?",
+                        (board_name,),
+                    ).fetchone()
+                if "is_active" in columns:
+                    query = "select count(*) from tasks where is_active = 1"
+                    params: tuple[Any, ...] = ()
+                else:
+                    query = "select count(*) from tasks"
+                    params = ()
+                if project is not None and "project_id" in columns:
+                    query += " and project_id = ?" if "where" in query else " where project_id = ?"
+                    params = (int(project[0]),)
+                return int(conn.execute(query, params).fetchone()[0])
+        except sqlite3.Error:
+            continue
+    return None
+
+
+def _json_or_text(line: str) -> Any:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return line
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {}
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_relative_copy_path(root: str, relative: str) -> Path:
+    prefix = root.strip("/").replace("/", "__") or "root"
+    return Path(prefix) / relative
 
 
 def _cleanup_staging_dir(staging_dir: Path | None) -> None:

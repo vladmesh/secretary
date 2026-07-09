@@ -5,7 +5,16 @@ from pathlib import Path
 
 from secretary.config import validate, validate_instance
 from secretary.config import load_config
-from secretary.data import KANBOARD_DATA_PATH, init_layout, raw_kanboard_dump
+from secretary.data import (
+    KANBOARD_DATA_PATH,
+    export_all,
+    export_board,
+    export_memory,
+    export_runs,
+    export_transcripts,
+    init_layout,
+    raw_kanboard_dump,
+)
 from secretary.host import (
     FixtureHostSource,
     KindDiff,
@@ -87,6 +96,58 @@ def build_parser() -> argparse.ArgumentParser:
     raw_dump.add_argument("--container", default="cp-kanboard")
     raw_dump.add_argument("--source-path", default=KANBOARD_DATA_PATH)
     raw_dump.set_defaults(handler=run_raw_kanboard_dump)
+
+    export = data_subcommands.add_parser(
+        "export",
+        help="write board, memory, runs and transcript exports into secretary-data",
+    )
+    export.add_argument("--instance", required=True)
+    export.add_argument("--data-dir")
+    export.add_argument(
+        "--copy-transcripts",
+        action="store_true",
+        help="copy transcript files in addition to writing the inventory",
+    )
+    export.set_defaults(handler=run_data_export)
+
+    export_board_command = data_subcommands.add_parser(
+        "export-board",
+        help="write secretary-data/board normalized cards",
+    )
+    export_board_command.add_argument("--instance", required=True)
+    export_board_command.add_argument("--data-dir")
+    export_board_command.set_defaults(handler=run_export_board)
+
+    export_memory_command = data_subcommands.add_parser(
+        "export-memory",
+        help="write secretary-data/memory facts and export.ndjson",
+    )
+    export_memory_command.add_argument("--instance", required=True)
+    export_memory_command.add_argument("--data-dir")
+    export_memory_command.add_argument("--source-dir", default="/home/dev/panelmem-kb")
+    export_memory_command.set_defaults(handler=run_export_memory)
+
+    export_runs_command = data_subcommands.add_parser(
+        "export-runs",
+        help="write secretary-data/runs state exports",
+    )
+    export_runs_command.add_argument("--instance", required=True)
+    export_runs_command.add_argument("--data-dir")
+    export_runs_command.add_argument(
+        "--state-dir",
+        default="/home/dev/orca/workspaces/triggered-agents/pipeline/state",
+    )
+    export_runs_command.set_defaults(handler=run_export_runs)
+
+    export_transcripts_command = data_subcommands.add_parser(
+        "export-transcripts",
+        help="write secretary-data/transcripts inventory",
+    )
+    export_transcripts_command.add_argument("--instance", required=True)
+    export_transcripts_command.add_argument("--data-dir")
+    export_transcripts_command.add_argument("--root", action="append", dest="roots")
+    export_transcripts_command.add_argument("--copy", action="store_true")
+    export_transcripts_command.set_defaults(handler=run_export_transcripts)
     data.set_defaults(handler=not_implemented("data"))
 
     for name in ("reconcile", "backup", "restore"):
@@ -195,6 +256,87 @@ def run_raw_kanboard_dump(args: argparse.Namespace) -> int:
 
     print(f"kanboard raw dump: {dump.dump_dir}")
     print(f"source: {dump.source}")
+    print("status: ok")
+    return 0
+
+
+def run_data_export(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+
+    try:
+        exports = export_all(data_dir)
+        if args.copy_transcripts:
+            exports["transcripts"] = export_transcripts(data_dir, copy=True)
+    except RuntimeError as exc:
+        print(f"secretary data export: {exc}")
+        return 1
+
+    for name in ("board", "memory", "runs", "transcripts"):
+        result = exports[name]
+        print(f"{name}: {result.count} -> {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_export_board(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = export_board(data_dir)
+    except RuntimeError as exc:
+        print(f"secretary data export-board: {exc}")
+        return 1
+    print(f"board cards: {result.count}")
+    print(f"export: {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_export_memory(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = export_memory(data_dir, source_dir=Path(args.source_dir))
+    except RuntimeError as exc:
+        print(f"secretary data export-memory: {exc}")
+        return 1
+    print(f"memory facts: {result.count}")
+    print(f"export: {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_export_runs(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = export_runs(data_dir, state_dir=Path(args.state_dir))
+    except RuntimeError as exc:
+        print(f"secretary data export-runs: {exc}")
+        return 1
+    print(f"run records: {result.count}")
+    print(f"export: {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_export_transcripts(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    roots = [Path(root) for root in args.roots] if args.roots else None
+    try:
+        result = export_transcripts(data_dir, roots=roots, copy=args.copy)
+    except RuntimeError as exc:
+        print(f"secretary data export-transcripts: {exc}")
+        return 1
+    print(f"transcripts: {result.count}")
+    print(f"inventory: {result.path}")
     print("status: ok")
     return 0
 

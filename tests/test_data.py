@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.data import init_layout, manifest_for, raw_kanboard_dump
+from secretary.data import (
+    export_board,
+    export_memory,
+    export_runs,
+    export_transcripts,
+    init_layout,
+    manifest_for,
+    normalize_board_card,
+    raw_kanboard_dump,
+)
 
 
 class DataLayoutTests(unittest.TestCase):
@@ -170,6 +181,177 @@ class RawKanboardDumpTests(unittest.TestCase):
                     raw_kanboard_dump(data_dir)
 
             self.assertEqual(list((data_dir / "board").iterdir()), [])
+
+
+class ExportTests(unittest.TestCase):
+    def test_normalize_board_card_keeps_required_surface(self):
+        card = {
+            "id": "7",
+            "reference": "secretary-353",
+            "title": "Export data",
+            "column": "In progress",
+            "swimlane": "secretary",
+            "position": "2",
+            "date_moved": "1783635890",
+            "task_type": "code",
+            "project": "secretary",
+        }
+        shown = {
+            "id": 7,
+            "reference": "secretary-353",
+            "title": "Export data",
+            "description": "body",
+            "column": "In progress",
+            "metadata": {"project": "secretary", "task_type": "code"},
+            "comments": [{"ts": "1", "text": "[worker]\nok"}],
+        }
+
+        normalized = normalize_board_card(card, shown)
+
+        self.assertEqual(normalized["reference"], "secretary-353")
+        self.assertEqual(normalized["swimlane"], "secretary")
+        self.assertEqual(normalized["column"], "In progress")
+        self.assertEqual(normalized["metadata"], {"project": "secretary", "task_type": "code"})
+        self.assertEqual(normalized["comments"], [{"ts": "1", "text": "[worker]\nok"}])
+
+    def test_export_board_writes_normalized_cards_and_is_idempotent(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            if command[-1] == "list":
+                stdout = json.dumps(
+                    [
+                        {
+                            "id": 1,
+                            "reference": "secretary-353",
+                            "title": "Export",
+                            "column": "Ready",
+                            "swimlane": "secretary",
+                            "position": 1,
+                        }
+                    ]
+                )
+            else:
+                stdout = json.dumps(
+                    {
+                        "id": 1,
+                        "reference": "secretary-353",
+                        "title": "Export",
+                        "description": "spec",
+                        "column": "Ready",
+                        "metadata": {"project": "secretary"},
+                        "comments": [{"ts": "10", "text": "[po]\nbody"}],
+                    }
+                )
+            return subprocess_completed(stdout)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
+                first = export_board(data_dir, command=["pipeline"])
+                first_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
+                second = export_board(data_dir, command=["pipeline"])
+                second_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
+
+        self.assertEqual(first.count, 1)
+        self.assertEqual(second.count, 1)
+        self.assertEqual(first_payload, second_payload)
+        self.assertEqual(len(calls), 4)
+
+    def test_export_board_records_active_raw_count_when_dump_exists(self):
+        def fake_run(command, **_kwargs):
+            if command[-1] == "list":
+                stdout = json.dumps([])
+            else:
+                stdout = json.dumps({})
+            return subprocess_completed(stdout)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
+            database.parent.mkdir(parents=True)
+            with sqlite3.connect(database) as conn:
+                conn.execute("create table projects (id integer primary key, name text)")
+                conn.execute(
+                    "create table tasks (id integer primary key, project_id integer, is_active integer)"
+                )
+                conn.execute("insert into projects (id, name) values (1, 'Other'), (2, 'Pipeline')")
+                conn.execute(
+                    "insert into tasks (project_id, is_active) values (2, 1), (2, 0), (2, 1), (1, 1)"
+                )
+            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
+                export_board(data_dir, command=["pipeline"])
+            summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(summary["raw_active_task_count"], 2)
+
+    def test_export_memory_mirrors_facts_and_ndjson(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
+            (source / "memory" / "global").mkdir()
+            (source / "memory" / "global" / "two.md").write_text("fact two\n", encoding="utf-8")
+            data_dir = root / "secretary-data"
+
+            first = export_memory(data_dir, source_dir=source)
+            first_payload = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
+            second = export_memory(data_dir, source_dir=source)
+            mirrored = (data_dir / "memory" / "facts" / "global" / "two.md").is_file()
+
+        self.assertEqual(first.count, 2)
+        self.assertEqual(second.count, 2)
+        self.assertIn("secretary/one.md", first_payload)
+        self.assertTrue(mirrored)
+
+    def test_export_runs_writes_records_watermarks_and_card_mapping(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state = root / "state"
+            (state / "pipeline").mkdir(parents=True)
+            (state / "pipeline" / "runs.jsonl").write_text(
+                '{"event":"claim","reference":"secretary-353"}\n',
+                encoding="utf-8",
+            )
+            (state / "pipeline" / "cards.json").write_text(
+                '{"secretary-353":{"worker":"353-system-exports"}}\n',
+                encoding="utf-8",
+            )
+
+            result = export_runs(root / "secretary-data", state_dir=state)
+            runs = (root / "secretary-data" / "runs" / "runs.ndjson").read_text(encoding="utf-8")
+            watermarks = json.loads(
+                (root / "secretary-data" / "runs" / "watermarks.json").read_text(encoding="utf-8")
+            )
+            cards = json.loads((root / "secretary-data" / "runs" / "cards.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.count, 1)
+        self.assertIn('"event": "claim"', runs)
+        self.assertEqual(watermarks["files"][0]["path"], "pipeline/cards.json")
+        self.assertIn("secretary-353", cards["cards"])
+
+    def test_export_transcripts_inventory_and_optional_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            transcripts = root / "claude"
+            (transcripts / "project").mkdir(parents=True)
+            (transcripts / "project" / "session.jsonl").write_text("{}\n", encoding="utf-8")
+
+            inventory = export_transcripts(root / "secretary-data", roots=[transcripts])
+            no_copy = (root / "secretary-data" / "transcripts" / "copies").exists()
+            copied = export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
+            copied_dir = (root / "secretary-data" / "transcripts" / "copies").is_dir()
+
+        self.assertEqual(inventory.count, 1)
+        self.assertFalse(no_copy)
+        self.assertEqual(copied.count, 1)
+        self.assertTrue(copied_dir)
+
+
+def subprocess_completed(stdout: str):
+    return mock.Mock(stdout=stdout, stderr="", returncode=0)
 
 
 if __name__ == "__main__":

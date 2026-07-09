@@ -101,6 +101,7 @@ Before full backup exists, Phase 3 exposes two narrow data commands:
 ```bash
 secretary data init --instance ~/secretary-instance
 secretary data raw-kanboard-dump --instance ~/secretary-instance
+secretary data export --instance ~/secretary-instance
 ```
 
 `data init` creates the target `secretary-data` directories and writes the
@@ -108,6 +109,14 @@ schema-validated `data-manifest.json` under `data_dir`. `data raw-kanboard-dump`
 copies the Kanboard container data directory into a fresh timestamped directory
 under `secretary-data/board/`; repeated runs keep earlier dumps intact. This is a
 raw layer for later backup/export work, not a normalized board export.
+
+`data export` writes the Phase 3 normalized snapshot: `board/cards.json` and
+`cards.ndjson` from the pipeline board CLI, `memory/facts` plus
+`memory/export.ndjson` from `panelmem-kb`, `runs/runs.ndjson`,
+`runs/watermarks.json` and `runs/cards.json` from triggered-agents state, and
+`transcripts/inventory.*` from head transcript directories. The exporters are
+read-only against their sources and publish deterministic files, so a repeat run
+without source changes leaves the same content.
 
 `secretary backup verify` will check backup structure and version compatibility
 before restore or offsite retention decisions. It is planned after Phase 1.
