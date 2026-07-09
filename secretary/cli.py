@@ -89,7 +89,12 @@ def load_instance_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ConfigError(f"instance config is not a file: {path}")
 
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot read instance config: {exc}") from exc
+    except UnicodeError as exc:
+        raise ConfigError(f"cannot decode instance config as UTF-8: {exc}") from exc
     try:
         if path.suffix == ".json":
             data = json.loads(text)

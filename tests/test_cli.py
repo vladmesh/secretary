@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from secretary.cli import main
@@ -33,6 +35,25 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertIn("requires --dry-run", output)
+
+    def test_doctor_reports_unreadable_instance_config(self):
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(FIXTURE)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary doctor: cannot read instance config", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_doctor_reports_non_utf8_instance_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            instance.write_bytes(b"\xff")
+
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary doctor: cannot decode instance config as UTF-8", output)
+        self.assertNotIn("Traceback", output)
 
     def test_target_command_stubs_are_explicit(self):
         for command in (
