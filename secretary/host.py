@@ -47,6 +47,20 @@ class KindDiff:
     unmanaged_on_host: list[str]
 
 
+@dataclass(frozen=True)
+class CollectResult:
+    """What a source found on the host, plus why any kind could not be read.
+
+    ``errors`` maps a kind ("projects" / "units" / "orca repos") to a reason
+    when that kind could not be inspected. An unreadable kind is never reported
+    as an empty host: doctor marks it unavailable instead of comparing against
+    an empty set, so "could not inspect" never masquerades as "nothing there".
+    """
+
+    inventory: HostInventory
+    errors: dict[str, str] = field(default_factory=dict)
+
+
 def _project_name(binding: dict[str, Any]) -> str:
     """Pick the host-facing name of a project binding.
 
@@ -104,13 +118,11 @@ class HostSource(ABC):
     """Something that can enumerate host resources without changing them."""
 
     @abstractmethod
-    def collect(self, expected: Expectations) -> HostInventory:
+    def collect(self, expected: Expectations) -> CollectResult:
         ...
 
 
 def _names_from_dir(directory: Path) -> set[str]:
-    if not directory.is_dir():
-        return set()
     return {entry.name for entry in directory.iterdir() if entry.is_dir()}
 
 
@@ -123,7 +135,8 @@ class FixtureHostSource(HostSource):
         units.txt            one systemd unit name per line
         orca-repos.txt       one Orca repo name per line
 
-    Reads only. Missing files mean an empty set for that kind.
+    Reads only. A missing file means an empty set for that kind, since the
+    fixture is authored deliberately and absence is not an inspection failure.
     """
 
     def __init__(self, root: Path):
@@ -140,71 +153,161 @@ class FixtureHostSource(HostSource):
                 names.add(token)
         return names
 
-    def collect(self, expected: Expectations) -> HostInventory:
-        return HostInventory(
-            projects=_names_from_dir(self.root / "projects"),
-            units=self._lines("units.txt"),
-            orca_repos=self._lines("orca-repos.txt"),
+    def _projects(self) -> set[str]:
+        projects_dir = self.root / "projects"
+        if not projects_dir.is_dir():
+            return set()
+        return _names_from_dir(projects_dir)
+
+    def collect(self, expected: Expectations) -> CollectResult:
+        return CollectResult(
+            inventory=HostInventory(
+                projects=self._projects(),
+                units=self._lines("units.txt"),
+                orca_repos=self._lines("orca-repos.txt"),
+            )
         )
+
+
+@dataclass(frozen=True)
+class _CmdResult:
+    """Outcome of one host probe.
+
+    ``ran`` is False only when the process could not execute at all (missing
+    binary, timeout, OS error); ``reason`` is set then. When ``ran`` is True the
+    caller interprets ``returncode``/``stderr`` itself, because a non-zero exit
+    is not always a failure (``systemctl list-unit-files`` exits 1 on no match).
+    """
+
+    ran: bool
+    returncode: int
+    stdout: str
+    stderr: str
+    reason: str = ""
 
 
 class LiveHostSource(HostSource):
     """The real host: the projects directory, systemd and Orca, all read-only.
 
-    Enumeration failures (a tool missing, a directory absent) degrade to an
-    empty set for that kind rather than raising, so doctor still reports the
-    kinds it could read.
+    Inspecting a kind can fail: a tool is missing, exits non-zero, hangs, or a
+    directory is unreadable. Such a failure is recorded per kind in the
+    CollectResult rather than silently turning into an empty set, so doctor can
+    tell the operator "could not inspect" instead of a false "nothing there".
     """
 
-    def collect(self, expected: Expectations) -> HostInventory:
-        return HostInventory(
-            projects=self._projects(expected),
-            units=self._units(expected),
-            orca_repos=self._orca_repos(),
-        )
+    # Cap each host probe so a hung systemctl or orca cannot wedge doctor.
+    timeout_seconds = 10
 
-    def _projects(self, expected: Expectations) -> set[str]:
-        if not expected.projects_root:
-            return set()
-        return _names_from_dir(Path(expected.projects_root))
+    def collect(self, expected: Expectations) -> CollectResult:
+        inventory = HostInventory()
+        errors: dict[str, str] = {}
 
-    def _units(self, expected: Expectations) -> set[str]:
+        projects, reason = self._projects(expected)
+        if reason:
+            errors["projects"] = reason
+        else:
+            inventory = HostInventory(projects, inventory.units, inventory.orca_repos)
+
+        units, reason = self._units(expected)
+        if reason:
+            errors["units"] = reason
+        else:
+            inventory = HostInventory(inventory.projects, units, inventory.orca_repos)
+
+        repos, reason = self._orca_repos()
+        if reason:
+            errors["orca repos"] = reason
+        else:
+            inventory = HostInventory(inventory.projects, inventory.units, repos)
+
+        return CollectResult(inventory=inventory, errors=errors)
+
+    def _projects(self, expected: Expectations) -> tuple[set[str], str]:
+        root = expected.projects_root
+        if not root:
+            # No declared projects to place means nothing to inspect; declared
+            # projects with no root is an inspection gap, not an empty host.
+            if expected.projects:
+                return set(), "host.projects_root not set"
+            return set(), ""
+        path = Path(root)
+        if not path.is_dir():
+            return set(), f"projects_root not a directory: {root}"
+        try:
+            return _names_from_dir(path), ""
+        except OSError:
+            return set(), f"cannot read projects_root: {root}"
+
+    def _units(self, expected: Expectations) -> tuple[set[str], str]:
         prefix = expected.unit_prefix
         if not prefix:
-            # Without a namespace we cannot tell which host units are ours, so
-            # scope to the declared names and report only presence.
-            return {u for u in expected.units if self._unit_exists(u)}
-        out = self._run(["systemctl", "list-unit-files", "--no-legend", f"{prefix}*"])
-        names: set[str] = set()
-        for line in out.splitlines():
-            token = line.split()[0] if line.split() else ""
+            if not expected.units:
+                return set(), ""
+            # Without a namespace we can only check the declared units exist.
+            names: set[str] = set()
+            for unit in expected.units:
+                result = self._run(["systemctl", "list-unit-files", "--no-legend", unit])
+                reason = self._systemctl_error(result)
+                if reason:
+                    return set(), reason
+                if result.stdout.strip():
+                    names.add(unit)
+            return names, ""
+        result = self._run(["systemctl", "list-unit-files", "--no-legend", f"{prefix}*"])
+        reason = self._systemctl_error(result)
+        if reason:
+            return set(), reason
+        names = set()
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            token = fields[0] if fields else ""
             if token.startswith(prefix):
                 names.add(token)
-        return names
+        return names, ""
 
-    def _unit_exists(self, unit: str) -> bool:
-        out = self._run(["systemctl", "list-unit-files", "--no-legend", unit])
-        return bool(out.strip())
+    @staticmethod
+    def _systemctl_error(result: _CmdResult) -> str:
+        """Real failure vs. an empty match.
 
-    def _orca_repos(self) -> set[str]:
-        out = self._run(["orca", "repo", "list"])
+        ``list-unit-files`` exits 1 with no stderr when a pattern matches no
+        units. That is a legitimately empty result, not an inspection failure,
+        so only a failed exec or a non-empty stderr counts as an error.
+        """
+        if not result.ran:
+            return result.reason
+        if result.returncode != 0 and result.stderr.strip():
+            return f"systemctl exited {result.returncode}"
+        return ""
+
+    def _orca_repos(self) -> tuple[set[str], str]:
+        result = self._run(["orca", "repo", "list"])
+        if not result.ran:
+            return set(), result.reason
+        if result.returncode != 0:
+            # orca reports an empty registry as exit 0, so non-zero is a failure.
+            return set(), f"orca exited {result.returncode}"
         names: set[str] = set()
-        for line in out.splitlines():
+        for line in result.stdout.splitlines():
             parts = line.split()
             # Format: <uuid> <name> <path>. The name is the second column.
             if len(parts) >= 2:
                 names.add(parts[1])
-        return names
+        return names, ""
 
-    @staticmethod
-    def _run(cmd: list[str]) -> str:
+    def _run(self, cmd: list[str]) -> _CmdResult:
+        tool = cmd[0]
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=self.timeout_seconds,
             )
-        except (OSError, ValueError):
-            return ""
-        return result.stdout or ""
+        except FileNotFoundError:
+            return _CmdResult(False, -1, "", "", f"{tool} not found")
+        except subprocess.TimeoutExpired:
+            return _CmdResult(False, -1, "", "", f"{tool} timed out after {self.timeout_seconds}s")
+        except OSError:
+            return _CmdResult(False, -1, "", "", f"{tool} could not run")
+        return _CmdResult(True, result.returncode, result.stdout or "", result.stderr or "")

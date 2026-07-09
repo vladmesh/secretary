@@ -90,28 +90,43 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"adapters: {report.adapters}")
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
 
+    host_incomplete = False
     if args.host or args.host_fixture:
-        print_host_inventory(report, args)
+        host_incomplete = print_host_inventory(report, args)
 
     print("host changes: none")
+    if host_incomplete:
+        # A kind could not be inspected, so this is not a clean "all matched".
+        print("status: host inventory incomplete")
+        return 1
     print("status: ok")
     return 0
 
 
-def print_host_inventory(report, args: argparse.Namespace) -> None:
-    """Print the read-only host inventory: matched / missing / unmanaged per kind."""
+def print_host_inventory(report, args: argparse.Namespace) -> bool:
+    """Print the read-only host inventory: matched / missing / unmanaged per kind.
+
+    Returns True if any kind could not be inspected (reported as unavailable).
+    """
     if args.host_fixture:
         source = FixtureHostSource(Path(args.host_fixture))
     else:
         source = LiveHostSource()
 
     expected = build_expectations(report.bindings, report.host)
-    result = inventory(expected, source.collect(expected))
+    collected = source.collect(expected)
+    diffs = inventory(expected, collected.inventory)
 
     print("")
     print("host inventory: read-only")
     for kind in ("projects", "units", "orca repos"):
-        _print_kind(kind, result[kind])
+        reason = collected.errors.get(kind)
+        if reason:
+            print(f"{kind}:")
+            print(f"  unavailable: {reason}")
+        else:
+            _print_kind(kind, diffs[kind])
+    return bool(collected.errors)
 
 
 def _print_kind(kind: str, diff: KindDiff) -> None:
