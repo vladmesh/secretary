@@ -157,7 +157,12 @@ def run_data_init(args: argparse.Namespace) -> int:
     if data_dir is None:
         return 1
 
-    layout = init_layout(data_dir)
+    try:
+        layout = init_layout(data_dir)
+    except RuntimeError as exc:
+        print(f"secretary data init: {exc}")
+        return 1
+
     manifest = load_config(layout.manifest_path)
     errors = validate(manifest, "data-manifest", layout.manifest_path.name)
     if errors:

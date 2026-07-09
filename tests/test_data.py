@@ -32,6 +32,41 @@ class DataLayoutTests(unittest.TestCase):
             self.assertEqual(second.created_dirs, [])
             self.assertEqual(manifest_for(data_dir), manifest_for(data_dir))
 
+    def test_init_layout_preserves_manifest_when_publish_short_writes(self):
+        original_write_text = Path.write_text
+
+        def partial_manifest_write(path, text, *args, **kwargs):
+            if path.name.startswith(".data-manifest.json."):
+                return original_write_text(path, "{partial", *args, **kwargs)
+            return original_write_text(path, text, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            manifest_path = data_dir / "data-manifest.json"
+            original_manifest = manifest_path.read_text(encoding="utf-8")
+
+            with mock.patch("secretary.data.Path.write_text", new=partial_manifest_write):
+                with self.assertRaises(RuntimeError):
+                    init_layout(data_dir)
+
+            self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
+            self.assertEqual(list(data_dir.glob(".data-manifest.json.*.tmp")), [])
+
+    def test_init_layout_preserves_manifest_when_publish_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            manifest_path = data_dir / "data-manifest.json"
+            original_manifest = manifest_path.read_text(encoding="utf-8")
+
+            with mock.patch("secretary.data.Path.write_text", side_effect=OSError("full")):
+                with self.assertRaises(RuntimeError):
+                    init_layout(data_dir)
+
+            self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
+            self.assertEqual(list(data_dir.glob(".data-manifest.json.*.tmp")), [])
+
 
 class RawKanboardDumpTests(unittest.TestCase):
     @mock.patch("secretary.data.subprocess.run")

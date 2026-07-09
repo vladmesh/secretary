@@ -147,6 +147,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(doctor_code, 0, doctor_output)
 
+    def test_data_init_reports_manifest_publish_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "secretary.cli.init_layout",
+                side_effect=RuntimeError("could not write data manifest: full"),
+            ):
+                code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary data init: could not write data manifest", output)
+        self.assertNotIn("Traceback", output)
+
     @mock.patch("secretary.data.subprocess.run")
     def test_raw_kanboard_dump_command_uses_data_dir(self, run):
         def fake_run(command, **_kwargs):

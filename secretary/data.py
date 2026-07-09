@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.config import validate
+
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
@@ -61,10 +63,7 @@ def init_layout(data_dir: Path) -> DataLayout:
             created_dirs.append(directory)
 
     manifest_path = data_dir / "data-manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest_for(data_dir), indent=2, sort_keys=False) + "\n",
-        encoding="utf-8",
-    )
+    _write_data_manifest(manifest_path, manifest_for(data_dir))
     return DataLayout(
         data_dir=data_dir,
         manifest_path=manifest_path,
@@ -123,6 +122,37 @@ def raw_kanboard_dump(
         raise RuntimeError(f"could not create raw dump: {exc}") from None
 
     return KanboardDump(dump_dir=dump_dir, source=f"{container}:{source_path}")
+
+
+def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    payload = json.dumps(manifest, indent=2, sort_keys=False) + "\n"
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{manifest_path.name}.",
+        suffix=".tmp",
+        dir=manifest_path.parent,
+        text=True,
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(payload, encoding="utf-8")
+        try:
+            candidate = json.loads(temp_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise RuntimeError(f"generated invalid data manifest: {exc}") from None
+        errors = validate(candidate, "data-manifest", manifest_path.name)
+        if errors:
+            details = "; ".join(str(error) for error in errors)
+            raise RuntimeError(f"generated invalid data manifest: {details}") from None
+        os.replace(temp_path, manifest_path)
+    except OSError as exc:
+        raise RuntimeError(f"could not write data manifest: {exc}") from None
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _publish_dump_dir(staging_dir: Path, board_dir: Path) -> Path:
