@@ -243,23 +243,18 @@ class LiveHostSource(HostSource):
     def _units(self, expected: Expectations) -> tuple[set[str], str]:
         prefix = expected.unit_prefix
         if not prefix:
-            if not expected.units:
-                return set(), ""
-            # Without a namespace we can only check the declared units exist.
-            names: set[str] = set()
-            for unit in expected.units:
-                result = self._run(["systemctl", "list-unit-files", "--no-legend", unit])
-                reason = self._systemctl_error(result)
-                if reason:
-                    return set(), reason
-                if result.stdout.strip():
-                    names.add(unit)
-            return names, ""
+            # unmanaged-on-host can only be computed by enumerating a namespace.
+            # Declared units with no prefix would let us confirm the declared
+            # ones and silently miss every undescribed host unit, so we refuse
+            # to emit a diff that cannot include unmanaged-on-host.
+            if expected.units:
+                return set(), "host.unit_prefix is required to compute unmanaged-on-host"
+            return set(), ""
         result = self._run(["systemctl", "list-unit-files", "--no-legend", f"{prefix}*"])
         reason = self._systemctl_error(result)
         if reason:
             return set(), reason
-        names = set()
+        names: set[str] = set()
         for line in result.stdout.splitlines():
             fields = line.split()
             token = fields[0] if fields else ""

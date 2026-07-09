@@ -158,6 +158,30 @@ class LiveSourceErrorTests(unittest.TestCase):
         result = host.collect(Expectations(units={"u"}, unit_prefix="u-"))
         self.assertIn("units", result.errors)
 
+    def test_units_without_prefix_are_unavailable_not_silent(self):
+        # No namespace means unmanaged-on-host cannot be computed. The live path
+        # must refuse rather than emit a diff that silently omits stray units.
+        host = self._host({"systemctl": _cmd(stdout=""), "orca": _cmd(stdout="")})
+        result = host.collect(Expectations(units={"secretary-pipeline"}, unit_prefix=""))
+        self.assertIn("units", result.errors)
+        self.assertIn("unit_prefix", result.errors["units"])
+        self.assertEqual(result.inventory.units, set())
+
+    def test_prefix_enumerates_namespace_even_with_no_declared_units(self):
+        # A declared prefix with no expected units still surfaces stray units as
+        # unmanaged-on-host, so ownership of the namespace is not silently dropped.
+        host = self._host(
+            {
+                "systemctl": _cmd(stdout="secretary-retro.service enabled enabled\n"),
+                "orca": _cmd(stdout=""),
+            }
+        )
+        expected = Expectations(units=set(), unit_prefix="secretary-")
+        result = host.collect(expected)
+        self.assertNotIn("units", result.errors)
+        diff = inventory(expected, result.inventory)
+        self.assertEqual(diff["units"].unmanaged_on_host, ["secretary-retro.service"])
+
     def test_orca_non_zero_exit_is_a_failure(self):
         host = self._host(
             {
@@ -315,6 +339,33 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertNotIn(secret, output)
         self.assertIn("projects:\n  unavailable:", output)
+
+    def test_units_without_prefix_rejected_before_inventory(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp) / "instance.yaml"
+            instance.write_text(
+                "version: 1\n"
+                "name: no-prefix\n"
+                "data_dir: /var/lib/secretary-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n"
+                "host:\n"
+                "  units:\n"
+                "    - secretary-pipeline\n",
+                encoding="utf-8",
+            )
+            code, output = run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance), "--host"]
+            )
+
+        # Config validation rejects the shape, so the misleading inventory that
+        # would print unmanaged-on-host: (none) is never reached.
+        self.assertEqual(code, 1, output)
+        self.assertIn("config problem", output)
+        self.assertIn("unit_prefix", output)
+        self.assertNotIn("host inventory", output)
 
     def test_output_excludes_env_file_contents(self):
         secret = "sk-live-host-inventory-DO-NOT-LEAK-71af"

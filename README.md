@@ -58,6 +58,9 @@ three sets:
 What the instance owns is declared under `host` in `instance.yaml`: `projects_root`
 (where repos live), `unit_prefix` (the systemd namespace secretary manages), `units`
 and `orca_repos`. Expected project names come from the bindings under `projects/`.
+Declaring `units` requires `unit_prefix`: without a namespace to enumerate, doctor
+cannot see host units that the instance does not describe, so it would not compute
+`unmanaged-on-host` for units.
 
 The inventory is strictly read-only: it enumerates resource names only and never
 opens env files, reads secrets, or changes host state. `--host-fixture DIR` runs the

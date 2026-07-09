@@ -78,13 +78,20 @@
         "units": {
           "type": "array",
           "items": {"type": "string", "minLength": 1},
-          "description": "systemd unit names this installation expects on the host."
+          "description": "systemd unit names this installation expects on the host. Requires unit_prefix so unmanaged-on-host can be computed."
         },
         "orca_repos": {
           "type": "array",
           "items": {"type": "string", "minLength": 1},
           "description": "Orca repo registrations this installation expects."
         }
+      },
+      "if": {
+        "properties": {"units": {"type": "array", "minItems": 1}},
+        "required": ["units"]
+      },
+      "then": {
+        "required": ["unit_prefix"]
       }
     }
   },
