@@ -19,9 +19,11 @@ policies:
 host:
   projects_root: /srv/projects
   unit_prefix: secretary-
+  # Full systemd unit file names, exactly as `systemctl list-unit-files` prints
+  # them. A logical service may own both a .service and a .timer.
   units:
-    - secretary-pipeline
-    - secretary-curator
+    - secretary-pipeline.service
+    - secretary-curator.timer
   orca_repos:
     - example-project
     - secretary

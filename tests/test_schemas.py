@@ -92,15 +92,26 @@ class SchemaInvalidTests(unittest.TestCase):
     def test_host_units_require_unit_prefix(self):
         data = copy.deepcopy(VALID_INSTANCE)
         # units with no unit_prefix cannot yield unmanaged-on-host, so reject it.
-        data["host"] = {"units": ["secretary-pipeline"]}
+        data["host"] = {"units": ["secretary-pipeline.service"]}
         errors = validate(data, "instance", "instance.yaml")
         self.assertTrue(errors)
         self.assertTrue(any("unit_prefix" in e.message for e in errors), errors)
 
     def test_host_units_with_prefix_pass(self):
         data = copy.deepcopy(VALID_INSTANCE)
-        data["host"] = {"units": ["secretary-pipeline"], "unit_prefix": "secretary-"}
+        data["host"] = {
+            "units": ["secretary-pipeline.service", "secretary-pipeline.timer"],
+            "unit_prefix": "secretary-",
+        }
         self.assertEqual(validate(data, "instance", "instance.yaml"), [])
+
+    def test_host_units_require_type_suffix(self):
+        # A suffixless name never matches systemctl output, so reject it up front.
+        data = copy.deepcopy(VALID_INSTANCE)
+        data["host"] = {"units": ["secretary-pipeline"], "unit_prefix": "secretary-"}
+        errors = validate(data, "instance", "instance.yaml")
+        self.assertTrue(errors)
+        self.assertTrue(any(e.path.startswith("host.units") for e in errors), errors)
 
     def test_host_empty_units_need_no_prefix(self):
         data = copy.deepcopy(VALID_INSTANCE)

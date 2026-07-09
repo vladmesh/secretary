@@ -135,8 +135,11 @@ class FixtureHostSource(HostSource):
         units.txt            one systemd unit name per line
         orca-repos.txt       one Orca repo name per line
 
-    Reads only. A missing file means an empty set for that kind, since the
-    fixture is authored deliberately and absence is not an inspection failure.
+    Reads only. The root itself must exist: a missing root is an inspection
+    failure (nothing was read), so every kind is marked unavailable rather than
+    reported as an empty host. Within an existing root a missing per-kind file
+    means an empty set, since the fixture is authored deliberately and a file's
+    absence is not an inspection failure.
     """
 
     def __init__(self, root: Path):
@@ -160,6 +163,15 @@ class FixtureHostSource(HostSource):
         return _names_from_dir(projects_dir)
 
     def collect(self, expected: Expectations) -> CollectResult:
+        if not self.root.is_dir():
+            # The root was never read, so this is "could not inspect", not an
+            # empty host. Marking every kind unavailable stops doctor from
+            # reporting all expected resources as missing against a phantom host.
+            reason = "fixture host directory not found"
+            return CollectResult(
+                inventory=HostInventory(),
+                errors={kind: reason for kind in KINDS},
+            )
         return CollectResult(
             inventory=HostInventory(
                 projects=self._projects(),

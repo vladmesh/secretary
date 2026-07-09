@@ -91,16 +91,28 @@ class FixtureSourceTests(unittest.TestCase):
         self.assertEqual(result.errors, {})
         actual = result.inventory
         self.assertEqual(actual.projects, {"example-project", "stray-project"})
-        self.assertEqual(actual.units, {"secretary-pipeline", "secretary-retro"})
+        # Full unit file names, exactly as systemctl list-unit-files prints them.
+        self.assertEqual(actual.units, {"secretary-pipeline.service", "secretary-retro.timer"})
         self.assertEqual(actual.orca_repos, {"example-project", "secretary", "extra-repo"})
 
-    def test_missing_files_yield_empty_sets(self):
-        source = FixtureHostSource(REPO_ROOT / "tests" / "fixtures" / "does-not-exist")
-        result = source.collect(Expectations())
+    def test_missing_per_kind_files_yield_empty_sets(self):
+        # An existing root with no unit/repo files and no projects dir is a
+        # deliberately empty host, not an inspection failure.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = FixtureHostSource(Path(tmp)).collect(Expectations())
         self.assertEqual(result.errors, {})
         self.assertEqual(result.inventory.projects, set())
         self.assertEqual(result.inventory.units, set())
         self.assertEqual(result.inventory.orca_repos, set())
+
+    def test_missing_root_is_unavailable_not_empty(self):
+        # A root that does not exist was never read: every kind must be marked
+        # unavailable instead of reporting an empty host (the fixture fail-open).
+        source = FixtureHostSource(REPO_ROOT / "tests" / "fixtures" / "does-not-exist")
+        result = source.collect(Expectations())
+        self.assertEqual(set(result.errors), {"projects", "units", "orca repos"})
 
 
 def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):
@@ -141,12 +153,42 @@ class LiveSourceErrorTests(unittest.TestCase):
                 "orca": _cmd(stdout=""),
             }
         )
-        expected = Expectations(units={"secretary-pipeline"}, unit_prefix="secretary-")
+        expected = Expectations(units={"secretary-pipeline.service"}, unit_prefix="secretary-")
         result = host.collect(expected)
         self.assertNotIn("units", result.errors)
         self.assertEqual(result.inventory.units, set())
         diff = inventory(expected, result.inventory)
-        self.assertEqual(diff["units"].missing_on_host, ["secretary-pipeline"])
+        self.assertEqual(diff["units"].missing_on_host, ["secretary-pipeline.service"])
+
+    def test_full_unit_names_match_systemctl_output(self):
+        # The reviewer's scenario: systemctl list-unit-files prints full file
+        # names with .service / .timer suffixes and one logical service can own
+        # both. Declared full names must match exactly, and any extra unit in the
+        # namespace surfaces as unmanaged-on-host, never as a false diff.
+        host = self._host(
+            {
+                "systemctl": _cmd(
+                    stdout=(
+                        "secretary-pipeline.service static  -\n"
+                        "secretary-pipeline.timer   enabled enabled\n"
+                    )
+                ),
+                "orca": _cmd(stdout=""),
+            }
+        )
+        expected = Expectations(
+            units={"secretary-pipeline.service"}, unit_prefix="secretary-"
+        )
+        result = host.collect(expected)
+        self.assertNotIn("units", result.errors)
+        self.assertEqual(
+            result.inventory.units,
+            {"secretary-pipeline.service", "secretary-pipeline.timer"},
+        )
+        diff = inventory(expected, result.inventory)
+        self.assertEqual(diff["units"].matched, ["secretary-pipeline.service"])
+        self.assertEqual(diff["units"].missing_on_host, [])
+        self.assertEqual(diff["units"].unmanaged_on_host, ["secretary-pipeline.timer"])
 
     def test_systemctl_stderr_is_a_failure(self):
         host = self._host(
@@ -162,7 +204,7 @@ class LiveSourceErrorTests(unittest.TestCase):
         # No namespace means unmanaged-on-host cannot be computed. The live path
         # must refuse rather than emit a diff that silently omits stray units.
         host = self._host({"systemctl": _cmd(stdout=""), "orca": _cmd(stdout="")})
-        result = host.collect(Expectations(units={"secretary-pipeline"}, unit_prefix=""))
+        result = host.collect(Expectations(units={"secretary-pipeline.service"}, unit_prefix=""))
         self.assertIn("units", result.errors)
         self.assertIn("unit_prefix", result.errors["units"])
         self.assertEqual(result.inventory.units, set())
@@ -243,10 +285,10 @@ class DoctorHostCliTests(unittest.TestCase):
         # projects
         self.assertIn("projects:\n  matched: example-project", output)
         self.assertIn("unmanaged-on-host: stray-project", output)
-        # units: one of each outcome
-        self.assertIn("units:\n  matched: secretary-pipeline", output)
-        self.assertIn("missing-on-host: secretary-curator", output)
-        self.assertIn("unmanaged-on-host: secretary-retro", output)
+        # units: one of each outcome, full unit file names
+        self.assertIn("units:\n  matched: secretary-pipeline.service", output)
+        self.assertIn("missing-on-host: secretary-curator.timer", output)
+        self.assertIn("unmanaged-on-host: secretary-retro.timer", output)
         # orca repos
         self.assertIn("orca repos:\n  matched: example-project, secretary", output)
         self.assertIn("missing-on-host: secretary-instance", output)
@@ -261,6 +303,29 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertNotIn("host inventory", output)
         # Phase 1 summary line is unchanged.
         self.assertIn("projects: 1", output)
+
+    def test_missing_fixture_root_exits_nonzero_not_false_missing(self):
+        # A wrong --host-fixture path must not fail open: every kind reads as
+        # unavailable and doctor exits non-zero, instead of printing all expected
+        # resources as missing-on-host against a host that was never inspected.
+        missing_root = str(REPO_ROOT / "tests" / "fixtures" / "no-such-fixture-root")
+        code, output = run_cli(
+            [
+                "doctor",
+                "--dry-run",
+                "--instance",
+                str(EXAMPLE_INSTANCE),
+                "--host-fixture",
+                missing_root,
+            ]
+        )
+        self.assertEqual(code, 1, output)
+        self.assertIn("unavailable: fixture host directory not found", output)
+        self.assertIn("status: host inventory incomplete", output)
+        # The false-clean symptom is gone: no expected resource is listed as
+        # missing-on-host, because no comparison ran.
+        self.assertNotIn("missing-on-host", output)
+        self.assertNotIn("example-project", output)
 
     def test_host_inventory_is_read_only(self):
         before_fixture = snapshot(HOST_FIXTURE)
