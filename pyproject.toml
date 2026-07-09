@@ -8,6 +8,16 @@ version = "0.1.0"
 description = "Portable secretary appliance CLI skeleton."
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+    "jsonschema>=4.10",
+]
 
 [project.scripts]
 secretary = "secretary.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["secretary*"]
+
+[tool.setuptools.package-data]
+"secretary.schemas" = ["*.json"]

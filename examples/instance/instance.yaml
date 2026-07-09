@@ -1,0 +1,18 @@
+# Example instance config. No live bindings — safe to commit to the product repo.
+version: 1
+name: example-secretary
+description: Example installation used by doctor --dry-run and schema tests.
+data_dir: /var/lib/secretary-data
+offsite:
+  instance_remote: git@example.invalid:example/secretary-instance.git
+  backup_pull_max_age_days: 7
+persona:
+  name: example-operator
+  style: terse
+heads:
+  - role: worker
+    model: example-worker-model
+  - role: reviewer
+    model: example-reviewer-model
+policies:
+  default_code_concurrency: 1

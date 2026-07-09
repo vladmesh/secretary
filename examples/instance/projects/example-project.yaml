@@ -1,0 +1,9 @@
+# Example project binding. Points at a placeholder repo, not a real project.
+id: example-project
+repo: /srv/projects/example-project
+enabled: true
+adapter: example-project
+default_branch: main
+plane: project
+policy:
+  code_concurrency: 1

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "project-binding.schema.json",
+  "title": "Project binding",
+  "description": "One connected project (secretary-instance/projects/<id>.yaml).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "repo", "enabled", "adapter", "default_branch"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Stable project id, kebab-case."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path or URL of the project repo."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Only true after a green onboarding gate."
+    },
+    "adapter": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Adapter id, resolved under adapters/."
+    },
+    "default_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plane": {
+      "type": "string",
+      "enum": ["orchestrator", "project", "memory", "ops"],
+      "description": "Routing plane for this project's cards."
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code_concurrency": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

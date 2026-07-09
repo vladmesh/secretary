@@ -1,0 +1,11 @@
+# Example external adapter. Mirrors the design-doc shape for a Node project.
+setup:
+  commands:
+    - npm ci
+    - cd server && npm install
+smoke:
+  command: node --check server/src/index.js
+validation:
+  ci: github
+artifact_policy:
+  write_project_files: false
