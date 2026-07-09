@@ -39,19 +39,30 @@
         "ci": {
           "type": "string",
           "enum": ["github", "local", "none"],
-          "description": "Where validation runs. 'none' must be justified by 'missing'."
+          "description": "Where validation runs. 'local' needs a command, 'none' must be justified by 'missing'."
         },
         "command": {
           "type": "string",
           "minLength": 1,
-          "description": "Local validation command when ci is 'local'."
+          "description": "Local validation command, required when ci is 'local'."
         },
         "missing": {
           "type": "array",
+          "minItems": 1,
           "items": {"type": "string", "minLength": 1},
-          "description": "What the gate could not cover, e.g. ['tests']."
+          "description": "What the gate could not cover, e.g. ['tests']. Required when ci is 'none'."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["ci"], "properties": {"ci": {"const": "local"}}},
+          "then": {"required": ["command"]}
+        },
+        {
+          "if": {"required": ["ci"], "properties": {"ci": {"const": "none"}}},
+          "then": {"required": ["missing"]}
+        }
+      ]
     },
     "artifact_policy": {
       "type": "object",

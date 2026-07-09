@@ -64,6 +64,16 @@ class SchemaValidTests(unittest.TestCase):
             with self.subTest(schema=schema):
                 self.assertEqual(validate(data, schema, schema), [])
 
+    def test_adapter_local_ci_with_command_passes(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "local", "command": "make test"}
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
+    def test_adapter_none_ci_with_missing_passes(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "none", "missing": ["tests"]}
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
 
 class SchemaInvalidTests(unittest.TestCase):
     def test_instance_missing_offsite_remote(self):
@@ -104,11 +114,52 @@ class SchemaInvalidTests(unittest.TestCase):
         errors = validate(data, "adapter", "a.yaml")
         self.assertTrue(any("validation" in e.path for e in errors), errors)
 
+    def test_adapter_local_ci_requires_command(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "local"}
+        errors = validate(data, "adapter", "a.yaml")
+        self.assertTrue(errors)
+        self.assertTrue(any("command" in e.message for e in errors), errors)
+
+    def test_adapter_none_ci_requires_missing(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "none"}
+        errors = validate(data, "adapter", "a.yaml")
+        self.assertTrue(errors)
+        self.assertTrue(any("missing" in e.message for e in errors), errors)
+
+    def test_adapter_none_ci_rejects_empty_missing(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "none", "missing": []}
+        errors = validate(data, "adapter", "a.yaml")
+        self.assertTrue(errors)
+
     def test_manifest_missing_component(self):
         data = copy.deepcopy(VALID_MANIFEST)
         del data["components"]["memory"]
         errors = validate(data, "data-manifest", "m.json")
         self.assertTrue(any("components" in e.path for e in errors), errors)
+
+
+class ErrorLeakTests(unittest.TestCase):
+    def test_message_does_not_echo_offending_value(self):
+        secret = "sk-live-do-not-print-3f9a"
+        data = copy.deepcopy(VALID_INSTANCE)
+        data["offsite"]["backup_pull_max_age_days"] = secret  # wrong type
+        errors = validate(data, "instance", "instance.yaml")
+        self.assertTrue(errors)
+        blob = "\n".join(str(e) for e in errors)
+        self.assertNotIn(secret, blob, blob)
+        # path and keyword are still present
+        self.assertTrue(any("backup_pull_max_age_days" in e.path for e in errors))
+        self.assertIn("expected type integer", blob)
+
+    def test_pattern_error_does_not_echo_value(self):
+        data = copy.deepcopy(VALID_BINDING)
+        data["id"] = "SECRET_ID_LEAK"
+        errors = validate(data, "project-binding", "b.yaml")
+        blob = "\n".join(str(e) for e in errors)
+        self.assertNotIn("SECRET_ID_LEAK", blob, blob)
 
 
 class ExampleInstanceTests(unittest.TestCase):

@@ -80,12 +80,62 @@ def _field_path(absolute_path: Any) -> str:
     return "".join(parts) or "<root>"
 
 
+_LIMIT_KEYWORDS = {
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "minProperties",
+    "maxProperties",
+}
+
+
+def _safe_message(error: Any) -> str:
+    """Describe a violation from the schema keyword and path only.
+
+    jsonschema's own ``error.message`` embeds the offending instance value,
+    which can be a secret. We rebuild the message from schema-side data (the
+    keyword, its expected value, and property names) and never emit the value.
+    """
+    keyword = error.validator
+    expected = error.validator_value
+
+    if keyword == "required":
+        instance = error.instance if isinstance(error.instance, dict) else {}
+        missing = [p for p in expected if p not in instance]
+        names = ", ".join(missing) or ", ".join(expected)
+        noun = "property" if len(missing) == 1 else "properties"
+        return f"missing required {noun}: {names}"
+    if keyword == "additionalProperties":
+        allowed = set(error.schema.get("properties", {}))
+        instance = error.instance if isinstance(error.instance, dict) else {}
+        extra = sorted(k for k in instance if k not in allowed)
+        noun = "property" if len(extra) == 1 else "properties"
+        return f"unexpected {noun}: {', '.join(extra)}"
+    if keyword == "type":
+        names = expected if isinstance(expected, str) else "/".join(expected)
+        return f"expected type {names}"
+    if keyword == "enum":
+        return "value must be one of: " + ", ".join(repr(v) for v in expected)
+    if keyword == "const":
+        return f"value must equal {expected!r}"
+    if keyword == "pattern":
+        return f"value must match pattern {expected!r}"
+    if keyword in _LIMIT_KEYWORDS:
+        return f"violates {keyword} = {expected}"
+    return f"failed {keyword} constraint"
+
+
 def validate(data: Any, schema_name: str, source: str) -> list[SchemaError]:
     """Validate ``data`` against a named schema. Returns errors, never raises."""
     validator = Draft202012Validator(load_schema(schema_name))
     errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
     return [
-        SchemaError(source=source, path=_field_path(e.absolute_path), message=e.message)
+        SchemaError(source=source, path=_field_path(e.absolute_path), message=_safe_message(e))
         for e in errors
     ]
 
