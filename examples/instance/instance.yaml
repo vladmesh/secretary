@@ -16,3 +16,13 @@ heads:
     model: example-reviewer-model
 policies:
   default_code_concurrency: 1
+host:
+  projects_root: /srv/projects
+  unit_prefix: secretary-
+  units:
+    - secretary-pipeline
+    - secretary-curator
+  orca_repos:
+    - example-project
+    - secretary
+    - secretary-instance

@@ -166,6 +166,8 @@ class InstanceReport:
     adapters: int
     has_manifest: bool
     errors: list[SchemaError]
+    bindings: list[dict[str, Any]]
+    host: dict[str, Any]
 
     @property
     def ok(self) -> bool:
@@ -199,13 +201,19 @@ def validate_instance(path: Path) -> InstanceReport:
             adapters=0,
             has_manifest=False,
             errors=[SchemaError(str(instance_file), "<file>", str(exc))],
+            bindings=[],
+            host={},
         )
 
     errors += validate(instance, "instance", instance_file.name)
     name = instance.get("name", "") if isinstance(instance, dict) else ""
+    host = instance.get("host", {}) if isinstance(instance, dict) else {}
+    if not isinstance(host, dict):
+        host = {}
 
     projects = _validate_dir(instance_dir / "projects", "project-binding", errors)
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
+    bindings = _load_bindings(instance_dir / "projects")
 
     manifest_file = instance_dir / "data-manifest.json"
     has_manifest = manifest_file.exists()
@@ -224,7 +232,28 @@ def validate_instance(path: Path) -> InstanceReport:
         adapters=adapters,
         has_manifest=has_manifest,
         errors=errors,
+        bindings=bindings,
+        host=host,
     )
+
+
+def _load_bindings(directory: Path) -> list[dict[str, Any]]:
+    """Read project bindings for the host inventory, ignoring unreadable files.
+
+    Schema violations are reported separately by ``_validate_dir``; here we only
+    need the parsed mappings, so anything that will not parse is skipped.
+    """
+    if not directory.is_dir():
+        return []
+    bindings: list[dict[str, Any]] = []
+    for config_file in sorted(directory.glob("*.yaml")):
+        try:
+            data = load_config(config_file)
+        except ConfigError:
+            continue
+        if isinstance(data, dict):
+            bindings.append(data)
+    return bindings
 
 
 def _validate_dir(directory: Path, schema_name: str, errors: list[SchemaError]) -> int:

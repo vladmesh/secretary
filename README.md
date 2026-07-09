@@ -44,6 +44,31 @@ secretary doctor: 1 config problem(s):
   example-project.yaml: id: 'Bad_Id' does not match '^[a-z0-9][a-z0-9-]*$'
 ```
 
+## Host inventory
+
+`doctor --dry-run --host` adds a read-only comparison of the instance against the
+live host. For project repos, systemd units and Orca repo registrations it prints
+three sets:
+
+- `matched` — described in the instance and present on the host;
+- `missing-on-host` — described in the instance but not found;
+- `unmanaged-on-host` — present on the host but not described (reconcile would
+  leave these alone).
+
+What the instance owns is declared under `host` in `instance.yaml`: `projects_root`
+(where repos live), `unit_prefix` (the systemd namespace secretary manages), `units`
+and `orca_repos`. Expected project names come from the bindings under `projects/`.
+
+The inventory is strictly read-only: it enumerates resource names only and never
+opens env files, reads secrets, or changes host state. `--host-fixture DIR` runs the
+same comparison against a fixture host directory instead of the live host, so it can
+run offline and under test:
+
+```bash
+python3 -m secretary doctor --dry-run --instance examples/instance \
+  --host-fixture tests/fixtures/host
+```
+
 The Phase 1 command surface is present, but only `doctor --dry-run` does useful work.
 `reconcile`, `backup`, `restore`, `project add`, `task`, and `memory` return an explicit
 `not implemented` message.

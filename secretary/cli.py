@@ -4,6 +4,13 @@ import argparse
 from pathlib import Path
 
 from secretary.config import validate_instance
+from secretary.host import (
+    FixtureHostSource,
+    KindDiff,
+    LiveHostSource,
+    build_expectations,
+    inventory,
+)
 
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -29,6 +36,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--instance",
         required=True,
         help="path to an instance dir or instance.yaml",
+    )
+    doctor.add_argument(
+        "--host",
+        action="store_true",
+        help="also compare the instance against the live host (read-only inventory)",
+    )
+    doctor.add_argument(
+        "--host-fixture",
+        metavar="DIR",
+        help="compare against a fixture host dir instead of the live host (implies --host)",
     )
     doctor.set_defaults(handler=run_doctor)
 
@@ -72,9 +89,40 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"projects: {report.projects}")
     print(f"adapters: {report.adapters}")
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
+
+    if args.host or args.host_fixture:
+        print_host_inventory(report, args)
+
     print("host changes: none")
     print("status: ok")
     return 0
+
+
+def print_host_inventory(report, args: argparse.Namespace) -> None:
+    """Print the read-only host inventory: matched / missing / unmanaged per kind."""
+    if args.host_fixture:
+        source = FixtureHostSource(Path(args.host_fixture))
+    else:
+        source = LiveHostSource()
+
+    expected = build_expectations(report.bindings, report.host)
+    result = inventory(expected, source.collect(expected))
+
+    print("")
+    print("host inventory: read-only")
+    for kind in ("projects", "units", "orca repos"):
+        _print_kind(kind, result[kind])
+
+
+def _print_kind(kind: str, diff: KindDiff) -> None:
+    print(f"{kind}:")
+    print(f"  matched: {_join(diff.matched)}")
+    print(f"  missing-on-host: {_join(diff.missing_on_host)}")
+    print(f"  unmanaged-on-host: {_join(diff.unmanaged_on_host)}")
+
+
+def _join(names: list[str]) -> str:
+    return ", ".join(names) if names else "(none)"
 
 
 def not_implemented(command: str):
