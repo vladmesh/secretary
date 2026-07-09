@@ -47,3 +47,10 @@ secretary doctor: 1 config problem(s):
 The Phase 1 command surface is present, but only `doctor --dry-run` does useful work.
 `reconcile`, `backup`, `restore`, `project add`, `task`, and `memory` return an explicit
 `not implemented` message.
+
+## Documentation
+
+- `docs/target-layout.md` describes the target `secretary`, `secretary-instance`
+  and `secretary-data` split, plus the purpose of each target command.
+- `docs/phase1-review.md` records the Phase 1 acceptance check and differences
+  between the current skeleton and the design doc.
