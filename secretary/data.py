@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,11 +80,15 @@ def raw_kanboard_dump(
 ) -> KanboardDump:
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
-    board_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        board_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"cannot prepare board data dir: {exc}") from None
 
-    dump_dir = _next_dump_dir(board_dir)
-    dump_dir.mkdir(parents=True)
-    destination = dump_dir / "data"
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir)
+    )
+    destination = staging_dir / "data"
 
     try:
         subprocess.run(
@@ -91,33 +98,47 @@ def raw_kanboard_dump(
             stderr=subprocess.PIPE,
             text=True,
         )
+
+        metadata = {
+            "version": 1,
+            "kind": "kanboard-raw",
+            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
+            "container": container,
+            "source_path": source_path,
+        }
+        (staging_dir / "manifest.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+        dump_dir = _publish_dump_dir(staging_dir, board_dir)
     except FileNotFoundError:
-        shutil.rmtree(dump_dir, ignore_errors=True)
+        shutil.rmtree(staging_dir, ignore_errors=True)
         raise RuntimeError("docker command not found") from None
     except subprocess.CalledProcessError as exc:
-        shutil.rmtree(dump_dir, ignore_errors=True)
+        shutil.rmtree(staging_dir, ignore_errors=True)
         reason = (exc.stderr or exc.stdout or "docker cp failed").strip().splitlines()
         raise RuntimeError(reason[-1] if reason else "docker cp failed") from None
+    except OSError as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(f"could not create raw dump: {exc}") from None
 
-    metadata = {
-        "version": 1,
-        "kind": "kanboard-raw",
-        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
-        "container": container,
-        "source_path": source_path,
-    }
-    (dump_dir / "manifest.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=False) + "\n",
-        encoding="utf-8",
-    )
     return KanboardDump(dump_dir=dump_dir, source=f"{container}:{source_path}")
 
 
-def _next_dump_dir(board_dir: Path) -> Path:
+def _publish_dump_dir(staging_dir: Path, board_dir: Path) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     candidate = board_dir / f"kanboard-raw-{stamp}"
     suffix = 1
-    while candidate.exists():
-        candidate = board_dir / f"kanboard-raw-{stamp}-{suffix}"
-        suffix += 1
-    return candidate
+    while True:
+        try:
+            os.rename(staging_dir, candidate)
+            return candidate
+        except FileExistsError:
+            candidate = board_dir / f"kanboard-raw-{stamp}-{suffix}"
+            suffix += 1
+        except OSError as exc:
+            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                candidate = board_dir / f"kanboard-raw-{stamp}-{suffix}"
+                suffix += 1
+                continue
+            raise

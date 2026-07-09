@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,54 @@ class RawKanboardDumpTests(unittest.TestCase):
             self.assertTrue((first.dump_dir / "manifest.json").is_file())
             self.assertEqual(run.call_count, 2)
             self.assertEqual(run.call_args.args[0][0:2], ["docker", "cp"])
+
+    @mock.patch("secretary.data.subprocess.run")
+    def test_raw_kanboard_dump_cleans_staging_when_manifest_write_fails(self, run):
+        def fake_run(command, **_kwargs):
+            destination = Path(command[-1])
+            destination.mkdir(parents=True)
+            (destination / "db.sqlite").write_bytes(b"sqlite")
+
+        run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+
+            with mock.patch("secretary.data.Path.write_text", side_effect=OSError("full")):
+                with self.assertRaises(RuntimeError):
+                    raw_kanboard_dump(data_dir)
+
+            board_entries = list((data_dir / "board").iterdir())
+
+        self.assertEqual(board_entries, [])
+
+    @mock.patch("secretary.data.subprocess.run")
+    def test_raw_kanboard_dump_retries_publish_name_collision(self, run):
+        def fake_run(command, **_kwargs):
+            destination = Path(command[-1])
+            destination.mkdir(parents=True)
+            (destination / "db.sqlite").write_bytes(b"sqlite")
+
+        original_rename = os.rename
+        rename_calls = []
+
+        def fake_rename(source, destination):
+            rename_calls.append(Path(destination).name)
+            if len(rename_calls) == 1:
+                raise FileExistsError
+            original_rename(source, destination)
+
+        run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+
+            with mock.patch("secretary.data.os.rename", side_effect=fake_rename):
+                dump = raw_kanboard_dump(data_dir)
+
+            self.assertTrue((dump.dump_dir / "manifest.json").is_file())
+            self.assertTrue((dump.dump_dir / "data" / "db.sqlite").is_file())
+
+        self.assertEqual(len(rename_calls), 2)
+        self.assertTrue(rename_calls[-1].endswith("-1"))
 
 
 if __name__ == "__main__":
