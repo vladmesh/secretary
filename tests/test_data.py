@@ -67,6 +67,28 @@ class DataLayoutTests(unittest.TestCase):
             self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
             self.assertEqual(list(data_dir.glob(".data-manifest.json.*.tmp")), [])
 
+    def test_init_layout_wraps_directory_prepare_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError, "cannot prepare secretary-data layout"
+            ):
+                init_layout(data_dir)
+
+    def test_init_layout_wraps_manifest_tempfile_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+
+            with mock.patch(
+                "secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "could not write data manifest"
+                ):
+                    init_layout(data_dir)
+
 
 class RawKanboardDumpTests(unittest.TestCase):
     @mock.patch("secretary.data.subprocess.run")
@@ -136,6 +158,18 @@ class RawKanboardDumpTests(unittest.TestCase):
 
         self.assertEqual(len(rename_calls), 2)
         self.assertTrue(rename_calls[-1].endswith("-1"))
+
+    def test_raw_kanboard_dump_wraps_staging_prepare_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+
+            with mock.patch(
+                "secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not create raw dump"):
+                    raw_kanboard_dump(data_dir)
+
+            self.assertEqual(list((data_dir / "board").iterdir()), [])
 
 
 if __name__ == "__main__":

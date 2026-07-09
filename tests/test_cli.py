@@ -171,6 +171,52 @@ class CliTests(unittest.TestCase):
         self.assertIn("secretary data init: could not write data manifest", output)
         self.assertNotIn("Traceback", output)
 
+    def test_data_init_reports_layout_prepare_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            data_dir.write_text("not a directory", encoding="utf-8")
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary data init: cannot prepare secretary-data layout", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_data_init_reports_manifest_tempfile_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")
+            ):
+                code, output = self.run_cli(
+                    ["data", "init", "--instance", str(instance_dir)]
+                )
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary data init: could not write data manifest", output)
+        self.assertNotIn("Traceback", output)
+
     @mock.patch("secretary.data.subprocess.run")
     def test_raw_kanboard_dump_command_uses_data_dir(self, run):
         def fake_run(command, **_kwargs):
@@ -200,6 +246,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("kanboard raw dump:", output)
         self.assertEqual(run.call_args.args[0][0:2], ["docker", "cp"])
+
+    def test_raw_kanboard_dump_reports_staging_prepare_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+            with mock.patch(
+                "secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")
+            ):
+                code, output = self.run_cli(
+                    ["data", "raw-kanboard-dump", "--instance", str(instance_dir)]
+                )
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary data raw-kanboard-dump: could not create raw dump", output)
+        self.assertNotIn("Traceback", output)
 
     def test_doctor_reports_bad_nested_field_with_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:

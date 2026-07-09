@@ -55,12 +55,15 @@ def manifest_for(data_dir: Path) -> dict[str, Any]:
 def init_layout(data_dir: Path) -> DataLayout:
     data_dir = data_dir.expanduser().resolve()
     created_dirs: list[Path] = []
-    for relative in LAYOUT_DIRS:
-        directory = data_dir / relative
-        existed = directory.is_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        if not existed:
-            created_dirs.append(directory)
+    try:
+        for relative in LAYOUT_DIRS:
+            directory = data_dir / relative
+            existed = directory.is_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            if not existed:
+                created_dirs.append(directory)
+    except OSError as exc:
+        raise RuntimeError(f"cannot prepare secretary-data layout: {exc}") from None
 
     manifest_path = data_dir / "data-manifest.json"
     _write_data_manifest(manifest_path, manifest_for(data_dir))
@@ -84,12 +87,13 @@ def raw_kanboard_dump(
     except OSError as exc:
         raise RuntimeError(f"cannot prepare board data dir: {exc}") from None
 
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir)
-    )
-    destination = staging_dir / "data"
+    staging_dir: Path | None = None
 
     try:
+        staging_dir = Path(
+            tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir)
+        )
+        destination = staging_dir / "data"
         subprocess.run(
             ["docker", "cp", f"{container}:{source_path}", str(destination)],
             check=True,
@@ -111,14 +115,14 @@ def raw_kanboard_dump(
         )
         dump_dir = _publish_dump_dir(staging_dir, board_dir)
     except FileNotFoundError:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        _cleanup_staging_dir(staging_dir)
         raise RuntimeError("docker command not found") from None
     except subprocess.CalledProcessError as exc:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        _cleanup_staging_dir(staging_dir)
         reason = (exc.stderr or exc.stdout or "docker cp failed").strip().splitlines()
         raise RuntimeError(reason[-1] if reason else "docker cp failed") from None
     except OSError as exc:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        _cleanup_staging_dir(staging_dir)
         raise RuntimeError(f"could not create raw dump: {exc}") from None
 
     return KanboardDump(dump_dir=dump_dir, source=f"{container}:{source_path}")
@@ -126,15 +130,16 @@ def raw_kanboard_dump(
 
 def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
     payload = json.dumps(manifest, indent=2, sort_keys=False) + "\n"
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{manifest_path.name}.",
-        suffix=".tmp",
-        dir=manifest_path.parent,
-        text=True,
-    )
-    os.close(fd)
-    temp_path = Path(temp_name)
+    temp_path: Path | None = None
     try:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{manifest_path.name}.",
+            suffix=".tmp",
+            dir=manifest_path.parent,
+            text=True,
+        )
+        temp_path = Path(temp_name)
+        os.close(fd)
         temp_path.write_text(payload, encoding="utf-8")
         try:
             candidate = json.loads(temp_path.read_text(encoding="utf-8"))
@@ -148,11 +153,16 @@ def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
     except OSError as exc:
         raise RuntimeError(f"could not write data manifest: {exc}") from None
     finally:
-        if temp_path.exists():
+        if temp_path is not None and temp_path.exists():
             try:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def _cleanup_staging_dir(staging_dir: Path | None) -> None:
+    if staging_dir is not None:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def _publish_dump_dir(staging_dir: Path, board_dir: Path) -> Path:
