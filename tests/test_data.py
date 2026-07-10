@@ -301,6 +301,44 @@ class ExportTests(unittest.TestCase):
 
         self.assertEqual(summary["raw_active_task_count"], 2)
 
+    def test_export_board_skips_raw_count_when_board_project_missing(self):
+        def fake_run(command, **_kwargs):
+            if command[-1] == "list":
+                stdout = json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}])
+            else:
+                stdout = json.dumps(
+                    {
+                        "id": 1,
+                        "reference": command[-1],
+                        "title": command[-1],
+                        "metadata": {},
+                        "comments": [],
+                    }
+                )
+            return subprocess_completed(stdout)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
+            database.parent.mkdir(parents=True)
+            with sqlite3.connect(database) as conn:
+                conn.execute("create table projects (id integer primary key, name text)")
+                conn.execute(
+                    "create table tasks (id integer primary key, project_id integer, is_active integer)"
+                )
+                conn.execute("insert into projects (id, name) values (1, 'Other')")
+                conn.execute(
+                    "insert into tasks (project_id, is_active) values (1, 1), (1, 1), (1, 1)"
+                )
+            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
+                export_board(data_dir, command=["pipeline"])
+            summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
+
+        # Дамп без доски Pipeline: чужие 3 active tasks не должны ни попасть в счёт,
+        # ни уронить экспорт mismatch'ем — сверка пропускается явно.
+        self.assertIsNone(summary["raw_active_task_count"])
+        self.assertEqual(summary["card_count"], 1)
+
     def test_export_board_fails_when_raw_count_disagrees(self):
         def fake_run(command, **_kwargs):
             if command[-1] == "list":

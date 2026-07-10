@@ -641,16 +641,15 @@ def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | 
                         "select id from projects where name = ?",
                         (board_name,),
                     ).fetchone()
+                if project is None or "project_id" not in columns:
+                    # Нельзя привязать tasks к нужной доске: глобальный счёт зацепил бы
+                    # чужие проекты, поэтому сверку пропускаем, а не считаем что попало.
+                    return None
                 if "is_active" in columns:
-                    query = "select count(*) from tasks where is_active = 1"
-                    params: tuple[Any, ...] = ()
+                    query = "select count(*) from tasks where is_active = 1 and project_id = ?"
                 else:
-                    query = "select count(*) from tasks"
-                    params = ()
-                if project is not None and "project_id" in columns:
-                    query += " and project_id = ?" if "where" in query else " where project_id = ?"
-                    params = (int(project[0]),)
-                return int(conn.execute(query, params).fetchone()[0])
+                    query = "select count(*) from tasks where project_id = ?"
+                return int(conn.execute(query, (int(project[0]),)).fetchone()[0])
         except sqlite3.Error:
             continue
     return None
