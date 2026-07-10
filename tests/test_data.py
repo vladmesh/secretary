@@ -362,6 +362,70 @@ class ExportTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "board export count mismatch"):
                     export_board(data_dir, command=["pipeline"])
 
+    def test_export_board_preserves_previous_snapshot_on_publish_error(self):
+        cards_by_run = [
+            [{"id": 1, "reference": "secretary-1", "title": "One"}],
+            [
+                {"id": 1, "reference": "secretary-1", "title": "One"},
+                {"id": 2, "reference": "secretary-2", "title": "Two"},
+            ],
+        ]
+        run_index = 0
+
+        def fake_run(command, **_kwargs):
+            nonlocal run_index
+            if command[-1] == "list":
+                stdout = json.dumps(cards_by_run[run_index])
+                run_index += 1
+            else:
+                stdout = json.dumps(
+                    {
+                        "id": 1,
+                        "reference": command[-1],
+                        "title": command[-1],
+                        "metadata": {},
+                        "comments": [],
+                    }
+                )
+            return subprocess_completed(stdout)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            board_dir = data_dir / "board"
+            raw_marker = board_dir / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
+            raw_marker.parent.mkdir(parents=True)
+            raw_marker.write_bytes(b"not sqlite")
+
+            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
+                export_board(data_dir, command=["pipeline"])
+                old_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
+                old_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
+                old_summary = (board_dir / "export.json").read_text(encoding="utf-8")
+
+                original_replace = os.replace
+                failed = False
+
+                def fail_on_ndjson_publish(source, destination):
+                    nonlocal failed
+                    if not failed and Path(destination) == board_dir / "cards.ndjson":
+                        failed = True
+                        raise OSError("full")
+                    return original_replace(source, destination)
+
+                with mock.patch("secretary.data.os.replace", side_effect=fail_on_ndjson_publish):
+                    with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
+                        export_board(data_dir, command=["pipeline"])
+
+            current_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
+            current_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
+            current_summary = (board_dir / "export.json").read_text(encoding="utf-8")
+            raw_dump_preserved = raw_marker.is_file()
+
+        self.assertEqual(current_cards, old_cards)
+        self.assertEqual(current_ndjson, old_ndjson)
+        self.assertEqual(current_summary, old_summary)
+        self.assertTrue(raw_dump_preserved)
+
     def test_export_memory_mirrors_facts_and_ndjson(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -510,6 +574,49 @@ class ExportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
                 export_runs(root / "secretary-data", state_dir=state)
 
+    def test_export_runs_preserves_previous_snapshot_on_publish_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state = root / "state"
+            runs_dir = root / "secretary-data" / "runs"
+            (state / "pipeline").mkdir(parents=True)
+            (state / "pipeline" / "runs.jsonl").write_text('{"event":"one"}\n', encoding="utf-8")
+            (state / "pipeline" / "cards.json").write_text("{}", encoding="utf-8")
+
+            export_runs(root / "secretary-data", state_dir=state)
+            old_runs = (runs_dir / "runs.ndjson").read_text(encoding="utf-8")
+            old_watermarks = (runs_dir / "watermarks.json").read_text(encoding="utf-8")
+            old_cards = (runs_dir / "cards.json").read_text(encoding="utf-8")
+            old_summary = (runs_dir / "export.json").read_text(encoding="utf-8")
+
+            (state / "pipeline" / "runs.jsonl").write_text(
+                '{"event":"one"}\n{"event":"two"}\n',
+                encoding="utf-8",
+            )
+            original_replace = os.replace
+            failed = False
+
+            def fail_on_watermarks_publish(source, destination):
+                nonlocal failed
+                if not failed and Path(destination) == runs_dir / "watermarks.json":
+                    failed = True
+                    raise OSError("full")
+                return original_replace(source, destination)
+
+            with mock.patch("secretary.data.os.replace", side_effect=fail_on_watermarks_publish):
+                with self.assertRaisesRegex(RuntimeError, "could not publish runs export"):
+                    export_runs(root / "secretary-data", state_dir=state)
+
+            current_runs = (runs_dir / "runs.ndjson").read_text(encoding="utf-8")
+            current_watermarks = (runs_dir / "watermarks.json").read_text(encoding="utf-8")
+            current_cards = (runs_dir / "cards.json").read_text(encoding="utf-8")
+            current_summary = (runs_dir / "export.json").read_text(encoding="utf-8")
+
+        self.assertEqual(current_runs, old_runs)
+        self.assertEqual(current_watermarks, old_watermarks)
+        self.assertEqual(current_cards, old_cards)
+        self.assertEqual(current_summary, old_summary)
+
     def test_export_transcripts_inventory_and_optional_copy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -547,6 +654,38 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(result.count, 1)
         self.assertEqual(copied_files, ["session.jsonl"])
         self.assertNotIn("TOKEN=do-not-copy", copied_payload)
+
+    def test_export_transcripts_preserves_previous_snapshot_on_copy_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            transcripts = root / "claude"
+            transcripts_dir = root / "secretary-data" / "transcripts"
+            (transcripts / "project").mkdir(parents=True)
+            (transcripts / "project" / "session.jsonl").write_text("{}\n", encoding="utf-8")
+
+            export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
+            old_inventory = (transcripts_dir / "inventory.json").read_text(encoding="utf-8")
+            old_ndjson = (transcripts_dir / "inventory.ndjson").read_text(encoding="utf-8")
+            old_copies = sorted(
+                path.relative_to(transcripts_dir / "copies").as_posix()
+                for path in (transcripts_dir / "copies").rglob("*.jsonl")
+            )
+            (transcripts / "project" / "second.jsonl").write_text("{}\n", encoding="utf-8")
+
+            with mock.patch("secretary.data.shutil.copy2", side_effect=OSError("full")):
+                with self.assertRaisesRegex(RuntimeError, "could not copy transcripts"):
+                    export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
+
+            current_inventory = (transcripts_dir / "inventory.json").read_text(encoding="utf-8")
+            current_ndjson = (transcripts_dir / "inventory.ndjson").read_text(encoding="utf-8")
+            current_copies = sorted(
+                path.relative_to(transcripts_dir / "copies").as_posix()
+                for path in (transcripts_dir / "copies").rglob("*.jsonl")
+            )
+
+        self.assertEqual(current_inventory, old_inventory)
+        self.assertEqual(current_ndjson, old_ndjson)
+        self.assertEqual(current_copies, old_copies)
 
     def test_export_all_passes_copy_transcripts_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:

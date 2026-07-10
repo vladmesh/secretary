@@ -187,9 +187,23 @@ def export_board(
         "card_count": len(normalized),
         "raw_active_task_count": raw_active_task_count,
     }
-    _write_json(board_dir / "cards.json", {"version": 1, "cards": normalized})
-    _write_ndjson(board_dir / "cards.ndjson", normalized)
-    _write_json(board_dir / "export.json", summary)
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".board-export-", suffix=".tmp", dir=board_dir))
+    except OSError as exc:
+        raise RuntimeError(f"could not create board export staging: {exc}") from None
+    try:
+        _write_json(staging / "cards.json", {"version": 1, "cards": normalized})
+        _write_ndjson(staging / "cards.ndjson", normalized)
+        _write_json(staging / "export.json", summary)
+        _publish_component_entries(
+            staging,
+            board_dir,
+            ["cards.json", "cards.ndjson", "export.json"],
+            "board export",
+        )
+    except RuntimeError:
+        _cleanup_staging_dir(staging)
+        raise
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
 
 
@@ -358,19 +372,33 @@ def export_runs(
     finally:
         _cleanup_staging_dir(snapshot)
 
-    _write_ndjson(runs_dir / "runs.ndjson", records)
-    _write_json(runs_dir / "watermarks.json", {"version": 1, "files": watermarks})
-    _write_json(runs_dir / "cards.json", {"version": 1, "cards": cards})
-    _write_json(
-        runs_dir / "export.json",
-        {
-            "version": 1,
-            "source": str(state_dir),
-            "run_record_count": len(records),
-            "watermark_count": len(watermarks),
-            "card_mapping_count": len(cards) if isinstance(cards, dict) else 0,
-        },
-    )
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".runs-export-", suffix=".tmp", dir=runs_dir))
+    except OSError as exc:
+        raise RuntimeError(f"could not create runs export staging: {exc}") from None
+    try:
+        _write_ndjson(staging / "runs.ndjson", records)
+        _write_json(staging / "watermarks.json", {"version": 1, "files": watermarks})
+        _write_json(staging / "cards.json", {"version": 1, "cards": cards})
+        _write_json(
+            staging / "export.json",
+            {
+                "version": 1,
+                "source": str(state_dir),
+                "run_record_count": len(records),
+                "watermark_count": len(watermarks),
+                "card_mapping_count": len(cards) if isinstance(cards, dict) else 0,
+            },
+        )
+        _publish_component_entries(
+            staging,
+            runs_dir,
+            ["runs.ndjson", "watermarks.json", "cards.json", "export.json"],
+            "runs export",
+        )
+    except RuntimeError:
+        _cleanup_staging_dir(staging)
+        raise
     return DataExport(path=runs_dir / "runs.ndjson", count=len(records), source=str(state_dir))
 
 
@@ -402,28 +430,35 @@ def export_transcripts(
             }
             entries.append(entry)
 
-    _write_json(transcripts_dir / "inventory.json", {"version": 1, "transcripts": entries})
-    _write_ndjson(transcripts_dir / "inventory.ndjson", entries)
-    if copy:
-        copy_dir = transcripts_dir / "copies"
-        try:
-            staging = Path(tempfile.mkdtemp(prefix=".copies-", suffix=".tmp", dir=transcripts_dir))
-        except OSError as exc:
-            raise RuntimeError(f"could not create transcripts copy staging: {exc}") from None
-        try:
-            for entry in entries:
-                destination = staging / _safe_relative_copy_path(entry["root"], entry["relative_path"])
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(entry["path"], destination, follow_symlinks=False)
-            _replace_dir(staging, copy_dir)
-        except OSError as exc:
-            _cleanup_staging_dir(staging)
-            raise RuntimeError(f"could not copy transcripts: {exc}") from None
-    elif (transcripts_dir / "copies").exists():
-        try:
-            shutil.rmtree(transcripts_dir / "copies")
-        except OSError as exc:
-            raise RuntimeError(f"could not remove transcript copies: {exc}") from None
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".transcripts-export-", suffix=".tmp", dir=transcripts_dir))
+    except OSError as exc:
+        raise RuntimeError(f"could not create transcripts export staging: {exc}") from None
+    try:
+        _write_json(staging / "inventory.json", {"version": 1, "transcripts": entries})
+        _write_ndjson(staging / "inventory.ndjson", entries)
+        if copy:
+            copy_dir = staging / "copies"
+            try:
+                copy_dir.mkdir(parents=True, exist_ok=True)
+                for entry in entries:
+                    destination = copy_dir / _safe_relative_copy_path(
+                        entry["root"],
+                        entry["relative_path"],
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(entry["path"], destination, follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"could not copy transcripts: {exc}") from None
+        _publish_component_entries(
+            staging,
+            transcripts_dir,
+            ["inventory.json", "inventory.ndjson", "copies"],
+            "transcripts export",
+        )
+    except RuntimeError:
+        _cleanup_staging_dir(staging)
+        raise
     return DataExport(path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots))
 
 
@@ -631,6 +666,61 @@ def _replace_dir(staging: Path, destination: Path) -> None:
         if not destination.exists() and backup.exists():
             os.replace(backup, destination)
         raise
+
+
+def _publish_component_entries(
+    staging: Path,
+    destination: Path,
+    entries: list[str],
+    label: str,
+) -> None:
+    try:
+        backup = Path(
+            tempfile.mkdtemp(prefix=f".{destination.name}-old-", suffix=".tmp", dir=destination)
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not publish {label}: {exc}") from None
+
+    try:
+        for entry in entries:
+            current = destination / entry
+            if current.exists():
+                os.replace(current, backup / entry)
+
+        for entry in entries:
+            source = staging / entry
+            target = destination / entry
+            if source.exists():
+                os.replace(source, target)
+
+        shutil.rmtree(staging)
+    except OSError as exc:
+        try:
+            _restore_component_entries(destination, backup, entries)
+        except OSError as restore_exc:
+            raise RuntimeError(
+                f"could not publish {label}: {exc}; rollback failed: {restore_exc}"
+            ) from None
+        raise RuntimeError(f"could not publish {label}: {exc}") from None
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _restore_component_entries(destination: Path, backup: Path, entries: list[str]) -> None:
+    for entry in entries:
+        current = destination / entry
+        if current.exists():
+            _remove_path(current)
+        saved = backup / entry
+        if saved.exists():
+            os.replace(saved, destination / entry)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def _ensure_dir(path: Path, label: str) -> None:
