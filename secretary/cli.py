@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
+from secretary.backup import create_backup, verify_backup
 from secretary.config import validate, validate_instance
 from secretary.config import load_config
 from secretary.data import (
@@ -150,7 +152,32 @@ def build_parser() -> argparse.ArgumentParser:
     export_transcripts_command.set_defaults(handler=run_export_transcripts)
     data.set_defaults(handler=not_implemented("data"))
 
-    for name in ("reconcile", "backup", "restore"):
+    backup = subparsers.add_parser("backup", help="create or verify encrypted backups")
+    backup_subcommands = backup.add_subparsers(dest="backup_command")
+
+    backup_create = backup_subcommands.add_parser("create")
+    backup_create.add_argument("--instance", required=True)
+    backup_create.add_argument("--data-dir")
+    backup_create.add_argument("--age-recipient")
+    backup_create.add_argument(
+        "--no-copy-transcripts",
+        action="store_true",
+        help="write transcript inventory only",
+    )
+    backup_create.set_defaults(handler=run_backup_create)
+
+    backup_verify = backup_subcommands.add_parser("verify")
+    backup_verify.add_argument("archive")
+    backup_verify.add_argument("--age-identity")
+    backup_verify.add_argument(
+        "--strict",
+        action="store_true",
+        help="treat warnings as findings",
+    )
+    backup_verify.set_defaults(handler=run_backup_verify)
+    backup.set_defaults(handler=not_implemented("backup"))
+
+    for name in ("reconcile", "restore"):
         command = subparsers.add_parser(name)
         command.add_argument("args", nargs="*")
         command.set_defaults(handler=not_implemented(name))
@@ -335,6 +362,54 @@ def run_export_transcripts(args: argparse.Namespace) -> int:
         return 1
     print(f"transcripts: {result.count}")
     print(f"inventory: {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_backup_create(args: argparse.Namespace) -> int:
+    try:
+        result = create_backup(
+            Path(args.instance),
+            data_dir=Path(args.data_dir) if args.data_dir else None,
+            recipient=args.age_recipient,
+            copy_transcripts=not args.no_copy_transcripts,
+        )
+    except RuntimeError as exc:
+        print(f"secretary backup create: {exc}")
+        return 1
+
+    print(f"archive: {result.archive}")
+    print(f"version: {result.manifest['version']}")
+    print("status: ok")
+    return 0
+
+
+def run_backup_verify(args: argparse.Namespace) -> int:
+    identity = args.age_identity or os.environ.get("SECRETARY_AGE_IDENTITY")
+    result = verify_backup(
+        Path(args.archive),
+        identity=Path(identity).expanduser() if identity else None,
+    )
+    print(f"archive: {args.archive}")
+    if result.manifest:
+        print(f"version: {result.manifest.get('version', '(unknown)')}")
+    if result.warnings:
+        print(f"warnings: {len(result.warnings)}")
+        for warning in result.warnings:
+            print(f"  {warning}")
+    findings = list(result.findings)
+    if args.strict:
+        findings.extend(result.warnings)
+    if findings:
+        print(f"findings: {len(findings)}")
+        for finding in findings:
+            print(f"  {finding}")
+    if result.code == 2:
+        print("status: unavailable")
+        return 2
+    if findings:
+        print("status: findings")
+        return 1
     print("status: ok")
     return 0
 
