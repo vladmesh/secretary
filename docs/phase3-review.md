@@ -1,7 +1,7 @@
 # Phase 3 Review
 
-Phase 3 goal: create the first live `secretary-data` backup of the current
-system, verify the archive, and compare the archive contents with the Phase 3
+Phase 3 goal: create a live `secretary-data` backup of the current system,
+verify the archive, and compare the archive contents with the Phase 3
 acceptance boundary.
 
 ## Commands Run
@@ -48,25 +48,29 @@ The pause state was checked again and was still clear:
 }
 ```
 
-The successful live backup used the live board environment from
+The original live backup was created before the transcript policy and
+claimed-worker guard fixes. That archive is retained as incident context, but it
+is not the acceptance artifact for this review because current `backup verify`
+correctly rejects its transcript payload copies.
+
+The current-code live backup was run by the secretary/operator outside the
+claimed worker context on 2026-07-10, using the live board environment from
 `/home/dev/control-panel/.env`:
 
 ```bash
-set -a
-. /home/dev/control-panel/.env
-set +a
 python3 -m secretary backup create --instance /home/dev/secretary-instance
 ```
 
 Output:
 
 ```text
-archive: /home/dev/secretary-data/backups/secretary-backup-20260710T142833Z.tar.age
+archive: /home/dev/secretary-data/backups/secretary-backup-20260710T150552Z.tar.age
 version: 1
 status: ok
+exit=0
 ```
 
-The pipeline pause state after the command:
+The pipeline pause state after the operator run:
 
 ```json
 {
@@ -77,23 +81,22 @@ The pipeline pause state after the command:
 }
 ```
 
-Verified the encrypted archive:
+Verified the encrypted archive with the current verifier:
 
 ```bash
 python3 -m secretary backup verify \
-  /home/dev/secretary-data/backups/secretary-backup-20260710T142833Z.tar.age \
+  /home/dev/secretary-data/backups/secretary-backup-20260710T150552Z.tar.age \
   --age-identity /home/dev/.config/secretary/age/keys.txt
 ```
 
 Output:
 
 ```text
-archive: /home/dev/secretary-data/backups/secretary-backup-20260710T142833Z.tar.age
+archive: /home/dev/secretary-data/backups/secretary-backup-20260710T150552Z.tar.age
 version: 1
 status: ok
+exit=0
 ```
-
-Exit code: 0.
 
 Local product tests:
 
@@ -116,8 +119,18 @@ Result: 15 tests passed.
 
 ## Archive Contents
 
-Verified by decrypting the archive into a temporary directory and inspecting the
-tar members without extracting into any product or instance path.
+Verified by decrypting
+`/home/dev/secretary-data/backups/secretary-backup-20260710T150552Z.tar.age`
+into a temporary directory and inspecting the tar members without extracting
+into any product or instance path.
+
+Versions manifest:
+
+```text
+created_at: 2026-07-10T15:05:52+00:00
+git_commit: c42376a6eedbe35e85a171d87dd6782dd76b2024
+members: 326
+```
 
 Versions manifest components:
 
@@ -134,21 +147,19 @@ transcripts
 Counts recorded in the archive:
 
 ```text
-board cards: 166
-memory facts: 163
-run records: 5485
-transcripts: 2968
-artifacts: 5
+board cards: 167
+raw active task count: 167
+memory facts: 164
+run records: 5580
+transcript inventory entries: 2980
+artifacts: 4
 ```
 
-The normalized board export also recorded `raw_active_task_count: 166`, so the
-normalized export matched the raw Kanboard active task count at snapshot time.
-After the backup finished, a fresh live `pipeline list` returned 167 cards. The
-extra live card was `secretary-379`, created after the snapshot, so this is live
-board movement after the archive boundary rather than a backup mismatch.
-
-The current `panelmem-kb` live source has 163 markdown facts under
-`/home/dev/panelmem-kb/memory`, matching the archive memory export count.
+The normalized board export recorded `raw_active_task_count: 167`, matching the
+board component count at snapshot time. A fresh live `pipeline list` also
+returned 167 cards during this review update. The current `panelmem-kb` live
+source has 164 markdown facts under `/home/dev/panelmem-kb/memory`, matching the
+archive memory export count.
 
 Forbidden entry checks:
 
@@ -158,38 +169,36 @@ actual Orca state entries: none
 Orca debug snapshot: secretary-backup/debug/orca-state/inventory.json
 nested secretary-data/backups entries: none
 generated systemd unit entries: none
-transcript payload copies: 2968
+transcript payload copies: none
 ```
 
-The debug Orca inventory listed 6187 files from Orca state roots, but the archive
-contains only that inventory JSON, not the state files themselves.
+The archive contains only the debug Orca inventory JSON, not the state files
+themselves.
 
-The first live archive was created before the reviewer return and contains full
-transcript payload copies under `secretary-backup/secretary-data/transcripts/copies/`.
-That is outside the Phase 3 inventory boundary. Current `backup create` now
-writes transcript inventory only unless `--copy-transcripts` is passed, and
-current `backup verify` reports transcript payload copies as findings.
+Earlier incident archives at 12:55Z, 14:20Z, 14:22Z, 14:25Z, and 14:28Z were
+created by code before the transcript policy fix, or by the claimed-worker
+self-kill incident tracked as `secretary-379`. They contain transcript payload
+copies and current `backup verify` rejects them. They are not the Phase 3
+acceptance artifact.
 
 ## Acceptance Check
 
 `secretary backup create` makes a consistent archive, with a short pipeline
 pause allowed.
 
-Status: done for the live system.
+Status: done.
 
-The successful run created
-`/home/dev/secretary-data/backups/secretary-backup-20260710T142833Z.tar.age`.
-`pause-status` was clear before and after the command. The command itself uses
+The current-code operator run created
+`/home/dev/secretary-data/backups/secretary-backup-20260710T150552Z.tar.age`.
+`pause-status` was clear after the command. The command itself uses
 `pipeline pause freeze` and `resume` internally.
 
 `secretary backup verify` checks structure and versions.
 
-Status: done for the original command output, with one now-fixed policy gap.
+Status: done.
 
-`backup verify` returned exit code 0 and printed `version: 1` and `status: ok`.
-The current verifier would reject this same archive because it contains transcript
-payload copies. New archives created with the default transcript policy should
-verify without that finding.
+Current `backup verify` returned exit code 0 and printed `version: 1` and
+`status: ok` for the acceptance archive.
 
 Archive is pulled to a local computer and `last_fetch` is updated.
 
@@ -217,10 +226,10 @@ Counts in board and memory exports match live sources.
 
 Status: done for the snapshot boundary.
 
-The archive board export has 166 cards and its raw Kanboard active task count
-was also 166. A post-backup live query showed 167 cards because `secretary-379`
-appeared after the snapshot. The memory export count is 163 and matches the
-current live `panelmem-kb` markdown fact count.
+The archive board component has 167 cards and its raw Kanboard active task count
+is 167. A fresh live query during this review update also returned 167 cards.
+The memory export count is 164 and matches the current live `panelmem-kb`
+markdown fact count.
 
 No host changes beyond normal backup work.
 
@@ -228,14 +237,13 @@ Status: mixed.
 
 The review did not edit `/home/dev/secretary-instance` or host configs. The
 normal backup work updated generated files under `/home/dev/secretary-data` and
-created the encrypted archive. The first failed `backup create` attempt did not
-create an archive and left the pipeline unpaused.
+created the encrypted acceptance archive.
 
-The earlier claimed-worker attempt was not normal backup work: it entered a
-pause/resume relaunch loop, created extra backup archives, and restarted a
-neighboring in-flight worker. That incident is tracked separately as
-`secretary-379`. Current `backup create` refuses `BOARD_ROLE=worker` contexts to
-prevent this path.
+The earlier claimed-worker attempts were not normal backup work: they entered a
+pause/resume relaunch path, created extra backup artifacts, and restarted or
+froze neighboring work. That incident is tracked separately as `secretary-379`.
+Current `backup create` refuses `BOARD_ROLE=worker` contexts to prevent this
+path.
 
 ## Real Gaps
 
@@ -244,18 +252,16 @@ The live backup command needs the Kanboard environment from
 `secretary backup create`. Without that environment, the command fails before
 snapshotting.
 
-Running `backup create` from a claimed worker is unsafe with the current pipeline
-resume behavior. During this review flow, a new card `secretary-379` was created
-for the defect: hard resume can relaunch in-flight workers, including the worker
-that invoked backup, which can cause a repeated create cycle. The Phase 3 review
-still produced a valid archive, but the command contract should say who may run
-the live backup. The product now has a guard that refuses `BOARD_ROLE=worker`
-contexts.
+Running `backup create` from a claimed worker is unsafe with the current
+pipeline resume behavior. During this review flow, card `secretary-379` was
+created for the defect: hard resume can relaunch in-flight workers, including
+the worker that invoked backup. The product now has a guard that refuses
+`BOARD_ROLE=worker` contexts.
 
 The first live archive copied full transcript JSONL payloads even though Phase 3
 calls for transcript inventory. The product now makes payload copies opt-in via
-`--copy-transcripts`, and `backup verify` reports `transcripts/copies` entries as
-unexpected.
+`--copy-transcripts`, and `backup verify` reports `transcripts/copies` entries
+as unexpected. The current acceptance archive has no transcript payload copies.
 
 Concurrent `backup create` runs could previously share a pause boundary and
 mutate the same generated snapshot files. The product now takes an advisory
@@ -263,8 +269,8 @@ backup create lock and refuses to run under a preexisting pause, so each archive
 owns the freeze that protects its snapshot.
 
 Offsite pull is still unconfirmed. The archive exists on the VPS, but
-`last_fetch` is absent, so the backup does not yet satisfy the offsite protection
-part of the design.
+`last_fetch` is absent, so the backup does not yet satisfy the offsite
+protection part of the design.
 
 The acceptance wording says counts should match the live board. On an active
 board, the exact live count can change immediately after the snapshot. The
@@ -280,7 +286,8 @@ providing the same Kanboard variables through the future instance runtime.
 
 State that live `backup create` should be run from an operator context, not from
 a claimed worker task. The current product guard refuses the claimed-worker
-environment, but the design doc should still make the operating context explicit.
+environment, but the design doc should still make the operating context
+explicit.
 
 Document the transcript boundary: Phase 3 backups include transcript inventory
 only by default. Copying transcript bodies requires explicit operator policy and
