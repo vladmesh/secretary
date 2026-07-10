@@ -212,6 +212,57 @@ class BackupTests(unittest.TestCase):
             self.assertTrue(result.archive.is_file())
             self.assertEqual(pipeline_calls, [])
 
+    def test_create_cleans_temp_payload_with_preexisting_freeze(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            temp_root = root / "tmp"
+            temp_root.mkdir()
+            _write_instance(instance, data_dir)
+            real_mkdtemp = tempfile.mkdtemp
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            with (
+                mock.patch(
+                    "secretary.backup._pipeline_status",
+                    return_value={
+                        "paused": True,
+                        "mode": "freeze",
+                        "internal_mode": "hard",
+                        "reason": "maintenance",
+                        "actor": "steward",
+                    },
+                ),
+                mock.patch("secretary.backup._pipeline_action") as pipeline_action,
+                mock.patch("secretary.backup.tempfile.mkdtemp") as mkdtemp,
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                ),
+            ):
+                mkdtemp.side_effect = lambda prefix, suffix: str(
+                    real_mkdtemp(prefix=prefix, suffix=suffix, dir=temp_root)
+                )
+                result = create_backup(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(
+                        source, destination
+                    ),
+                )
+
+            self.assertTrue(result.archive.is_file())
+            pipeline_action.assert_not_called()
+            self.assertEqual(list(temp_root.iterdir()), [])
+
     def test_create_rejects_preexisting_drain_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

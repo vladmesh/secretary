@@ -117,16 +117,16 @@ def create_backup(
         os.replace(encrypted_archive, final_archive)
         completed = True
     finally:
-        if paused_by_us:
-            try:
+        try:
+            if paused_by_us:
                 _pipeline_action(
                     "resume",
                     pipeline_worktree=pipeline_worktree,
                     command=pipeline_command,
                 )
-            finally:
-                for path in temp_paths:
-                    _remove_path_quietly(path)
+        finally:
+            for path in temp_paths:
+                _remove_path_quietly(path)
         if not completed:
             _remove_path_quietly(final_archive)
 
