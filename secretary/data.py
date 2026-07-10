@@ -20,6 +20,7 @@ from secretary.config import validate
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
 PIPELINE_WORKTREE = Path("/home/dev/orca/workspaces/triggered-agents/pipeline")
+ORCA_WORKSPACES_ROOT = Path("/home/dev/orca/workspaces")
 PANELMEM_KB = Path("/home/dev/panelmem-kb")
 PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -462,12 +463,84 @@ def export_transcripts(
     return DataExport(path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots))
 
 
+def export_artifacts(
+    data_dir: Path,
+    *,
+    workspaces_root: Path = ORCA_WORKSPACES_ROOT,
+) -> DataExport:
+    data_dir = data_dir.expanduser().resolve()
+    artifacts_dir = data_dir / "artifacts"
+    _ensure_dir(artifacts_dir, "artifacts data dir")
+
+    entries = []
+    for path, file_stat in _regular_files_under(artifacts_dir, context="artifact source"):
+        relative = path.relative_to(artifacts_dir)
+        if _skip_artifact_relative(relative):
+            continue
+        entries.append(
+            {
+                "kind": "existing",
+                "relative_path": relative.as_posix(),
+                "bytes": file_stat.st_size,
+                "mtime": int(file_stat.st_mtime),
+            }
+        )
+
+    task_docs = _task_artifact_docs(workspaces_root)
+    entries.extend(task_docs)
+
+    try:
+        staging = Path(
+            tempfile.mkdtemp(prefix=".artifacts-export-", suffix=".tmp", dir=artifacts_dir)
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not create artifacts export staging: {exc}") from None
+    try:
+        _write_json(
+            staging / "inventory.json",
+            {
+                "version": 1,
+                "policy": {
+                    "project_worktrees": "only TASK.md and REVIEW.md root docs are copied",
+                    "project_env": "excluded",
+                },
+                "artifacts": entries,
+            },
+        )
+        _write_ndjson(staging / "inventory.ndjson", entries)
+        for entry in task_docs:
+            source = Path(entry["path"])
+            destination = staging / "task-docs" / entry["relative_path"]
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination, follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"could not copy task artifact {entry['relative_path']}: {exc}"
+                ) from None
+        _publish_component_entries(
+            staging,
+            artifacts_dir,
+            ["inventory.json", "inventory.ndjson", "task-docs"],
+            "artifacts export",
+        )
+    except RuntimeError:
+        _cleanup_staging_dir(staging)
+        raise
+    return DataExport(
+        path=artifacts_dir / "inventory.json",
+        count=len(entries),
+        source=str(workspaces_root),
+    )
+
+
 def export_all(data_dir: Path, *, copy_transcripts: bool = False) -> dict[str, DataExport]:
     return {
         "board": export_board(data_dir),
         "memory": export_memory(data_dir),
         "runs": export_runs(data_dir),
         "transcripts": export_transcripts(data_dir, copy=copy_transcripts),
+        "artifacts": export_artifacts(data_dir),
     }
 
 
@@ -794,6 +867,65 @@ def _int_or_none(value: Any) -> int | None:
 def _safe_relative_copy_path(root: str, relative: str) -> Path:
     prefix = root.strip("/").replace("/", "__") or "root"
     return Path(prefix) / relative
+
+
+def _task_artifact_docs(workspaces_root: Path) -> list[dict[str, Any]]:
+    workspaces_root = workspaces_root.expanduser().resolve()
+    if not workspaces_root.is_dir():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        projects = sorted(path for path in workspaces_root.iterdir() if path.is_dir())
+    except OSError as exc:
+        raise RuntimeError(f"could not list workspaces root {workspaces_root}: {exc}") from None
+    for project_dir in projects:
+        if project_dir.name.startswith("."):
+            continue
+        try:
+            workspaces = sorted(path for path in project_dir.iterdir() if path.is_dir())
+        except OSError:
+            continue
+        for workspace in workspaces:
+            if workspace.name.startswith("."):
+                continue
+            for name in ("TASK.md", "REVIEW.md"):
+                path = workspace / name
+                try:
+                    file_stat = path.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    relative = _display_relative(workspaces_root, path)
+                    raise RuntimeError(f"could not inspect task artifact {relative}: {exc}") from None
+                mode = file_stat.st_mode
+                if not stat_module.S_ISREG(mode):
+                    continue
+                relative = path.relative_to(workspaces_root)
+                if _skip_artifact_relative(relative):
+                    continue
+                entries.append(
+                    {
+                        "kind": "task-doc",
+                        "path": str(path),
+                        "relative_path": relative.as_posix(),
+                        "bytes": file_stat.st_size,
+                        "mtime": int(file_stat.st_mtime),
+                    }
+                )
+    return entries
+
+
+def _skip_artifact_relative(relative: Path) -> bool:
+    return (
+        relative.name in {"inventory.json", "inventory.ndjson"}
+        or (relative.parts and relative.parts[0] == "task-docs")
+        or ".git" in relative.parts
+        or any(part.startswith(".") for part in relative.parts)
+        or any(part.startswith(".env") for part in relative.parts)
+        or any(part.endswith(".service") or part.endswith(".timer") for part in relative.parts)
+        or "index.sqlite" in relative.parts
+        or "backups" in relative.parts
+    )
 
 
 def _cleanup_staging_dir(staging_dir: Path | None) -> None:

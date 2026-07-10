@@ -39,6 +39,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "doctor warns if the last backup pull to an offsite machine is older than this."
+        },
+        "age_recipient": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Public age recipient used by secretary backup create. The private identity is not stored in the repo."
         }
       }
     },
