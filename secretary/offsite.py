@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+
+LAST_FETCH_NAME = "last_fetch"
+
+
+@dataclass(frozen=True)
+class OffsiteStatus:
+    warnings: list[str]
+    findings: list[str]
+
+
+def check_last_fetch(
+    instance: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> OffsiteStatus:
+    """Check the offsite pull marker when a max age is configured."""
+    offsite = instance.get("offsite")
+    if not isinstance(offsite, dict):
+        return OffsiteStatus([], [])
+
+    max_age_days = offsite.get("backup_pull_max_age_days")
+    if not isinstance(max_age_days, int):
+        return OffsiteStatus([], [])
+
+    data_dir = instance.get("data_dir")
+    if not isinstance(data_dir, str) or not data_dir:
+        return OffsiteStatus([], [])
+
+    marker = last_fetch_path(Path(data_dir).expanduser())
+    if not marker.is_file():
+        return OffsiteStatus(["offsite backup pull is not configured: last_fetch missing"], [])
+
+    fetched_at = _read_fetch_time(marker)
+    if fetched_at is None:
+        return OffsiteStatus([], ["offsite backup pull marker is invalid"])
+
+    now = _as_utc(now or datetime.now(UTC))
+    age = now - fetched_at
+    if age > timedelta(days=max_age_days):
+        return OffsiteStatus(
+            [],
+            [
+                "offsite backup pull is stale: "
+                f"last_fetch age {age.days}d exceeds {max_age_days}d"
+            ],
+        )
+    return OffsiteStatus([], [])
+
+
+def last_fetch_path(data_dir: Path) -> Path:
+    return data_dir / "backups" / LAST_FETCH_NAME
+
+
+def _read_fetch_time(path: Path) -> datetime | None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        return _as_utc(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

@@ -117,6 +117,21 @@ The dump uses `docker cp cp-kanboard:/var/www/app/data` and writes a new
 `board/kanboard-raw-<timestamp>/` directory each time. It does not call the
 Kanboard API and does not write into the live container.
 
+## Offsite pull
+
+Backups are protected only after an offsite machine pulls the encrypted archives
+from the VPS. Run this on the local machine:
+
+```bash
+scripts/pull-backups-offsite.sh vps.example.com /home/dev/secretary-data ~/secretary-backups
+```
+
+The script copies `secretary-data/backups/*.tar.age` over ssh with `rsync`, falling
+back to `scp` when `rsync` is unavailable. After a successful pull it atomically
+updates `secretary-data/backups/last_fetch` on the VPS. `doctor` reads
+`offsite.backup_pull_max_age_days` from `instance.yaml`: a missing `last_fetch`
+is a warning, while a stale marker is a finding and exits non-zero.
+
 ## Documentation
 
 - `docs/target-layout.md` describes the target `secretary`, `secretary-instance`

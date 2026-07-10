@@ -95,6 +95,58 @@ class CliTests(unittest.TestCase):
         self.assertEqual(strict_code, 1, strict_output)
         self.assertIn("status: warnings", strict_output)
 
+    def test_doctor_warns_when_offsite_marker_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n"
+                "  backup_pull_max_age_days: 7\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("offsite warnings:", output)
+        self.assertIn("last_fetch missing", output)
+        self.assertIn("status: ok", output)
+
+    def test_doctor_reports_stale_offsite_marker_as_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n"
+                "  backup_pull_max_age_days: 1\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            marker = data_dir / "backups" / "last_fetch"
+            marker.write_text("2000-01-01T00:00:00Z\n", encoding="utf-8")
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("offsite findings:", output)
+        self.assertIn("stale", output)
+        self.assertIn("status: findings", output)
+
     def test_data_init_generates_manifest_that_doctor_finds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

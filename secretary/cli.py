@@ -5,8 +5,7 @@ import os
 from pathlib import Path
 
 from secretary.backup import create_backup, verify_backup
-from secretary.config import validate, validate_instance
-from secretary.config import load_config
+from secretary.config import ConfigError, load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
     export_all,
@@ -25,6 +24,7 @@ from secretary.host import (
     build_expectations,
     inventory,
 )
+from secretary.offsite import check_last_fetch
 
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -211,7 +211,8 @@ def run_doctor(args: argparse.Namespace) -> int:
         print("secretary doctor requires --dry-run in the Phase 1 skeleton")
         return 2
 
-    report = validate_instance(Path(args.instance))
+    instance_path = Path(args.instance)
+    report = validate_instance(instance_path)
 
     if not report.ok:
         print(f"secretary doctor: {len(report.errors)} config problem(s):")
@@ -233,6 +234,8 @@ def run_doctor(args: argparse.Namespace) -> int:
         for warning in report.warnings:
             print(f"  {warning}")
 
+    offsite_warnings, offsite_findings = print_offsite_status(instance_path)
+
     host_incomplete = False
     if args.host or args.host_fixture:
         host_incomplete = print_host_inventory(report, args)
@@ -242,11 +245,34 @@ def run_doctor(args: argparse.Namespace) -> int:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
         return 1
-    if report.warnings and args.strict:
+    if offsite_findings:
+        print("status: findings")
+        return 1
+    if (report.warnings or offsite_warnings) and args.strict:
         print("status: warnings")
         return 1
     print("status: ok")
     return 0
+
+
+def print_offsite_status(instance_path: Path) -> tuple[list[str], list[str]]:
+    try:
+        instance = load_config(_instance_path(str(instance_path)))
+    except ConfigError:
+        return [], []
+    if not isinstance(instance, dict):
+        return [], []
+
+    status = check_last_fetch(instance)
+    if status.warnings:
+        print("offsite warnings:")
+        for warning in status.warnings:
+            print(f"  {warning}")
+    if status.findings:
+        print("offsite findings:")
+        for finding in status.findings:
+            print(f"  {finding}")
+    return status.warnings, status.findings
 
 
 def run_data_init(args: argparse.Namespace) -> int:
