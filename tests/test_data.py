@@ -389,13 +389,13 @@ class ExportTests(unittest.TestCase):
             fact = source / "memory" / "secretary" / "one.md"
             fact.parent.mkdir(parents=True)
             fact.write_text("fact one\n", encoding="utf-8")
-            original_replace = data_module._replace_dir_from_tree
+            original_copy_tree = data_module._copy_tree
 
-            def replace_then_mutate(source_memory, facts_dir):
-                original_replace(source_memory, facts_dir)
+            def copy_then_mutate(source_memory, facts_dir):
+                original_copy_tree(source_memory, facts_dir)
                 fact.write_text("changed after snapshot\n", encoding="utf-8")
 
-            with mock.patch("secretary.data._replace_dir_from_tree", side_effect=replace_then_mutate):
+            with mock.patch("secretary.data._copy_tree", side_effect=copy_then_mutate):
                 export_memory(root / "secretary-data", source_dir=source)
             exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
                 encoding="utf-8"
@@ -436,6 +436,31 @@ class ExportTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
                 export_memory(root / "secretary-data", source_dir=source)
+
+    def test_export_memory_preserves_previous_snapshot_on_decode_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            facts = source / "memory" / "secretary"
+            facts.mkdir(parents=True)
+            (facts / "good.md").write_text("good fact\n", encoding="utf-8")
+            data_dir = root / "secretary-data"
+            export_memory(data_dir, source_dir=source)
+            old_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
+
+            (facts / "bad.md").write_bytes(b"\xff\xfe")
+
+            with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
+                export_memory(data_dir, source_dir=source)
+
+            current_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
+            mirrored = sorted(
+                path.relative_to(data_dir / "memory" / "facts").as_posix()
+                for path in (data_dir / "memory" / "facts").rglob("*.md")
+            )
+
+        self.assertEqual(current_export, old_export)
+        self.assertEqual(mirrored, ["secretary/good.md"])
 
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:

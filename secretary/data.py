@@ -248,10 +248,36 @@ def export_memory(
         raise RuntimeError(f"memory source not found: {source_memory}")
 
     memory_dir = data_dir / "memory"
-    facts_dir = memory_dir / "facts"
     _ensure_dir(memory_dir, "memory data dir")
-    _replace_dir_from_tree(source_memory, facts_dir)
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".memory-", suffix=".tmp", dir=data_dir))
+    except OSError as exc:
+        raise RuntimeError(f"could not create memory export staging: {exc}") from None
+    facts_dir = staging / "facts"
 
+    try:
+        _copy_tree(source_memory, facts_dir)
+        facts = _read_memory_facts(facts_dir)
+        _write_ndjson(staging / "export.ndjson", facts)
+        _write_json(
+            staging / "export.json",
+            {
+                "version": 1,
+                "source": str(source_memory),
+                "fact_count": len(facts),
+            },
+        )
+        _replace_dir(staging, memory_dir)
+    except RuntimeError:
+        _cleanup_staging_dir(staging)
+        raise
+    except OSError as exc:
+        _cleanup_staging_dir(staging)
+        raise RuntimeError(f"could not publish memory export: {exc}") from None
+    return DataExport(path=memory_dir / "export.ndjson", count=len(facts), source=str(source_memory))
+
+
+def _read_memory_facts(facts_dir: Path) -> list[dict[str, Any]]:
     facts = []
     for path, file_stat in _regular_files_under(facts_dir, context="memory snapshot"):
         if path.suffix != ".md":
@@ -272,12 +298,7 @@ def export_memory(
                 "text": text,
             }
         )
-    _write_ndjson(memory_dir / "export.ndjson", facts)
-    _write_json(
-        memory_dir / "export.json",
-        {"version": 1, "source": str(source_memory), "fact_count": len(facts)},
-    )
-    return DataExport(path=memory_dir / "export.ndjson", count=len(facts), source=str(source_memory))
+    return facts
 
 
 def export_runs(
