@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import shutil
 import tarfile
 import tempfile
@@ -14,6 +16,11 @@ from secretary.data import DataExport
 
 
 class BackupTests(unittest.TestCase):
+    def setUp(self):
+        self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
     def test_create_writes_encrypted_archive_with_expected_structure_and_verify_is_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -34,7 +41,7 @@ class BackupTests(unittest.TestCase):
                 return SimpleNamespace(dump_dir=raw)
 
             def fake_export_all(data_dir_arg, *, copy_transcripts):
-                self.assertTrue(copy_transcripts)
+                self.assertFalse(copy_transcripts)
                 _write_export_surface(data_dir_arg)
                 return {
                     "board": DataExport(data_dir_arg / "board" / "cards.json", 1, "board"),
@@ -89,6 +96,17 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
             self.assertNotIn("secretary-backup/secretary-data/backups/old.tar.age", names)
             self.assertNotIn("secretary-backup/instance/.env", names)
+
+    def test_create_rejects_claimed_worker_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+
+            with mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}):
+                with self.assertRaisesRegex(RuntimeError, "claimed worker"):
+                    create_backup(instance, recipient="age1example")
 
     def test_create_resumes_pipeline_when_snapshot_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -165,20 +183,12 @@ class BackupTests(unittest.TestCase):
             )
             self.assertEqual(calls[2], ["pipeline", "--role", "steward", "resume"])
 
-    def test_create_does_not_resume_preexisting_freeze(self):
+    def test_create_rejects_preexisting_freeze(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
             data_dir = root / "secretary-data"
             _write_instance(instance, data_dir)
-            pipeline_calls: list[str] = []
-
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             with (
                 mock.patch(
@@ -193,41 +203,18 @@ class BackupTests(unittest.TestCase):
                 ),
                 mock.patch(
                     "secretary.backup._pipeline_action",
-                    side_effect=lambda action, **_kwargs: pipeline_calls.append(action),
-                ),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
-                mock.patch(
-                    "secretary.backup.export_all",
-                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                    side_effect=AssertionError("pause action should not run"),
                 ),
             ):
-                result = create_backup(
-                    instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(
-                        source, destination
-                    ),
-                )
+                with self.assertRaisesRegex(RuntimeError, "already paused"):
+                    create_backup(instance, recipient="age1example")
 
-            self.assertTrue(result.archive.is_file())
-            self.assertEqual(pipeline_calls, [])
-
-    def test_create_cleans_temp_payload_with_preexisting_freeze(self):
+    def test_create_releases_lock_when_preexisting_freeze_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
             data_dir = root / "secretary-data"
-            temp_root = root / "tmp"
-            temp_root.mkdir()
             _write_instance(instance, data_dir)
-            real_mkdtemp = tempfile.mkdtemp
-
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             with (
                 mock.patch(
@@ -241,27 +228,17 @@ class BackupTests(unittest.TestCase):
                     },
                 ),
                 mock.patch("secretary.backup._pipeline_action") as pipeline_action,
-                mock.patch("secretary.backup.tempfile.mkdtemp") as mkdtemp,
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
-                mock.patch(
-                    "secretary.backup.export_all",
-                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
-                ),
             ):
-                mkdtemp.side_effect = lambda prefix, suffix: str(
-                    real_mkdtemp(prefix=prefix, suffix=suffix, dir=temp_root)
-                )
-                result = create_backup(
-                    instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(
-                        source, destination
-                    ),
-                )
+                with self.assertRaisesRegex(RuntimeError, "already paused"):
+                    create_backup(instance, recipient="age1example")
 
-            self.assertTrue(result.archive.is_file())
             pipeline_action.assert_not_called()
-            self.assertEqual(list(temp_root.iterdir()), [])
+            fd = os.open(data_dir / "backups" / ".create.lock", os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     def test_create_rejects_preexisting_drain_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -277,10 +254,28 @@ class BackupTests(unittest.TestCase):
                 ),
                 mock.patch("secretary.backup._pipeline_action") as pipeline_action,
             ):
-                with self.assertRaisesRegex(RuntimeError, "already paused in drain"):
+                with self.assertRaisesRegex(RuntimeError, "already paused"):
                     create_backup(instance, recipient="age1example")
 
             pipeline_action.assert_not_called()
+
+    def test_create_rejects_concurrent_create(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            lock_path = data_dir / "backups" / ".create.lock"
+            lock_path.parent.mkdir(parents=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(RuntimeError, "already running"):
+                    create_backup(instance, recipient="age1example")
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual(sorted(path.name for path in lock_path.parent.iterdir()), [".create.lock"])
 
     def test_create_publishes_archive_without_clobbering_existing_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -303,7 +298,7 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch("secretary.backup.datetime") as fake_datetime,
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action"),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
@@ -427,6 +422,31 @@ class BackupTests(unittest.TestCase):
 
         self.assertEqual(result.code, 1)
         self.assertIn("raw board dump has no data files", result.findings)
+
+    def test_verify_returns_1_when_transcript_payload_copies_are_present(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "with-transcript-copies.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_complete_payload(payload)
+            copy_path = payload / "secretary-data" / "transcripts" / "copies" / "session.jsonl"
+            copy_path.parent.mkdir(parents=True)
+            copy_path.write_text("{}\n", encoding="utf-8")
+            raw = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data" / "db.sqlite"
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            raw.write_bytes(b"sqlite")
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertTrue(
+            any("unexpected transcript payload copy" in item for item in result.findings)
+        )
 
     def test_git_commit_uses_product_repo_root(self):
         from secretary.backup import _git_commit

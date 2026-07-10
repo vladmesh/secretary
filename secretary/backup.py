@@ -7,10 +7,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+import fcntl
 
 from secretary.config import ConfigError, load_config
 from secretary.data import (
@@ -49,12 +52,15 @@ def create_backup(
     *,
     data_dir: Path | None = None,
     recipient: str | None = None,
-    copy_transcripts: bool = True,
+    copy_transcripts: bool = False,
+    allow_claimed_worker: bool = False,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     pipeline_command: list[str] | None = None,
     age_command: str = "age",
     encrypt: Callable[[Path, Path, str], None] | None = None,
 ) -> BackupResult:
+    if not allow_claimed_worker:
+        _reject_claimed_worker_context()
     instance_file = _instance_file(instance_path)
     data_dir = (data_dir or _load_data_dir(instance_file)).expanduser().resolve()
     recipient = recipient or _age_recipient(instance_file)
@@ -65,74 +71,103 @@ def create_backup(
     backups_dir.mkdir(parents=True, exist_ok=True)
     created_at = datetime.now(UTC).replace(microsecond=0).isoformat()
     stamp = created_at.replace("+00:00", "Z").replace("-", "").replace(":", "")
-    final_archive = _reserve_unique_path(backups_dir / f"secretary-backup-{stamp}.tar.age")
+    final_archive: Path | None = None
 
     paused_by_us = False
     completed = False
     temp_paths: list[Path] = []
-    try:
-        pre_pause = _pipeline_status(pipeline_worktree=pipeline_worktree, command=pipeline_command)
-        if pre_pause.get("paused"):
-            if pre_pause.get("mode") != "freeze" and pre_pause.get("internal_mode") != "hard":
-                raise RuntimeError("pipeline is already paused in drain; backup create needs freeze")
-        else:
+    with _backup_create_lock(backups_dir):
+        final_archive = _reserve_unique_path(backups_dir / f"secretary-backup-{stamp}.tar.age")
+        try:
+            pre_pause = _pipeline_status(pipeline_worktree=pipeline_worktree, command=pipeline_command)
+            if pre_pause.get("paused"):
+                raise RuntimeError("pipeline is already paused; backup create must own the freeze")
             pause_status = _pipeline_action(
                 "pause",
                 pipeline_worktree=pipeline_worktree,
                 command=pipeline_command,
             )
             paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
+            if not paused_by_us:
+                raise RuntimeError("pipeline pause was not owned by backup create")
 
-        init_layout(data_dir)
-        raw_dump = raw_kanboard_dump(data_dir)
-        exports = export_all(data_dir, copy_transcripts=copy_transcripts)
+            init_layout(data_dir)
+            raw_dump = raw_kanboard_dump(data_dir)
+            exports = export_all(data_dir, copy_transcripts=copy_transcripts)
 
-        staging = Path(tempfile.mkdtemp(prefix=".secretary-backup-", suffix=".tmp"))
-        temp_paths.append(staging)
-        payload = staging / ARCHIVE_ROOT
-        payload.mkdir()
+            staging = Path(tempfile.mkdtemp(prefix=".secretary-backup-", suffix=".tmp"))
+            temp_paths.append(staging)
+            payload = staging / ARCHIVE_ROOT
+            payload.mkdir()
 
-        manifest = _build_versions_manifest(
-            created_at=created_at,
-            instance_file=instance_file,
-            data_dir=data_dir,
-            raw_dump=raw_dump.dump_dir,
-            exports=exports,
-        )
-        _copy_instance_config(instance_file.parent, payload / "instance")
-        _copy_data_snapshot(data_dir, payload / "secretary-data")
-        _write_json(payload / "versions.json", manifest)
-        _write_orca_debug_snapshot(payload / "debug" / "orca-state")
+            manifest = _build_versions_manifest(
+                created_at=created_at,
+                instance_file=instance_file,
+                data_dir=data_dir,
+                raw_dump=raw_dump.dump_dir,
+                exports=exports,
+            )
+            _copy_instance_config(instance_file.parent, payload / "instance")
+            _copy_data_snapshot(data_dir, payload / "secretary-data")
+            _write_json(payload / "versions.json", manifest)
+            _write_orca_debug_snapshot(payload / "debug" / "orca-state")
 
-        plain_archive = staging / "payload.tar"
-        _write_tar(plain_archive, payload)
-        temp_paths.append(plain_archive)
+            plain_archive = staging / "payload.tar"
+            _write_tar(plain_archive, payload)
+            temp_paths.append(plain_archive)
 
-        encrypted_archive = staging / "payload.tar.age"
-        temp_paths.append(encrypted_archive)
-        if encrypt is None:
-            _encrypt_with_age(plain_archive, encrypted_archive, recipient, age_command=age_command)
-        else:
-            encrypt(plain_archive, encrypted_archive, recipient)
-        os.replace(encrypted_archive, final_archive)
-        completed = True
-    finally:
-        try:
-            if paused_by_us:
-                _pipeline_action(
-                    "resume",
-                    pipeline_worktree=pipeline_worktree,
-                    command=pipeline_command,
-                )
+            encrypted_archive = staging / "payload.tar.age"
+            temp_paths.append(encrypted_archive)
+            if encrypt is None:
+                _encrypt_with_age(plain_archive, encrypted_archive, recipient, age_command=age_command)
+            else:
+                encrypt(plain_archive, encrypted_archive, recipient)
+            os.replace(encrypted_archive, final_archive)
+            completed = True
         finally:
-            for path in temp_paths:
-                _remove_path_quietly(path)
-        if not completed:
-            _remove_path_quietly(final_archive)
+            try:
+                if paused_by_us:
+                    _pipeline_action(
+                        "resume",
+                        pipeline_worktree=pipeline_worktree,
+                        command=pipeline_command,
+                    )
+            finally:
+                for path in temp_paths:
+                    _remove_path_quietly(path)
+            if not completed and final_archive is not None:
+                _remove_path_quietly(final_archive)
 
-    if not final_archive.is_file():
+    if final_archive is None or not final_archive.is_file():
         raise RuntimeError("encrypted archive was not created")
     return BackupResult(archive=final_archive, manifest=manifest)
+
+
+def _reject_claimed_worker_context() -> None:
+    if os.environ.get("BOARD_ROLE") == "worker":
+        raise RuntimeError(
+            "backup create must not run from a claimed worker; use an operator context"
+        )
+
+
+@contextmanager
+def _backup_create_lock(backups_dir: Path) -> Iterator[None]:
+    lock_path = backups_dir / ".create.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        raise RuntimeError(f"could not open backup create lock: {exc}") from None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another backup create is already running") from None
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def verify_backup(
@@ -240,6 +275,19 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         if _is_forbidden_archive_entry(name)
     ]
     findings.extend(f"forbidden archive entry: {name}" for name in forbidden_names)
+    transcript_copy_names = [
+        name
+        for name in sorted(names)
+        if Path(name).parts[:4] == (
+            ARCHIVE_ROOT,
+            "secretary-data",
+            "transcripts",
+            "copies",
+        )
+    ]
+    findings.extend(
+        f"unexpected transcript payload copy: {name}" for name in transcript_copy_names
+    )
     return VerifyResult(1 if findings else 0, findings, warnings, manifest if isinstance(manifest, dict) else None)
 
 
