@@ -78,6 +78,20 @@ python3 -m secretary doctor --dry-run --instance examples/instance \
 ```
 
 The Phase 1 command surface is present, but only `doctor --dry-run` does useful work.
+
+## Data exports
+
+Phase 3 adds read-only exporters for the current system:
+
+```bash
+python3 -m secretary data export --instance ~/secretary-instance
+```
+
+The combined export writes normalized board cards, memory facts, pipeline run
+state and transcript inventory under `secretary-data/`. Narrow commands are also
+available for one component at a time: `export-board`, `export-memory`,
+`export-runs` and `export-transcripts`. Re-running an export rewrites the same
+snapshot files in deterministic order without changing the live sources.
 `reconcile`, `backup`, `restore`, `project add`, `task`, and `memory` return an
 explicit `not implemented` message.
 
