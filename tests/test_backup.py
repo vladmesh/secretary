@@ -56,6 +56,7 @@ class BackupTests(unittest.TestCase):
                 shutil.copy2(source, destination)
 
             with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch("secretary.backup.export_all", side_effect=fake_export_all),
@@ -101,6 +102,7 @@ class BackupTests(unittest.TestCase):
                 pipeline_calls.append(action)
 
             with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
                 mock.patch(
                     "secretary.backup.raw_kanboard_dump",
@@ -113,7 +115,7 @@ class BackupTests(unittest.TestCase):
 
             self.assertEqual(pipeline_calls, ["pause", "resume"])
 
-    def test_create_uses_pipeline_drain_pause_contract(self):
+    def test_create_uses_pipeline_freeze_pause_contract(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
@@ -123,29 +125,111 @@ class BackupTests(unittest.TestCase):
 
             def fake_run(args, **_kwargs):
                 calls.append(list(args))
-                return SimpleNamespace(stdout="{}", stderr="")
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "paused": True,
+                            "mode": "freeze",
+                            "internal_mode": "hard",
+                            "reason": "secretary backup create",
+                            "actor": "secretary-backup",
+                        }
+                    ),
+                    stderr="",
+                )
 
             with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
-                from secretary.backup import _pipeline_action
+                from secretary.backup import _pipeline_action, _pipeline_status
 
+                _pipeline_status(pipeline_worktree=root, command=["pipeline"])
                 _pipeline_action("pause", pipeline_worktree=root, command=["pipeline"])
                 _pipeline_action("resume", pipeline_worktree=root, command=["pipeline"])
 
             self.assertEqual(
                 calls[0],
+                ["pipeline", "--role", "steward", "pause-status"],
+            )
+            self.assertEqual(
+                calls[1],
                 [
                     "pipeline",
                     "--role",
                     "steward",
                     "pause",
-                    "drain",
+                    "freeze",
                     "--reason",
                     "secretary backup create",
                     "--actor",
                     "secretary-backup",
                 ],
             )
-            self.assertEqual(calls[1], ["pipeline", "--role", "steward", "resume"])
+            self.assertEqual(calls[2], ["pipeline", "--role", "steward", "resume"])
+
+    def test_create_does_not_resume_preexisting_freeze(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            pipeline_calls: list[str] = []
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            with (
+                mock.patch(
+                    "secretary.backup._pipeline_status",
+                    return_value={
+                        "paused": True,
+                        "mode": "freeze",
+                        "internal_mode": "hard",
+                        "reason": "maintenance",
+                        "actor": "steward",
+                    },
+                ),
+                mock.patch(
+                    "secretary.backup._pipeline_action",
+                    side_effect=lambda action, **_kwargs: pipeline_calls.append(action),
+                ),
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                ),
+            ):
+                result = create_backup(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(
+                        source, destination
+                    ),
+                )
+
+            self.assertTrue(result.archive.is_file())
+            self.assertEqual(pipeline_calls, [])
+
+    def test_create_rejects_preexisting_drain_pause(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+
+            with (
+                mock.patch(
+                    "secretary.backup._pipeline_status",
+                    return_value={"paused": True, "mode": "drain", "internal_mode": "soft"},
+                ),
+                mock.patch("secretary.backup._pipeline_action") as pipeline_action,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already paused in drain"):
+                    create_backup(instance, recipient="age1example")
+
+            pipeline_action.assert_not_called()
 
     def test_create_publishes_archive_without_clobbering_existing_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -167,6 +251,7 @@ class BackupTests(unittest.TestCase):
 
             with (
                 mock.patch("secretary.backup.datetime") as fake_datetime,
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action"),
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
@@ -272,6 +357,40 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(any("runs/runs.ndjson" in item for item in result.findings))
         self.assertTrue(any("artifacts/inventory.json" in item for item in result.findings))
 
+    def test_verify_returns_1_when_raw_board_dump_has_no_data_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "incomplete.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_complete_payload(payload)
+            raw = payload / "secretary-data" / "board" / "kanboard-raw-empty"
+            (raw / "data").mkdir(parents=True)
+            (raw / "manifest.json").write_text("{}", encoding="utf-8")
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertIn("raw board dump has no data files", result.findings)
+
+    def test_git_commit_uses_product_repo_root(self):
+        from secretary.backup import _git_commit
+
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(stdout="abc123\n", stderr="")
+
+        with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
+            self.assertEqual(_git_commit(Path("/product")), "abc123")
+
+        self.assertEqual(calls[0][1]["cwd"], Path("/product"))
+
 
 def _write_instance(instance: Path, data_dir: Path) -> None:
     instance.mkdir()
@@ -310,6 +429,53 @@ def _write_export_surface(data_dir: Path) -> None:
     )
     (data_dir / "backups").mkdir(parents=True, exist_ok=True)
     (data_dir / "backups" / "old.tar.age").write_bytes(b"old")
+
+
+def _write_complete_payload(payload: Path) -> None:
+    (payload / "instance").mkdir(parents=True)
+    (payload / "secretary-data" / "board").mkdir(parents=True)
+    (payload / "secretary-data" / "memory").mkdir(parents=True)
+    (payload / "secretary-data" / "runs").mkdir(parents=True)
+    (payload / "secretary-data" / "transcripts").mkdir(parents=True)
+    (payload / "secretary-data" / "artifacts").mkdir(parents=True)
+    (payload / "debug" / "orca-state").mkdir(parents=True)
+    (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+    (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "runs.ndjson").write_text("{}\n", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "transcripts" / "inventory.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    (payload / "secretary-data" / "artifacts" / "inventory.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    (payload / "debug" / "orca-state" / "inventory.json").write_text("{}", encoding="utf-8")
+    (payload / "versions.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "components": {
+                    "raw_board": {"path": "board/kanboard-raw-empty"},
+                    "board": {"path": "board/cards.json"},
+                    "memory": {"path": "memory/export.ndjson"},
+                    "runs": {"path": "runs/runs.ndjson"},
+                    "transcripts": {"path": "transcripts/inventory.json"},
+                    "artifacts": {"path": "artifacts/inventory.json"},
+                    "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _fake_exports(data_dir: Path) -> dict[str, DataExport]:

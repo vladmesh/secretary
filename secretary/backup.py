@@ -26,6 +26,8 @@ ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 ARCHIVE_ROOT = "secretary-backup"
 BACKUP_VERSION = 1
 PIPELINE_PAUSE_REASON = "secretary backup create"
+PIPELINE_PAUSE_ACTOR = "secretary-backup"
+PRODUCT_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -65,12 +67,21 @@ def create_backup(
     stamp = created_at.replace("+00:00", "Z").replace("-", "").replace(":", "")
     final_archive = _reserve_unique_path(backups_dir / f"secretary-backup-{stamp}.tar.age")
 
-    paused = False
+    paused_by_us = False
     completed = False
     temp_paths: list[Path] = []
     try:
-        _pipeline_action("pause", pipeline_worktree=pipeline_worktree, command=pipeline_command)
-        paused = True
+        pre_pause = _pipeline_status(pipeline_worktree=pipeline_worktree, command=pipeline_command)
+        if pre_pause.get("paused"):
+            if pre_pause.get("mode") != "freeze" and pre_pause.get("internal_mode") != "hard":
+                raise RuntimeError("pipeline is already paused in drain; backup create needs freeze")
+        else:
+            pause_status = _pipeline_action(
+                "pause",
+                pipeline_worktree=pipeline_worktree,
+                command=pipeline_command,
+            )
+            paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
 
         init_layout(data_dir)
         raw_dump = raw_kanboard_dump(data_dir)
@@ -106,7 +117,7 @@ def create_backup(
         os.replace(encrypted_archive, final_archive)
         completed = True
     finally:
-        if paused:
+        if paused_by_us:
             try:
                 _pipeline_action(
                     "resume",
@@ -217,10 +228,11 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
                     findings.append(f"versions manifest component has no path: {name}")
                     continue
                 archive_name = _component_archive_name(component["path"])
-                if archive_name not in names and not any(
-                    member_name.startswith(f"{archive_name}/") for member_name in names
-                ):
+                if not _archive_has_path(names, archive_name):
                     findings.append(f"component path missing from archive: {name}")
+                    continue
+                if name == "raw_board":
+                    findings.extend(_verify_raw_board_component(members, names, archive_name))
 
     forbidden_names = [
         name
@@ -244,7 +256,7 @@ def _build_versions_manifest(
         "created_at": created_at,
         "tool": "secretary",
         "python": sys.version.split()[0],
-        "git_commit": _git_commit(),
+        "git_commit": _git_commit(PRODUCT_REPO_ROOT),
         "instance": {
             "path": str(instance_file),
         },
@@ -269,18 +281,18 @@ def _pipeline_action(
     *,
     pipeline_worktree: Path,
     command: list[str] | None,
-) -> None:
+) -> dict[str, Any] | None:
     cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
     if action == "pause":
         args = [
             "--role",
             "steward",
             "pause",
-            "drain",
+            "freeze",
             "--reason",
             PIPELINE_PAUSE_REASON,
             "--actor",
-            "secretary-backup",
+            PIPELINE_PAUSE_ACTOR,
         ]
     elif action == "resume":
         args = ["--role", "steward", "resume"]
@@ -292,8 +304,38 @@ def _pipeline_action(
         pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
     env["PYTHONPATH"] = pythonpath
     try:
-        subprocess.run(
+        result = subprocess.run(
             [*cmd, *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        return json.loads(result.stdout) if result.stdout.strip() else None
+    except FileNotFoundError:
+        raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None
+    except subprocess.CalledProcessError as exc:
+        reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
+        raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
+
+
+def _pipeline_status(
+    *,
+    pipeline_worktree: Path,
+    command: list[str] | None,
+) -> dict[str, Any]:
+    cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
+    env = os.environ.copy()
+    pythonpath = str(pipeline_worktree)
+    if env.get("PYTHONPATH"):
+        pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
+    env["PYTHONPATH"] = pythonpath
+    try:
+        result = subprocess.run(
+            [*cmd, "--role", "steward", "pause-status"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -305,6 +347,20 @@ def _pipeline_action(
     except subprocess.CalledProcessError as exc:
         reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
         raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
+    try:
+        status = json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
+    return status if isinstance(status, dict) else {}
+
+
+def _pause_owned_by_backup(status: dict[str, Any]) -> bool:
+    return (
+        status.get("paused") is True
+        and status.get("actor") == PIPELINE_PAUSE_ACTOR
+        and status.get("reason") == PIPELINE_PAUSE_REASON
+        and (status.get("mode") == "freeze" or status.get("internal_mode") == "hard")
+    )
 
 
 def _copy_instance_config(source: Path, destination: Path) -> None:
@@ -434,6 +490,27 @@ def _component_archive_name(path: str) -> str:
     return f"{ARCHIVE_ROOT}/secretary-data/{path}"
 
 
+def _archive_has_path(names: set[str], archive_name: str) -> bool:
+    return archive_name in names or any(
+        member_name.startswith(f"{archive_name}/") for member_name in names
+    )
+
+
+def _verify_raw_board_component(
+    members: list[tarfile.TarInfo],
+    names: set[str],
+    archive_name: str,
+) -> list[str]:
+    findings: list[str] = []
+    manifest_name = f"{archive_name}/manifest.json"
+    data_prefix = f"{archive_name}/data/"
+    if manifest_name not in names:
+        findings.append("raw board dump missing manifest.json")
+    if not any(member.isfile() and member.name.startswith(data_prefix) for member in members):
+        findings.append("raw board dump has no data files")
+    return findings
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -477,7 +554,7 @@ def _relative_to_data(data_dir: Path, path: Path) -> str:
         return str(path)
 
 
-def _git_commit() -> str | None:
+def _git_commit(repo_root: Path) -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -485,6 +562,7 @@ def _git_commit() -> str | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=repo_root,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
