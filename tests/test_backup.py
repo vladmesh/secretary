@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tarfile
 import tempfile
@@ -44,6 +45,11 @@ class BackupTests(unittest.TestCase):
                         1,
                         "transcripts",
                     ),
+                    "artifacts": DataExport(
+                        data_dir_arg / "artifacts" / "inventory.json",
+                        1,
+                        "artifacts",
+                    ),
                 }
 
             def fake_encrypt(source, destination, _recipient):
@@ -74,6 +80,10 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/versions.json", names)
             self.assertIn("secretary-backup/instance/instance.yaml", names)
             self.assertIn("secretary-backup/secretary-data/board/cards.json", names)
+            self.assertIn("secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite", names)
+            self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", names)
+            self.assertIn("secretary-backup/secretary-data/runs/cards.json", names)
+            self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
             self.assertIn("secretary-backup/debug/orca-state/inventory.json", names)
             self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
             self.assertNotIn("secretary-backup/secretary-data/backups/old.tar.age", names)
@@ -102,6 +112,83 @@ class BackupTests(unittest.TestCase):
                     create_backup(instance, recipient="age1example")
 
             self.assertEqual(pipeline_calls, ["pause", "resume"])
+
+    def test_create_uses_pipeline_drain_pause_contract(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            calls: list[list[str]] = []
+
+            def fake_run(args, **_kwargs):
+                calls.append(list(args))
+                return SimpleNamespace(stdout="{}", stderr="")
+
+            with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
+                from secretary.backup import _pipeline_action
+
+                _pipeline_action("pause", pipeline_worktree=root, command=["pipeline"])
+                _pipeline_action("resume", pipeline_worktree=root, command=["pipeline"])
+
+            self.assertEqual(
+                calls[0],
+                [
+                    "pipeline",
+                    "--role",
+                    "steward",
+                    "pause",
+                    "drain",
+                    "--reason",
+                    "secretary backup create",
+                    "--actor",
+                    "secretary-backup",
+                ],
+            )
+            self.assertEqual(calls[1], ["pipeline", "--role", "steward", "resume"])
+
+    def test_create_publishes_archive_without_clobbering_existing_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            backups = data_dir / "backups"
+            backups.mkdir(parents=True)
+            existing = backups / "secretary-backup-20260710T000000Z.tar.age"
+            existing.write_bytes(b"keep")
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            with (
+                mock.patch("secretary.backup.datetime") as fake_datetime,
+                mock.patch("secretary.backup._pipeline_action"),
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                ),
+            ):
+                from datetime import datetime, UTC
+
+                fake_datetime.now.return_value = datetime(2026, 7, 10, tzinfo=UTC)
+                result = create_backup(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(
+                        source, destination
+                    ),
+                )
+
+            self.assertEqual(existing.read_bytes(), b"keep")
+            self.assertNotEqual(result.archive, existing)
+            self.assertEqual(result.archive.name, "secretary-backup-20260710T000000Z-2.tar.age")
+            self.assertTrue(result.archive.is_file())
 
     def test_verify_returns_2_when_archive_or_key_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -132,6 +219,58 @@ class BackupTests(unittest.TestCase):
 
         self.assertEqual(result.code, 1)
         self.assertTrue(any("missing required archive entry" in item for item in result.findings))
+
+    def test_verify_returns_1_when_component_paths_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "incomplete.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            (payload / "instance").mkdir(parents=True)
+            (payload / "secretary-data" / "board").mkdir(parents=True)
+            (payload / "secretary-data" / "memory").mkdir(parents=True)
+            (payload / "secretary-data" / "runs").mkdir(parents=True)
+            (payload / "secretary-data" / "transcripts").mkdir(parents=True)
+            (payload / "debug" / "orca-state").mkdir(parents=True)
+            (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+            (payload / "secretary-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
+            (payload / "secretary-data" / "memory" / "export.ndjson").write_text("", encoding="utf-8")
+            (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
+            (payload / "secretary-data" / "transcripts" / "inventory.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            (payload / "debug" / "orca-state" / "inventory.json").write_text("{}", encoding="utf-8")
+            (payload / "versions.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "components": {
+                            "raw_board": {"path": "board/raw"},
+                            "board": {"path": "board/cards.json"},
+                            "memory": {"path": "memory/export.ndjson"},
+                            "runs": {"path": "runs/runs.ndjson"},
+                            "transcripts": {"path": "transcripts/inventory.json"},
+                            "artifacts": {"path": "artifacts/inventory.json"},
+                            "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertTrue(any("runs/runs.ndjson" in item for item in result.findings))
+        self.assertTrue(any("artifacts/inventory.json" in item for item in result.findings))
 
 
 def _write_instance(instance: Path, data_dir: Path) -> None:
@@ -164,8 +303,24 @@ def _write_export_surface(data_dir: Path) -> None:
         '{"version":1,"transcripts":[]}\n',
         encoding="utf-8",
     )
+    (data_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    (data_dir / "artifacts" / "inventory.json").write_text(
+        '{"version":1,"artifacts":[]}\n',
+        encoding="utf-8",
+    )
     (data_dir / "backups").mkdir(parents=True, exist_ok=True)
     (data_dir / "backups" / "old.tar.age").write_bytes(b"old")
+
+
+def _fake_exports(data_dir: Path) -> dict[str, DataExport]:
+    _write_export_surface(data_dir)
+    return {
+        "board": DataExport(data_dir / "board" / "cards.json", 1, "board"),
+        "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "memory"),
+        "runs": DataExport(data_dir / "runs" / "runs.ndjson", 1, "runs"),
+        "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 1, "transcripts"),
+        "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "artifacts"),
+    }
 
 
 if __name__ == "__main__":

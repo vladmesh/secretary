@@ -12,6 +12,7 @@ import secretary.data as data_module
 from secretary.data import (
     export_board,
     export_all,
+    export_artifacts,
     export_memory,
     export_runs,
     export_transcripts,
@@ -687,6 +688,44 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(current_ndjson, old_ndjson)
         self.assertEqual(current_copies, old_copies)
 
+    def test_export_artifacts_inventories_existing_files_and_task_docs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            artifacts_dir = data_dir / "artifacts"
+            (artifacts_dir / "report.txt").parent.mkdir(parents=True)
+            (artifacts_dir / "report.txt").write_text("report\n", encoding="utf-8")
+            (artifacts_dir / ".env").write_text("TOKEN=do-not-copy\n", encoding="utf-8")
+            workspaces = root / "workspaces"
+            workspace = workspaces / "secretary" / "354-backup-create-verify"
+            workspace.mkdir(parents=True)
+            (workspace / "TASK.md").write_text("task\n", encoding="utf-8")
+            (workspace / "REVIEW.md").write_text("review\n", encoding="utf-8")
+            (workspace / ".env").write_text("TOKEN=do-not-copy\n", encoding="utf-8")
+
+            result = export_artifacts(data_dir, workspaces_root=workspaces)
+            second = export_artifacts(data_dir, workspaces_root=workspaces)
+            inventory = json.loads((artifacts_dir / "inventory.json").read_text(encoding="utf-8"))
+            copied_docs = sorted(
+                path.relative_to(artifacts_dir / "task-docs").as_posix()
+                for path in (artifacts_dir / "task-docs").rglob("*.md")
+            )
+
+        self.assertEqual(result.count, 3)
+        self.assertEqual(second.count, 3)
+        paths = {entry["relative_path"] for entry in inventory["artifacts"]}
+        self.assertIn("report.txt", paths)
+        self.assertIn("secretary/354-backup-create-verify/TASK.md", paths)
+        self.assertIn("secretary/354-backup-create-verify/REVIEW.md", paths)
+        self.assertNotIn(".env", paths)
+        self.assertEqual(
+            copied_docs,
+            [
+                "secretary/354-backup-create-verify/REVIEW.md",
+                "secretary/354-backup-create-verify/TASK.md",
+            ],
+        )
+
     def test_export_all_passes_copy_transcripts_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -708,10 +747,15 @@ class ExportTests(unittest.TestCase):
                     "secretary.data.export_transcripts",
                     return_value=data_module.DataExport(data_dir / "inventory.json", 1, "transcripts"),
                 ) as transcripts,
+                mock.patch(
+                    "secretary.data.export_artifacts",
+                    return_value=data_module.DataExport(data_dir / "artifacts.json", 1, "artifacts"),
+                ) as artifacts,
             ):
                 export_all(data_dir, copy_transcripts=True)
 
         transcripts.assert_called_once_with(data_dir, copy=True)
+        artifacts.assert_called_once_with(data_dir)
 
 
 def subprocess_completed(stdout: str):

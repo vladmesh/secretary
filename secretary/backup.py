@@ -25,6 +25,7 @@ PIPELINE_WORKTREE = Path("/home/dev/orca/workspaces/triggered-agents/pipeline")
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 ARCHIVE_ROOT = "secretary-backup"
 BACKUP_VERSION = 1
+PIPELINE_PAUSE_REASON = "secretary backup create"
 
 
 @dataclass(frozen=True)
@@ -61,8 +62,8 @@ def create_backup(
     backups_dir = data_dir / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
     created_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-    stamp = created_at.replace("-", "").replace(":", "").replace("+00:00", "Z")
-    final_archive = _unique_path(backups_dir / f"secretary-backup-{stamp}.tar.age")
+    stamp = created_at.replace("+00:00", "Z").replace("-", "").replace(":", "")
+    final_archive = _reserve_unique_path(backups_dir / f"secretary-backup-{stamp}.tar.age")
 
     paused = False
     completed = False
@@ -96,10 +97,13 @@ def create_backup(
         _write_tar(plain_archive, payload)
         temp_paths.append(plain_archive)
 
+        encrypted_archive = staging / "payload.tar.age"
+        temp_paths.append(encrypted_archive)
         if encrypt is None:
-            _encrypt_with_age(plain_archive, final_archive, recipient, age_command=age_command)
+            _encrypt_with_age(plain_archive, encrypted_archive, recipient, age_command=age_command)
         else:
-            encrypt(plain_archive, final_archive, recipient)
+            encrypt(plain_archive, encrypted_archive, recipient)
+        os.replace(encrypted_archive, final_archive)
         completed = True
     finally:
         if paused:
@@ -172,9 +176,14 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         f"{ARCHIVE_ROOT}/instance/instance.yaml",
         f"{ARCHIVE_ROOT}/secretary-data/data-manifest.json",
         f"{ARCHIVE_ROOT}/secretary-data/board/cards.json",
+        f"{ARCHIVE_ROOT}/secretary-data/board/cards.ndjson",
+        f"{ARCHIVE_ROOT}/secretary-data/board/export.json",
         f"{ARCHIVE_ROOT}/secretary-data/memory/export.ndjson",
+        f"{ARCHIVE_ROOT}/secretary-data/runs/runs.ndjson",
         f"{ARCHIVE_ROOT}/secretary-data/runs/watermarks.json",
+        f"{ARCHIVE_ROOT}/secretary-data/runs/cards.json",
         f"{ARCHIVE_ROOT}/secretary-data/transcripts/inventory.json",
+        f"{ARCHIVE_ROOT}/secretary-data/artifacts/inventory.json",
         f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json",
     }
     missing = sorted(required - names)
@@ -188,6 +197,30 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         components = manifest.get("components")
         if not isinstance(components, dict):
             findings.append("versions manifest has no components object")
+        else:
+            required_components = {
+                "raw_board",
+                "board",
+                "memory",
+                "runs",
+                "transcripts",
+                "artifacts",
+                "debug_orca_state",
+            }
+            missing_components = sorted(required_components - set(components))
+            findings.extend(
+                f"versions manifest missing component: {name}" for name in missing_components
+            )
+            for name in sorted(required_components & set(components)):
+                component = components.get(name)
+                if not isinstance(component, dict) or not isinstance(component.get("path"), str):
+                    findings.append(f"versions manifest component has no path: {name}")
+                    continue
+                archive_name = _component_archive_name(component["path"])
+                if archive_name not in names and not any(
+                    member_name.startswith(f"{archive_name}/") for member_name in names
+                ):
+                    findings.append(f"component path missing from archive: {name}")
 
     forbidden_names = [
         name
@@ -238,6 +271,21 @@ def _pipeline_action(
     command: list[str] | None,
 ) -> None:
     cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
+    if action == "pause":
+        args = [
+            "--role",
+            "steward",
+            "pause",
+            "drain",
+            "--reason",
+            PIPELINE_PAUSE_REASON,
+            "--actor",
+            "secretary-backup",
+        ]
+    elif action == "resume":
+        args = ["--role", "steward", "resume"]
+    else:
+        raise RuntimeError(f"unknown pipeline action: {action}")
     env = os.environ.copy()
     pythonpath = str(pipeline_worktree)
     if env.get("PYTHONPATH"):
@@ -245,7 +293,7 @@ def _pipeline_action(
     env["PYTHONPATH"] = pythonpath
     try:
         subprocess.run(
-            [*cmd, action],
+            [*cmd, *args],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -380,6 +428,12 @@ def _is_forbidden_archive_entry(name: str) -> bool:
     )
 
 
+def _component_archive_name(path: str) -> str:
+    if path.startswith("debug/"):
+        return f"{ARCHIVE_ROOT}/{path}"
+    return f"{ARCHIVE_ROOT}/secretary-data/{path}"
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -437,13 +491,27 @@ def _git_commit() -> str | None:
     return result.stdout.strip() or None
 
 
-def _unique_path(path: Path) -> Path:
-    candidate = path
+def _reserve_unique_path(path: Path) -> Path:
     suffix = 1
-    while candidate.exists():
-        candidate = path.with_name(f"{path.stem}-{suffix}{path.suffix}")
-        suffix += 1
-    return candidate
+    while True:
+        candidate = path if suffix == 1 else _suffixed_path(path, suffix)
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            suffix += 1
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return candidate
+
+
+def _suffixed_path(path: Path, suffix: int) -> Path:
+    name = path.name
+    if name.endswith(".tar.age"):
+        return path.with_name(f"{name.removesuffix('.tar.age')}-{suffix}.tar.age")
+    return path.with_name(f"{path.stem}-{suffix}{path.suffix}")
 
 
 def _remove_path_quietly(path: Path) -> None:

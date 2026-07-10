@@ -10,6 +10,7 @@ from secretary.config import load_config
 from secretary.data import (
     KANBOARD_DATA_PATH,
     export_all,
+    export_artifacts,
     export_board,
     export_memory,
     export_runs,
@@ -150,6 +151,14 @@ def build_parser() -> argparse.ArgumentParser:
     export_transcripts_command.add_argument("--root", action="append", dest="roots")
     export_transcripts_command.add_argument("--copy", action="store_true")
     export_transcripts_command.set_defaults(handler=run_export_transcripts)
+
+    export_artifacts_command = data_subcommands.add_parser(
+        "export-artifacts",
+        help="write secretary-data/artifacts inventory and task docs",
+    )
+    export_artifacts_command.add_argument("--instance", required=True)
+    export_artifacts_command.add_argument("--data-dir")
+    export_artifacts_command.set_defaults(handler=run_export_artifacts)
     data.set_defaults(handler=not_implemented("data"))
 
     backup = subparsers.add_parser("backup", help="create or verify encrypted backups")
@@ -298,7 +307,7 @@ def run_data_export(args: argparse.Namespace) -> int:
         print(f"secretary data export: {exc}")
         return 1
 
-    for name in ("board", "memory", "runs", "transcripts"):
+    for name in ("board", "memory", "runs", "transcripts", "artifacts"):
         result = exports[name]
         print(f"{name}: {result.count} -> {result.path}")
     print("status: ok")
@@ -361,6 +370,21 @@ def run_export_transcripts(args: argparse.Namespace) -> int:
         print(f"secretary data export-transcripts: {exc}")
         return 1
     print(f"transcripts: {result.count}")
+    print(f"inventory: {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_export_artifacts(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = export_artifacts(data_dir)
+    except RuntimeError as exc:
+        print(f"secretary data export-artifacts: {exc}")
+        return 1
+    print(f"artifacts: {result.count}")
     print(f"inventory: {result.path}")
     print("status: ok")
     return 0
