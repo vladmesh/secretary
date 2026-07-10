@@ -169,9 +169,14 @@ def build_parser() -> argparse.ArgumentParser:
     backup_create.add_argument("--data-dir")
     backup_create.add_argument("--age-recipient")
     backup_create.add_argument(
+        "--copy-transcripts",
+        action="store_true",
+        help="copy transcript files in addition to writing the inventory",
+    )
+    backup_create.add_argument(
         "--no-copy-transcripts",
         action="store_true",
-        help="write transcript inventory only",
+        help=argparse.SUPPRESS,
     )
     backup_create.set_defaults(handler=run_backup_create)
 
@@ -422,7 +427,7 @@ def run_backup_create(args: argparse.Namespace) -> int:
             Path(args.instance),
             data_dir=Path(args.data_dir) if args.data_dir else None,
             recipient=args.age_recipient,
-            copy_transcripts=not args.no_copy_transcripts,
+            copy_transcripts=args.copy_transcripts,
         )
     except RuntimeError as exc:
         print(f"secretary backup create: {exc}")

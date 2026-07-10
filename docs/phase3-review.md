@@ -101,7 +101,18 @@ Local product tests:
 python3 -m unittest
 ```
 
-Result: 127 tests passed.
+Result from the first review pass: 127 tests passed.
+
+After the reviewer return, the backup command was changed so transcript payload
+copies are opt-in, claimed worker contexts are refused, concurrent create runs
+are locked, and preexisting pipeline pauses are rejected. The focused regression
+test was rerun:
+
+```bash
+python3 -m unittest tests.test_backup
+```
+
+Result: 15 tests passed.
 
 ## Archive Contents
 
@@ -147,10 +158,17 @@ actual Orca state entries: none
 Orca debug snapshot: secretary-backup/debug/orca-state/inventory.json
 nested secretary-data/backups entries: none
 generated systemd unit entries: none
+transcript payload copies: 2968
 ```
 
 The debug Orca inventory listed 6187 files from Orca state roots, but the archive
 contains only that inventory JSON, not the state files themselves.
+
+The first live archive was created before the reviewer return and contains full
+transcript payload copies under `secretary-backup/secretary-data/transcripts/copies/`.
+That is outside the Phase 3 inventory boundary. Current `backup create` now
+writes transcript inventory only unless `--copy-transcripts` is passed, and
+current `backup verify` reports transcript payload copies as findings.
 
 ## Acceptance Check
 
@@ -166,9 +184,12 @@ The successful run created
 
 `secretary backup verify` checks structure and versions.
 
-Status: done.
+Status: done for the original command output, with one now-fixed policy gap.
 
 `backup verify` returned exit code 0 and printed `version: 1` and `status: ok`.
+The current verifier would reject this same archive because it contains transcript
+payload copies. New archives created with the default transcript policy should
+verify without that finding.
 
 Archive is pulled to a local computer and `last_fetch` is updated.
 
@@ -203,12 +224,18 @@ current live `panelmem-kb` markdown fact count.
 
 No host changes beyond normal backup work.
 
-Status: done with one caveat.
+Status: mixed.
 
 The review did not edit `/home/dev/secretary-instance` or host configs. The
 normal backup work updated generated files under `/home/dev/secretary-data` and
 created the encrypted archive. The first failed `backup create` attempt did not
 create an archive and left the pipeline unpaused.
+
+The earlier claimed-worker attempt was not normal backup work: it entered a
+pause/resume relaunch loop, created extra backup archives, and restarted a
+neighboring in-flight worker. That incident is tracked separately as
+`secretary-379`. Current `backup create` refuses `BOARD_ROLE=worker` contexts to
+prevent this path.
 
 ## Real Gaps
 
@@ -222,7 +249,18 @@ resume behavior. During this review flow, a new card `secretary-379` was created
 for the defect: hard resume can relaunch in-flight workers, including the worker
 that invoked backup, which can cause a repeated create cycle. The Phase 3 review
 still produced a valid archive, but the command contract should say who may run
-the live backup or the product should add a guard.
+the live backup. The product now has a guard that refuses `BOARD_ROLE=worker`
+contexts.
+
+The first live archive copied full transcript JSONL payloads even though Phase 3
+calls for transcript inventory. The product now makes payload copies opt-in via
+`--copy-transcripts`, and `backup verify` reports `transcripts/copies` entries as
+unexpected.
+
+Concurrent `backup create` runs could previously share a pause boundary and
+mutate the same generated snapshot files. The product now takes an advisory
+backup create lock and refuses to run under a preexisting pause, so each archive
+owns the freeze that protects its snapshot.
 
 Offsite pull is still unconfirmed. The archive exists on the VPS, but
 `last_fetch` is absent, so the backup does not yet satisfy the offsite protection
@@ -241,8 +279,12 @@ For the current system that means sourcing `/home/dev/control-panel/.env` or
 providing the same Kanboard variables through the future instance runtime.
 
 State that live `backup create` should be run from an operator context, not from
-a claimed worker task, until the resume behavior has an explicit self-exclusion
-or the product refuses unsafe invocation.
+a claimed worker task. The current product guard refuses the claimed-worker
+environment, but the design doc should still make the operating context explicit.
+
+Document the transcript boundary: Phase 3 backups include transcript inventory
+only by default. Copying transcript bodies requires explicit operator policy and
+`--copy-transcripts`.
 
 Split Phase 3 acceptance into two checks: VPS-side backup create and verify, and
 offsite pull from the local computer. The second check needs vladmesh or an
