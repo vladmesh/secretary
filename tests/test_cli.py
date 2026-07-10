@@ -174,6 +174,39 @@ class CliTests(unittest.TestCase):
         self.assertIn("future", output)
         self.assertIn("status: findings", output)
 
+    def test_doctor_reports_unavailable_offsite_marker_as_finding(self):
+        class BrokenMarker:
+            def is_file(self) -> bool:
+                raise PermissionError("denied")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n"
+                "  backup_pull_max_age_days: 1\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+            with mock.patch(
+                "secretary.offsite.last_fetch_path", return_value=BrokenMarker()
+            ):
+                code, output = self.run_cli(
+                    ["doctor", "--dry-run", "--instance", str(instance_dir)]
+                )
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("offsite findings:", output)
+        self.assertIn("unavailable", output)
+        self.assertNotIn("Traceback", output)
+        self.assertIn("status: findings", output)
+
     def test_data_init_generates_manifest_that_doctor_finds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

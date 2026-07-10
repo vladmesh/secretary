@@ -35,10 +35,21 @@ def check_last_fetch(
         return OffsiteStatus([], [])
 
     marker = last_fetch_path(Path(data_dir).expanduser())
-    if not marker.is_file():
+    try:
+        marker_exists = marker.is_file()
+    except OSError:
+        return OffsiteStatus([], ["offsite backup pull marker is unavailable"])
+    if not marker_exists:
         return OffsiteStatus(["offsite backup pull is not configured: last_fetch missing"], [])
 
-    fetched_at = _read_fetch_time(marker)
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return OffsiteStatus([], ["offsite backup pull marker is unavailable"])
+    except UnicodeError:
+        return OffsiteStatus([], ["offsite backup pull marker is invalid"])
+
+    fetched_at = _parse_fetch_time(raw)
     if fetched_at is None:
         return OffsiteStatus([], ["offsite backup pull marker is invalid"])
 
@@ -61,11 +72,7 @@ def last_fetch_path(data_dir: Path) -> Path:
     return data_dir / "backups" / LAST_FETCH_NAME
 
 
-def _read_fetch_time(path: Path) -> datetime | None:
-    try:
-        raw = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
-        return None
+def _parse_fetch_time(raw: str) -> datetime | None:
     if not raw:
         return None
     if raw.endswith("Z"):

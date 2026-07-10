@@ -30,6 +30,11 @@ if [[ -n "${SECRETARY_SSH_COMMAND:-}" && -z "${RSYNC_RSH:-}" ]]; then
 fi
 
 mkdir -p "$local_backup_dir"
+staging_dir=$(mktemp -d "$local_backup_dir/.pull-backups.XXXXXX")
+cleanup() {
+  rm -rf "$staging_dir"
+}
+trap cleanup EXIT
 
 remote_archives=$("${ssh_cmd[@]}" "$ssh_target" "find '$remote_backups_dir' -maxdepth 1 -type f -name '*.tar.age' -print")
 if [[ -z "$remote_archives" ]]; then
@@ -39,13 +44,21 @@ fi
 
 if command -v rsync >/dev/null 2>&1; then
   rsync -av --include='*.tar.age' --exclude='*' \
-    "$ssh_target:$remote_backups_dir/" "$local_backup_dir/"
+    "$ssh_target:$remote_backups_dir/" "$staging_dir/"
 else
   printf '%s\n' "$remote_archives" |
     while IFS= read -r remote_archive; do
-      "${scp_cmd[@]}" "$ssh_target:$remote_archive" "$local_backup_dir/"
+      "${scp_cmd[@]}" "$ssh_target:$remote_archive" "$staging_dir/"
     done
 fi
+
+copied_archives=$(find "$staging_dir" -maxdepth 1 -type f -name '*.tar.age' -print -quit)
+if [[ -z "$copied_archives" ]]; then
+  echo "no encrypted backup archives copied from $ssh_target:$remote_backups_dir" >&2
+  exit 1
+fi
+
+find "$staging_dir" -maxdepth 1 -type f -name '*.tar.age' -exec cp -p {} "$local_backup_dir/" \;
 
 "${ssh_cmd[@]}" "$ssh_target" \
   "set -euo pipefail; mkdir -p '$remote_backups_dir'; tmp=\$(mktemp '$remote_backups_dir/.last_fetch.XXXXXX'); date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$tmp\"; mv \"\$tmp\" '$remote_backups_dir/last_fetch'"

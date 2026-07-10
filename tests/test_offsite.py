@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from secretary.offsite import check_last_fetch, last_fetch_path
 
@@ -70,6 +71,16 @@ class OffsiteTests(unittest.TestCase):
         self.assertEqual(status.warnings, [])
         self.assertIn("future", status.findings[0])
 
+    def test_unavailable_marker_is_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = _instance(Path(tmpdir), max_age_days=7)
+
+            with mock.patch("secretary.offsite.last_fetch_path", return_value=BrokenMarker()):
+                status = check_last_fetch(instance)
+
+        self.assertEqual(status.warnings, [])
+        self.assertIn("unavailable", status.findings[0])
+
 
 def _instance(root: Path, *, max_age_days: int) -> dict[str, object]:
     return {
@@ -81,6 +92,11 @@ def _instance(root: Path, *, max_age_days: int) -> dict[str, object]:
             "backup_pull_max_age_days": max_age_days,
         },
     }
+
+
+class BrokenMarker:
+    def is_file(self) -> bool:
+        raise PermissionError("denied")
 
 
 if __name__ == "__main__":

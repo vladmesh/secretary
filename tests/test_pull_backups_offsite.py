@@ -118,6 +118,60 @@ bash -c "$1"
         self.assertIn("no encrypted backup archives found", result.stderr)
         self.assertFalse(marker_exists)
 
+    def test_rsync_noop_does_not_update_last_fetch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fakebin = root / "bin"
+            remote_data = root / "remote-data"
+            local_backups = root / "local-backups"
+            remote_backups = remote_data / "backups"
+            fakebin.mkdir()
+            remote_backups.mkdir(parents=True)
+            (remote_backups / "backup-20260710.tar.age").write_text(
+                "encrypted\n", encoding="utf-8"
+            )
+            _write_executable(
+                fakebin / "ssh",
+                """#!/usr/bin/env bash
+target=$1
+shift
+bash -c "$1"
+""",
+            )
+            _write_executable(
+                fakebin / "rsync",
+                """#!/usr/bin/env bash
+set -euo pipefail
+dest=${@: -1}
+mkdir -p "$dest"
+""",
+            )
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}{os.pathsep}{env['PATH']}"
+            env["SECRETARY_SSH_COMMAND"] = str(fakebin / "ssh")
+
+            result = subprocess.run(
+                [
+                    str(SCRIPT),
+                    "localhost",
+                    str(remote_data),
+                    str(local_backups),
+                ],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            copied_archive_exists = (local_backups / "backup-20260710.tar.age").exists()
+            marker_exists = (remote_backups / "last_fetch").exists()
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("no encrypted backup archives copied", result.stderr)
+        self.assertFalse(copied_archive_exists)
+        self.assertFalse(marker_exists)
+
 
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(textwrap.dedent(content), encoding="utf-8")
