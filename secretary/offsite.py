@@ -7,6 +7,7 @@ from typing import Any
 
 
 LAST_FETCH_NAME = "last_fetch"
+MAX_CLOCK_SKEW = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,8 @@ def check_last_fetch(
 
     now = _as_utc(now or datetime.now(UTC))
     age = now - fetched_at
+    if age < -MAX_CLOCK_SKEW:
+        return OffsiteStatus([], ["offsite backup pull marker is in the future"])
     if age > timedelta(days=max_age_days):
         return OffsiteStatus(
             [],

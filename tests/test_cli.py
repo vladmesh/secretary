@@ -147,6 +147,33 @@ class CliTests(unittest.TestCase):
         self.assertIn("stale", output)
         self.assertIn("status: findings", output)
 
+    def test_doctor_reports_future_offsite_marker_as_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n"
+                "  backup_pull_max_age_days: 1\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            marker = data_dir / "backups" / "last_fetch"
+            marker.write_text("2999-01-01T00:00:00Z\n", encoding="utf-8")
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("offsite findings:", output)
+        self.assertIn("future", output)
+        self.assertIn("status: findings", output)
+
     def test_data_init_generates_manifest_that_doctor_finds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

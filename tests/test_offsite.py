@@ -57,6 +57,19 @@ class OffsiteTests(unittest.TestCase):
         self.assertEqual(status.warnings, [])
         self.assertIn("invalid", status.findings[0])
 
+    def test_future_marker_is_finding(self):
+        now = datetime(2026, 7, 10, 12, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = _instance(Path(tmpdir), max_age_days=7)
+            marker = last_fetch_path(Path(instance["data_dir"]))
+            marker.parent.mkdir(parents=True)
+            marker.write_text("2026-07-10T12:10:01Z\n", encoding="utf-8")
+
+            status = check_last_fetch(instance, now=now)
+
+        self.assertEqual(status.warnings, [])
+        self.assertIn("future", status.findings[0])
+
 
 def _instance(root: Path, *, max_age_days: int) -> dict[str, object]:
     return {

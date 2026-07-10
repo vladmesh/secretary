@@ -31,16 +31,21 @@ fi
 
 mkdir -p "$local_backup_dir"
 
+remote_archives=$("${ssh_cmd[@]}" "$ssh_target" "find '$remote_backups_dir' -maxdepth 1 -type f -name '*.tar.age' -print")
+if [[ -z "$remote_archives" ]]; then
+  echo "no encrypted backup archives found in $ssh_target:$remote_backups_dir" >&2
+  exit 1
+fi
+
 if command -v rsync >/dev/null 2>&1; then
   rsync -av --include='*.tar.age' --exclude='*' \
     "$ssh_target:$remote_backups_dir/" "$local_backup_dir/"
 else
-  "${ssh_cmd[@]}" "$ssh_target" "find '$remote_backups_dir' -maxdepth 1 -type f -name '*.tar.age' -print" |
+  printf '%s\n' "$remote_archives" |
     while IFS= read -r remote_archive; do
       "${scp_cmd[@]}" "$ssh_target:$remote_archive" "$local_backup_dir/"
     done
 fi
 
-fetched_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 "${ssh_cmd[@]}" "$ssh_target" \
-  "set -euo pipefail; mkdir -p '$remote_backups_dir'; tmp=\$(mktemp '$remote_backups_dir/.last_fetch.XXXXXX'); printf '%s\n' '$fetched_at' > \"\$tmp\"; mv \"\$tmp\" '$remote_backups_dir/last_fetch'"
+  "set -euo pipefail; mkdir -p '$remote_backups_dir'; tmp=\$(mktemp '$remote_backups_dir/.last_fetch.XXXXXX'); date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$tmp\"; mv \"\$tmp\" '$remote_backups_dir/last_fetch'"
