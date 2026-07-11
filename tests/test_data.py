@@ -24,7 +24,7 @@ from secretary.data import (
     normalize_board_card,
     raw_kanboard_dump,
 )
-from secretary.memory_journal import (
+from secretary.memory_write import (
     MemoryLockError,
     MemoryPermissionError,
     MemoryValidationError,
@@ -923,6 +923,32 @@ class ExportTests(unittest.TestCase):
         self.assertIn("protocol fact", exported)
         self.assertNotIn("external fact", exported)
         self.assertEqual(status, "")
+
+    def test_export_memory_respects_live_journal_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            source = root / "panelmem-kb"
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "external.md").write_text(
+                "external fact\n",
+                encoding="utf-8",
+            )
+            memory_dir = data_dir / "memory"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / memory_journal.MEMORY_LOCK_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "host": memory_journal.socket.gethostname(),
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(MemoryLockError):
+                export_memory(data_dir, source_dir=source)
 
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:

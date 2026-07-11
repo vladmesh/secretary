@@ -26,7 +26,7 @@ from secretary.host import (
     build_expectations,
     inventory,
 )
-from secretary.memory_journal import (
+from secretary.memory_write import (
     MemoryLockError,
     MemoryPermissionError,
     MemoryValidationError,
