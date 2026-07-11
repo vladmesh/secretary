@@ -244,6 +244,30 @@ class CliTests(unittest.TestCase):
         self.assertIn("core archive is stale", output)
         self.assertIn("full archive is stale", output)
 
+    def test_doctor_warns_when_backups_dir_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            shutil.rmtree(data_dir / "backups")
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("backup warnings:", output)
+        self.assertIn("backup directory is unavailable", output)
+
     def test_backup_create_accepts_kind_both(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

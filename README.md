@@ -148,7 +148,9 @@ machine keeps the point-in-time series.
 
 Daily operator timer templates live in `docs/systemd/`. The timer runs around
 04:00 UTC and calls `backup create --kind both`, so core and full are captured
-with one pause.
+with one pause. Install and enable those templates only after the deployed
+`/home/dev/secretary` checkout contains the merged code; ephemeral worker
+workspaces should not install live units.
 
 ## Documentation
 

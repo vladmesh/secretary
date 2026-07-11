@@ -662,6 +662,12 @@ class BackupTests(unittest.TestCase):
         self.assertIn("backup core archive is missing", status.warnings)
         self.assertIn("backup full archive is missing", status.warnings)
 
+    def test_backup_health_warns_when_backup_dir_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status = check_backup_health(Path(tmpdir))
+
+        self.assertIn("backup directory is unavailable", status.warnings)
+
     def test_backup_health_warns_when_backup_dir_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -695,7 +695,7 @@ def check_backup_health(
 ) -> BackupHealth:
     backups_dir = data_dir.expanduser() / "backups"
     if not backups_dir.exists():
-        return BackupHealth([])
+        return BackupHealth(["backup directory is unavailable"])
     if not backups_dir.is_dir():
         return BackupHealth(["backup directory is unavailable"])
     try:
