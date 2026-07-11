@@ -120,7 +120,9 @@ POLICIES: dict[BackupKind, BackupPolicy] = {
 BACKUP_KINDS: tuple[BackupKind, ...] = tuple(POLICIES)
 
 
-def policy_for(kind: str) -> BackupPolicy | None:
+def policy_for(kind: object) -> BackupPolicy | None:
+    if not isinstance(kind, str):
+        return None
     return POLICIES.get(kind) if kind in POLICIES else None
 
 
