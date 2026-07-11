@@ -475,7 +475,9 @@ class ExportTests(unittest.TestCase):
             fact = source / "memory" / "secretary" / "one.md"
             fact.parent.mkdir(parents=True)
             fact.write_text("fact one\n", encoding="utf-8")
-            original_copy_tree = data_module._copy_tree
+            from secretary import memory_journal
+
+            original_copy_tree = memory_journal._copy_tree
 
             def copy_then_mutate(source_memory, facts_dir):
                 original_copy_tree(source_memory, facts_dir)
@@ -638,7 +640,7 @@ class ExportTests(unittest.TestCase):
                     raise RuntimeError("copy failed")
                 return original_copy_tree(source_path, destination)
 
-            with mock.patch("secretary.data._copy_tree", side_effect=fail_when_publishing):
+            with mock.patch("secretary.memory_journal._copy_tree", side_effect=fail_when_publishing):
                 with self.assertRaisesRegex(RuntimeError, "copy failed"):
                     import_memory_journal(data_dir, source_dir=source)
 
