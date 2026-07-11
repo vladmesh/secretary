@@ -54,13 +54,22 @@ def create_backup(
     recipient: str | None = None,
     copy_transcripts: bool = False,
     allow_claimed_worker: bool = False,
+    caller_workspace: Path | None = None,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     pipeline_command: list[str] | None = None,
     age_command: str = "age",
     encrypt: Callable[[Path, Path, str], None] | None = None,
 ) -> BackupResult:
+    exclude_workspace: Path | None = None
     if not allow_claimed_worker:
         _reject_claimed_worker_context()
+    elif caller_workspace is None:
+        raise RuntimeError(
+            "backup create with allow_claimed_worker needs caller_workspace so the "
+            "pipeline freeze can exclude the calling worker"
+        )
+    else:
+        exclude_workspace = caller_workspace.expanduser().resolve()
     instance_file = _instance_file(instance_path)
     data_dir = (data_dir or _load_data_dir(instance_file)).expanduser().resolve()
     recipient = recipient or _age_recipient(instance_file)
@@ -86,6 +95,7 @@ def create_backup(
                 "pause",
                 pipeline_worktree=pipeline_worktree,
                 command=pipeline_command,
+                exclude_workspace=exclude_workspace,
             )
             paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
             if not paused_by_us:
@@ -329,6 +339,7 @@ def _pipeline_action(
     *,
     pipeline_worktree: Path,
     command: list[str] | None,
+    exclude_workspace: Path | None = None,
 ) -> dict[str, Any] | None:
     cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
     if action == "pause":
@@ -342,6 +353,8 @@ def _pipeline_action(
             "--actor",
             PIPELINE_PAUSE_ACTOR,
         ]
+        if exclude_workspace is not None:
+            args.extend(["--exclude-workspace", str(exclude_workspace)])
     elif action == "resume":
         args = ["--role", "steward", "resume"]
     else:
@@ -364,10 +377,21 @@ def _pipeline_action(
     except FileNotFoundError:
         raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None
     except subprocess.CalledProcessError as exc:
+        if exclude_workspace is not None and _rejects_exclude_workspace(exc.stderr):
+            raise RuntimeError(
+                "pipeline dispatcher does not understand --exclude-workspace; it "
+                "predates triggered-agents PR #85 and would relaunch the calling "
+                "worker on resume, so refusing to pause instead of dropping the flag"
+            ) from None
         reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
         raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
+
+
+def _rejects_exclude_workspace(stderr: str | None) -> bool:
+    text = (stderr or "").lower()
+    return "unrecognized arguments" in text and "--exclude-workspace" in text
 
 
 def _pipeline_status(

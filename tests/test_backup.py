@@ -182,6 +182,109 @@ class BackupTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(calls[2], ["pipeline", "--role", "steward", "resume"])
+            self.assertNotIn("--exclude-workspace", calls[1])
+
+    def test_pipeline_pause_appends_exclude_workspace(self):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            calls.append(list(args))
+            return SimpleNamespace(stdout="{}", stderr="")
+
+        with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
+            from secretary.backup import _pipeline_action
+
+            _pipeline_action(
+                "pause",
+                pipeline_worktree=Path("/tmp"),
+                command=["pipeline"],
+                exclude_workspace=Path("/ws/backup"),
+            )
+
+        self.assertEqual(
+            calls[0],
+            [
+                "pipeline",
+                "--role",
+                "steward",
+                "pause",
+                "freeze",
+                "--reason",
+                "secretary backup create",
+                "--actor",
+                "secretary-backup",
+                "--exclude-workspace",
+                "/ws/backup",
+            ],
+        )
+
+    def test_pipeline_pause_reports_dispatcher_without_flag(self):
+        import subprocess
+
+        def fake_run(args, **_kwargs):
+            raise subprocess.CalledProcessError(
+                returncode=2,
+                cmd=args,
+                stderr="pipeline pause: error: unrecognized arguments: "
+                "--exclude-workspace /ws/backup\n",
+            )
+
+        with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
+            from secretary.backup import _pipeline_action
+
+            with self.assertRaisesRegex(RuntimeError, "refusing to pause"):
+                _pipeline_action(
+                    "pause",
+                    pipeline_worktree=Path("/tmp"),
+                    command=["pipeline"],
+                    exclude_workspace=Path("/ws/backup"),
+                )
+
+    def test_create_claimed_worker_excludes_caller_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            calls: list[tuple[str, Path | None]] = []
+
+            def fake_pipeline(action, *, exclude_workspace=None, **_kwargs):
+                calls.append((action, exclude_workspace))
+
+            with (
+                mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}),
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
+                mock.patch("secretary.backup.export_all", side_effect=RuntimeError("stop")),
+                mock.patch(
+                    "secretary.backup.raw_kanboard_dump",
+                    return_value=SimpleNamespace(dump_dir=data_dir / "board" / "raw"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop"):
+                    create_backup(
+                        instance,
+                        recipient="age1example",
+                        allow_claimed_worker=True,
+                        caller_workspace=Path("/ws/backup"),
+                    )
+
+        self.assertEqual(calls[0], ("pause", Path("/ws/backup")))
+        self.assertEqual(calls[1], ("resume", None))
+
+    def test_create_claimed_worker_requires_caller_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+
+            with self.assertRaisesRegex(RuntimeError, "caller_workspace"):
+                create_backup(
+                    instance,
+                    recipient="age1example",
+                    allow_claimed_worker=True,
+                )
 
     def test_create_rejects_preexisting_freeze(self):
         with tempfile.TemporaryDirectory() as tmpdir:
