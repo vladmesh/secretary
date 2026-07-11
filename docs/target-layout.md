@@ -59,6 +59,12 @@ needs a private remote outside the VPS because restore depends on it.
 secretary-data/
   board/
   memory/
+    facts/          # local git journal, git root is here
+      global/
+      <project-dir>/
+    export.ndjson   # derived, not in the git journal
+    index.sqlite    # derived, not in the git journal
+    manifest.json   # derived, not in the git journal
   runs/
   transcripts/
   artifacts/
@@ -66,11 +72,15 @@ secretary-data/
 ```
 
 Backups move this data as archives, not through product or instance git history.
-The planned exception is `memory/facts`, which is a local git journal inside the
-data directory. It is still transported by backup, not by pushing product code.
+The exception is `memory/facts`, which is a local git journal inside the data
+directory. It has no remote and is still transported by backup, not by pushing
+product code. Fact files keep the existing flat layout:
+`memory/facts/global/<slug>.md` and `memory/facts/<project-dir>/<slug>.md`.
+There is no intermediate `project/` directory.
 
-`memory/index.sqlite` is derived state. It can be rebuilt from facts and exports,
-so it is not the canonical memory source.
+`memory/export.ndjson`, `memory/index.sqlite` and `memory/manifest.json` are
+derived siblings outside the git root. They can be rebuilt from facts, so they
+are not the canonical memory source.
 
 ## Target Commands
 
@@ -104,7 +114,8 @@ secretary data raw-kanboard-dump --instance ~/secretary-instance
 secretary data export --instance ~/secretary-instance
 ```
 
-`data init` creates the target `secretary-data` directories and writes the
+`data init` creates the target `secretary-data` directories, initializes
+`memory/facts` as a local git repository without a remote, and writes the
 schema-validated `data-manifest.json` under `data_dir`. `data raw-kanboard-dump`
 copies the Kanboard container data directory into a fresh timestamped directory
 under `secretary-data/board/`; repeated runs keep earlier dumps intact. This is a
@@ -112,11 +123,21 @@ raw layer for later backup/export work, not a normalized board export.
 
 `data export` writes the Phase 3 normalized snapshot: `board/cards.json` and
 `cards.ndjson` from the pipeline board CLI, `memory/facts` plus
-`memory/export.ndjson` from `panelmem-kb`, `runs/runs.ndjson`,
-`runs/watermarks.json` and `runs/cards.json` from triggered-agents state, and
-`transcripts/inventory.*` from head transcript directories. The exporters are
-read-only against their sources and publish deterministic files, so a repeat run
-without source changes leaves the same content.
+`memory/export.ndjson` from a local import of `panelmem-kb`,
+`runs/runs.ndjson`, `runs/watermarks.json` and `runs/cards.json` from
+triggered-agents state, and `transcripts/inventory.*` from head transcript
+directories. The exporters are read-only against their external sources and
+publish deterministic files. A repeat memory import without fact changes leaves
+the journal commit history unchanged.
+
+`secretary memory import --instance ~/secretary-instance --from ~/panelmem-kb`
+is the explicit pre-cutover sync. It copies supported markdown facts from
+`panelmem-kb/memory` into `memory/facts`, commits the local journal with
+`Op: import`, records the source HEAD in `memory/manifest.json`, and keeps
+`panelmem-kb` untouched as the readable fallback. Re-running it after curator
+freeze can pull facts added since the first seed. It refuses to run after the
+first non-import commit appears in the journal, so protocol writes cannot be
+overwritten by another source sync.
 
 `secretary backup verify` will check backup structure and version compatibility
 before restore or offsite retention decisions. It is planned after Phase 1.

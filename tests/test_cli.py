@@ -430,14 +430,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("secretary data init: could not write data manifest", output)
         self.assertNotIn("Traceback", output)
 
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_command_uses_data_dir(self, run):
+    def test_raw_kanboard_dump_command_uses_data_dir(self):
         def fake_run(command, **_kwargs):
             destination = Path(command[-1])
             destination.mkdir(parents=True)
             (destination / "db.sqlite").write_bytes(b"sqlite")
 
-        run.side_effect = fake_run
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
             data_dir = Path(tmpdir) / "secretary-data"
@@ -452,13 +450,15 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
-            code, output = self.run_cli(
-                ["data", "raw-kanboard-dump", "--instance", str(instance_dir)]
-            )
+            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run) as run:
+                code, output = self.run_cli(
+                    ["data", "raw-kanboard-dump", "--instance", str(instance_dir)]
+                )
+                docker_command = run.call_args.args[0]
 
         self.assertEqual(code, 0, output)
         self.assertIn("kanboard raw dump:", output)
-        self.assertEqual(run.call_args.args[0][0:2], ["docker", "cp"])
+        self.assertEqual(docker_command[0:2], ["docker", "cp"])
 
     def test_raw_kanboard_dump_reports_staging_prepare_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -633,6 +633,56 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("secretary data export-memory: could not decode memory fact", output)
         self.assertNotIn("Traceback", output)
+
+    def test_memory_import_command_uses_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "fact.md").write_text("fact\n", encoding="utf-8")
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+
+            first_code, first_output = self.run_cli(
+                [
+                    "memory",
+                    "import",
+                    "--instance",
+                    str(instance_dir),
+                    "--from",
+                    str(source),
+                ]
+            )
+            second_code, second_output = self.run_cli(
+                [
+                    "memory",
+                    "import",
+                    "--instance",
+                    str(instance_dir),
+                    "--from",
+                    str(source),
+                ]
+            )
+            export_exists = (data_dir / "memory" / "export.ndjson").is_file()
+            fact_exists = (data_dir / "memory" / "facts" / "secretary" / "fact.md").is_file()
+
+        self.assertEqual(first_code, 0, first_output)
+        self.assertIn("memory facts: 1", first_output)
+        self.assertIn("changed: yes", first_output)
+        self.assertEqual(second_code, 0, second_output)
+        self.assertIn("changed: no", second_output)
+        self.assertTrue(export_exists)
+        self.assertTrue(fact_exists)
 
     def test_export_transcripts_command_accepts_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
