@@ -20,6 +20,11 @@ class BackupTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
+        self.workspace_patch = mock.patch(
+            "secretary.backup._claimed_workspace_from_cwd", return_value=None
+        )
+        self.workspace_patch.start()
+        self.addCleanup(self.workspace_patch.stop)
 
     def test_create_writes_encrypted_archive_with_expected_structure_and_verify_is_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -105,6 +110,25 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, data_dir)
 
             with mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}):
+                with self.assertRaisesRegex(RuntimeError, "claimed worker"):
+                    create_backup(instance, recipient="age1example")
+
+    def test_create_rejects_claimed_workspace_when_board_role_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "orca" / "workspaces" / "secretary" / "380-backup"
+            workspace.mkdir(parents=True)
+            (workspace / "TASK.md").write_text("task\n", encoding="utf-8")
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+
+            with (
+                mock.patch.dict(os.environ, {"BOARD_ROLE": ""}),
+                mock.patch(
+                    "secretary.backup._claimed_workspace_from_cwd", return_value=workspace
+                ),
+            ):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance, recipient="age1example")
 
@@ -411,6 +435,8 @@ class BackupTests(unittest.TestCase):
                 from datetime import datetime, UTC
 
                 fake_datetime.now.return_value = datetime(2026, 7, 10, tzinfo=UTC)
+                fake_datetime.strptime.side_effect = datetime.strptime
+                fake_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
                 result = create_backup(
                     instance,
                     recipient="age1example",
@@ -487,6 +513,22 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/secretary-data/runs/runs.ndjson", core_names)
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", full_names)
 
+    def test_failed_create_does_not_leave_zero_length_final_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", side_effect=RuntimeError("pause failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "pause failed"):
+                    create_backup(instance, recipient="age1example")
+
+            self.assertEqual(list((data_dir / "backups").glob("*.tar.age")), [])
+
     def test_core_filters_done_cards(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -548,9 +590,9 @@ class BackupTests(unittest.TestCase):
             recent_full = backups / "secretary-backup-full-20260710T230000Z.tar.age"
             for path in (old_core, old_full, recent_full):
                 path.write_bytes(b"old")
-            old_time = 1_000_000
-            os.utime(old_core, (old_time, old_time))
-            os.utime(old_full, (old_time, old_time))
+            fresh_mtime = 2_000_000_000
+            os.utime(old_core, (fresh_mtime, fresh_mtime))
+            os.utime(old_full, (fresh_mtime, fresh_mtime))
 
             def fake_raw(data_dir_arg):
                 raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
@@ -594,9 +636,9 @@ class BackupTests(unittest.TestCase):
             full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
             core.write_bytes(b"core")
             full.write_bytes(b"full")
-            stale = datetime(2026, 7, 8, tzinfo=UTC).timestamp()
-            os.utime(core, (stale, stale))
-            os.utime(full, (stale, stale))
+            fresh_mtime = datetime(2026, 7, 11, tzinfo=UTC).timestamp()
+            os.utime(core, (fresh_mtime, fresh_mtime))
+            os.utime(full, (fresh_mtime, fresh_mtime))
 
             status = check_backup_health(
                 root,
@@ -607,6 +649,48 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(any("core archive is stale" in warning for warning in status.warnings))
         self.assertTrue(any("full archive is stale" in warning for warning in status.warnings))
         self.assertTrue(any("backup directory is large" in warning for warning in status.warnings))
+
+    def test_backup_health_warns_when_core_or_full_is_missing(self):
+        from datetime import UTC, datetime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "backups").mkdir()
+
+            status = check_backup_health(root, now=datetime(2026, 7, 11, tzinfo=UTC))
+
+        self.assertIn("backup core archive is missing", status.warnings)
+        self.assertIn("backup full archive is missing", status.warnings)
+
+    def test_backup_health_warns_when_backup_dir_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "backups").mkdir()
+
+            with mock.patch("secretary.backup._backup_archives", side_effect=OSError("denied")):
+                status = check_backup_health(root)
+
+        self.assertIn("backup directory is unavailable", status.warnings)
+
+    def test_verify_reports_missing_runs_state_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "core.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_core_payload(payload)
+            (payload / "secretary-data" / "runs" / "claims.json").unlink()
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertTrue(
+            any("runs_state component path missing from archive: claims" in item for item in result.findings)
+        )
 
     def test_verify_returns_2_when_archive_or_key_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -838,6 +922,45 @@ def _write_complete_payload(payload: Path) -> None:
                     "transcripts": {"path": "transcripts/inventory.json"},
                     "artifacts": {"path": "artifacts/inventory.json"},
                     "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_core_payload(payload: Path) -> None:
+    (payload / "instance").mkdir(parents=True)
+    (payload / "secretary-data" / "board").mkdir(parents=True)
+    (payload / "secretary-data" / "memory").mkdir(parents=True)
+    (payload / "secretary-data" / "runs").mkdir(parents=True)
+    (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+    (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "cards.json").write_text(
+        '{"version":1,"cards":[]}\n',
+        encoding="utf-8",
+    )
+    (payload / "secretary-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "claims.json").write_text("{}", encoding="utf-8")
+    (payload / "versions.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "backup_kind": "core",
+                "components": {
+                    "board": {"path": "board/cards.json"},
+                    "memory": {"path": "memory/export.ndjson"},
+                    "runs_state": {
+                        "path": "runs/watermarks.json",
+                        "cards": "runs/cards.json",
+                        "claims": "runs/claims.json",
+                    },
                 },
             },
             sort_keys=True,

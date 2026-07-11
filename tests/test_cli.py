@@ -235,12 +235,9 @@ class CliTests(unittest.TestCase):
             os.utime(core, (stale, stale))
             os.utime(full, (stale, stale))
 
-            with mock.patch("secretary.backup.datetime") as fake_datetime:
-                fake_datetime.now.return_value = datetime(2026, 7, 11, tzinfo=UTC)
-                fake_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
-                code, output = self.run_cli(
-                    ["doctor", "--dry-run", "--instance", str(instance_dir)]
-                )
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
 
         self.assertEqual(code, 0, output)
         self.assertIn("backup warnings:", output)
@@ -302,7 +299,7 @@ class CliTests(unittest.TestCase):
                 ["data", "init", "--instance", str(instance_dir)]
             )
             doctor_code, doctor_output = self.run_cli(
-                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
             )
             manifest_exists = (data_dir / "data-manifest.json").is_file()
 
@@ -310,7 +307,9 @@ class CliTests(unittest.TestCase):
         self.assertTrue(manifest_exists)
         self.assertEqual(doctor_code, 0, doctor_output)
         self.assertIn("data manifest: present", doctor_output)
-        self.assertNotIn("warnings:", doctor_output)
+        self.assertIn("backup warnings:", doctor_output)
+        self.assertIn("backup core archive is missing", doctor_output)
+        self.assertIn("backup full archive is missing", doctor_output)
 
     def test_data_init_overwrites_broken_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -330,11 +329,12 @@ class CliTests(unittest.TestCase):
 
             code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
             doctor_code, doctor_output = self.run_cli(
-                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
             )
 
         self.assertEqual(code, 0, output)
         self.assertEqual(doctor_code, 0, doctor_output)
+        self.assertIn("backup core archive is missing", doctor_output)
 
     def test_data_init_reports_manifest_publish_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:

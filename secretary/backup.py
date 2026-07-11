@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -138,7 +139,7 @@ def create_backups(
     temp_paths: list[Path] = []
     with _backup_create_lock(backups_dir):
         final_archives = [
-            _reserve_unique_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar.age")
+            _unique_archive_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar.age")
             for kind in kinds
         ]
         try:
@@ -220,10 +221,20 @@ def create_backups(
 
 
 def _reject_claimed_worker_context() -> None:
-    if os.environ.get("BOARD_ROLE") == "worker":
+    if os.environ.get("BOARD_ROLE") == "worker" or _claimed_workspace_from_cwd() is not None:
         raise RuntimeError(
             "backup create must not run from a claimed worker; use an operator context"
         )
+
+
+def _claimed_workspace_from_cwd(cwd: Path | None = None) -> Path | None:
+    current = (cwd or Path.cwd()).expanduser().resolve()
+    for candidate in (current, *current.parents):
+        if candidate.parent.parent.name != "workspaces":
+            continue
+        if (candidate / "TASK.md").is_file():
+            return candidate
+    return None
 
 
 @contextmanager
@@ -362,6 +373,8 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
                     continue
                 if name == "raw_board":
                     findings.extend(_verify_raw_board_component(members, names, archive_name))
+                if name == "runs_state":
+                    findings.extend(_verify_runs_state_component(names, component))
 
     if backup_kind == "core":
         findings.extend(_verify_core_archive(names, path))
@@ -626,21 +639,19 @@ def _apply_retention(backups_dir: Path, *, keep: set[Path], now: datetime) -> No
         if archive != newest_core and archive not in keep:
             _remove_path_quietly(archive)
 
-    cutoff = now.timestamp() - FULL_RETENTION_SECONDS
+    cutoff = now - timedelta(seconds=FULL_RETENTION_SECONDS)
     for archive in archives:
         if archive in keep:
             continue
         if _archive_kind_from_name(archive) != "full":
             continue
-        if _archive_timestamp(archive) < cutoff:
+        created_at = _archive_created_at(archive)
+        if created_at is not None and created_at < cutoff:
             _remove_path_quietly(archive)
 
 
 def _backup_archives(backups_dir: Path) -> list[Path]:
-    try:
-        return sorted(path for path in backups_dir.glob("*.tar.age") if path.is_file())
-    except OSError:
-        return []
+    return sorted(path for path in backups_dir.iterdir() if path.name.endswith(".tar.age") and path.is_file())
 
 
 def _archive_kind_from_name(path: Path) -> BackupKind:
@@ -651,14 +662,29 @@ def _archive_kind_from_name(path: Path) -> BackupKind:
 
 
 def _archive_sort_key(path: Path) -> tuple[float, str]:
-    return (_archive_timestamp(path), path.name)
+    created_at = _archive_created_at(path)
+    timestamp = created_at.timestamp() if created_at is not None else _archive_mtime(path).timestamp()
+    return (timestamp, path.name)
 
 
-def _archive_timestamp(path: Path) -> float:
+def _archive_created_at(path: Path) -> datetime | None:
+    match = re.fullmatch(
+        r"secretary-backup-(?:(?:core|full)-)?(\d{8}T\d{6}Z)(?:-\d+)?\.tar\.age",
+        path.name,
+    )
+    if match is None:
+        return None
     try:
-        return path.stat().st_mtime
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _archive_mtime(path: Path) -> datetime:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     except OSError:
-        return 0.0
+        return datetime.fromtimestamp(0, tz=UTC)
 
 
 def check_backup_health(
@@ -670,6 +696,8 @@ def check_backup_health(
     backups_dir = data_dir.expanduser() / "backups"
     if not backups_dir.exists():
         return BackupHealth([])
+    if not backups_dir.is_dir():
+        return BackupHealth(["backup directory is unavailable"])
     try:
         archives = _backup_archives(backups_dir)
     except OSError:
@@ -681,10 +709,22 @@ def check_backup_health(
     full_archives = [archive for archive in archives if _archive_kind_from_name(archive) == "full"]
     newest_core = max(core_archives, key=_archive_sort_key, default=None)
     newest_full = max(full_archives, key=_archive_sort_key, default=None)
-    if newest_core is not None and now - _archive_mtime(newest_core) > CORE_MAX_AGE:
-        warnings.append("backup core archive is stale: newest core is older than 1d")
-    if newest_full is not None and now - _archive_mtime(newest_full) > FULL_MAX_AGE:
-        warnings.append("backup full archive is stale: newest full is older than 48h")
+    if newest_core is None:
+        warnings.append("backup core archive is missing")
+    else:
+        core_created_at = _archive_created_at(newest_core)
+        if core_created_at is None:
+            warnings.append(f"backup core archive timestamp is unavailable: {newest_core.name}")
+        elif now - core_created_at > CORE_MAX_AGE:
+            warnings.append("backup core archive is stale: newest core is older than 1d")
+    if newest_full is None:
+        warnings.append("backup full archive is missing")
+    else:
+        full_created_at = _archive_created_at(newest_full)
+        if full_created_at is None:
+            warnings.append(f"backup full archive timestamp is unavailable: {newest_full.name}")
+        elif now - full_created_at > FULL_MAX_AGE:
+            warnings.append("backup full archive is stale: newest full is older than 48h")
 
     total = 0
     for archive in archives:
@@ -698,10 +738,6 @@ def check_backup_health(
             f"{total // (1024 * 1024)}MiB exceeds {max_bytes // (1024 * 1024)}MiB"
         )
     return BackupHealth(warnings)
-
-
-def _archive_mtime(path: Path) -> datetime:
-    return datetime.fromtimestamp(_archive_timestamp(path), tz=UTC)
 
 
 def _copy_tree_filtered(source: Path, destination: Path, *, skip: Callable[[Path], bool]) -> None:
@@ -827,6 +863,22 @@ def _verify_raw_board_component(
     return findings
 
 
+def _verify_runs_state_component(
+    names: set[str],
+    component: dict[str, Any],
+) -> list[str]:
+    findings: list[str] = []
+    for field in ("cards", "claims"):
+        value = component.get(field)
+        if not isinstance(value, str):
+            findings.append(f"runs_state component has no {field} path")
+            continue
+        archive_name = _component_archive_name(value)
+        if not _archive_has_path(names, archive_name):
+            findings.append(f"runs_state component path missing from archive: {field}")
+    return findings
+
+
 def _verify_core_archive(names: set[str], path: Path) -> list[str]:
     findings: list[str] = []
     raw_entries = [
@@ -922,20 +974,13 @@ def _git_commit(repo_root: Path) -> str | None:
     return result.stdout.strip() or None
 
 
-def _reserve_unique_path(path: Path) -> Path:
+def _unique_archive_path(path: Path) -> Path:
     suffix = 1
     while True:
         candidate = path if suffix == 1 else _suffixed_path(path, suffix)
-        try:
-            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            suffix += 1
-            continue
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        return candidate
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def _suffixed_path(path: Path, suffix: int) -> Path:
