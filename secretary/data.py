@@ -26,7 +26,12 @@ from secretary._fsutil import (
     write_json as _write_json,
     write_ndjson as _write_ndjson,
 )
-from secretary.memory_journal import PANELMEM_KB, import_memory_journal, init_memory_journal
+from secretary.memory_journal import (
+    PANELMEM_KB,
+    export_memory_snapshot,
+    import_memory_journal,
+    init_memory_journal,
+)
 
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
@@ -269,9 +274,9 @@ def export_memory(
     source_dir: Path = PANELMEM_KB,
 ) -> DataExport:
     data_dir = data_dir.expanduser().resolve()
-    result = import_memory_journal(data_dir, source_dir=source_dir)
+    result = export_memory_snapshot(data_dir, source_dir=source_dir)
     return DataExport(
-        path=data_dir / "memory" / "export.ndjson",
+        path=result.path,
         count=result.count,
         source=result.source,
     )

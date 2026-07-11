@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import shutil
 import tempfile
 import unittest
@@ -684,6 +685,127 @@ class CliTests(unittest.TestCase):
         self.assertTrue(export_exists)
         self.assertTrue(fact_exists)
 
+    def test_memory_protocol_commands_return_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            fact = root / "fact.md"
+            fact.write_text("fact from cli\n", encoding="utf-8")
+
+            propose_code, propose_output = self.run_cli(
+                [
+                    "memory",
+                    "propose",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--scope",
+                    "project:secretary",
+                    "--slug",
+                    "cli-fact",
+                    "--file",
+                    str(fact),
+                    "--source",
+                    "curator:claude/session",
+                    "--tags",
+                    "secretary,memory",
+                ]
+            )
+            proposal = json.loads(propose_output)
+            commit_code, commit_output = self.run_cli(
+                [
+                    "memory",
+                    "commit",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--propose-id",
+                    proposal["propose_id"],
+                ]
+            )
+            committed = json.loads(commit_output)
+
+        self.assertEqual(propose_code, 0, propose_output)
+        self.assertEqual(proposal["op"], "propose")
+        self.assertEqual(proposal["fact"], "secretary/cli-fact")
+        self.assertEqual(commit_code, 0, commit_output)
+        self.assertEqual(committed["op"], "commit")
+        self.assertEqual(committed["changed_facts"], ["secretary/cli-fact"])
+        self.assertTrue(committed["commit"])
+
+    def test_memory_protocol_commands_use_stable_error_codes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            fact = root / "fact.md"
+            fact.write_text("fact from cli\n", encoding="utf-8")
+
+            validation_code, validation_output = self.run_cli(
+                [
+                    "memory",
+                    "propose",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--scope",
+                    "bad",
+                    "--slug",
+                    "cli-fact",
+                    "--file",
+                    str(fact),
+                    "--source",
+                    "curator:claude/session",
+                ]
+            )
+            permission_code, permission_output = self.run_cli(
+                [
+                    "memory",
+                    "propose",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "worker:codex/session",
+                    "--scope",
+                    "project:secretary",
+                    "--slug",
+                    "cli-fact",
+                    "--file",
+                    str(fact),
+                    "--source",
+                    "worker:codex/session",
+                ]
+            )
+
+        self.assertEqual(validation_code, 2, validation_output)
+        self.assertEqual(json.loads(validation_output)["error"], "validation")
+        self.assertEqual(permission_code, 3, permission_output)
+        self.assertEqual(json.loads(permission_output)["error"], "permission")
+
     def test_export_transcripts_command_accepts_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -802,7 +924,6 @@ class CliTests(unittest.TestCase):
             ["restore"],
             ["project", "add", "example"],
             ["task", "list"],
-            ["memory", "commit"],
         ):
             with self.subTest(command=command):
                 code, output = self.run_cli(command)
