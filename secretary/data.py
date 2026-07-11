@@ -370,6 +370,10 @@ def export_runs(
         cards = _read_json_file_strict(cards_path) if cards_path.is_file() else {}
         if not isinstance(cards, dict):
             raise RuntimeError(f"state card mapping must be an object: {cards_path}")
+        claims_path = snapshot / "pipeline" / "claims.json"
+        claims = _read_json_file_strict(claims_path) if claims_path.is_file() else {}
+        if not isinstance(claims, dict):
+            raise RuntimeError(f"state claims must be an object: {claims_path}")
     finally:
         _cleanup_staging_dir(snapshot)
 
@@ -381,6 +385,7 @@ def export_runs(
         _write_ndjson(staging / "runs.ndjson", records)
         _write_json(staging / "watermarks.json", {"version": 1, "files": watermarks})
         _write_json(staging / "cards.json", {"version": 1, "cards": cards})
+        _write_json(staging / "claims.json", {"version": 1, "claims": claims})
         _write_json(
             staging / "export.json",
             {
@@ -389,12 +394,13 @@ def export_runs(
                 "run_record_count": len(records),
                 "watermark_count": len(watermarks),
                 "card_mapping_count": len(cards) if isinstance(cards, dict) else 0,
+                "claim_count": len(claims),
             },
         )
         _publish_component_entries(
             staging,
             runs_dir,
-            ["runs.ndjson", "watermarks.json", "cards.json", "export.json"],
+            ["runs.ndjson", "watermarks.json", "cards.json", "claims.json", "export.json"],
             "runs export",
         )
     except RuntimeError:

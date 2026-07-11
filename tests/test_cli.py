@@ -5,6 +5,7 @@ import io
 import shutil
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -207,6 +208,103 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Traceback", output)
         self.assertIn("status: findings", output)
 
+    def test_doctor_warns_when_backups_are_stale(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            backups = data_dir / "backups"
+            core = backups / "secretary-backup-core-20260709T000000Z.tar.age"
+            full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
+            core.write_bytes(b"core")
+            full.write_bytes(b"full")
+            stale = datetime(2026, 7, 8, tzinfo=UTC).timestamp()
+            core.touch()
+            full.touch()
+            import os
+
+            os.utime(core, (stale, stale))
+            os.utime(full, (stale, stale))
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("backup warnings:", output)
+        self.assertIn("core archive is stale", output)
+        self.assertIn("full archive is stale", output)
+
+    def test_doctor_warns_when_backups_dir_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            shutil.rmtree(data_dir / "backups")
+
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("backup warnings:", output)
+        self.assertIn("backup directory is unavailable", output)
+
+    def test_backup_create_accepts_kind_both(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch("secretary.cli.create_backups") as create:
+                create.return_value = [
+                    mock.Mock(archive=Path("/tmp/core.tar.age"), manifest={"version": 1, "backup_kind": "core"}),
+                    mock.Mock(archive=Path("/tmp/full.tar.age"), manifest={"version": 1, "backup_kind": "full"}),
+                ]
+                code, output = self.run_cli(
+                    [
+                        "backup",
+                        "create",
+                        "--instance",
+                        str(instance_dir),
+                        "--age-recipient",
+                        "age1example",
+                        "--kind",
+                        "both",
+                    ]
+                )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("kind: core", output)
+        self.assertIn("kind: full", output)
+        self.assertEqual(create.call_args.kwargs["backup_kinds"], ("core", "full"))
+
     def test_data_init_generates_manifest_that_doctor_finds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
@@ -225,7 +323,7 @@ class CliTests(unittest.TestCase):
                 ["data", "init", "--instance", str(instance_dir)]
             )
             doctor_code, doctor_output = self.run_cli(
-                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
             )
             manifest_exists = (data_dir / "data-manifest.json").is_file()
 
@@ -233,7 +331,9 @@ class CliTests(unittest.TestCase):
         self.assertTrue(manifest_exists)
         self.assertEqual(doctor_code, 0, doctor_output)
         self.assertIn("data manifest: present", doctor_output)
-        self.assertNotIn("warnings:", doctor_output)
+        self.assertIn("backup warnings:", doctor_output)
+        self.assertIn("backup core archive is missing", doctor_output)
+        self.assertIn("backup full archive is missing", doctor_output)
 
     def test_data_init_overwrites_broken_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -253,11 +353,12 @@ class CliTests(unittest.TestCase):
 
             code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
             doctor_code, doctor_output = self.run_cli(
-                ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
+                ["doctor", "--dry-run", "--instance", str(instance_dir)]
             )
 
         self.assertEqual(code, 0, output)
         self.assertEqual(doctor_code, 0, doctor_output)
+        self.assertIn("backup core archive is missing", doctor_output)
 
     def test_data_init_reports_manifest_publish_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:

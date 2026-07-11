@@ -132,6 +132,26 @@ updates `secretary-data/backups/last_fetch` on the VPS. `doctor` reads
 `offsite.backup_pull_max_age_days` from `instance.yaml`: a missing `last_fetch`
 is a warning, while a stale marker is a finding and exits non-zero.
 
+## Backup policy
+
+`secretary backup create --kind both` creates one core archive and one full archive
+under `secretary-data/backups/` during a single pipeline pause. Core archives contain
+the active normalized board export without Done cards, full memory export, run
+watermarks, card mapping, claims, instance config and the versions manifest. Full
+archives contain the raw board dump, full normalized export, runs, transcript
+inventory, artifacts and debug inventory.
+
+After a successful create, VPS retention keeps only the latest core archive and
+removes full archives older than 48 hours. The offsite pull script still copies
+all `*.tar.age` archives it sees and never deletes local files, so the local
+machine keeps the point-in-time series.
+
+Daily operator timer templates live in `docs/systemd/`. The timer runs around
+04:00 UTC and calls `backup create --kind both`, so core and full are captured
+with one pause. Install and enable those templates only after the deployed
+`/home/dev/secretary` checkout contains the merged code; ephemeral worker
+workspaces should not install live units.
+
 ## Documentation
 
 - `docs/target-layout.md` describes the target `secretary`, `secretary-instance`

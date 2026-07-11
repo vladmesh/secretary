@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,9 +10,9 @@ import tarfile
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
 import fcntl
 
@@ -28,6 +29,11 @@ PIPELINE_WORKTREE = Path("/home/dev/orca/workspaces/triggered-agents/pipeline")
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 ARCHIVE_ROOT = "secretary-backup"
 BACKUP_VERSION = 1
+BACKUP_KINDS = ("core", "full")
+FULL_RETENTION_SECONDS = 48 * 60 * 60
+CORE_MAX_AGE = timedelta(days=1)
+FULL_MAX_AGE = timedelta(hours=48)
+BACKUPS_MAX_BYTES = 512 * 1024 * 1024
 PIPELINE_PAUSE_REASON = "secretary backup create"
 PIPELINE_PAUSE_ACTOR = "secretary-backup"
 PRODUCT_REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +53,14 @@ class VerifyResult:
     manifest: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class BackupHealth:
+    warnings: list[str]
+
+
+BackupKind = Literal["core", "full"]
+
+
 def create_backup(
     instance_path: Path,
     *,
@@ -59,7 +73,44 @@ def create_backup(
     pipeline_command: list[str] | None = None,
     age_command: str = "age",
     encrypt: Callable[[Path, Path, str], None] | None = None,
+    backup_kind: BackupKind = "full",
 ) -> BackupResult:
+    return create_backups(
+        instance_path,
+        data_dir=data_dir,
+        recipient=recipient,
+        copy_transcripts=copy_transcripts,
+        allow_claimed_worker=allow_claimed_worker,
+        caller_workspace=caller_workspace,
+        pipeline_worktree=pipeline_worktree,
+        pipeline_command=pipeline_command,
+        age_command=age_command,
+        encrypt=encrypt,
+        backup_kinds=(backup_kind,),
+    )[0]
+
+
+def create_backups(
+    instance_path: Path,
+    *,
+    data_dir: Path | None = None,
+    recipient: str | None = None,
+    copy_transcripts: bool = False,
+    allow_claimed_worker: bool = False,
+    caller_workspace: Path | None = None,
+    pipeline_worktree: Path = PIPELINE_WORKTREE,
+    pipeline_command: list[str] | None = None,
+    age_command: str = "age",
+    encrypt: Callable[[Path, Path, str], None] | None = None,
+    backup_kinds: tuple[BackupKind, ...] = ("full",),
+) -> list[BackupResult]:
+    kinds = tuple(dict.fromkeys(backup_kinds))
+    invalid = [kind for kind in kinds if kind not in BACKUP_KINDS]
+    if invalid:
+        raise RuntimeError(f"unsupported backup kind: {invalid[0]}")
+    if not kinds:
+        raise RuntimeError("at least one backup kind is required")
+
     exclude_workspace: Path | None = None
     if not allow_claimed_worker:
         _reject_claimed_worker_context()
@@ -80,13 +131,17 @@ def create_backup(
     backups_dir.mkdir(parents=True, exist_ok=True)
     created_at = datetime.now(UTC).replace(microsecond=0).isoformat()
     stamp = created_at.replace("+00:00", "Z").replace("-", "").replace(":", "")
-    final_archive: Path | None = None
+    final_archives: list[Path] = []
+    results: list[BackupResult] = []
 
     paused_by_us = False
     completed = False
     temp_paths: list[Path] = []
     with _backup_create_lock(backups_dir):
-        final_archive = _reserve_unique_path(backups_dir / f"secretary-backup-{stamp}.tar.age")
+        final_archives = [
+            _unique_archive_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar.age")
+            for kind in kinds
+        ]
         try:
             pre_pause = _pipeline_status(pipeline_worktree=pipeline_worktree, command=pipeline_command)
             if pre_pause.get("paused"):
@@ -105,34 +160,44 @@ def create_backup(
             raw_dump = raw_kanboard_dump(data_dir)
             exports = export_all(data_dir, copy_transcripts=copy_transcripts)
 
-            staging = Path(tempfile.mkdtemp(prefix=".secretary-backup-", suffix=".tmp"))
-            temp_paths.append(staging)
-            payload = staging / ARCHIVE_ROOT
-            payload.mkdir()
+            for kind, final_archive in zip(kinds, final_archives, strict=True):
+                staging = Path(tempfile.mkdtemp(prefix=".secretary-backup-", suffix=".tmp"))
+                temp_paths.append(staging)
+                payload = staging / ARCHIVE_ROOT
+                payload.mkdir()
 
-            manifest = _build_versions_manifest(
-                created_at=created_at,
-                instance_file=instance_file,
-                data_dir=data_dir,
-                raw_dump=raw_dump.dump_dir,
-                exports=exports,
-            )
-            _copy_instance_config(instance_file.parent, payload / "instance")
-            _copy_data_snapshot(data_dir, payload / "secretary-data")
-            _write_json(payload / "versions.json", manifest)
-            _write_orca_debug_snapshot(payload / "debug" / "orca-state")
+                manifest = _build_versions_manifest(
+                    created_at=created_at,
+                    backup_kind=kind,
+                    instance_file=instance_file,
+                    data_dir=data_dir,
+                    raw_dump=raw_dump.dump_dir,
+                    exports=exports,
+                )
+                _copy_instance_config(instance_file.parent, payload / "instance")
+                _copy_data_snapshot(data_dir, payload / "secretary-data", backup_kind=kind)
+                if kind == "core":
+                    core_board_count = _filter_core_board_export(
+                        payload / "secretary-data" / "board"
+                    )
+                    manifest["components"]["board"]["count"] = core_board_count
+                _write_json(payload / "versions.json", manifest)
+                if kind == "full":
+                    _write_orca_debug_snapshot(payload / "debug" / "orca-state")
 
-            plain_archive = staging / "payload.tar"
-            _write_tar(plain_archive, payload)
-            temp_paths.append(plain_archive)
+                plain_archive = staging / f"{kind}.tar"
+                _write_tar(plain_archive, payload)
+                temp_paths.append(plain_archive)
 
-            encrypted_archive = staging / "payload.tar.age"
-            temp_paths.append(encrypted_archive)
-            if encrypt is None:
-                _encrypt_with_age(plain_archive, encrypted_archive, recipient, age_command=age_command)
-            else:
-                encrypt(plain_archive, encrypted_archive, recipient)
-            os.replace(encrypted_archive, final_archive)
+                encrypted_archive = staging / f"{kind}.tar.age"
+                temp_paths.append(encrypted_archive)
+                if encrypt is None:
+                    _encrypt_with_age(plain_archive, encrypted_archive, recipient, age_command=age_command)
+                else:
+                    encrypt(plain_archive, encrypted_archive, recipient)
+                os.replace(encrypted_archive, final_archive)
+                results.append(BackupResult(archive=final_archive, manifest=manifest))
+            _apply_retention(backups_dir, keep=set(final_archives), now=datetime.now(UTC))
             completed = True
         finally:
             try:
@@ -145,19 +210,31 @@ def create_backup(
             finally:
                 for path in temp_paths:
                     _remove_path_quietly(path)
-            if not completed and final_archive is not None:
-                _remove_path_quietly(final_archive)
+            if not completed:
+                for final_archive in final_archives:
+                    _remove_path_quietly(final_archive)
 
-    if final_archive is None or not final_archive.is_file():
+    missing = [path for path in final_archives if not path.is_file()]
+    if missing:
         raise RuntimeError("encrypted archive was not created")
-    return BackupResult(archive=final_archive, manifest=manifest)
+    return results
 
 
 def _reject_claimed_worker_context() -> None:
-    if os.environ.get("BOARD_ROLE") == "worker":
+    if os.environ.get("BOARD_ROLE") == "worker" or _claimed_workspace_from_cwd() is not None:
         raise RuntimeError(
             "backup create must not run from a claimed worker; use an operator context"
         )
+
+
+def _claimed_workspace_from_cwd(cwd: Path | None = None) -> Path | None:
+    current = (cwd or Path.cwd()).expanduser().resolve()
+    for candidate in (current, *current.parents):
+        if candidate.parent.parent.name != "workspaces":
+            continue
+        if (candidate / "TASK.md").is_file():
+            return candidate
+    return None
 
 
 @contextmanager
@@ -227,6 +304,13 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
     except (tarfile.TarError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         return VerifyResult(1, [f"invalid archive: {exc}"], [])
 
+    backup_kind = "full"
+    has_explicit_kind = False
+    if isinstance(manifest, dict):
+        has_explicit_kind = "backup_kind" in manifest or "kind" in manifest
+        raw_kind = manifest.get("backup_kind", manifest.get("kind", "full"))
+        backup_kind = raw_kind if raw_kind in BACKUP_KINDS else "invalid"
+
     required = {
         f"{ARCHIVE_ROOT}/versions.json",
         f"{ARCHIVE_ROOT}/instance/instance.yaml",
@@ -235,13 +319,18 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         f"{ARCHIVE_ROOT}/secretary-data/board/cards.ndjson",
         f"{ARCHIVE_ROOT}/secretary-data/board/export.json",
         f"{ARCHIVE_ROOT}/secretary-data/memory/export.ndjson",
-        f"{ARCHIVE_ROOT}/secretary-data/runs/runs.ndjson",
         f"{ARCHIVE_ROOT}/secretary-data/runs/watermarks.json",
         f"{ARCHIVE_ROOT}/secretary-data/runs/cards.json",
-        f"{ARCHIVE_ROOT}/secretary-data/transcripts/inventory.json",
-        f"{ARCHIVE_ROOT}/secretary-data/artifacts/inventory.json",
-        f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json",
     }
+    if backup_kind == "full":
+        required.update(
+            {
+                f"{ARCHIVE_ROOT}/secretary-data/runs/runs.ndjson",
+                f"{ARCHIVE_ROOT}/secretary-data/transcripts/inventory.json",
+                f"{ARCHIVE_ROOT}/secretary-data/artifacts/inventory.json",
+                f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json",
+            }
+        )
     missing = sorted(required - names)
     findings.extend(f"missing required archive entry: {name}" for name in missing)
 
@@ -250,19 +339,25 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
     else:
         if manifest.get("version") != BACKUP_VERSION:
             findings.append("unsupported backup version")
+        if backup_kind == "invalid":
+            findings.append("unsupported backup kind")
         components = manifest.get("components")
         if not isinstance(components, dict):
             findings.append("versions manifest has no components object")
         else:
-            required_components = {
-                "raw_board",
-                "board",
-                "memory",
-                "runs",
-                "transcripts",
-                "artifacts",
-                "debug_orca_state",
-            }
+            required_components = {"board", "memory", "runs_state"}
+            if backup_kind == "full":
+                required_components = {
+                    "raw_board",
+                    "board",
+                    "memory",
+                    "runs",
+                    "transcripts",
+                    "artifacts",
+                    "debug_orca_state",
+                }
+                if has_explicit_kind or "runs_state" in components:
+                    required_components.add("runs_state")
             missing_components = sorted(required_components - set(components))
             findings.extend(
                 f"versions manifest missing component: {name}" for name in missing_components
@@ -278,6 +373,11 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
                     continue
                 if name == "raw_board":
                     findings.extend(_verify_raw_board_component(members, names, archive_name))
+                if name == "runs_state":
+                    findings.extend(_verify_runs_state_component(names, component))
+
+    if backup_kind == "core":
+        findings.extend(_verify_core_archive(names, path))
 
     forbidden_names = [
         name
@@ -304,13 +404,34 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
 def _build_versions_manifest(
     *,
     created_at: str,
+    backup_kind: BackupKind,
     instance_file: Path,
     data_dir: Path,
     raw_dump: Path,
     exports: dict[str, DataExport],
 ) -> dict[str, Any]:
+    components: dict[str, Any] = {
+        "board": _component_manifest(data_dir, exports["board"]),
+        "memory": _component_manifest(data_dir, exports["memory"]),
+        "runs_state": {
+            "path": "runs/watermarks.json",
+            "cards": "runs/cards.json",
+            "claims": "runs/claims.json",
+            "source": exports["runs"].source,
+        },
+    }
+    if backup_kind == "full":
+        components = {
+            "raw_board": {"path": _relative_to_data(data_dir, raw_dump)},
+            **components,
+            "runs": _component_manifest(data_dir, exports["runs"]),
+            "transcripts": _component_manifest(data_dir, exports["transcripts"]),
+            "artifacts": _component_manifest(data_dir, exports["artifacts"]),
+            "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+        }
     return {
         "version": BACKUP_VERSION,
+        "backup_kind": backup_kind,
         "created_at": created_at,
         "tool": "secretary",
         "python": sys.version.split()[0],
@@ -319,18 +440,15 @@ def _build_versions_manifest(
             "path": str(instance_file),
         },
         "data_dir": str(data_dir),
-        "components": {
-            "raw_board": {"path": _relative_to_data(data_dir, raw_dump)},
-            **{
-                name: {
-                    "path": _relative_to_data(data_dir, export.path),
-                    "count": export.count,
-                    "source": export.source,
-                }
-                for name, export in sorted(exports.items())
-            },
-            "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
-        },
+        "components": components,
+    }
+
+
+def _component_manifest(data_dir: Path, export: DataExport) -> dict[str, Any]:
+    return {
+        "path": _relative_to_data(data_dir, export.path),
+        "count": export.count,
+        "source": export.source,
     }
 
 
@@ -443,7 +561,7 @@ def _copy_instance_config(source: Path, destination: Path) -> None:
     )
 
 
-def _copy_data_snapshot(data_dir: Path, destination: Path) -> None:
+def _copy_data_snapshot(data_dir: Path, destination: Path, *, backup_kind: BackupKind) -> None:
     allowed_roots = {"board", "memory", "runs", "transcripts", "artifacts"}
 
     def skip(relative: Path) -> bool:
@@ -454,10 +572,172 @@ def _copy_data_snapshot(data_dir: Path, destination: Path) -> None:
         if relative.parts[0] == "backups":
             return True
         if relative.parts[0] in allowed_roots or relative.name == "data-manifest.json":
-            return any(part.startswith(".") for part in relative.parts)
+            if any(part.startswith(".") for part in relative.parts):
+                return True
+            if backup_kind == "core":
+                return _skip_core_data_entry(relative)
+            return False
         return True
 
     _copy_tree_filtered(data_dir, destination, skip=skip)
+
+
+def _skip_core_data_entry(relative: Path) -> bool:
+    if not relative.parts:
+        return False
+    root = relative.parts[0]
+    if root in {"transcripts", "artifacts"}:
+        return True
+    if root == "board" and len(relative.parts) > 1:
+        name = relative.parts[1]
+        return name.startswith("kanboard-raw-")
+    if root == "runs" and len(relative.parts) > 1:
+        return relative.parts[1] not in {"watermarks.json", "cards.json", "claims.json"}
+    return False
+
+
+def _filter_core_board_export(board_dir: Path) -> int:
+    cards_path = board_dir / "cards.json"
+    ndjson_path = board_dir / "cards.ndjson"
+    export_path = board_dir / "export.json"
+    try:
+        payload = json.loads(cards_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        raise RuntimeError(f"could not read core board export: {exc}") from None
+    cards = payload.get("cards") if isinstance(payload, dict) else None
+    if not isinstance(cards, list):
+        raise RuntimeError("core board export has no cards list")
+    filtered = [
+        card for card in cards
+        if not (isinstance(card, dict) and str(card.get("column", "")).casefold() == "done")
+    ]
+    payload["cards"] = filtered
+    _write_json(cards_path, payload)
+    ndjson_path.write_text(
+        "".join(json.dumps(card, sort_keys=True) + "\n" for card in filtered),
+        encoding="utf-8",
+    )
+    try:
+        export_payload = json.loads(export_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        export_payload = {"version": 1}
+    if isinstance(export_payload, dict):
+        export_payload["card_count"] = len(filtered)
+        export_payload["policy"] = {
+            **(export_payload.get("policy") if isinstance(export_payload.get("policy"), dict) else {}),
+            "done_cards": "excluded",
+        }
+        _write_json(export_path, export_payload)
+    return len(filtered)
+
+
+def _apply_retention(backups_dir: Path, *, keep: set[Path], now: datetime) -> None:
+    archives = _backup_archives(backups_dir)
+    core_archives = [archive for archive in archives if _archive_kind_from_name(archive) == "core"]
+    newest_core = max(core_archives, key=_archive_sort_key, default=None)
+    for archive in core_archives:
+        if archive != newest_core and archive not in keep:
+            _remove_path_quietly(archive)
+
+    cutoff = now - timedelta(seconds=FULL_RETENTION_SECONDS)
+    for archive in archives:
+        if archive in keep:
+            continue
+        if _archive_kind_from_name(archive) != "full":
+            continue
+        created_at = _archive_created_at(archive)
+        if created_at is not None and created_at < cutoff:
+            _remove_path_quietly(archive)
+
+
+def _backup_archives(backups_dir: Path) -> list[Path]:
+    return sorted(path for path in backups_dir.iterdir() if path.name.endswith(".tar.age") and path.is_file())
+
+
+def _archive_kind_from_name(path: Path) -> BackupKind:
+    name = path.name
+    if name.startswith("secretary-backup-core-"):
+        return "core"
+    return "full"
+
+
+def _archive_sort_key(path: Path) -> tuple[float, str]:
+    created_at = _archive_created_at(path)
+    timestamp = created_at.timestamp() if created_at is not None else _archive_mtime(path).timestamp()
+    return (timestamp, path.name)
+
+
+def _archive_created_at(path: Path) -> datetime | None:
+    match = re.fullmatch(
+        r"secretary-backup-(?:(?:core|full)-)?(\d{8}T\d{6}Z)(?:-\d+)?\.tar\.age",
+        path.name,
+    )
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _archive_mtime(path: Path) -> datetime:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        return datetime.fromtimestamp(0, tz=UTC)
+
+
+def check_backup_health(
+    data_dir: Path,
+    *,
+    now: datetime | None = None,
+    max_bytes: int = BACKUPS_MAX_BYTES,
+) -> BackupHealth:
+    backups_dir = data_dir.expanduser() / "backups"
+    if not backups_dir.exists():
+        return BackupHealth(["backup directory is unavailable"])
+    if not backups_dir.is_dir():
+        return BackupHealth(["backup directory is unavailable"])
+    try:
+        archives = _backup_archives(backups_dir)
+    except OSError:
+        return BackupHealth(["backup directory is unavailable"])
+
+    now = now or datetime.now(UTC)
+    warnings: list[str] = []
+    core_archives = [archive for archive in archives if _archive_kind_from_name(archive) == "core"]
+    full_archives = [archive for archive in archives if _archive_kind_from_name(archive) == "full"]
+    newest_core = max(core_archives, key=_archive_sort_key, default=None)
+    newest_full = max(full_archives, key=_archive_sort_key, default=None)
+    if newest_core is None:
+        warnings.append("backup core archive is missing")
+    else:
+        core_created_at = _archive_created_at(newest_core)
+        if core_created_at is None:
+            warnings.append(f"backup core archive timestamp is unavailable: {newest_core.name}")
+        elif now - core_created_at > CORE_MAX_AGE:
+            warnings.append("backup core archive is stale: newest core is older than 1d")
+    if newest_full is None:
+        warnings.append("backup full archive is missing")
+    else:
+        full_created_at = _archive_created_at(newest_full)
+        if full_created_at is None:
+            warnings.append(f"backup full archive timestamp is unavailable: {newest_full.name}")
+        elif now - full_created_at > FULL_MAX_AGE:
+            warnings.append("backup full archive is stale: newest full is older than 48h")
+
+    total = 0
+    for archive in archives:
+        try:
+            total += archive.stat().st_size
+        except OSError:
+            warnings.append(f"backup archive is unavailable: {archive.name}")
+    if total > max_bytes:
+        warnings.append(
+            "backup directory is large: "
+            f"{total // (1024 * 1024)}MiB exceeds {max_bytes // (1024 * 1024)}MiB"
+        )
+    return BackupHealth(warnings)
 
 
 def _copy_tree_filtered(source: Path, destination: Path, *, skip: Callable[[Path], bool]) -> None:
@@ -583,6 +863,59 @@ def _verify_raw_board_component(
     return findings
 
 
+def _verify_runs_state_component(
+    names: set[str],
+    component: dict[str, Any],
+) -> list[str]:
+    findings: list[str] = []
+    for field in ("cards", "claims"):
+        value = component.get(field)
+        if not isinstance(value, str):
+            findings.append(f"runs_state component has no {field} path")
+            continue
+        archive_name = _component_archive_name(value)
+        if not _archive_has_path(names, archive_name):
+            findings.append(f"runs_state component path missing from archive: {field}")
+    return findings
+
+
+def _verify_core_archive(names: set[str], path: Path) -> list[str]:
+    findings: list[str] = []
+    raw_entries = [
+        name for name in names
+        if Path(name).parts[:3] == (ARCHIVE_ROOT, "secretary-data", "board")
+        and len(Path(name).parts) > 3
+        and Path(name).parts[3].startswith("kanboard-raw-")
+    ]
+    findings.extend(f"core archive contains raw board dump: {name}" for name in raw_entries)
+    forbidden_core_entries = {
+        f"{ARCHIVE_ROOT}/secretary-data/runs/runs.ndjson",
+        f"{ARCHIVE_ROOT}/secretary-data/transcripts/inventory.json",
+        f"{ARCHIVE_ROOT}/secretary-data/artifacts/inventory.json",
+        f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json",
+    }
+    findings.extend(
+        f"core archive contains full-only entry: {name}"
+        for name in sorted(forbidden_core_entries & names)
+    )
+    try:
+        with tarfile.open(path, "r") as archive:
+            cards = _read_member_json(archive, f"{ARCHIVE_ROOT}/secretary-data/board/cards.json")
+    except (tarfile.TarError, OSError, json.JSONDecodeError, UnicodeError) as exc:
+        return [*findings, f"could not inspect core board export: {exc}"]
+    card_list = cards.get("cards") if isinstance(cards, dict) else None
+    if not isinstance(card_list, list):
+        findings.append("core board export has no cards list")
+        return findings
+    done_refs = [
+        str(card.get("reference") or card.get("id") or "(unknown)")
+        for card in card_list
+        if isinstance(card, dict) and str(card.get("column", "")).casefold() == "done"
+    ]
+    findings.extend(f"core archive contains Done card: {ref}" for ref in done_refs)
+    return findings
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -641,20 +974,13 @@ def _git_commit(repo_root: Path) -> str | None:
     return result.stdout.strip() or None
 
 
-def _reserve_unique_path(path: Path) -> Path:
+def _unique_archive_path(path: Path) -> Path:
     suffix = 1
     while True:
         candidate = path if suffix == 1 else _suffixed_path(path, suffix)
-        try:
-            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            suffix += 1
-            continue
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        return candidate
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def _suffixed_path(path: Path, suffix: int) -> Path:
