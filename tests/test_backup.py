@@ -698,6 +698,27 @@ class BackupTests(unittest.TestCase):
             any("runs_state component path missing from archive: claims" in item for item in result.findings)
         )
 
+    def test_verify_accepts_legacy_full_archive_without_runs_state_claims(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "legacy-full.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_complete_payload(payload)
+            (payload / "secretary-data" / "runs" / "claims.json").unlink()
+            raw_data = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data"
+            raw_data.mkdir(parents=True)
+            (raw_data / "db.sqlite").write_bytes(b"sqlite")
+            (raw_data.parent / "manifest.json").write_text("{}", encoding="utf-8")
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 0, result.findings)
+
     def test_verify_returns_2_when_archive_or_key_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
