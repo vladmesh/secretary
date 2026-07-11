@@ -81,7 +81,7 @@ The Phase 1 command surface is present, but only `doctor --dry-run` does useful 
 
 ## Data exports
 
-Phase 3 adds read-only exporters for the current system:
+Phase 3 adds exporters for the current system:
 
 ```bash
 python3 -m secretary data export --instance ~/secretary-instance
@@ -90,10 +90,22 @@ python3 -m secretary data export --instance ~/secretary-instance
 The combined export writes normalized board cards, memory facts, pipeline run
 state and transcript inventory under `secretary-data/`. Narrow commands are also
 available for one component at a time: `export-board`, `export-memory`,
-`export-runs` and `export-transcripts`. Re-running an export rewrites the same
-snapshot files in deterministic order without changing the live sources.
-`reconcile`, `backup`, `restore`, `project add`, `task`, and `memory` return an
-explicit `not implemented` message.
+`export-runs` and `export-transcripts`. Memory export seeds or syncs the local
+`memory/facts` git journal from `panelmem-kb`, then writes derived
+`memory/export.ndjson` and `memory/manifest.json` next to it. Re-running it does
+not create a new import commit when facts are unchanged.
+
+The explicit memory import command is available for the pre-cutover sync:
+
+```bash
+python3 -m secretary memory import --instance ~/secretary-instance \
+  --from ~/panelmem-kb
+```
+
+`panelmem-kb` remains readable and unchanged. It is retained as the rollback
+source until cutover moves writers to the secretary memory protocol. `reconcile`,
+`backup`, `restore`, `project add`, `task`, and public memory writer commands
+return an explicit `not implemented` message.
 
 ## Data layout
 
@@ -104,7 +116,8 @@ python3 -m secretary data init --instance /home/dev/secretary-instance
 ```
 
 This creates `board/`, `memory/`, `runs/`, `transcripts/`, `artifacts/`,
-`backups/` and writes `data-manifest.json` in the data directory. The command is
+`backups/`, initializes `memory/facts` as a local git repository without a
+remote, and writes `data-manifest.json` in the data directory. The command is
 idempotent and overwrites only the generated manifest.
 
 Capture a raw Kanboard storage dump into the board data layer:

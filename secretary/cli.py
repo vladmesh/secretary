@@ -14,6 +14,7 @@ from secretary.data import (
     export_memory,
     export_runs,
     export_transcripts,
+    import_memory_journal,
     init_layout,
     raw_kanboard_dump,
 )
@@ -209,10 +210,25 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.set_defaults(handler=not_implemented("project add"))
     project.set_defaults(handler=not_implemented("project"))
 
-    for name in ("task", "memory"):
-        command = subparsers.add_parser(name)
-        command.add_argument("args", nargs="*")
-        command.set_defaults(handler=not_implemented(name))
+    task = subparsers.add_parser("task")
+    task.add_argument("args", nargs="*")
+    task.set_defaults(handler=not_implemented("task"))
+
+    memory = subparsers.add_parser("memory", help="manage the memory journal")
+    memory_subcommands = memory.add_subparsers(dest="memory_command")
+    memory_import = memory_subcommands.add_parser(
+        "import",
+        help="seed or sync secretary-data/memory/facts from panelmem-kb",
+    )
+    memory_import.add_argument("--instance", required=True)
+    memory_import.add_argument("--data-dir")
+    memory_import.add_argument("--from", dest="source_dir", default="/home/dev/panelmem-kb")
+    memory_import.set_defaults(handler=run_memory_import)
+    for name in ("propose", "commit", "supersede"):
+        memory_stub = memory_subcommands.add_parser(name)
+        memory_stub.add_argument("args", nargs="*")
+        memory_stub.set_defaults(handler=not_implemented(f"memory {name}"))
+    memory.set_defaults(handler=not_implemented("memory"))
 
     return parser
 
@@ -390,6 +406,25 @@ def run_export_memory(args: argparse.Namespace) -> int:
         return 1
     print(f"memory facts: {result.count}")
     print(f"export: {result.path}")
+    print("status: ok")
+    return 0
+
+
+def run_memory_import(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = import_memory_journal(data_dir, source_dir=Path(args.source_dir))
+    except RuntimeError as exc:
+        print(f"secretary memory import: {exc}")
+        return 1
+    print(f"memory facts: {result.count}")
+    print(f"journal: {result.facts_dir}")
+    print(f"source: {result.source}")
+    print(f"source head: {result.source_head}")
+    print(f"journal commit: {result.commit or '(none)'}")
+    print(f"changed: {'yes' if result.changed else 'no'}")
     print("status: ok")
     return 0
 
