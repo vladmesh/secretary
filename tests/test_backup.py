@@ -719,6 +719,32 @@ class BackupTests(unittest.TestCase):
 
         self.assertEqual(result.code, 0, result.findings)
 
+    def test_verify_reports_missing_normalized_board_export_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "core.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_core_payload(payload)
+            (payload / "secretary-data" / "board" / "cards.ndjson").unlink()
+            (payload / "secretary-data" / "board" / "export.json").unlink()
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertIn(
+            "missing required archive entry: secretary-backup/secretary-data/board/cards.ndjson",
+            result.findings,
+        )
+        self.assertIn(
+            "missing required archive entry: secretary-backup/secretary-data/board/export.json",
+            result.findings,
+        )
+
     def test_verify_returns_2_when_archive_or_key_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

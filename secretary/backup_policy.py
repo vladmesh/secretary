@@ -63,7 +63,12 @@ RUNS_STATE = ComponentPolicy(
 CORE_POLICY = BackupPolicy(
     kind="core",
     components=(
-        ComponentPolicy("board", "board/cards.json", source_export="board"),
+        ComponentPolicy(
+            "board",
+            "board/cards.json",
+            source_export="board",
+            required_entries=("board/cards.ndjson", "board/export.json"),
+        ),
         ComponentPolicy("memory", "memory/export.ndjson", source_export="memory"),
         RUNS_STATE,
     ),
@@ -88,7 +93,12 @@ FULL_POLICY = BackupPolicy(
             required_entries=("board",),
             requires_raw_board_data=True,
         ),
-        ComponentPolicy("board", "board/cards.json", source_export="board"),
+        ComponentPolicy(
+            "board",
+            "board/cards.json",
+            source_export="board",
+            required_entries=("board/cards.ndjson", "board/export.json"),
+        ),
         ComponentPolicy("memory", "memory/export.ndjson", source_export="memory"),
         RUNS_STATE,
         ComponentPolicy("runs", "runs/runs.ndjson", source_export="runs"),
