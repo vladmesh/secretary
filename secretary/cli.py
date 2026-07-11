@@ -4,7 +4,7 @@ import argparse
 import os
 from pathlib import Path
 
-from secretary.backup import create_backup, verify_backup
+from secretary.backup import check_backup_health, create_backups, verify_backup
 from secretary.config import ConfigError, load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
@@ -169,6 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
     backup_create.add_argument("--data-dir")
     backup_create.add_argument("--age-recipient")
     backup_create.add_argument(
+        "--kind",
+        choices=("full", "core", "both"),
+        default="full",
+        help="archive kind to create",
+    )
+    backup_create.add_argument(
         "--copy-transcripts",
         action="store_true",
         help="copy transcript files in addition to writing the inventory",
@@ -240,6 +246,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"  {warning}")
 
     offsite_warnings, offsite_findings = print_offsite_status(instance_path)
+    backup_warnings = print_backup_status(report.instance_path)
 
     host_incomplete = False
     if args.host or args.host_fixture:
@@ -253,7 +260,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if offsite_findings:
         print("status: findings")
         return 1
-    if (report.warnings or offsite_warnings) and args.strict:
+    if (report.warnings or offsite_warnings or backup_warnings) and args.strict:
         print("status: warnings")
         return 1
     print("status: ok")
@@ -278,6 +285,18 @@ def print_offsite_status(instance_path: Path) -> tuple[list[str], list[str]]:
         for finding in status.findings:
             print(f"  {finding}")
     return status.warnings, status.findings
+
+
+def print_backup_status(instance_path: Path) -> list[str]:
+    data_dir = _load_data_dir(_instance_path(str(instance_path)))
+    if data_dir is None:
+        return []
+    status = check_backup_health(data_dir)
+    if status.warnings:
+        print("backup warnings:")
+        for warning in status.warnings:
+            print(f"  {warning}")
+    return status.warnings
 
 
 def run_data_init(args: argparse.Namespace) -> int:
@@ -422,19 +441,23 @@ def run_export_artifacts(args: argparse.Namespace) -> int:
 
 
 def run_backup_create(args: argparse.Namespace) -> int:
+    kinds = ("core", "full") if args.kind == "both" else (args.kind,)
     try:
-        result = create_backup(
+        results = create_backups(
             Path(args.instance),
             data_dir=Path(args.data_dir) if args.data_dir else None,
             recipient=args.age_recipient,
             copy_transcripts=args.copy_transcripts,
+            backup_kinds=kinds,
         )
     except RuntimeError as exc:
         print(f"secretary backup create: {exc}")
         return 1
 
-    print(f"archive: {result.archive}")
-    print(f"version: {result.manifest['version']}")
+    for result in results:
+        print(f"archive: {result.archive}")
+        print(f"kind: {result.manifest.get('backup_kind', 'full')}")
+        print(f"version: {result.manifest['version']}")
     print("status: ok")
     return 0
 
@@ -447,6 +470,7 @@ def run_backup_verify(args: argparse.Namespace) -> int:
     )
     print(f"archive: {args.archive}")
     if result.manifest:
+        print(f"kind: {result.manifest.get('backup_kind', 'full')}")
         print(f"version: {result.manifest.get('version', '(unknown)')}")
     if result.warnings:
         print(f"warnings: {len(result.warnings)}")

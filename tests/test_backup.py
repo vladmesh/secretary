@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.backup import create_backup, verify_backup
+from secretary.backup import check_backup_health, create_backup, create_backups, verify_backup
 from secretary.data import DataExport
 
 
@@ -388,7 +388,7 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, data_dir)
             backups = data_dir / "backups"
             backups.mkdir(parents=True)
-            existing = backups / "secretary-backup-20260710T000000Z.tar.age"
+            existing = backups / "secretary-backup-full-20260710T000000Z.tar.age"
             existing.write_bytes(b"keep")
 
             def fake_raw(data_dir_arg):
@@ -421,8 +421,192 @@ class BackupTests(unittest.TestCase):
 
             self.assertEqual(existing.read_bytes(), b"keep")
             self.assertNotEqual(result.archive, existing)
-            self.assertEqual(result.archive.name, "secretary-backup-20260710T000000Z-2.tar.age")
+            self.assertEqual(result.archive.name, "secretary-backup-full-20260710T000000Z-2.tar.age")
             self.assertTrue(result.archive.is_file())
+
+    def test_create_both_uses_one_pause_and_writes_core_and_full_archives(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            pipeline_calls: list[str] = []
+
+            def fake_pipeline(action, **_kwargs):
+                pipeline_calls.append(action)
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                ),
+            ):
+                results = create_backups(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(
+                        source,
+                        destination,
+                    ),
+                    backup_kinds=("core", "full"),
+                )
+
+            self.assertEqual(pipeline_calls, ["pause", "resume"])
+            self.assertEqual([result.manifest["backup_kind"] for result in results], ["core", "full"])
+            for result in results:
+                verified = verify_backup(
+                    result.archive,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+                self.assertEqual(verified.code, 0, verified.findings)
+
+            core = results[0].archive
+            full = results[1].archive
+            with tarfile.open(core, "r") as archive:
+                core_names = set(archive.getnames())
+            with tarfile.open(full, "r") as archive:
+                full_names = set(archive.getnames())
+            self.assertNotIn(
+                "secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite",
+                core_names,
+            )
+            self.assertIn(
+                "secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite",
+                full_names,
+            )
+            self.assertNotIn("secretary-backup/secretary-data/runs/runs.ndjson", core_names)
+            self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", full_names)
+
+    def test_core_filters_done_cards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(
+                        data_dir_arg,
+                        include_done=True,
+                    ),
+                ),
+            ):
+                result = create_backup(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(
+                        source,
+                        destination,
+                    ),
+                    backup_kind="core",
+                )
+
+            with tarfile.open(result.archive, "r") as archive:
+                cards = json.loads(
+                    archive.extractfile(
+                        "secretary-backup/secretary-data/board/cards.json"
+                    ).read().decode("utf-8")
+                )
+                manifest = json.loads(
+                    archive.extractfile("secretary-backup/versions.json").read().decode("utf-8")
+                )
+            self.assertEqual([card["reference"] for card in cards["cards"]], ["active-1"])
+            self.assertEqual(manifest["components"]["board"]["count"], 1)
+
+    def test_retention_keeps_one_core_and_removes_old_full(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            backups = data_dir / "backups"
+            backups.mkdir(parents=True)
+            old_core = backups / "secretary-backup-core-20260708T000000Z.tar.age"
+            old_full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
+            recent_full = backups / "secretary-backup-full-20260710T230000Z.tar.age"
+            for path in (old_core, old_full, recent_full):
+                path.write_bytes(b"old")
+            old_time = 1_000_000
+            os.utime(old_core, (old_time, old_time))
+            os.utime(old_full, (old_time, old_time))
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                ),
+            ):
+                result = create_backup(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(
+                        source,
+                        destination,
+                    ),
+                    backup_kind="core",
+                )
+
+            self.assertTrue(result.archive.exists())
+            self.assertFalse(old_core.exists())
+            self.assertFalse(old_full.exists())
+            self.assertTrue(recent_full.exists())
+
+    def test_backup_health_warns_for_stale_archives_and_large_directory(self):
+        from datetime import UTC, datetime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            backups = root / "backups"
+            backups.mkdir()
+            core = backups / "secretary-backup-core-20260709T000000Z.tar.age"
+            full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
+            core.write_bytes(b"core")
+            full.write_bytes(b"full")
+            stale = datetime(2026, 7, 8, tzinfo=UTC).timestamp()
+            os.utime(core, (stale, stale))
+            os.utime(full, (stale, stale))
+
+            status = check_backup_health(
+                root,
+                now=datetime(2026, 7, 11, tzinfo=UTC),
+                max_bytes=1,
+            )
+
+        self.assertTrue(any("core archive is stale" in warning for warning in status.warnings))
+        self.assertTrue(any("full archive is stale" in warning for warning in status.warnings))
+        self.assertTrue(any("backup directory is large" in warning for warning in status.warnings))
 
     def test_verify_returns_2_when_archive_or_key_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -579,10 +763,19 @@ def _write_instance(instance: Path, data_dir: Path) -> None:
     )
 
 
-def _write_export_surface(data_dir: Path) -> None:
+def _write_export_surface(data_dir: Path, *, include_done: bool = False) -> None:
+    cards = [{"reference": "active-1", "column": "Ready"}]
+    if include_done:
+        cards.append({"reference": "done-1", "column": "Done"})
     (data_dir / "board").mkdir(parents=True, exist_ok=True)
-    (data_dir / "board" / "cards.json").write_text('{"version":1,"cards":[]}\n', encoding="utf-8")
-    (data_dir / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+    (data_dir / "board" / "cards.json").write_text(
+        json.dumps({"version": 1, "cards": cards}) + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "board" / "cards.ndjson").write_text(
+        "".join(json.dumps(card) + "\n" for card in cards),
+        encoding="utf-8",
+    )
     (data_dir / "board" / "export.json").write_text('{"version":1}\n', encoding="utf-8")
     (data_dir / "memory").mkdir(parents=True, exist_ok=True)
     (data_dir / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
@@ -591,6 +784,7 @@ def _write_export_surface(data_dir: Path) -> None:
     (data_dir / "runs" / "runs.ndjson").write_text("{}\n", encoding="utf-8")
     (data_dir / "runs" / "watermarks.json").write_text('{"version":1,"files":[]}\n', encoding="utf-8")
     (data_dir / "runs" / "cards.json").write_text('{"version":1,"cards":{}}\n', encoding="utf-8")
+    (data_dir / "runs" / "claims.json").write_text('{"version":1,"claims":{}}\n', encoding="utf-8")
     (data_dir / "transcripts").mkdir(parents=True, exist_ok=True)
     (data_dir / "transcripts" / "inventory.json").write_text(
         '{"version":1,"transcripts":[]}\n',
@@ -622,6 +816,7 @@ def _write_complete_payload(payload: Path) -> None:
     (payload / "secretary-data" / "runs" / "runs.ndjson").write_text("{}\n", encoding="utf-8")
     (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "runs" / "claims.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "transcripts" / "inventory.json").write_text(
         "{}",
         encoding="utf-8",
@@ -652,8 +847,8 @@ def _write_complete_payload(payload: Path) -> None:
     )
 
 
-def _fake_exports(data_dir: Path) -> dict[str, DataExport]:
-    _write_export_surface(data_dir)
+def _fake_exports(data_dir: Path, *, include_done: bool = False) -> dict[str, DataExport]:
+    _write_export_surface(data_dir, include_done=include_done)
     return {
         "board": DataExport(data_dir / "board" / "cards.json", 1, "board"),
         "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "memory"),
