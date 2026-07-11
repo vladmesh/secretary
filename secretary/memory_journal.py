@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
+import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +31,15 @@ PANELMEM_KB = Path("/home/dev/panelmem-kb")
 MEMORY_IMPORT_MARKER = "Op: import"
 MEMORY_GIT_NAME = "Secretary Memory"
 MEMORY_GIT_EMAIL = "secretary-memory@localhost"
+MEMORY_LOCK_NAME = ".write.lock"
+
+
+class MemoryProtocolError(RuntimeError):
+    pass
+
+
+class MemoryLockError(MemoryProtocolError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -39,6 +51,13 @@ class MemoryImport:
     commit: str | None
     changed: bool
     initialized: bool
+
+
+@dataclass(frozen=True)
+class MemoryExportSnapshot:
+    path: Path
+    count: int
+    source: str
 
 
 def init_memory_journal(data_dir: Path) -> tuple[Path, bool]:
@@ -89,6 +108,7 @@ def import_memory_journal(
     initialized = False
     with _memory_journal_lock(memory_dir):
         facts_dir, initialized = init_memory_journal(data_dir)
+        _recover_journal_worktree(facts_dir)
         _ensure_import_only_journal(facts_dir)
         source_head = _source_git_head(source_root)
         staging: Path | None = None
@@ -124,6 +144,7 @@ def import_memory_journal(
                 source_head=source_head,
                 commit=commit,
                 changed=changed,
+                record_import=True,
             )
         except RuntimeError:
             _cleanup_staging_dir(staging)
@@ -140,6 +161,59 @@ def import_memory_journal(
         commit=commit,
         changed=changed,
         initialized=initialized,
+    )
+
+
+def export_memory_snapshot(
+    data_dir: Path,
+    *,
+    source_dir: Path = PANELMEM_KB,
+) -> MemoryExportSnapshot:
+    data_dir = data_dir.expanduser().resolve()
+    memory_dir = data_dir / "memory"
+    _ensure_dir(memory_dir, "memory data dir")
+    facts_dir = memory_dir / "facts"
+    with _memory_journal_lock(memory_dir):
+        if (
+            facts_dir.is_dir()
+            and (facts_dir / ".git").is_dir()
+            and _journal_head(facts_dir) is not None
+        ):
+            source_memory = facts_dir
+            source_root = facts_dir
+            source_head = _journal_head(facts_dir) or "unknown"
+        else:
+            source_root, source_memory = _resolve_memory_source(source_dir)
+            if not source_memory.is_dir():
+                raise RuntimeError(f"memory source not found: {source_memory}")
+            source_head = _source_git_head(source_root)
+
+        try:
+            staging = Path(
+                tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir)
+            )
+        except OSError as exc:
+            raise RuntimeError(f"could not create memory export staging: {exc}") from None
+        try:
+            _copy_tree(source_memory, staging)
+            facts = _read_memory_facts(staging)
+            _publish_memory_export(
+                memory_dir,
+                facts=facts,
+                source_memory=source_memory,
+                source_root=source_root,
+                source_head=source_head,
+                commit=source_head if source_memory == facts_dir else None,
+                changed=False,
+                record_import=False,
+            )
+        finally:
+            _cleanup_staging_dir(staging)
+
+    return MemoryExportSnapshot(
+        path=memory_dir / "export.ndjson",
+        count=len(facts),
+        source=str(source_memory),
     )
 
 
@@ -214,23 +288,26 @@ def _source_git_root(path: Path) -> Path | None:
 
 def _source_git_head(source_root: Path) -> str:
     try:
-        return _git(source_root, ["rev-parse", "HEAD"], context="inspect memory source head").strip()
+        return _git(
+            source_root,
+            ["rev-parse", "HEAD"],
+            context="inspect memory source head",
+        ).strip()
     except RuntimeError:
         return "unknown"
 
 
 @contextmanager
 def _memory_journal_lock(memory_dir: Path):
-    lock_path = memory_dir / ".journal.lock"
+    _ensure_dir(memory_dir, "memory data dir")
+    lock_path = memory_dir / MEMORY_LOCK_NAME
+    payload = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "created_at": int(time.time()),
+    }
+    _create_memory_lock(lock_path, payload)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        raise RuntimeError(f"memory facts journal is locked: {lock_path}") from None
-    except OSError as exc:
-        raise RuntimeError(f"cannot lock memory facts journal: {exc}") from None
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(f"pid={os.getpid()}\n")
         yield
     finally:
         try:
@@ -239,6 +316,57 @@ def _memory_journal_lock(memory_dir: Path):
             pass
         except OSError:
             pass
+
+
+def _create_memory_lock(lock_path: Path, payload: dict[str, Any]) -> None:
+    while True:
+        temp_path = lock_path.with_name(f".{lock_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            fd = os.open(temp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+                handle.write("\n")
+            os.link(temp_path, lock_path)
+            return
+        except FileExistsError:
+            if not _remove_stale_lock(lock_path):
+                raise MemoryLockError(f"memory facts journal is locked: {lock_path}") from None
+        except OSError as exc:
+            raise RuntimeError(f"cannot lock memory facts journal: {exc}") from None
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
+def _remove_stale_lock(lock_path: Path) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("host") != socket.gethostname():
+        return False
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        try:
+            lock_path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+    except PermissionError:
+        return False
+    return False
 
 
 def _publish_memory_facts(staging: Path, facts_dir: Path) -> tuple[bool, Path]:
@@ -326,6 +454,7 @@ def _publish_memory_export(
     source_head: str,
     commit: str | None,
     changed: bool,
+    record_import: bool,
 ) -> None:
     try:
         staging = Path(
@@ -353,6 +482,7 @@ def _publish_memory_export(
                 source_head=source_head,
                 commit=commit,
                 changed=changed,
+                record_import=record_import,
             ),
         )
         _publish_component_entries(
@@ -375,6 +505,7 @@ def _memory_manifest(
     source_head: str,
     commit: str | None,
     changed: bool,
+    record_import: bool,
 ) -> dict[str, Any]:
     old = _read_json_file_if_valid(memory_dir / "manifest.json")
     imports = old.get("imports", []) if isinstance(old.get("imports"), list) else []
@@ -385,7 +516,9 @@ def _memory_manifest(
         "changed": changed,
     }
     provenance_keys = ("source_head", "journal_commit", "fact_count")
-    if not imports or any(imports[-1].get(key) != entry[key] for key in provenance_keys):
+    if record_import and (
+        not imports or any(imports[-1].get(key) != entry[key] for key in provenance_keys)
+    ):
         imports = [*imports, entry]
     return {
         "version": 1,
@@ -425,6 +558,20 @@ def _ensure_import_only_journal(facts_dir: Path) -> None:
             raise RuntimeError(
                 f"memory import refused after non-import journal commit {short}"
             )
+
+
+def _recover_journal_worktree(facts_dir: Path) -> None:
+    if not (facts_dir / ".git").is_dir():
+        return
+    if not _git_status(facts_dir):
+        return
+    if _journal_head(facts_dir) is None:
+        for path in sorted(facts_dir.iterdir()):
+            if path.name != ".git":
+                _remove_path(path)
+        return
+    _git(facts_dir, ["reset", "--hard", "HEAD"], context="recover memory journal")
+    _git(facts_dir, ["clean", "-fd"], context="recover memory journal")
 
 
 def _git_log_messages(facts_dir: Path) -> list[tuple[str, str]]:

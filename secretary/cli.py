@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -25,10 +26,21 @@ from secretary.host import (
     build_expectations,
     inventory,
 )
+from secretary.memory_write import (
+    MemoryLockError,
+    MemoryPermissionError,
+    MemoryValidationError,
+    commit_memory_proposal,
+    propose_memory_fact,
+    supersede_memory_fact,
+)
 from secretary.offsite import check_last_fetch
 
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
+MEMORY_EXIT_VALIDATION = 2
+MEMORY_EXIT_PERMISSION = 3
+MEMORY_EXIT_LOCKED = 4
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -224,13 +236,42 @@ def build_parser() -> argparse.ArgumentParser:
     memory_import.add_argument("--data-dir")
     memory_import.add_argument("--from", dest="source_dir", default="/home/dev/panelmem-kb")
     memory_import.set_defaults(handler=run_memory_import)
-    for name in ("propose", "commit", "supersede"):
-        memory_stub = memory_subcommands.add_parser(name)
-        memory_stub.add_argument("args", nargs="*")
-        memory_stub.set_defaults(handler=not_implemented(f"memory {name}"))
+
+    memory_propose = memory_subcommands.add_parser("propose")
+    add_memory_write_common(memory_propose)
+    memory_propose.add_argument("--scope", required=True)
+    memory_propose.add_argument("--slug", required=True)
+    memory_propose.add_argument("--file", required=True)
+    memory_propose.add_argument("--source")
+    memory_propose.add_argument("--tags", default="")
+    memory_propose.add_argument("--pinned", action="store_true")
+    memory_propose.add_argument("--supersedes", default="")
+    memory_propose.set_defaults(handler=run_memory_propose)
+
+    memory_commit = memory_subcommands.add_parser("commit")
+    add_memory_write_common(memory_commit)
+    memory_commit.add_argument("--propose-id", required=True)
+    memory_commit.set_defaults(handler=run_memory_commit)
+
+    memory_supersede = memory_subcommands.add_parser("supersede")
+    add_memory_write_common(memory_supersede)
+    memory_supersede.add_argument("--scope", required=True)
+    memory_supersede.add_argument("--slug", required=True)
+    memory_supersede.add_argument("--file", required=True)
+    memory_supersede.add_argument("--supersedes", required=True)
+    memory_supersede.add_argument("--source")
+    memory_supersede.add_argument("--tags", default="")
+    memory_supersede.add_argument("--pinned", action="store_true")
+    memory_supersede.set_defaults(handler=run_memory_supersede)
     memory.set_defaults(handler=not_implemented("memory"))
 
     return parser
+
+
+def add_memory_write_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--instance", required=True)
+    parser.add_argument("--data-dir")
+    parser.add_argument("--actor", required=True)
 
 
 def run_doctor(args: argparse.Namespace) -> int:
@@ -427,6 +468,118 @@ def run_memory_import(args: argparse.Namespace) -> int:
     print(f"changed: {'yes' if result.changed else 'no'}")
     print("status: ok")
     return 0
+
+
+def run_memory_propose(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = propose_memory_fact(
+            data_dir,
+            actor=args.actor,
+            scope=args.scope,
+            slug=args.slug,
+            fact_file=Path(args.file),
+            source=args.source,
+            tags=_split_csv(args.tags),
+            pinned=args.pinned,
+            supersedes=_split_csv(args.supersedes),
+        )
+    except Exception as exc:
+        return _print_memory_error("propose", exc)
+    _print_json(
+        {
+            "ok": True,
+            "op": "propose",
+            "propose_id": result.propose_id,
+            "proposal": str(result.path),
+            "fact": f"{result.scope_dir}/{result.slug}",
+            "actor": result.actor,
+            "source": result.source,
+            "supersedes": list(result.supersedes),
+        }
+    )
+    return 0
+
+
+def run_memory_commit(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = commit_memory_proposal(
+            data_dir,
+            actor=args.actor,
+            propose_id=args.propose_id,
+        )
+    except Exception as exc:
+        return _print_memory_error("commit", exc)
+    _print_memory_write_result(result)
+    return 0
+
+
+def run_memory_supersede(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = supersede_memory_fact(
+            data_dir,
+            actor=args.actor,
+            scope=args.scope,
+            slug=args.slug,
+            fact_file=Path(args.file),
+            supersedes=_split_csv(args.supersedes),
+            source=args.source,
+            tags=_split_csv(args.tags),
+            pinned=args.pinned,
+        )
+    except Exception as exc:
+        return _print_memory_error("supersede", exc)
+    _print_memory_write_result(result)
+    return 0
+
+
+def _print_memory_write_result(result) -> None:
+    _print_json(
+        {
+            "ok": True,
+            "op": result.op,
+            "commit": result.commit,
+            "journal": str(result.facts_dir),
+            "fact": result.fact,
+            "actor": result.actor,
+            "source": result.source,
+            "changed_facts": list(result.changed_facts),
+            "propose_id": result.propose_id,
+        }
+    )
+
+
+def _print_memory_error(op: str, exc: Exception) -> int:
+    if isinstance(exc, MemoryValidationError):
+        code = MEMORY_EXIT_VALIDATION
+        kind = "validation"
+    elif isinstance(exc, MemoryPermissionError):
+        code = MEMORY_EXIT_PERMISSION
+        kind = "permission"
+    elif isinstance(exc, MemoryLockError):
+        code = MEMORY_EXIT_LOCKED
+        kind = "locked"
+    else:
+        code = 1
+        kind = "runtime"
+    _print_json({"ok": False, "op": op, "error": kind, "message": str(exc)})
+    return code
+
+
+def _print_json(payload: dict) -> None:
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def run_export_runs(args: argparse.Namespace) -> int:

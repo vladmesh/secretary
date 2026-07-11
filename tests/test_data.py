@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import secretary.data as data_module
+import secretary.memory_journal as memory_journal
 from secretary.data import (
     export_board,
     export_all,
@@ -22,6 +23,14 @@ from secretary.data import (
     manifest_for,
     normalize_board_card,
     raw_kanboard_dump,
+)
+from secretary.memory_write import (
+    MemoryLockError,
+    MemoryPermissionError,
+    MemoryValidationError,
+    commit_memory_proposal,
+    propose_memory_fact,
+    supersede_memory_fact,
 )
 
 
@@ -432,7 +441,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(current_summary, old_summary)
         self.assertTrue(raw_dump_preserved)
 
-    def test_export_memory_mirrors_facts_and_ndjson(self):
+    def test_export_memory_writes_readonly_ndjson_from_fallback_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "panelmem-kb"
@@ -454,8 +463,7 @@ class ExportTests(unittest.TestCase):
             first = export_memory(data_dir, source_dir=source)
             first_payload = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             second = export_memory(data_dir, source_dir=source)
-            mirrored = (data_dir / "memory" / "facts" / "global" / "two.md").is_file()
-            log_count = git(data_dir / "memory" / "facts", "rev-list", "--count", "HEAD")
+            facts_dir_exists = (data_dir / "memory" / "facts").exists()
             manifest = json.loads((data_dir / "memory" / "manifest.json").read_text(encoding="utf-8"))
             source_head = git(source, "rev-parse", "HEAD")
 
@@ -463,27 +471,24 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(second.count, 2)
         self.assertIn("secretary/one.md", first_payload)
         self.assertIn('"metadata": {"created": "2026-07-11"', first_payload)
-        self.assertTrue(mirrored)
-        self.assertEqual(log_count, "1")
+        self.assertFalse(facts_dir_exists)
         self.assertEqual(manifest["source"]["head"], source_head)
         self.assertTrue(manifest["source"]["readonly_fallback"])
 
-    def test_export_memory_ndjson_comes_from_mirrored_snapshot(self):
+    def test_export_memory_ndjson_comes_from_readonly_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "panelmem-kb"
             fact = source / "memory" / "secretary" / "one.md"
             fact.parent.mkdir(parents=True)
             fact.write_text("fact one\n", encoding="utf-8")
-            from secretary import memory_journal
-
             original_copy_tree = memory_journal._copy_tree
 
-            def copy_then_mutate(source_memory, facts_dir):
-                original_copy_tree(source_memory, facts_dir)
+            def copy_then_mutate(source_memory, snapshot):
+                original_copy_tree(source_memory, snapshot)
                 fact.write_text("changed after snapshot\n", encoding="utf-8")
 
-            with mock.patch("secretary.data._copy_tree", side_effect=copy_then_mutate):
+            with mock.patch("secretary.memory_journal._copy_tree", side_effect=copy_then_mutate):
                 export_memory(root / "secretary-data", source_dir=source)
             exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
                 encoding="utf-8"
@@ -542,13 +547,10 @@ class ExportTests(unittest.TestCase):
                 export_memory(data_dir, source_dir=source)
 
             current_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
-            mirrored = sorted(
-                path.relative_to(data_dir / "memory" / "facts").as_posix()
-                for path in (data_dir / "memory" / "facts").rglob("*.md")
-            )
+            facts_dir_exists = (data_dir / "memory" / "facts").exists()
 
         self.assertEqual(current_export, old_export)
-        self.assertEqual(mirrored, ["secretary/good.md"])
+        self.assertFalse(facts_dir_exists)
 
     def test_memory_import_repeated_sync_adds_new_source_fact_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -609,10 +611,42 @@ class ExportTests(unittest.TestCase):
             (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
             data_dir = root / "secretary-data"
             (data_dir / "memory").mkdir(parents=True)
-            (data_dir / "memory" / ".journal.lock").write_text("pid=1\n", encoding="utf-8")
+            (data_dir / "memory" / memory_journal.MEMORY_LOCK_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "host": memory_journal.socket.gethostname(),
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(RuntimeError, "journal is locked"):
                 import_memory_journal(data_dir, source_dir=source)
+
+    def test_memory_import_removes_proven_stale_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "panelmem-kb"
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
+            data_dir = root / "secretary-data"
+            (data_dir / "memory").mkdir(parents=True)
+            (data_dir / "memory" / memory_journal.MEMORY_LOCK_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": 99999999,
+                        "host": memory_journal.socket.gethostname(),
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = import_memory_journal(data_dir, source_dir=source)
+
+        self.assertEqual(result.count, 1)
 
     def test_memory_import_restores_journal_on_copy_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -647,6 +681,274 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(git(facts_dir, "ls-files"), old_tracked)
             self.assertEqual(git(facts_dir, "rev-parse", "HEAD"), old_head)
             self.assertEqual(git(facts_dir, "status", "--porcelain"), "")
+
+    def test_memory_protocol_commit_writes_one_journal_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("new durable fact\n", encoding="utf-8")
+
+            proposal = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="new-fact",
+                fact_file=fact,
+                source="curator:claude/session",
+                tags=["secretary", "memory"],
+            )
+            result = commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+            facts_dir = data_dir / "memory" / "facts"
+            log_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            message = git(facts_dir, "log", "-1", "--format=%B")
+            status = git(facts_dir, "status", "--porcelain")
+            exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
+
+        self.assertEqual(result.fact, "secretary/new-fact")
+        self.assertEqual(log_count, "1")
+        self.assertIn("Op: commit", message)
+        self.assertIn("Principal: curator:claude/session", message)
+        self.assertIn("Source: curator:claude/session", message)
+        self.assertIn("Changed-Facts: secretary/new-fact", message)
+        self.assertEqual(status, "")
+        self.assertIn("new durable fact", exported)
+
+    def test_memory_protocol_rejects_invalid_input_and_permissions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fact = root / "fact.md"
+            fact.write_text("fact\n", encoding="utf-8")
+
+            with self.assertRaises(MemoryValidationError):
+                propose_memory_fact(
+                    root / "secretary-data",
+                    actor="curator:claude/session",
+                    scope="bad",
+                    slug="new-fact",
+                    fact_file=fact,
+                    source="curator:claude/session",
+                )
+            with self.assertRaises(MemoryPermissionError):
+                propose_memory_fact(
+                    root / "secretary-data",
+                    actor="worker:codex/session",
+                    scope="project:secretary",
+                    slug="new-fact",
+                    fact_file=fact,
+                    source="worker:codex/session",
+                )
+
+    def test_memory_protocol_supersede_unknown_fact_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("replacement\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(MemoryValidationError, "not found"):
+                supersede_memory_fact(
+                    data_dir,
+                    actor="curator:claude/session",
+                    scope="project:secretary",
+                    slug="replacement",
+                    fact_file=fact,
+                    supersedes=["missing"],
+                    source="curator:claude/session",
+                )
+            facts_dir = data_dir / "memory" / "facts"
+            status = git(facts_dir, "status", "--porcelain")
+
+        self.assertEqual(status, "")
+
+    def test_memory_protocol_supersede_removes_old_fact_in_one_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            old_fact = root / "old.md"
+            old_fact.write_text("old fact\n", encoding="utf-8")
+            proposal = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="old",
+                fact_file=old_fact,
+                source="curator:claude/session",
+            )
+            commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+            new_fact = root / "new.md"
+            new_fact.write_text("current fact\n", encoding="utf-8")
+
+            result = supersede_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="new",
+                fact_file=new_fact,
+                supersedes=["old"],
+                source="curator:claude/session",
+            )
+            facts_dir = data_dir / "memory" / "facts"
+            tracked = git(facts_dir, "ls-files").splitlines()
+            log_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            message = git(facts_dir, "log", "-1", "--format=%B")
+
+        self.assertEqual(result.changed_facts, ("secretary/new", "secretary/old"))
+        self.assertEqual(tracked, ["secretary/new.md"])
+        self.assertEqual(log_count, "2")
+        self.assertIn("Op: supersede", message)
+        self.assertIn("Supersedes: secretary/old", message)
+
+    def test_memory_protocol_live_lock_rejects_concurrent_write(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("fact\n", encoding="utf-8")
+            memory_dir = data_dir / "memory"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / memory_journal.MEMORY_LOCK_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "host": memory_journal.socket.gethostname(),
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(MemoryLockError):
+                propose_memory_fact(
+                    data_dir,
+                    actor="curator:claude/session",
+                    scope="project:secretary",
+                    slug="new-fact",
+                    fact_file=fact,
+                    source="curator:claude/session",
+                )
+
+    def test_memory_protocol_recovers_dirty_worktree_before_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            first_fact = root / "first.md"
+            first_fact.write_text("first fact\n", encoding="utf-8")
+            first = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="first",
+                fact_file=first_fact,
+                source="curator:claude/session",
+            )
+            commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=first.propose_id,
+            )
+            facts_dir = data_dir / "memory" / "facts"
+            (facts_dir / "secretary" / "first.md").write_text("dirty edit\n", encoding="utf-8")
+            (facts_dir / "secretary" / "residue.md").write_text("residue\n", encoding="utf-8")
+            second_fact = root / "second.md"
+            second_fact.write_text("second fact\n", encoding="utf-8")
+
+            second = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="second",
+                fact_file=second_fact,
+                source="curator:claude/session",
+            )
+            commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=second.propose_id,
+            )
+            first_text = (facts_dir / "secretary" / "first.md").read_text(encoding="utf-8")
+            tracked = git(facts_dir, "ls-files").splitlines()
+            status = git(facts_dir, "status", "--porcelain")
+
+        self.assertIn("first fact", first_text)
+        self.assertEqual(tracked, ["secretary/first.md", "secretary/second.md"])
+        self.assertEqual(status, "")
+
+    def test_export_memory_after_protocol_commit_is_readonly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            source = root / "panelmem-kb"
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "external.md").write_text(
+                "external fact\n",
+                encoding="utf-8",
+            )
+            protocol_fact = root / "protocol.md"
+            protocol_fact.write_text("protocol fact\n", encoding="utf-8")
+            proposal = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="protocol",
+                fact_file=protocol_fact,
+                source="curator:claude/session",
+            )
+            commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+            facts_dir = data_dir / "memory" / "facts"
+            before_head = git(facts_dir, "rev-parse", "HEAD")
+            before_count = git(facts_dir, "rev-list", "--count", "HEAD")
+
+            result = export_memory(data_dir, source_dir=source)
+            after_head = git(facts_dir, "rev-parse", "HEAD")
+            after_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
+            status = git(facts_dir, "status", "--porcelain")
+
+        self.assertEqual(result.count, 1)
+        self.assertEqual(after_head, before_head)
+        self.assertEqual(after_count, before_count)
+        self.assertIn("protocol fact", exported)
+        self.assertNotIn("external fact", exported)
+        self.assertEqual(status, "")
+
+    def test_export_memory_respects_live_journal_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            source = root / "panelmem-kb"
+            (source / "memory" / "secretary").mkdir(parents=True)
+            (source / "memory" / "secretary" / "external.md").write_text(
+                "external fact\n",
+                encoding="utf-8",
+            )
+            memory_dir = data_dir / "memory"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / memory_journal.MEMORY_LOCK_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "host": memory_journal.socket.gethostname(),
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(MemoryLockError):
+                export_memory(data_dir, source_dir=source)
 
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
