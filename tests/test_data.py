@@ -25,10 +25,14 @@ from secretary.data import (
     raw_kanboard_dump,
 )
 from secretary.memory_write import (
+    MEMORY_PROPOSAL_ACTIVE_MARKER,
+    MemoryExportPublishError,
     MemoryLockError,
     MemoryPermissionError,
+    MemoryProtocolError,
     MemoryValidationError,
     commit_memory_proposal,
+    gc_memory_proposals,
     propose_memory_fact,
     supersede_memory_fact,
 )
@@ -717,6 +721,154 @@ class ExportTests(unittest.TestCase):
         self.assertIn("Changed-Facts: secretary/new-fact", message)
         self.assertEqual(status, "")
         self.assertIn("new durable fact", exported)
+
+    def test_memory_protocol_export_failure_after_commit_is_retryable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("retryable fact\n", encoding="utf-8")
+            proposal = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="retryable",
+                fact_file=fact,
+                source="curator:claude/session",
+            )
+
+            with mock.patch(
+                "secretary.memory_write._publish_memory_export",
+                side_effect=RuntimeError("disk full"),
+            ):
+                with self.assertRaises(MemoryExportPublishError) as raised:
+                    commit_memory_proposal(
+                        data_dir,
+                        actor="curator:claude/session",
+                        propose_id=proposal.propose_id,
+                    )
+
+            failed_result = raised.exception.result
+            facts_dir = data_dir / "memory" / "facts"
+            after_failure_head = git(facts_dir, "rev-parse", "HEAD")
+            log_count_after_failure = git(facts_dir, "rev-list", "--count", "HEAD")
+            completed_marker = data_dir / "memory" / ".staging" / proposal.propose_id / "committed.json"
+            completed_exists_after_failure = completed_marker.is_file()
+            export_exists_after_failure = (data_dir / "memory" / "export.ndjson").exists()
+
+            retry_result = commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+            retry_head = git(facts_dir, "rev-parse", "HEAD")
+            retry_log_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
+            staging_exists_after_retry = completed_marker.parent.exists()
+
+        self.assertEqual(failed_result.commit, after_failure_head)
+        self.assertEqual(failed_result.fact, "secretary/retryable")
+        self.assertEqual(log_count_after_failure, "1")
+        self.assertTrue(completed_exists_after_failure)
+        self.assertFalse(export_exists_after_failure)
+        self.assertEqual(retry_result.commit, after_failure_head)
+        self.assertEqual(retry_head, after_failure_head)
+        self.assertEqual(retry_log_count, "1")
+        self.assertIn("retryable fact", exported)
+        self.assertFalse(staging_exists_after_retry)
+
+    def test_memory_protocol_errors_share_base_class(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("fact\n", encoding="utf-8")
+            memory_dir = data_dir / "memory"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / memory_journal.MEMORY_LOCK_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "host": memory_journal.socket.gethostname(),
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            errors: list[MemoryProtocolError] = []
+            for actor, scope, source in (
+                ("curator:claude/session", "bad", "curator:claude/session"),
+                ("worker:codex/session", "project:secretary", "worker:codex/session"),
+                ("curator:claude/session", "project:secretary", "curator:claude/session"),
+            ):
+                try:
+                    propose_memory_fact(
+                        data_dir,
+                        actor=actor,
+                        scope=scope,
+                        slug="new-fact",
+                        fact_file=fact,
+                        source=source,
+                    )
+                except MemoryProtocolError as exc:
+                    errors.append(exc)
+
+        self.assertIsInstance(errors[0], MemoryValidationError)
+        self.assertIsInstance(errors[1], MemoryPermissionError)
+        self.assertIsInstance(errors[2], MemoryLockError)
+        self.assertTrue(all(isinstance(error, MemoryProtocolError) for error in errors))
+
+    def test_memory_protocol_gc_removes_only_stale_uncommitted_proposals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("fact\n", encoding="utf-8")
+            stale = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="stale",
+                fact_file=fact,
+                source="curator:claude/session",
+            )
+            fresh = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="fresh",
+                fact_file=fact,
+                source="curator:claude/session",
+            )
+            active = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="active",
+                fact_file=fact,
+                source="curator:claude/session",
+            )
+            for proposal in (stale, active):
+                proposal_path = proposal.path / "proposal.json"
+                payload = json.loads(proposal_path.read_text(encoding="utf-8"))
+                payload["created_at"] = 1
+                proposal_path.write_text(json.dumps(payload), encoding="utf-8")
+            (active.path / MEMORY_PROPOSAL_ACTIVE_MARKER).write_text("{}", encoding="utf-8")
+
+            result = gc_memory_proposals(
+                data_dir,
+                max_age_seconds=60,
+                active_grace_seconds=3600,
+            )
+            fresh_exists = fresh.path.is_dir()
+            active_exists = active.path.is_dir()
+            stale_exists = stale.path.exists()
+
+        self.assertEqual(result.removed, (stale.propose_id,))
+        self.assertTrue(fresh_exists)
+        self.assertTrue(active_exists)
+        self.assertFalse(stale_exists)
 
     def test_memory_protocol_rejects_invalid_input_and_permissions(self):
         with tempfile.TemporaryDirectory() as tmpdir:

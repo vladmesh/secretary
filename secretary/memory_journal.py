@@ -25,6 +25,7 @@ from secretary._fsutil import (
     write_json as _write_json,
     write_ndjson as _write_ndjson,
 )
+from secretary.memory_errors import MemoryLockError, MemoryProtocolError
 
 
 PANELMEM_KB = Path("/home/dev/panelmem-kb")
@@ -32,14 +33,6 @@ MEMORY_IMPORT_MARKER = "Op: import"
 MEMORY_GIT_NAME = "Secretary Memory"
 MEMORY_GIT_EMAIL = "secretary-memory@localhost"
 MEMORY_LOCK_NAME = ".write.lock"
-
-
-class MemoryProtocolError(RuntimeError):
-    pass
-
-
-class MemoryLockError(MemoryProtocolError):
-    pass
 
 
 @dataclass(frozen=True)

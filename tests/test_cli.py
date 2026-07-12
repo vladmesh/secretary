@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -15,6 +16,18 @@ from secretary.cli import main
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 class CliTests(unittest.TestCase):
@@ -745,6 +758,84 @@ class CliTests(unittest.TestCase):
         self.assertEqual(committed["op"], "commit")
         self.assertEqual(committed["changed_facts"], ["secretary/cli-fact"])
         self.assertTrue(committed["commit"])
+
+    def test_memory_commit_reports_export_failure_with_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            fact = root / "fact.md"
+            fact.write_text("cli retryable fact\n", encoding="utf-8")
+            propose_code, propose_output = self.run_cli(
+                [
+                    "memory",
+                    "propose",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--scope",
+                    "project:secretary",
+                    "--slug",
+                    "cli-retryable",
+                    "--file",
+                    str(fact),
+                    "--source",
+                    "curator:claude/session",
+                ]
+            )
+            proposal = json.loads(propose_output)
+
+            with mock.patch(
+                "secretary.memory_write._publish_memory_export",
+                side_effect=RuntimeError("disk full"),
+            ):
+                failed_code, failed_output = self.run_cli(
+                    [
+                        "memory",
+                        "commit",
+                        "--instance",
+                        str(instance_dir),
+                        "--actor",
+                        "curator:claude/session",
+                        "--propose-id",
+                        proposal["propose_id"],
+                    ]
+                )
+            failed = json.loads(failed_output)
+            retry_code, retry_output = self.run_cli(
+                [
+                    "memory",
+                    "commit",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--propose-id",
+                    proposal["propose_id"],
+                ]
+            )
+            retried = json.loads(retry_output)
+            log_count = git(data_dir / "memory" / "facts", "rev-list", "--count", "HEAD")
+
+        self.assertEqual(propose_code, 0, propose_output)
+        self.assertEqual(failed_code, 1, failed_output)
+        self.assertEqual(failed["error"], "export")
+        self.assertEqual(failed["fact"], "secretary/cli-retryable")
+        self.assertTrue(failed["commit"])
+        self.assertEqual(retry_code, 0, retry_output)
+        self.assertEqual(retried["commit"], failed["commit"])
+        self.assertEqual(log_count, "1")
 
     def test_memory_protocol_commands_use_stable_error_codes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

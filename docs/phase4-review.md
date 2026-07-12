@@ -178,8 +178,12 @@ Recovery contract on service start:
   died mid-write. The canon is the last commit, so recovery is
   `git reset --hard HEAD && git clean -fd` to discard the partial write. Discard
   is safe because an uncommitted change was never canon and can be re-proposed.
-- Stale `memory/.staging/*` entries older than the current run are cleared; a
-  propose without a matching commit is dropped, never auto-committed.
+- Stale `memory/.staging/*` entries are cleared only when they are valid
+  uncommitted proposals older than 7 days. A proposal with a recent `.active`
+  marker is kept for at least 1 hour even when its original `created_at` is old.
+  Completed proposals with `committed.json` are not GC candidates; they carry the
+  journal commit for retry after a derived export failure. GC never
+  auto-commits a proposal.
 - A crash after commit but before reindex leaves a stale index. Canon (HEAD) is
   still correct; the watcher or a `memory reindex` rebuilds it. The index is
   never authoritative.
