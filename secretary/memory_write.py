@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -16,7 +17,6 @@ from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
 from secretary.memory_journal import (
-    MemoryLockError,
     _git,
     _git_status,
     _journal_head,
@@ -26,18 +26,19 @@ from secretary.memory_journal import (
     _recover_journal_worktree,
     init_memory_journal,
 )
+from secretary.memory_errors import (
+    MemoryExportPublishError,
+    MemoryLockError,
+    MemoryPermissionError,
+    MemoryProtocolError,
+    MemoryValidationError,
+)
 
 
-class MemoryProtocolError(RuntimeError):
-    pass
-
-
-class MemoryValidationError(MemoryProtocolError):
-    pass
-
-
-class MemoryPermissionError(MemoryProtocolError):
-    pass
+MEMORY_PROPOSAL_TTL_SECONDS = 7 * 24 * 60 * 60
+MEMORY_PROPOSAL_ACTIVE_SECONDS = 60 * 60
+MEMORY_PROPOSAL_ACTIVE_MARKER = ".active"
+MEMORY_PROPOSAL_DONE = "committed.json"
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,13 @@ class MemoryWriteResult:
     source: str
     changed_facts: tuple[str, ...]
     propose_id: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryProposalGCResult:
+    removed: tuple[str, ...]
+    kept_fresh: tuple[str, ...]
+    kept_active: tuple[str, ...]
 
 
 def propose_memory_fact(
@@ -93,6 +101,7 @@ def propose_memory_fact(
     )
     proposal_id = uuid.uuid4().hex
     with _memory_journal_lock(memory_dir):
+        _gc_staging_proposals(memory_dir, now=int(time.time()))
         staging_dir = memory_dir / ".staging" / proposal_id
         try:
             staging_dir.mkdir(parents=True, exist_ok=False)
@@ -141,9 +150,22 @@ def commit_memory_proposal(
     propose_id = _clean_proposal_id(propose_id)
     with _memory_journal_lock(memory_dir):
         proposal_dir = memory_dir / ".staging" / propose_id
+        completed = _read_completed_proposal(proposal_dir)
+        if completed is not None:
+            _ensure_commit_actor(actor, completed.actor)
+            _publish_write_export(memory_dir, completed)
+            _cleanup_staging_dir(proposal_dir)
+            return completed
         proposal = _read_proposal(proposal_dir)
         _ensure_commit_actor(actor, str(proposal["actor"]))
-        result = _apply_memory_write(memory_dir, proposal, op="commit")
+        _mark_proposal_active(proposal_dir)
+        try:
+            result = _apply_memory_write(memory_dir, proposal, op="commit")
+        except Exception:
+            _remove_proposal_active(proposal_dir)
+            raise
+        _write_completed_proposal(proposal_dir, result)
+        _publish_write_export(memory_dir, result)
         _cleanup_staging_dir(proposal_dir)
         return result
 
@@ -189,7 +211,31 @@ def supersede_memory_fact(
         "fact_text": fact_text,
     }
     with _memory_journal_lock(memory_dir):
-        return _apply_memory_write(memory_dir, proposal, op="supersede")
+        result = _apply_memory_write(memory_dir, proposal, op="supersede")
+        _publish_write_export(memory_dir, result)
+        return result
+
+
+def gc_memory_proposals(
+    data_dir: Path,
+    *,
+    max_age_seconds: int = MEMORY_PROPOSAL_TTL_SECONDS,
+    active_grace_seconds: int = MEMORY_PROPOSAL_ACTIVE_SECONDS,
+) -> MemoryProposalGCResult:
+    data_dir = data_dir.expanduser().resolve()
+    memory_dir = data_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    if max_age_seconds < 0:
+        raise MemoryValidationError("proposal max age must be non-negative")
+    if active_grace_seconds < 0:
+        raise MemoryValidationError("proposal active grace must be non-negative")
+    with _memory_journal_lock(memory_dir):
+        return _gc_staging_proposals(
+            memory_dir,
+            now=int(time.time()),
+            max_age_seconds=max_age_seconds,
+            active_grace_seconds=active_grace_seconds,
+        )
 
 
 def _ensure_writer_actor(actor: str) -> None:
@@ -363,6 +409,145 @@ def _read_proposal(proposal_dir: Path) -> dict[str, Any]:
     return payload
 
 
+def _read_completed_proposal(proposal_dir: Path) -> MemoryWriteResult | None:
+    try:
+        payload = json.loads((proposal_dir / MEMORY_PROPOSAL_DONE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MemoryValidationError(
+            f"could not read completed proposal {proposal_dir.name}: {exc}"
+        ) from None
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise MemoryValidationError(f"invalid completed proposal {proposal_dir.name}")
+    changed_facts = payload.get("changed_facts")
+    if not isinstance(changed_facts, list) or not all(
+        isinstance(item, str) for item in changed_facts
+    ):
+        raise MemoryValidationError(
+            f"completed proposal {proposal_dir.name} has invalid changed facts"
+        )
+    try:
+        return MemoryWriteResult(
+            op=str(payload["op"]),
+            facts_dir=Path(str(payload["facts_dir"])),
+            commit=str(payload["commit"]),
+            fact=str(payload["fact"]),
+            actor=str(payload["actor"]),
+            source=str(payload["source"]),
+            changed_facts=tuple(changed_facts),
+            propose_id=str(payload["propose_id"]) if payload.get("propose_id") else None,
+        )
+    except KeyError as exc:
+        raise MemoryValidationError(
+            f"completed proposal {proposal_dir.name} missing {exc.args[0]}"
+        ) from None
+
+
+def _write_completed_proposal(proposal_dir: Path, result: MemoryWriteResult) -> None:
+    _write_json(
+        proposal_dir / MEMORY_PROPOSAL_DONE,
+        {
+            "version": 1,
+            "op": result.op,
+            "facts_dir": str(result.facts_dir),
+            "commit": result.commit,
+            "fact": result.fact,
+            "actor": result.actor,
+            "source": result.source,
+            "changed_facts": list(result.changed_facts),
+            "propose_id": result.propose_id,
+        },
+    )
+    _remove_proposal_active(proposal_dir)
+
+
+def _mark_proposal_active(proposal_dir: Path) -> None:
+    _write_json(
+        proposal_dir / MEMORY_PROPOSAL_ACTIVE_MARKER,
+        {"pid": os.getpid(), "updated_at": int(time.time())},
+    )
+
+
+def _remove_proposal_active(proposal_dir: Path) -> None:
+    try:
+        (proposal_dir / MEMORY_PROPOSAL_ACTIVE_MARKER).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _gc_staging_proposals(
+    memory_dir: Path,
+    *,
+    now: int,
+    max_age_seconds: int = MEMORY_PROPOSAL_TTL_SECONDS,
+    active_grace_seconds: int = MEMORY_PROPOSAL_ACTIVE_SECONDS,
+) -> MemoryProposalGCResult:
+    staging_root = memory_dir / ".staging"
+    if not staging_root.is_dir():
+        return MemoryProposalGCResult(removed=(), kept_fresh=(), kept_active=())
+
+    removed: list[str] = []
+    kept_fresh: list[str] = []
+    kept_active: list[str] = []
+    for proposal_dir in sorted(staging_root.iterdir()):
+        if not proposal_dir.is_dir():
+            continue
+        try:
+            proposal_id = _clean_proposal_id(proposal_dir.name)
+        except MemoryValidationError:
+            continue
+        if (proposal_dir / MEMORY_PROPOSAL_DONE).exists():
+            continue
+        if _proposal_is_active(proposal_dir, now=now, active_grace_seconds=active_grace_seconds):
+            kept_active.append(proposal_id)
+            continue
+        created_at = _proposal_created_at(proposal_dir)
+        if created_at is None:
+            continue
+        if now - created_at <= max_age_seconds:
+            kept_fresh.append(proposal_id)
+            continue
+        _cleanup_staging_dir(proposal_dir)
+        removed.append(proposal_id)
+    return MemoryProposalGCResult(
+        removed=tuple(removed),
+        kept_fresh=tuple(kept_fresh),
+        kept_active=tuple(kept_active),
+    )
+
+
+def _proposal_is_active(
+    proposal_dir: Path,
+    *,
+    now: int,
+    active_grace_seconds: int,
+) -> bool:
+    marker = proposal_dir / MEMORY_PROPOSAL_ACTIVE_MARKER
+    try:
+        marker_mtime = int(marker.stat().st_mtime)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return now - marker_mtime <= active_grace_seconds
+
+
+def _proposal_created_at(proposal_dir: Path) -> int | None:
+    try:
+        payload = json.loads((proposal_dir / "proposal.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return None
+    created_at = payload.get("created_at")
+    if not isinstance(created_at, int):
+        return None
+    return created_at
+
+
 def _apply_memory_write(
     memory_dir: Path,
     proposal: dict[str, Any],
@@ -409,17 +594,6 @@ def _apply_memory_write(
         _recover_journal_worktree(facts_dir)
         raise
 
-    facts = _read_memory_facts(facts_dir)
-    _publish_memory_export(
-        memory_dir,
-        facts=facts,
-        source_memory=facts_dir,
-        source_root=facts_dir,
-        source_head=commit,
-        commit=commit,
-        changed=True,
-        record_import=False,
-    )
     return MemoryWriteResult(
         op=op,
         facts_dir=facts_dir,
@@ -430,6 +604,26 @@ def _apply_memory_write(
         changed_facts=(fact_id, *supersedes),
         propose_id=proposal.get("id") if isinstance(proposal.get("id"), str) else None,
     )
+
+
+def _publish_write_export(memory_dir: Path, result: MemoryWriteResult) -> None:
+    try:
+        facts = _read_memory_facts(result.facts_dir)
+        _publish_memory_export(
+            memory_dir,
+            facts=facts,
+            source_memory=result.facts_dir,
+            source_root=result.facts_dir,
+            source_head=result.commit,
+            commit=result.commit,
+            changed=True,
+            record_import=False,
+        )
+    except RuntimeError as exc:
+        raise MemoryExportPublishError(
+            f"memory export publish failed after journal commit {result.commit}: {exc}",
+            result=result,
+        ) from None
 
 
 def _supersede_paths(facts_dir: Path, supersedes: tuple[str, ...]) -> list[tuple[str, Path]]:

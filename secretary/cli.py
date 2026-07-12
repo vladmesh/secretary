@@ -27,6 +27,7 @@ from secretary.host import (
     inventory,
 )
 from secretary.memory_write import (
+    MemoryExportPublishError,
     MemoryLockError,
     MemoryPermissionError,
     MemoryValidationError,
@@ -558,6 +559,24 @@ def _print_memory_write_result(result) -> None:
 
 
 def _print_memory_error(op: str, exc: Exception) -> int:
+    if isinstance(exc, MemoryExportPublishError):
+        result = exc.result
+        _print_json(
+            {
+                "ok": False,
+                "op": op,
+                "error": "export",
+                "message": str(exc),
+                "commit": result.commit,
+                "journal": str(result.facts_dir),
+                "fact": result.fact,
+                "actor": result.actor,
+                "source": result.source,
+                "changed_facts": list(result.changed_facts),
+                "propose_id": result.propose_id,
+            }
+        )
+        return 1
     if isinstance(exc, MemoryValidationError):
         code = MEMORY_EXIT_VALIDATION
         kind = "validation"
