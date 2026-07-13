@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from secretary._fsutil import file_lock, publish_pair_atomic
+from secretary._fsutil import file_lock, publish_pair_and_remove_atomic, publish_pair_atomic
 from secretary.config import ConfigError, load_config, validate
 
 
@@ -90,7 +90,6 @@ def _project_add_locked(
     if error:
         return 1, _fail_draft(artifact, "draft.invalid", error)
     if existing_draft:
-        scanner_changed = False
         errors = validate(existing_draft, "onboarding-contract", draft_path.name)
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
@@ -109,10 +108,7 @@ def _project_add_locked(
         old_head = artifact.get("scanner", {}).get("repo", {}).get("head")
         artifact["scanner"] = scanner
         if old_head and scanner.get("repo", {}).get("head") != old_head:
-            scanner_changed = True
             _reset_scanner_derived_state(artifact)
-    else:
-        scanner_changed = False
 
     binding = dict(identity)
     binding["enabled"] = False
@@ -125,15 +121,24 @@ def _project_add_locked(
     if dry_run:
         return 0, artifact
 
+    adapter_path = instance_dir / "adapters" / f"{identity['adapter']}.yaml"
+    remove_stale_adapter = (
+        adapter_path.exists()
+        and artifact.get("provision", {}).get("status") != "drafted"
+    )
     try:
-        publish_pair_atomic(
-            binding_path,
-            yaml.safe_dump(binding, sort_keys=False, allow_unicode=True),
-            draft_path,
-            yaml.safe_dump(artifact, sort_keys=False, allow_unicode=True),
-        )
-        if scanner_changed:
-            (instance_dir / "adapters" / f"{identity['adapter']}.yaml").unlink(missing_ok=True)
+        binding_text = yaml.safe_dump(binding, sort_keys=False, allow_unicode=True)
+        draft_text = yaml.safe_dump(artifact, sort_keys=False, allow_unicode=True)
+        if remove_stale_adapter:
+            publish_pair_and_remove_atomic(
+                binding_path,
+                binding_text,
+                draft_path,
+                draft_text,
+                adapter_path,
+            )
+        else:
+            publish_pair_atomic(binding_path, binding_text, draft_path, draft_text)
     except OSError as exc:
         message = f"publication failed: {exc.strerror or 'I/O error'}"
         return 1, _fail_draft(artifact, "draft.invalid", message)

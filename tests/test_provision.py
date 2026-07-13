@@ -175,6 +175,58 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(stored["provision"]["status"], "pending")
         self.assertFalse(self.adapter_path.exists())
 
+    def test_project_add_rolls_back_when_stale_adapter_delete_fails(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        old_draft = self.draft_path.read_bytes()
+        (self.repo / "sample.py").write_text("VALUE = 6\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Change before failed cleanup")
+        with mock.patch("pathlib.Path.unlink", side_effect=PermissionError("injected")):
+            code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertEqual(old_draft, self.draft_path.read_bytes())
+        self.assertTrue(self.adapter_path.exists())
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(load_config(self.draft_path)["provision"]["status"], "pending")
+        self.assertFalse(self.adapter_path.exists())
+
+    def test_project_add_cleans_existing_pending_draft_stale_adapter(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        draft = load_config(self.draft_path)
+        draft["provision"] = {
+            "owner": "provision-agent",
+            "status": "pending",
+            "binding": {"enabled": False},
+            "adapter": {
+                "status": "unresolved",
+                "required_decisions": [
+                    "setup.commands",
+                    "smoke.command",
+                    "validation.ci",
+                    "artifact_policy.write_project_files",
+                ],
+            },
+            "findings": [],
+        }
+        draft["ownership"]["adapter"]["storage"] = "secretary-instance/adapter-drafts/<project>.yaml"
+        self.draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(load_config(self.draft_path)["provision"]["status"], "pending")
+        self.assertFalse(self.adapter_path.exists())
+
     def test_project_add_waits_for_apply_and_resets_stale_adapter(self):
         task = self.start()["task"]
         result_path = self.write_result(self.drafted_result(task))

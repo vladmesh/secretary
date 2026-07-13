@@ -85,6 +85,44 @@ def publish_pair_atomic(first: Path, first_text: str, second: Path, second_text:
                 temp.unlink(missing_ok=True)
 
 
+def publish_pair_and_remove_atomic(
+    first: Path,
+    first_text: str,
+    second: Path,
+    second_text: str,
+    remove: Path,
+) -> None:
+    """Publish two files and remove one stale file, rolling back on publish/remove errors."""
+    first_before = first.read_bytes() if first.exists() else None
+    second_before = second.read_bytes() if second.exists() else None
+    first_temp: Path | None = None
+    second_temp: Path | None = None
+    try:
+        first_temp = stage_text(first, first_text)
+        second_temp = stage_text(second, second_text)
+        os.replace(first_temp, first)
+        first_temp = None
+        os.replace(second_temp, second)
+        second_temp = None
+        remove.unlink()
+    except OSError:
+        _restore_file(second, second_before)
+        _restore_file(first, first_before)
+        raise
+    finally:
+        for temp in (first_temp, second_temp):
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+
+def _restore_file(path: Path, before: bytes | None) -> None:
+    if before is None:
+        path.unlink(missing_ok=True)
+    else:
+        restore = stage_text(path, before.decode("utf-8"))
+        os.replace(restore, path)
+
+
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
