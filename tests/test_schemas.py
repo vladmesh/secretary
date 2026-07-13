@@ -240,6 +240,17 @@ class SchemaInvalidTests(unittest.TestCase):
         errors = validate(data, "onboarding-contract", "failed-scanner-passed-gate.json")
         self.assertTrue(any(e.path in {"scanner.status", "scanner.findings"} for e in errors), errors)
 
+    def test_onboarding_rejects_passed_gate_with_missing_repo(self):
+        # A passed gate must sit on a green scanner chain: repo.exists = true.
+        # An "ok" status with exists = false is still a missing-repo error path.
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["scanner"]["repo"] = {
+            "input": "/srv/projects/missing-project",
+            "exists": False,
+        }
+        errors = validate(data, "onboarding-contract", "missing-repo-passed-gate.json")
+        self.assertTrue(any(e.path == "scanner.repo.exists" for e in errors), errors)
+
     def test_onboarding_rejects_passed_gate_with_failed_provision(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
         data["provision"]["status"] = "failed"

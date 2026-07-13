@@ -29,9 +29,13 @@
           "scanner": {
             "properties": {
               "status": {"const": "ok"},
+              "repo": {
+                "properties": {"exists": {"const": true}},
+                "required": ["exists"]
+              },
               "findings": {"$ref": "#/$defs/noErrorFindings"}
             },
-            "required": ["status", "findings"]
+            "required": ["status", "repo", "findings"]
           },
           "provision": {
             "properties": {
