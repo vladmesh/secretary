@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import shutil
 import stat as stat_module
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -81,6 +83,17 @@ def publish_pair_atomic(first: Path, first_text: str, second: Path, second_text:
         for temp in (first_temp, second_temp):
             if temp is not None:
                 temp.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def copy_tree(source: Path, destination: Path) -> None:

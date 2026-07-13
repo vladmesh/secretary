@@ -5,12 +5,14 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import yaml
 
+from secretary._fsutil import publish_pair_atomic
 from secretary.config import load_config, validate
 from secretary.cli import main
 from secretary.onboarding import project_add
@@ -171,6 +173,35 @@ class ProvisionTests(unittest.TestCase):
         )
         stored = load_config(self.draft_path)
         self.assertEqual(stored["provision"]["status"], "pending")
+        self.assertFalse(self.adapter_path.exists())
+
+    def test_project_add_waits_for_apply_and_resets_stale_adapter(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        workers: list[threading.Thread] = []
+
+        def publish_then_race(first, first_text, second, second_text):
+            (self.repo / "sample.py").write_text("VALUE = 5\n", encoding="utf-8")
+            git(self.repo, "add", "sample.py")
+            git(self.repo, "commit", "-m", "Concurrent scanner update")
+            worker = threading.Thread(
+                target=lambda: project_add(str(self.repo), str(self.instance), dry_run=False)
+            )
+            workers.append(worker)
+            worker.start()
+            publish_pair_atomic(first, first_text, second, second_text)
+
+        with mock.patch("secretary.provision.publish_pair_atomic", side_effect=publish_then_race):
+            code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+
+        self.assertEqual(code, 0, result)
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        stored = load_config(self.draft_path)
+        self.assertEqual(stored["provision"]["status"], "pending")
+        self.assertEqual(stored["scanner"]["repo"]["head"], git(self.repo, "rev-parse", "HEAD"))
+        self.assertFalse(self.adapter_path.exists())
 
     def test_malformed_foreign_and_stale_results_do_not_publish(self):
         task = self.start()["task"]
@@ -250,16 +281,21 @@ class ProvisionTests(unittest.TestCase):
             "environment": {
                 "run_id": task["run_id"],
                 "status": "failed",
-                "message": "missing package manager",
+                "code": "dependency-missing",
                 "retry": "same-run",
             },
         }
         code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "environment_failed")
+        self.assertEqual(result["environment"]["summary"], "required dependency is missing")
         self.assertFalse(self.adapter_path.exists())
         draft = load_config(self.draft_path)
         self.assertEqual(draft["provision"]["status"], "failed")
+        self.assertEqual(
+            draft["provision"]["findings"][0]["message"],
+            "required dependency is missing",
+        )
         self.assertFalse(load_config(self.binding_path)["enabled"])
 
         restarted = self.start()
@@ -280,7 +316,7 @@ class ProvisionTests(unittest.TestCase):
             "environment": {
                 "run_id": task["run_id"],
                 "status": "failed",
-                "message": "missing package manager",
+                "code": "dependency-missing",
                 "retry": "same-run",
             },
         }
@@ -291,6 +327,32 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "publication_failed")
         self.assertFalse(self.adapter_path.exists())
+
+    def test_environment_failure_rejects_raw_secret_message(self):
+        task = self.start()["task"]
+        secret = "ghp_secret_token_value"
+        env = {
+            "version": 1,
+            "run_id": task["run_id"],
+            "identity": {"id": "sample-project", "adapter": "sample-project"},
+            "input_revision": dict(task["input_revision"]),
+            "status": "environment_failed",
+            "environment": {
+                "run_id": task["run_id"],
+                "status": "failed",
+                "code": "runtime-error",
+                "message": secret,
+                "retry": "same-run",
+            },
+        }
+
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "result_invalid")
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(secret, self.draft_path.read_text(encoding="utf-8"))
 
     def test_partial_publication_failure_rolls_back_adapter(self):
         task = self.start()["task"]

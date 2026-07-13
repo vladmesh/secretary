@@ -30,11 +30,14 @@
     "environment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_id", "status", "message"],
+      "required": ["run_id", "status", "code"],
       "properties": {
         "run_id": {"type": "string", "minLength": 1},
         "status": {"const": "failed"},
-        "message": {"type": "string", "minLength": 1},
+        "code": {
+          "type": "string",
+          "enum": ["dependency-missing", "tool-unavailable", "permission-denied", "runtime-error"]
+        },
         "retry": {"type": "string", "enum": ["same-run"]}
       }
     },

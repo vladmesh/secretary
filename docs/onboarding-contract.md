@@ -65,6 +65,9 @@ adapter with the canonical adapter schema, then materializes
 command, or `none` with the missing coverage declared. Project-local adapter
 files are only a structured proposal for project-plane bindings and still
 require a later opt-in; this phase writes the external instance adapter only.
+Environment failures are reported with an allowlisted failure code. The runtime
+renders the stored summary, so arbitrary environment text is not copied into
+the result output or onboarding draft.
 
 `project add` and an unrun provision or gate use `status: pending`. Missing
 repositories and scanner failures still produce a complete, schema-valid v1

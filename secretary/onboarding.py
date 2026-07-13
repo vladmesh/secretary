@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from secretary._fsutil import publish_pair_atomic
+from secretary._fsutil import file_lock, publish_pair_atomic
 from secretary.config import ConfigError, load_config, validate
 
 
@@ -40,7 +40,25 @@ def project_add(
     instance_dir = instance.parent if instance.name == "instance.yaml" else instance
     binding_path = instance_dir / "projects" / f"{project_id}.yaml"
     draft_path = instance_dir / "adapter-drafts" / f"{project_id}.yaml"
+    if dry_run:
+        return _project_add_locked(
+            repo, project_id, instance_dir, binding_path, draft_path, dry_run=True
+        )
+    with file_lock(_project_lock_path(instance_dir, project_id)):
+        return _project_add_locked(
+            repo, project_id, instance_dir, binding_path, draft_path, dry_run=False
+        )
 
+
+def _project_add_locked(
+    repo: Path,
+    project_id: str,
+    instance_dir: Path,
+    binding_path: Path,
+    draft_path: Path,
+    *,
+    dry_run: bool,
+) -> tuple[int, dict[str, Any]]:
     existing_binding, error = _load_optional_mapping(binding_path)
     if error:
         default_branch = _default_branch(repo) if repo.is_dir() else "main"
@@ -72,6 +90,7 @@ def project_add(
     if error:
         return 1, _fail_draft(artifact, "draft.invalid", error)
     if existing_draft:
+        scanner_changed = False
         errors = validate(existing_draft, "onboarding-contract", draft_path.name)
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
@@ -90,7 +109,10 @@ def project_add(
         old_head = artifact.get("scanner", {}).get("repo", {}).get("head")
         artifact["scanner"] = scanner
         if old_head and scanner.get("repo", {}).get("head") != old_head:
+            scanner_changed = True
             _reset_scanner_derived_state(artifact)
+    else:
+        scanner_changed = False
 
     binding = dict(identity)
     binding["enabled"] = False
@@ -110,6 +132,8 @@ def project_add(
             draft_path,
             yaml.safe_dump(artifact, sort_keys=False, allow_unicode=True),
         )
+        if scanner_changed:
+            (instance_dir / "adapters" / f"{identity['adapter']}.yaml").unlink(missing_ok=True)
     except OSError as exc:
         message = f"publication failed: {exc.strerror or 'I/O error'}"
         return 1, _fail_draft(artifact, "draft.invalid", message)
@@ -123,6 +147,10 @@ def render_artifact(artifact: dict[str, Any]) -> str:
 def _project_id(name: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return value or "project"
+
+
+def _project_lock_path(instance_dir: Path, project_id: str) -> Path:
+    return instance_dir / ".locks" / f"{project_id}.lock"
 
 
 def _identity(

@@ -11,9 +11,16 @@ from typing import Any
 
 import yaml
 
-from secretary._fsutil import publish_pair_atomic, stage_text
+from secretary._fsutil import file_lock, publish_pair_atomic, stage_text
 from secretary.config import ConfigError, load_config, validate
 from secretary.onboarding import scan_repo
+
+ENVIRONMENT_SUMMARIES = {
+    "dependency-missing": "required dependency is missing",
+    "tool-unavailable": "required tool is unavailable",
+    "permission-denied": "environment permission denied",
+    "runtime-error": "provision runtime failed",
+}
 
 
 def start_provision(instance_value: str, project_id: str) -> tuple[int, dict[str, Any]]:
@@ -42,6 +49,15 @@ def apply_provision_result(
     result_value: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     instance = _instance_dir(instance_value)
+    with file_lock(_project_lock_path(instance, project_id)):
+        return _apply_provision_result_locked(instance, project_id, result_value)
+
+
+def _apply_provision_result_locked(
+    instance: Path,
+    project_id: str,
+    result_value: str | None,
+) -> tuple[int, dict[str, Any]]:
     loaded = _load_inputs(instance, project_id)
     if loaded["status"] != "ok":
         return 1, loaded
@@ -49,9 +65,14 @@ def apply_provision_result(
     run_id = _run_id(draft)
     task_path = _run_dir(instance, project_id, run_id) / "task.yaml"
     if not task_path.exists():
-        code, started = start_provision(instance_value, project_id)
+        code, started = start_provision(str(instance), project_id)
         if code:
             return code, started
+        loaded = _load_inputs(instance, project_id)
+        if loaded["status"] != "ok":
+            return 1, loaded
+        draft = loaded["draft"]
+        run_id = _run_id(draft)
     result_path = Path(result_value) if result_value else _run_dir(instance, project_id, run_id) / "result.yaml"
     try:
         result = load_config(result_path)
@@ -72,7 +93,7 @@ def apply_provision_result(
                 project_id,
                 draft,
                 "environment.failed",
-                result["environment"]["message"],
+                outcome["environment"]["summary"],
             )
             if failure:
                 return 1, failure
@@ -89,6 +110,16 @@ def apply_provision_result(
     updated = _draft_with_adapter(draft, adapter)
     adapter_path = instance / "adapters" / f"{draft['identity']['adapter']}.yaml"
     draft_path = instance / "adapter-drafts" / f"{project_id}.yaml"
+    latest = _load_inputs(instance, project_id)
+    if latest["status"] != "ok":
+        return 1, latest
+    if latest["draft"]["scanner"]["repo"]["head"] != draft["scanner"]["repo"]["head"]:
+        return 1, _status(
+            "stale_input",
+            run_id=run_id,
+            expected_scanner_head=draft["scanner"]["repo"]["head"],
+            actual_scanner_head=latest["draft"]["scanner"]["repo"]["head"],
+        )
     errors = validate(updated, "onboarding-contract", draft_path.name)
     if errors:
         return 1, _status("canonical_invalid", run_id=run_id, errors=[str(e) for e in errors])
@@ -117,6 +148,10 @@ def render_result(data: dict[str, Any]) -> str:
 def _instance_dir(value: str) -> Path:
     path = Path(value).expanduser()
     return path.parent if path.name == "instance.yaml" else path
+
+
+def _project_lock_path(instance: Path, project_id: str) -> Path:
+    return instance / ".locks" / f"{project_id}.lock"
 
 
 def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
@@ -222,10 +257,12 @@ def _validate_result(result: dict[str, Any], draft: dict[str, Any], run_id: str)
     if result["status"] == "environment_failed":
         if result["environment"]["run_id"] != run_id:
             return _status("result_foreign", run_id=run_id, errors=["environment run id does not match"])
+        environment = dict(result["environment"])
+        environment["summary"] = ENVIRONMENT_SUMMARIES[environment["code"]]
         return _status(
             "environment_failed",
             run_id=run_id,
-            environment=result["environment"],
+            environment=environment,
         )
     if result["status"] == "stale_input":
         return _status("stale_input", run_id=run_id, **result["stale_input"])
