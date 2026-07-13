@@ -7,6 +7,7 @@ import shutil
 import tarfile
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -602,6 +603,7 @@ class BackupTests(unittest.TestCase):
                 return SimpleNamespace(dump_dir=raw)
 
             with (
+                mock.patch("secretary.backup.datetime") as fake_datetime,
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
@@ -610,6 +612,9 @@ class BackupTests(unittest.TestCase):
                     side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
+                fake_datetime.now.return_value = datetime(2026, 7, 11, tzinfo=UTC)
+                fake_datetime.strptime.side_effect = datetime.strptime
+                fake_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
                 result = create_backup(
                     instance,
                     recipient="age1example",

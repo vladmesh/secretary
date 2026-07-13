@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -51,6 +52,18 @@ class MemoryExportSnapshot:
     path: Path
     count: int
     source: str
+
+
+@dataclass(frozen=True)
+class MemoryVerify:
+    facts_dir: Path
+    ok: bool
+    findings: tuple[str, ...]
+    journal_commit: str | None
+    fact_count: int
+    export_count: int | None
+    index_count: int | None
+    dirty: bool
 
 
 def init_memory_journal(data_dir: Path) -> tuple[Path, bool]:
@@ -210,6 +223,67 @@ def export_memory_snapshot(
     )
 
 
+def verify_memory_journal(data_dir: Path) -> MemoryVerify:
+    data_dir = data_dir.expanduser().resolve()
+    memory_dir = data_dir / "memory"
+    facts_dir = memory_dir / "facts"
+    findings: list[str] = []
+    journal_commit: str | None = None
+    fact_count = 0
+    export_count: int | None = None
+    index_count: int | None = None
+    dirty = False
+
+    with _memory_journal_lock(memory_dir):
+        if not (facts_dir / ".git").is_dir():
+            findings.append(f"memory facts journal is not a git repo: {facts_dir}")
+        else:
+            journal_commit = _journal_head(facts_dir)
+            if journal_commit is None:
+                findings.append("memory facts journal has no commits")
+            status = _git_status(facts_dir)
+            dirty = bool(status)
+            if status:
+                findings.append("memory facts journal has uncommitted changes")
+            remotes = _git(facts_dir, ["remote"], context="inspect memory journal remotes")
+            if remotes.splitlines():
+                findings.append("memory facts journal has remotes configured")
+            if journal_commit is not None:
+                fact_count = len(_tracked_fact_ids(facts_dir))
+
+        export_path = memory_dir / "export.ndjson"
+        if not export_path.is_file():
+            findings.append(f"memory export missing: {export_path}")
+        else:
+            export_ids = _read_export_fact_ids(export_path)
+            export_count = len(export_ids)
+            if fact_count and export_count != fact_count:
+                findings.append(
+                    f"memory export count mismatch: export={export_count} journal={fact_count}"
+                )
+
+        index_path = memory_dir / "index.sqlite"
+        if not index_path.is_file():
+            findings.append(f"memory index missing: {index_path}")
+        else:
+            index_count = _read_index_fact_count(index_path)
+            if fact_count and index_count != fact_count:
+                findings.append(
+                    f"memory index count mismatch: index={index_count} journal={fact_count}"
+                )
+
+    return MemoryVerify(
+        facts_dir=facts_dir,
+        ok=not findings,
+        findings=tuple(findings),
+        journal_commit=journal_commit,
+        fact_count=fact_count,
+        export_count=export_count,
+        index_count=index_count,
+        dirty=dirty,
+    )
+
+
 def _read_memory_facts(facts_dir: Path) -> list[dict[str, Any]]:
     facts = []
     for path, file_stat in _regular_files_under(facts_dir, context="memory snapshot"):
@@ -233,6 +307,47 @@ def _read_memory_facts(facts_dir: Path) -> list[dict[str, Any]]:
             }
         )
     return facts
+
+
+def _tracked_fact_ids(facts_dir: Path) -> list[str]:
+    raw = _git(facts_dir, ["ls-files", "-z"], context="inspect memory journal files")
+    fact_ids = []
+    for item in raw.split("\0"):
+        if item.endswith(".md"):
+            fact_ids.append(item.removesuffix(".md"))
+    return fact_ids
+
+
+def _read_export_fact_ids(path: Path) -> list[str]:
+    ids: list[str] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"could not read memory export {path}: {exc}") from None
+    except UnicodeError as exc:
+        raise RuntimeError(f"could not decode memory export {path}: {exc}") from None
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid memory export JSON at line {number}: {exc}") from None
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"invalid memory export row at line {number}: not an object")
+        fact_id = payload.get("id")
+        if not isinstance(fact_id, str) or not fact_id:
+            raise RuntimeError(f"invalid memory export row at line {number}: missing id")
+        ids.append(fact_id)
+    return ids
+
+
+def _read_index_fact_count(path: Path) -> int:
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            return int(conn.execute("select count(*) from memories").fetchone()[0])
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"could not read memory index {path}: {exc}") from None
 
 
 def _memory_fact_metadata(text: str) -> dict[str, Any]:

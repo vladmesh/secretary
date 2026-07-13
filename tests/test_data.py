@@ -24,6 +24,7 @@ from secretary.data import (
     normalize_board_card,
     raw_kanboard_dump,
 )
+from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
     MEMORY_PROPOSAL_ACTIVE_MARKER,
     MemoryExportPublishError,
@@ -722,6 +723,38 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(status, "")
         self.assertIn("new durable fact", exported)
 
+    def test_memory_verify_checks_export_and_index_parity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text("verified durable fact\n", encoding="utf-8")
+            proposal = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="project:secretary",
+                slug="verified",
+                fact_file=fact,
+                source="curator:claude/session",
+            )
+            commit_memory_proposal(
+                data_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+            index = data_dir / "memory" / "index.sqlite"
+            with sqlite3.connect(index) as conn:
+                conn.execute("create table memories(id integer primary key)")
+                conn.execute("insert into memories default values")
+                conn.commit()
+
+            result = verify_memory_journal(data_dir)
+
+        self.assertTrue(result.ok, result.findings)
+        self.assertEqual(result.fact_count, 1)
+        self.assertEqual(result.export_count, 1)
+        self.assertEqual(result.index_count, 1)
+
     def test_memory_protocol_export_failure_after_commit_is_retryable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1304,31 +1337,42 @@ class ExportTests(unittest.TestCase):
     def test_export_all_passes_copy_transcripts_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
+            calls = []
 
             with (
                 mock.patch(
                     "secretary.data.export_board",
-                    return_value=data_module.DataExport(data_dir / "board.json", 1, "board"),
+                    side_effect=lambda data_dir_arg: calls.append("board")
+                    or data_module.DataExport(data_dir_arg / "board.json", 1, "board"),
                 ),
                 mock.patch(
                     "secretary.data.export_memory",
-                    return_value=data_module.DataExport(data_dir / "memory.ndjson", 1, "memory"),
+                    side_effect=lambda data_dir_arg: calls.append("memory")
+                    or data_module.DataExport(data_dir_arg / "memory.ndjson", 1, "memory"),
                 ),
                 mock.patch(
                     "secretary.data.export_runs",
-                    return_value=data_module.DataExport(data_dir / "runs.ndjson", 1, "runs"),
+                    side_effect=lambda data_dir_arg: calls.append("runs")
+                    or data_module.DataExport(data_dir_arg / "runs.ndjson", 1, "runs"),
                 ),
                 mock.patch(
                     "secretary.data.export_transcripts",
-                    return_value=data_module.DataExport(data_dir / "inventory.json", 1, "transcripts"),
+                    side_effect=lambda data_dir_arg, *, copy: calls.append("transcripts")
+                    or data_module.DataExport(
+                        data_dir_arg / "inventory.json",
+                        1,
+                        "transcripts",
+                    ),
                 ) as transcripts,
                 mock.patch(
                     "secretary.data.export_artifacts",
-                    return_value=data_module.DataExport(data_dir / "artifacts.json", 1, "artifacts"),
+                    side_effect=lambda data_dir_arg: calls.append("artifacts")
+                    or data_module.DataExport(data_dir_arg / "artifacts.json", 1, "artifacts"),
                 ) as artifacts,
             ):
                 export_all(data_dir, copy_transcripts=True)
 
+        self.assertEqual(calls, ["memory", "board", "runs", "transcripts", "artifacts"])
         transcripts.assert_called_once_with(data_dir, copy=True)
         artifacts.assert_called_once_with(data_dir)
 

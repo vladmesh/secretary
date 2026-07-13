@@ -26,6 +26,7 @@ from secretary.host import (
     build_expectations,
     inventory,
 )
+from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
     MemoryExportPublishError,
     MemoryLockError,
@@ -237,6 +238,14 @@ def build_parser() -> argparse.ArgumentParser:
     memory_import.add_argument("--data-dir")
     memory_import.add_argument("--from", dest="source_dir", default="/home/dev/panelmem-kb")
     memory_import.set_defaults(handler=run_memory_import)
+
+    memory_verify = memory_subcommands.add_parser(
+        "verify",
+        help="verify secretary-data/memory journal, export and index parity",
+    )
+    memory_verify.add_argument("--instance", required=True)
+    memory_verify.add_argument("--data-dir")
+    memory_verify.set_defaults(handler=run_memory_verify)
 
     memory_propose = memory_subcommands.add_parser("propose")
     add_memory_write_common(memory_propose)
@@ -469,6 +478,31 @@ def run_memory_import(args: argparse.Namespace) -> int:
     print(f"changed: {'yes' if result.changed else 'no'}")
     print("status: ok")
     return 0
+
+
+def run_memory_verify(args: argparse.Namespace) -> int:
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = verify_memory_journal(data_dir)
+    except RuntimeError as exc:
+        print(f"secretary memory verify: {exc}")
+        return 1
+    print(f"journal: {result.facts_dir}")
+    print(f"journal commit: {result.journal_commit or '(none)'}")
+    print(f"memory facts: {result.fact_count}")
+    export_count = result.export_count if result.export_count is not None else "(missing)"
+    index_count = result.index_count if result.index_count is not None else "(missing)"
+    print(f"export facts: {export_count}")
+    print(f"index facts: {index_count}")
+    print(f"journal dirty: {'yes' if result.dirty else 'no'}")
+    if result.findings:
+        print("findings:")
+        for finding in result.findings:
+            print(f"  {finding}")
+    print(f"status: {'ok' if result.ok else 'failed'}")
+    return 0 if result.ok else 1
 
 
 def run_memory_propose(args: argparse.Namespace) -> int:
