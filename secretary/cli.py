@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Callable
 
 from secretary.backup import check_backup_health, create_backups, verify_backup
 from secretary.config import ConfigError, load_config, validate, validate_instance
@@ -37,6 +38,7 @@ from secretary.memory_write import (
     supersede_memory_fact,
 )
 from secretary.offsite import check_last_fetch
+from secretary.tasks import KanboardClient, TaskError, TaskReader
 
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -224,8 +226,19 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.set_defaults(handler=not_implemented("project add"))
     project.set_defaults(handler=not_implemented("project"))
 
-    task = subparsers.add_parser("task")
-    task.add_argument("args", nargs="*")
+    task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
+    task_subcommands = task.add_subparsers(dest="task_command")
+    task_list = task_subcommands.add_parser("list")
+    task_list.add_argument(
+        "--state",
+        action="append",
+        choices=("ideas", "ready", "in_progress", "validate", "blocked", "done"),
+    )
+    task_list.add_argument("--project")
+    task_list.set_defaults(handler=run_task_list)
+    task_show = task_subcommands.add_parser("show")
+    task_show.add_argument("--ref", required=True)
+    task_show.set_defaults(handler=run_task_show)
     task.set_defaults(handler=not_implemented("task"))
 
     memory = subparsers.add_parser("memory", help="manage the memory journal")
@@ -282,6 +295,25 @@ def add_memory_write_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--data-dir")
     parser.add_argument("--actor", required=True)
+
+
+def run_task_list(args: argparse.Namespace) -> int:
+    return _run_task_read(lambda reader: reader.list(states=set(args.state or ()), project=args.project))
+
+
+def run_task_show(args: argparse.Namespace) -> int:
+    return _run_task_read(lambda reader: reader.show(args.ref))
+
+
+def _run_task_read(operation: Callable[[TaskReader], object]) -> int:
+    try:
+        reader = TaskReader(KanboardClient())
+        result = operation(reader)
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
 
 
 def run_doctor(args: argparse.Namespace) -> int:
