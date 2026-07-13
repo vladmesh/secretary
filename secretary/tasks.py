@@ -403,6 +403,7 @@ class TaskWriter:
         unresolved = 0
         for event in self.audit.pending_events():
             try:
+                self._finish_pending_cleanup(event)
                 task = self.reader.show(str(event["ref"]))
                 event["task_id"] = task["id"]
                 event["backend"]["revision"] = _revision(task)
@@ -412,6 +413,31 @@ class TaskWriter:
             except (TaskError, OSError, KeyError, TypeError):
                 unresolved += 1
         return repaired, unresolved
+
+    def _finish_pending_cleanup(self, event: dict[str, Any]) -> None:
+        """Complete an idempotent Ready reset before recording its move event."""
+        payload = event.get("payload")
+        if event.get("kind") != "moved" or not isinstance(payload, dict) or payload.get("to") != "ready":
+            return
+        task = self.reader.show(str(event["ref"]))
+        if task["state"] != "ready":
+            raise TaskError("backend_error", "pending move no longer matches task state", 1)
+        self.client.call(
+            "saveTaskMetadata",
+            task_id=_task_number(task),
+            values={
+                "claim": "", "resolved_head": "", "resolved_review_head": "",
+                "retry_same": "", "retry_switch": "", "retry_heads": "",
+            },
+        )
+        normalized = self.reader.show(str(event["ref"]))
+        if (
+            normalized["claim"]["worker"] is not None
+            or normalized["routing"]["resolved_worker_head"] is not None
+            or normalized["routing"]["resolved_review_head"] is not None
+            or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
+        ):
+            raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:
