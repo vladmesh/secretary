@@ -369,7 +369,11 @@ def run_task_move(args: argparse.Namespace) -> int:
 
 
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
-    repaired, unresolved = TaskAudit(args.data_dir).reconcile()
+    try:
+        repaired, unresolved = TaskWriter(KanboardClient(), data_dir=args.data_dir).reconcile()
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
     print(json.dumps({"repaired": repaired, "unresolved": unresolved}, sort_keys=True, separators=(",", ":")))
     return 0 if unresolved == 0 else 1
 

@@ -25,6 +25,10 @@ class TaskError(Exception):
         super().__init__(message)
 
 
+class _CommittedWriteError(Exception):
+    """A later step failed after a Kanboard mutation was committed."""
+
+
 _STATE_BY_COLUMN = {
     "Идеи": "ideas",
     "Ready": "ready",
@@ -205,7 +209,7 @@ class TaskAudit:
     """Durable, append-only audit log with retry-safe pending records."""
 
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
-        self.board_dir = os.fspath(data_dir)
+        self.board_dir = os.path.join(os.fspath(data_dir), "board")
         self.events_path = os.path.join(self.board_dir, "events.ndjson")
         self.pending_dir = os.path.join(self.board_dir, "pending-audit")
         self.lock_path = os.path.join(self.board_dir, ".audit.lock")
@@ -255,6 +259,20 @@ class TaskAudit:
             except (OSError, ValueError, KeyError, TypeError):
                 unresolved += 1
         return repaired, unresolved
+
+    def pending_events(self) -> list[dict[str, Any]]:
+        if not os.path.isdir(self.pending_dir):
+            return []
+        result = []
+        for name in sorted(os.listdir(self.pending_dir)):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self.pending_dir, name), encoding="utf-8") as source:
+                    result.append(json.load(source))
+            except (OSError, ValueError):
+                continue
+        return result
 
     def status(self) -> dict[str, int | bool]:
         pending = 0
@@ -337,13 +355,16 @@ class TaskWriter:
             raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
             if not isinstance(raw, dict):
                 raise TaskError("not_found", "task was not found", 2)
-            if target == "ready":
-                self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"claim": "", "resolved_head": "", "resolved_review_head": "", "retry_same": "", "retry_switch": "", "retry_heads": ""})
             ok = self.client.call("moveTaskPosition", project_id=board_id, task_id=_task_number(task), column_id=column_id, position=1, swimlane_id=_positive_int(raw.get("swimlane_id")) or 0)
             if not ok:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            if reason.strip():
-                self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
+            try:
+                if target == "ready":
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"claim": "", "resolved_head": "", "resolved_review_head": "", "retry_same": "", "retry_switch": "", "retry_heads": ""})
+                if reason.strip():
+                    self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
@@ -354,24 +375,43 @@ class TaskWriter:
                 event_id = self.audit.append(request_id, existing)
             except OSError:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": {"commented": "commented", "reported": "reported", "moved": "moved"}[kind], "task": self.reader.show(reference), "event_id": event_id}
+            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
         task = self.reader.show(reference)
         event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": payload}
         self.audit.stage(request_id, event)
         try:
             mutation(task)
+        except _CommittedWriteError:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         except Exception:
             self.audit.discard(request_id)
             raise
-        task = self.reader.show(reference)
+        try:
+            task = self.reader.show(reference)
+        except Exception:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         event["backend"]["revision"] = _revision(task)
         self.audit.stage(request_id, event)
         try:
             event_id = self.audit.append(request_id, event)
         except OSError:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        action = {"commented": "commented", "reported": "reported", "moved": "moved"}[kind]
-        return {"action": action, "task": task, "event_id": event_id}
+        return {"action": kind, "task": task, "event_id": event_id}
+
+    def reconcile(self) -> tuple[int, int]:
+        repaired = 0
+        unresolved = 0
+        for event in self.audit.pending_events():
+            try:
+                task = self.reader.show(str(event["ref"]))
+                event["task_id"] = task["id"]
+                event["backend"]["revision"] = _revision(task)
+                self.audit.stage(str(event["request_id"]), event)
+                self.audit.append(str(event["request_id"]), event)
+                repaired += 1
+            except (TaskError, OSError, KeyError, TypeError):
+                unresolved += 1
+        return repaired, unresolved
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:

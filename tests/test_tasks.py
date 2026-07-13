@@ -5,9 +5,11 @@ import io
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
+from secretary.data import export_board
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -196,3 +198,20 @@ class TaskWriterTests(unittest.TestCase):
         writes = len([call for call in self.client.calls if call[0] == "createComment"])
         self.assertEqual(self.writer.audit.reconcile(), (1, 0))
         self.assertEqual(writes, len([call for call in self.client.calls if call[0] == "createComment"]))
+
+    def test_partial_move_failure_keeps_pending_until_reconcile(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.fail_comments = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="validate", reason="why")
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.client.tasks[0]["column_id"], 4)
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.client.fail_comments = False
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_pending_blocks_export_from_the_same_data_root(self) -> None:
+        self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
+        with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
+            export_board(Path(self.tmpdir.name), command=["pipeline"])

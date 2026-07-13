@@ -171,7 +171,7 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    audit = TaskAudit(board_dir).status()
+    audit = TaskAudit(data_dir).status()
     if not audit["ok"]:
         raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
 
