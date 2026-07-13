@@ -24,17 +24,26 @@ divergence is not caught by an equality check, it is impossible to write down.
 A passed gate therefore enables the one binding that `project add` created and
 `provision-agent` kept disabled, never a neighbouring project.
 
+The scanner target is the same single identity: `scanner.repo` records only
+observations (`exists`, `head`, `worktree_clean`) about `identity.repo` at
+`identity.default_branch`, never its own repo path or branch. A passed gate
+already requires `scanner.repo.exists: true`, so a green scanner chain always
+describes the identity being enabled, never a neighbouring repo or a different
+branch.
+
 Consumers read identity from `identity` alone. They never re-derive it from a
-stage snapshot, so no consumer needs its own cross-stage equality check and no
-second source of identity exists.
+stage snapshot or a scanner field, so no consumer needs its own cross-stage
+equality check and no second source of identity exists.
 
 ## Artifacts
 
-`scanner` is written only by the deterministic scanner. It records facts read
-from the repository: repo existence, default branch, head, clean worktree flag,
-language/package-manager hints, CI files, test files and whether a project-local
-adapter already exists. It does not make LLM conclusions and does not write
-bindings or adapters.
+`scanner` is written only by the deterministic scanner. It observes
+`identity.repo` at `identity.default_branch` and records facts: repo existence,
+head, clean worktree flag, language/package-manager hints, CI files, test files
+and whether a project-local adapter already exists. The scanner does not name
+its own repo path or branch, so a green scan cannot describe a different target
+than the identity being onboarded. It does not make LLM conclusions and does not
+write bindings or adapters.
 
 `draft` is written by `project add`. It creates the
 `secretary-instance/adapters/<project>.yaml` adapter draft and records the

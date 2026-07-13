@@ -195,10 +195,7 @@ class SchemaInvalidTests(unittest.TestCase):
     def test_onboarding_accepts_missing_repo_scanner_failure(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
         data["scanner"]["status"] = "failed"
-        data["scanner"]["repo"] = {
-            "input": "/srv/projects/missing-project",
-            "exists": False,
-        }
+        data["scanner"]["repo"] = {"exists": False}
         data["scanner"]["findings"] = [{"code": "repo.missing", "severity": "error"}]
         data["gate"]["status"] = "failed"
         data["gate"]["binding"]["enabled"] = False
@@ -244,10 +241,7 @@ class SchemaInvalidTests(unittest.TestCase):
         # A passed gate must sit on a green scanner chain: repo.exists = true.
         # An "ok" status with exists = false is still a missing-repo error path.
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
-        data["scanner"]["repo"] = {
-            "input": "/srv/projects/missing-project",
-            "exists": False,
-        }
+        data["scanner"]["repo"] = {"exists": False}
         errors = validate(data, "onboarding-contract", "missing-repo-passed-gate.json")
         self.assertTrue(any(e.path == "scanner.repo.exists" for e in errors), errors)
 
@@ -315,6 +309,18 @@ class OnboardingIdentityTests(unittest.TestCase):
                     self.assertTrue(
                         any(e.path == f"{stage}.binding" for e in errors), errors
                     )
+
+    def test_scanner_cannot_name_its_own_repo_or_branch(self):
+        # The scanned target is identity.repo at identity.default_branch. The
+        # scanner reports observations only; it cannot carry a repo path or
+        # branch that disagrees with identity, in either direction.
+        for field, value in (("input", "/srv/projects/other-project"),
+                             ("default_branch", "release")):
+            with self.subTest(field=field):
+                data = self._happy()
+                data["scanner"]["repo"][field] = value
+                errors = validate(data, "onboarding-contract", f"scanner-repo-{field}.json")
+                self.assertTrue(any(e.path == "scanner.repo" for e in errors), errors)
 
     def test_passed_gate_cannot_enable_a_foreign_binding(self):
         # The prior review's escape: passed gate carrying another project's

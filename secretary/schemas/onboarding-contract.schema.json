@@ -152,20 +152,13 @@
         "repo": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["input", "exists"],
+          "description": "Observations about identity.repo at identity.default_branch. The scanner does not name its own repo path or branch, so it cannot scan a target other than the identity being onboarded.",
+          "required": ["exists"],
           "properties": {
-            "input": {"type": "string", "minLength": 1},
             "exists": {"type": "boolean"},
-            "default_branch": {"type": "string", "minLength": 1},
             "head": {"type": "string", "minLength": 1},
             "worktree_clean": {"type": "boolean"}
-          },
-          "allOf": [
-            {
-              "if": {"properties": {"exists": {"const": true}}, "required": ["exists"]},
-              "then": {"required": ["default_branch"]}
-            }
-          ]
+          }
         },
         "facts": {
           "type": "object",

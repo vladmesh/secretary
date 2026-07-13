@@ -11,9 +11,7 @@
     "owner": "deterministic-scanner",
     "status": "ok",
     "repo": {
-      "input": "/srv/projects/example-project",
-      "exists": true,
-      "default_branch": "main"
+      "exists": true
     },
     "facts": {
       "languages": ["python"],
