@@ -32,6 +32,7 @@ from secretary.memory_journal import (
     import_memory_journal,
     init_memory_journal,
 )
+from secretary.tasks import TaskAudit
 
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
@@ -170,6 +171,9 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
+    audit = TaskAudit(board_dir).status()
+    if not audit["ok"]:
+        raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
 
     cards = _pipeline_json(["list"], pipeline_worktree=pipeline_worktree, command=command)
     if not isinstance(cards, list):

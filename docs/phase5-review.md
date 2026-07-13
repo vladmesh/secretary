@@ -69,7 +69,7 @@ for read/export compatibility and is not accepted as a protocol write.
 | `project` | metadata `project`; swimlane name is cross-check only | Empty for legacy/manual cards. No inferred project is written back. |
 | `type` | metadata `task_type` | Empty for legacy cards; new writes require `code` or `research`. |
 | `blocked_by` | metadata `blocked_by` | Empty string becomes `null`. |
-| `claim.worker` | metadata `claim` | Empty string becomes `null`; existing dispatcher remains authoritative for its lifecycle. |
+| `claim.worker` | metadata `claim` | Empty string becomes `null`; existing dispatcher remains authoritative for its lifecycle. `claim.claimed_at` is `null` on legacy cards and is never inferred from comment text. |
 | `workspace.slug`, `workspace.base_branch` | metadata `slug`, `base_branch` | Empty string becomes `null`; absent `base_branch` keeps manifest/default branch behavior. |
 | `retry.*` | metadata `retry_same`, `retry_switch`, `retry_heads` | Missing or invalid counters read as `0`; empty heads reads as `[]`. |
 | worker overrides/results | metadata `head`, `resolved_head` | `head` maps to `head_override`; absent `resolved_head` yields `null`, not the effective default profile. |
@@ -120,9 +120,11 @@ The Phase 5 public surface is:
 ```text
 secretary task list [--state STATE] [--project PROJECT]
 secretary task show --ref REF
-secretary task comment --ref REF --body-file FILE
-secretary task report --ref REF --kind done|blocked --body-file FILE
-secretary task move --ref REF --to STATE [--reason-file FILE]
+secretary task comment --ref REF --role ROLE --body-file FILE
+secretary task report --ref REF --role worker --kind done|blocked --body-file FILE
+secretary task move --ref REF --role ROLE --to STATE [--reason-file FILE]
+secretary task reconcile-audit
+secretary task verify-audit
 ```
 
 Successful commands write one JSON document to stdout. `list` returns an array
@@ -153,8 +155,8 @@ Read-only `list` and `show` need no role. `comment` is available to `po`,
 `dispatcher`, `worker`, `reviewer`, `steward` and `retro`, and records that
 role as the comment actor. `report` is worker-only: `blocked` requires a
 non-empty body; `done` keeps the existing optional body. `move` uses the
-following matrix. `in_progress` is entered only by dispatcher claim and is not
-a `move` target.
+following matrix. `in_progress` is entered from Ready only by dispatcher claim.
+`Validate -> In progress` is the dispatcher-only rework transition.
 
 | Role | Permitted transitions |
 | --- | --- |
@@ -202,7 +204,9 @@ task/revision, then appends and fsyncs the event under a board-audit lock. It
 does not roll back Kanboard if that append fails, because Kanboard has no safe
 compare-and-swap rollback and another actor may have changed the card. Instead
 it leaves a durable pending-audit record keyed by request id, returns exit 4,
-and repair reads the committed backend state and appends exactly one event.
+and `task reconcile-audit` appends exactly one event without repeating the
+Kanboard mutation. `task verify-audit` reports unresolved pending records;
+they block normalized protocol export and backup promotion.
 The event id/request id uniqueness constraint makes repair idempotent.
 
 `backup` consumes the normalized task snapshot plus `events.ndjson` through the
