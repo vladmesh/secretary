@@ -3,6 +3,16 @@
 Checked on 2026-07-13 against the deployed `/home/dev/secretary` checkout at
 `1113a81` and pilot card `secretary-471`.
 
+## Acceptance status
+
+| Criterion | Status | Evidence |
+| --- | --- | --- |
+| Pilot card uses old dispatcher and new worker path | done | Protocol comment is visible through both task readers. |
+| Role guards do not damage the card | done | Forbidden reviewer report returned exit 3 before the permitted comment. |
+| Normalized export contains the pilot and passes live checks | not done | Repeat after the worker-mode rollout gate is fixed. |
+| Worker rollback preserves events | not done | Legacy reader sees the protocol comment, but launch templates cannot select rollback mode. |
+| Closure report and secretary-only design record | done | This report and the pending-cleanup reconciliation test are in `secretary`. |
+
 ## Protocol live e2e
 
 `secretary task show --ref secretary-471` returned the claimed In progress
