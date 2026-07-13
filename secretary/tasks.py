@@ -356,7 +356,7 @@ class TaskWriter:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             return {"action": {"commented": "commented", "reported": "reported", "moved": "moved"}[kind], "task": self.reader.show(reference), "event_id": event_id}
         task = self.reader.show(reference)
-        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": payload}
+        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": payload}
         self.audit.stage(request_id, event)
         try:
             mutation(task)
