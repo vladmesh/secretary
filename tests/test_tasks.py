@@ -128,6 +128,7 @@ class KanboardClientTests(unittest.TestCase):
 
 class WriteKanboard(FakeKanboard):
     fail_comments = False
+    fail_metadata = False
 
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
@@ -148,6 +149,8 @@ class WriteKanboard(FakeKanboard):
             return True
         if method == "saveTaskMetadata":
             self.calls.append((method, params))
+            if self.fail_metadata:
+                raise TaskError("backend_error", "Kanboard rejected the metadata write", 1)
             self.metadata[int(params["task_id"])].update(params["values"])
             return True
         return super().call(method, **params)
@@ -210,6 +213,24 @@ class TaskWriterTests(unittest.TestCase):
         self.client.fail_comments = False
         self.assertEqual(self.writer.reconcile(), (1, 0))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_reconcile_completes_stale_ready_cleanup_before_closing_pending(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.fail_metadata = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="")
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.client.tasks[0]["column_id"], 2)
+        self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+
+        self.client.fail_metadata = False
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        task = self.writer.reader.show("secretary-468")
+        self.assertIsNone(task["claim"]["worker"])
+        self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
 
     def test_pending_blocks_export_from_the_same_data_root(self) -> None:
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
