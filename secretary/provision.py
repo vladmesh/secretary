@@ -5,13 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from secretary._fsutil import file_lock, publish_pair_atomic, stage_text
+from secretary._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
 from secretary.onboarding import scan_repo
 
@@ -88,6 +87,13 @@ def _apply_provision_result_locked(
         return 1, _status("stale_input", run_id=run_id, **stale)
     if outcome:
         if outcome["status"] == "environment_failed":
+            if draft.get("provision", {}).get("status") == "drafted":
+                return 1, _status(
+                    "transition_conflict",
+                    run_id=run_id,
+                    current_status="drafted",
+                    attempted_status="environment_failed",
+                )
             failure = _record_provision_failure(
                 instance,
                 project_id,
@@ -311,16 +317,10 @@ def _record_provision_failure(
     if validate(updated, "onboarding-contract", "failure"):
         return _status("canonical_invalid", run_id=_run_id(draft), errors=["environment failure draft is invalid"])
     path = instance / "adapter-drafts" / f"{project_id}.yaml"
-    temp: Path | None = None
     try:
-        temp = stage_text(path, yaml.safe_dump(updated, sort_keys=False))
-        os.replace(temp, path)
-        temp = None
+        publish_state_atomic([(path, yaml.safe_dump(updated, sort_keys=False))])
     except OSError as exc:
         return _status("publication_failed", run_id=_run_id(draft), errors=[exc.strerror or "I/O error"])
-    finally:
-        if temp is not None:
-            temp.unlink(missing_ok=True)
     return None
 
 

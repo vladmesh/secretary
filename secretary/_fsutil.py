@@ -61,28 +61,7 @@ def stage_text(path: Path, payload: str) -> Path:
 
 def publish_pair_atomic(first: Path, first_text: str, second: Path, second_text: str) -> None:
     """Publish two files and restore the first if publishing the second fails."""
-    first_before = first.read_bytes() if first.exists() else None
-    first_temp: Path | None = None
-    second_temp: Path | None = None
-    try:
-        first_temp = stage_text(first, first_text)
-        second_temp = stage_text(second, second_text)
-        os.replace(first_temp, first)
-        first_temp = None
-        try:
-            os.replace(second_temp, second)
-            second_temp = None
-        except OSError:
-            if first_before is None:
-                first.unlink(missing_ok=True)
-            else:
-                restore = stage_text(first, first_before.decode("utf-8"))
-                os.replace(restore, first)
-            raise
-    finally:
-        for temp in (first_temp, second_temp):
-            if temp is not None:
-                temp.unlink(missing_ok=True)
+    publish_state_atomic([(first, first_text), (second, second_text)])
 
 
 def publish_pair_and_remove_atomic(
@@ -93,26 +72,32 @@ def publish_pair_and_remove_atomic(
     remove: Path,
 ) -> None:
     """Publish two files and remove one stale file, rolling back on publish/remove errors."""
-    first_before = first.read_bytes() if first.exists() else None
-    second_before = second.read_bytes() if second.exists() else None
-    first_temp: Path | None = None
-    second_temp: Path | None = None
+    publish_state_atomic([(first, first_text), (second, second_text)], removes=[remove])
+
+
+def publish_state_atomic(
+    writes: list[tuple[Path, str]],
+    *,
+    removes: list[Path] | None = None,
+) -> None:
+    """Apply one onboarding state transition and restore every path on failure."""
+    removals = removes or []
+    paths = [path for path, _ in writes] + removals
+    before = {path: path.read_bytes() if path.exists() else None for path in paths}
+    staged: list[tuple[Path, Path]] = []
     try:
-        first_temp = stage_text(first, first_text)
-        second_temp = stage_text(second, second_text)
-        os.replace(first_temp, first)
-        first_temp = None
-        os.replace(second_temp, second)
-        second_temp = None
-        remove.unlink()
+        staged = [(path, stage_text(path, text)) for path, text in writes]
+        for path, temp in staged:
+            os.replace(temp, path)
+        for path in removals:
+            path.unlink()
     except OSError:
-        _restore_file(second, second_before)
-        _restore_file(first, first_before)
+        for path in reversed(paths):
+            _restore_file(path, before[path])
         raise
     finally:
-        for temp in (first_temp, second_temp):
-            if temp is not None:
-                temp.unlink(missing_ok=True)
+        for _, temp in staged:
+            temp.unlink(missing_ok=True)
 
 
 def _restore_file(path: Path, before: bytes | None) -> None:

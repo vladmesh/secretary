@@ -373,12 +373,46 @@ class ProvisionTests(unittest.TestCase):
             },
         }
 
-        with mock.patch("secretary.provision.os.replace", side_effect=OSError(5, "injected")):
+        with mock.patch("secretary._fsutil.os.replace", side_effect=OSError(5, "injected")):
             code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
 
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "publication_failed")
         self.assertFalse(self.adapter_path.exists())
+
+    def test_environment_failure_after_success_is_transition_conflict(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(result_path)
+        )
+        self.assertEqual(code, 0, result)
+        draft_before = self.draft_path.read_bytes()
+        adapter_before = self.adapter_path.read_bytes()
+
+        environment_failed = {
+            "version": 1,
+            "run_id": task["run_id"],
+            "identity": {"id": "sample-project", "adapter": "sample-project"},
+            "input_revision": dict(task["input_revision"]),
+            "status": "environment_failed",
+            "environment": {
+                "run_id": task["run_id"],
+                "status": "failed",
+                "code": "runtime-error",
+                "retry": "same-run",
+            },
+        }
+        result_path = self.write_result(environment_failed)
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(result_path)
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "transition_conflict")
+        self.assertEqual(result["current_status"], "drafted")
+        self.assertEqual(self.draft_path.read_bytes(), draft_before)
+        self.assertEqual(self.adapter_path.read_bytes(), adapter_before)
 
     def test_environment_failure_rejects_raw_secret_message(self):
         task = self.start()["task"]
