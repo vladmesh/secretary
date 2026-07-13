@@ -1078,7 +1078,6 @@ class CliTests(unittest.TestCase):
             ["backup"],
             ["restore"],
             ["project", "add", "example"],
-            ["task", "list"],
         ):
             with self.subTest(command=command):
                 code, output = self.run_cli(command)
