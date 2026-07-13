@@ -20,6 +20,38 @@
     {
       "if": {
         "properties": {
+          "draft": {
+            "properties": {
+              "adapter": {
+                "properties": {"status": {"const": "unresolved"}},
+                "required": ["status"]
+              }
+            },
+            "required": ["adapter"]
+          }
+        },
+        "required": ["draft"]
+      },
+      "then": {
+        "properties": {
+          "ownership": {
+            "properties": {
+              "adapter": {
+                "properties": {
+                  "storage": {"const": "secretary-instance/adapter-drafts/<project>.yaml"}
+                },
+                "required": ["storage"]
+              }
+            },
+            "required": ["adapter"]
+          }
+        },
+        "required": ["ownership"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "gate": {"properties": {"status": {"const": "passed"}}, "required": ["status"]}
         },
         "required": ["gate"]
@@ -36,6 +68,11 @@
               "findings": {"$ref": "#/$defs/noErrorFindings"}
             },
             "required": ["status", "repo", "findings"]
+          },
+          "draft": {
+            "properties": {
+              "findings": {"$ref": "#/$defs/noErrorFindings"}
+            }
           },
           "provision": {
             "properties": {
@@ -169,6 +206,8 @@
             "package_managers": {"type": "array", "items": {"type": "string", "minLength": 1}},
             "ci_files": {"type": "array", "items": {"type": "string", "minLength": 1}},
             "test_files": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "docs_files": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "setup_files": {"type": "array", "items": {"type": "string", "minLength": 1}},
             "project_local_adapter": {"type": "boolean"}
           }
         },
@@ -182,7 +221,8 @@
       "properties": {
         "owner": {"const": "project-add"},
         "binding": {"$ref": "#/$defs/disabledStageBinding"},
-        "adapter": {"$ref": "#/$defs/adapterDraft"}
+        "adapter": {"$ref": "#/$defs/projectAddAdapterDraft"},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
       }
     },
     "provision": {
@@ -191,11 +231,21 @@
       "required": ["owner", "status", "binding", "adapter", "findings"],
       "properties": {
         "owner": {"const": "provision-agent"},
-        "status": {"type": "string", "enum": ["drafted", "failed"]},
+        "status": {"type": "string", "enum": ["pending", "drafted", "failed"]},
         "binding": {"$ref": "#/$defs/disabledStageBinding"},
-        "adapter": {"$ref": "#/$defs/adapterDraft"},
+        "adapter": {"$ref": "#/$defs/projectAddAdapterDraft"},
         "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "pending"}}, "required": ["status"]},
+          "then": {"properties": {"adapter": {"$ref": "#/$defs/unresolvedAdapterDraft"}}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "drafted"}}, "required": ["status"]},
+          "then": {"properties": {"adapter": {"$ref": "#/$defs/adapterDraft"}}}
+        }
+      ]
     },
     "gate": {
       "type": "object",
@@ -203,23 +253,27 @@
       "required": ["owner", "status", "checks", "binding", "findings"],
       "properties": {
         "owner": {"const": "onboarding-gate"},
-        "status": {"type": "string", "enum": ["passed", "failed"]},
+        "status": {"type": "string", "enum": ["pending", "passed", "failed"]},
         "checks": {
           "type": "object",
           "additionalProperties": false,
           "required": ["clean_worktree", "setup", "smoke", "validation", "artifact_policy"],
           "properties": {
-            "clean_worktree": {"type": "string", "enum": ["passed", "failed"]},
+            "clean_worktree": {"type": "string", "enum": ["passed", "failed", "not-run"]},
             "setup": {"type": "string", "enum": ["passed", "failed", "not-run"]},
             "smoke": {"type": "string", "enum": ["passed", "failed", "not-run"]},
             "validation": {"type": "string", "enum": ["passed", "failed", "not-run", "declared-missing"]},
-            "artifact_policy": {"type": "string", "enum": ["passed", "failed"]}
+            "artifact_policy": {"type": "string", "enum": ["passed", "failed", "not-run"]}
           }
         },
         "binding": {"$ref": "#/$defs/stageBinding"},
         "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
       },
       "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "pending"}}, "required": ["status"]},
+          "then": {"properties": {"binding": {"properties": {"enabled": {"const": false}}}}}
+        },
         {
           "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
           "then": {
@@ -274,7 +328,7 @@
           "properties": {
             "draft_owner": {"const": "project-add"},
             "provision_owner": {"const": "provision-agent"},
-            "storage": {"const": "secretary-instance/adapters/<project>.yaml"}
+            "storage": {"enum": ["secretary-instance/adapter-drafts/<project>.yaml", "secretary-instance/adapters/<project>.yaml"]}
           }
         },
         "enable_transition": {
@@ -371,6 +425,31 @@
         }
       }
     },
+    "unresolvedAdapterDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "required_decisions"],
+      "properties": {
+        "status": {"const": "unresolved"},
+        "required_decisions": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "setup.commands"},
+            {"const": "smoke.command"},
+            {"const": "validation.ci"},
+            {"const": "artifact_policy.write_project_files"}
+          ],
+          "items": false,
+          "minItems": 4
+        }
+      }
+    },
+    "projectAddAdapterDraft": {
+      "oneOf": [
+        {"$ref": "#/$defs/unresolvedAdapterDraft"},
+        {"$ref": "#/$defs/adapterDraft"}
+      ]
+    },
     "finding": {
       "type": "object",
       "additionalProperties": false,
@@ -378,7 +457,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "enum": ["repo.missing", "scanner.failed", "draft.invalid", "ci.undeclared", "gate.failed"]
+          "enum": ["repo.missing", "scanner.failed", "draft.invalid", "ci.undeclared", "tests.not-observed", "ci.not-observed", "gate.failed"]
         },
         "severity": {"type": "string", "enum": ["error", "warning", "info"]},
         "message": {"type": "string", "minLength": 1}

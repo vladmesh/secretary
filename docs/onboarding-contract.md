@@ -45,14 +45,22 @@ its own repo path or branch, so a green scan cannot describe a different target
 than the identity being onboarded. It does not make LLM conclusions and does not
 write bindings or adapters.
 
-`draft` is written by `project add`. It creates the
-`secretary-instance/adapters/<project>.yaml` adapter draft and records the
-binding as `enabled: false`. The binding identity comes from `identity`.
+`draft` is written by `project add`. It records the binding as `enabled: false`
+and writes an unresolved onboarding artifact to
+`secretary-instance/adapter-drafts/<project>.yaml`. The unresolved form names
+the decisions still owned by provision, but has no setup, smoke, CI or artifact
+policy values. It is not a canonical adapter and is validated separately by
+`doctor`.
 
-`provision` is written by the provision-agent. It may complete setup, smoke,
-validation and artifact policy in the adapter draft. It keeps the binding at
-`enabled: false` and must choose CI policy explicitly: `github`, `local` with a
-command, or `none` with the missing coverage declared.
+`provision` is written by the provision-agent. It completes setup, smoke,
+validation and artifact policy, validates the result with the canonical adapter
+schema, then materializes `secretary-instance/adapters/<project>.yaml`. It keeps
+the binding at `enabled: false` and must choose CI policy explicitly: `github`,
+`local` with a command, or `none` with the missing coverage declared.
+
+`project add` and an unrun provision or gate use `status: pending`. Missing
+repositories and scanner failures still produce a complete, schema-valid v1
+artifact for machine-readable failure handling, but publish no instance files.
 
 `gate` is written only by the onboarding gate. A passed gate is the only artifact
 that may record the binding as `enabled: true`. A failed gate keeps
@@ -63,7 +71,7 @@ explicitly uses `validation.ci: none` with missing coverage recorded. A passed
 gate with `validation.ci: github` or `validation.ci: local` must use
 `validation: passed`. A passed gate also requires `scanner.status: ok`,
 `provision.status: drafted` and no `severity: error` findings in scanner,
-provision or gate.
+draft, provision or gate.
 
 ## Ownership
 
@@ -87,6 +95,8 @@ The contract reserves these finding codes:
 | `scanner.failed` | Deterministic scanning could not complete. |
 | `draft.invalid` | The draft binding or adapter fails schema validation. |
 | `ci.undeclared` | The provision result did not choose a CI policy. |
+| `tests.not-observed` | The scanner did not observe test files. |
+| `ci.not-observed` | The scanner did not observe CI files. |
 | `gate.failed` | The clean-worktree/setup/smoke/validation gate failed. |
 
 ## Compatibility Manifest
