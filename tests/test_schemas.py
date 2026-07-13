@@ -208,6 +208,31 @@ class SchemaInvalidTests(unittest.TestCase):
         data["gate"]["findings"] = [{"code": "repo.missing", "severity": "error"}]
         self.assertEqual(validate(data, "onboarding-contract", "missing-repo.json"), [])
 
+    def test_onboarding_accepts_declared_missing_only_for_no_ci(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["provision"]["adapter"]["validation"] = {"ci": "none", "missing": ["tests"]}
+        data["gate"]["checks"]["validation"] = "declared-missing"
+        self.assertEqual(validate(data, "onboarding-contract", "no-ci-declared-missing.json"), [])
+
+    def test_onboarding_rejects_declared_missing_with_github_ci(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["gate"]["checks"]["validation"] = "declared-missing"
+        errors = validate(data, "onboarding-contract", "github-declared-missing.json")
+        self.assertTrue(any(e.path == "provision.adapter.validation.ci" for e in errors), errors)
+
+    def test_onboarding_rejects_declared_missing_with_local_ci(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["provision"]["adapter"]["validation"] = {"ci": "local", "command": "make test"}
+        data["gate"]["checks"]["validation"] = "declared-missing"
+        errors = validate(data, "onboarding-contract", "local-declared-missing.json")
+        self.assertTrue(any(e.path == "provision.adapter.validation.ci" for e in errors), errors)
+
+    def test_onboarding_rejects_passed_validation_with_no_ci(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["provision"]["adapter"]["validation"] = {"ci": "none", "missing": ["tests"]}
+        errors = validate(data, "onboarding-contract", "no-ci-passed-validation.json")
+        self.assertTrue(any(e.path == "gate.checks.validation" for e in errors), errors)
+
     def test_onboarding_rejects_undeclared_ci(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
         del data["provision"]["adapter"]["validation"]["ci"]

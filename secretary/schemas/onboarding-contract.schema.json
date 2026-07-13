@@ -19,6 +19,79 @@
     "ownership": {"$ref": "#/$defs/ownership"},
     "compatibility_manifest": {"$ref": "#/$defs/compatibilityManifest"}
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "gate": {
+            "properties": {
+              "status": {"const": "passed"},
+              "checks": {
+                "properties": {"validation": {"const": "declared-missing"}},
+                "required": ["validation"]
+              }
+            },
+            "required": ["status", "checks"]
+          }
+        },
+        "required": ["gate"]
+      },
+      "then": {
+        "properties": {
+          "provision": {
+            "properties": {
+              "adapter": {
+                "properties": {
+                  "validation": {
+                    "properties": {"ci": {"const": "none"}},
+                    "required": ["ci", "missing"]
+                  }
+                },
+                "required": ["validation"]
+              }
+            },
+            "required": ["adapter"]
+          }
+        },
+        "required": ["provision"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "gate": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
+          "provision": {
+            "properties": {
+              "adapter": {
+                "properties": {
+                  "validation": {
+                    "properties": {"ci": {"const": "none"}},
+                    "required": ["ci"]
+                  }
+                },
+                "required": ["validation"]
+              }
+            },
+            "required": ["adapter"]
+          }
+        },
+        "required": ["gate", "provision"]
+      },
+      "then": {
+        "properties": {
+          "gate": {
+            "properties": {
+              "checks": {
+                "properties": {"validation": {"const": "declared-missing"}},
+                "required": ["validation"]
+              }
+            },
+            "required": ["checks"]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "scanner": {
       "type": "object",

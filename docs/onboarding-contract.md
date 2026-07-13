@@ -31,7 +31,8 @@ that may set the binding to `enabled: true`. A failed gate keeps
 artifact policy checks to be `passed`; validation must be `passed` or
 `declared-missing`. `declared-missing` is only for projects whose adapter
 explicitly uses `validation.ci: none` with missing coverage recorded. A passed
-gate must not carry error findings.
+gate with `validation.ci: github` or `validation.ci: local` must use
+`validation: passed`. A passed gate must not carry error findings.
 
 ## Ownership
 
