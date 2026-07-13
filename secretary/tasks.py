@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import base64
+import fcntl
+import hashlib
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,6 +23,10 @@ class TaskError(Exception):
         self.message = message
         self.exit_code = exit_code
         super().__init__(message)
+
+
+class _CommittedWriteError(Exception):
+    """A later step failed after a Kanboard mutation was committed."""
 
 
 _STATE_BY_COLUMN = {
@@ -37,6 +45,22 @@ _KNOWN_METADATA = {
 }
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
+_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro"}
+_COMMENT_ROLES = _ROLES
+_TRANSITIONS = {
+    "po": {("ideas", "ready"), ("blocked", "ready")},
+    "dispatcher": {
+        ("in_progress", "validate"), ("in_progress", "blocked"),
+        ("in_progress", "ready"), ("validate", "in_progress"),
+        ("validate", "blocked"), ("validate", "done"),
+    },
+    "worker": set(), "reviewer": set(), "retro": set(),
+    "steward": {
+        ("ideas", "ready"), ("blocked", "ready"), ("blocked", "done"),
+        ("in_progress", "done"), ("ideas", "blocked"), ("ready", "blocked"),
+        ("in_progress", "blocked"), ("validate", "blocked"),
+    },
+}
 
 
 class KanboardClient:
@@ -181,8 +205,241 @@ class TaskReader:
         return result
 
 
+class TaskAudit:
+    """Durable, append-only audit log with retry-safe pending records."""
+
+    def __init__(self, data_dir: str | os.PathLike[str]) -> None:
+        self.board_dir = os.path.join(os.fspath(data_dir), "board")
+        self.events_path = os.path.join(self.board_dir, "events.ndjson")
+        self.pending_dir = os.path.join(self.board_dir, "pending-audit")
+        self.lock_path = os.path.join(self.board_dir, ".audit.lock")
+
+    def stage(self, request_id: str, event: dict[str, Any]) -> None:
+        os.makedirs(self.pending_dir, exist_ok=True)
+        self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
+
+    def append(self, request_id: str, event: dict[str, Any]) -> str:
+        os.makedirs(self.board_dir, exist_ok=True)
+        with open(self.lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                if not self._has_request(request_id):
+                    with open(self.events_path, "a", encoding="utf-8") as events:
+                        events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+                        events.flush()
+                        os.fsync(events.fileno())
+                pending = os.path.join(self.pending_dir, f"{request_id}.json")
+                if os.path.exists(pending):
+                    os.unlink(pending)
+                return str(event["event_id"])
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def discard(self, request_id: str) -> None:
+        try:
+            os.unlink(os.path.join(self.pending_dir, f"{request_id}.json"))
+        except FileNotFoundError:
+            pass
+
+    def reconcile(self) -> tuple[int, int]:
+        if not os.path.isdir(self.pending_dir):
+            return 0, 0
+        repaired = 0
+        unresolved = 0
+        for name in sorted(os.listdir(self.pending_dir)):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(self.pending_dir, name)
+            try:
+                with open(path, encoding="utf-8") as source:
+                    event = json.load(source)
+                request_id = str(event["request_id"])
+                self.append(request_id, event)
+                repaired += 1
+            except (OSError, ValueError, KeyError, TypeError):
+                unresolved += 1
+        return repaired, unresolved
+
+    def pending_events(self) -> list[dict[str, Any]]:
+        if not os.path.isdir(self.pending_dir):
+            return []
+        result = []
+        for name in sorted(os.listdir(self.pending_dir)):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self.pending_dir, name), encoding="utf-8") as source:
+                    result.append(json.load(source))
+            except (OSError, ValueError):
+                continue
+        return result
+
+    def status(self) -> dict[str, int | bool]:
+        pending = 0
+        if os.path.isdir(self.pending_dir):
+            pending = sum(name.endswith(".json") for name in os.listdir(self.pending_dir))
+        return {"ok": pending == 0, "pending": pending}
+
+    def event(self, request_id: str) -> dict[str, Any] | None:
+        try:
+            with open(self.events_path, encoding="utf-8") as events:
+                for line in events:
+                    if line.strip():
+                        candidate = json.loads(line)
+                        if candidate.get("request_id") == request_id:
+                            return candidate
+        except FileNotFoundError:
+            pass
+        pending = os.path.join(self.pending_dir, f"{request_id}.json")
+        try:
+            with open(pending, encoding="utf-8") as source:
+                return json.load(source)
+        except FileNotFoundError:
+            return None
+
+    def _has_request(self, request_id: str) -> bool:
+        try:
+            with open(self.events_path, encoding="utf-8") as events:
+                return any(json.loads(line).get("request_id") == request_id for line in events if line.strip())
+        except FileNotFoundError:
+            return False
+
+    @staticmethod
+    def _atomic_json(path: str, document: dict[str, Any]) -> None:
+        directory = os.path.dirname(path)
+        fd, temp = tempfile.mkstemp(prefix=".pending-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                json.dump(document, output, sort_keys=True, separators=(",", ":"))
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temp, path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+
+
+class TaskWriter:
+    """Protocol writes, role guards and normalized audit events."""
+
+    def __init__(self, client: KanboardClient, *, data_dir: str | os.PathLike[str]) -> None:
+        self.client = client
+        self.reader = TaskReader(client)
+        self.audit = TaskAudit(data_dir)
+
+    def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+        self._role(role, _COMMENT_ROLES)
+        return self._write("commented", role, actor, reference, request_id, {"marker": role, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"))
+
+    def report(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+        self._role(role, {"worker"})
+        if kind not in {"done", "blocked"} or (kind == "blocked" and not body.strip()):
+            raise TaskError("validation", "blocked reports require a non-empty body", 2)
+        marker = f"report:{kind}"
+        return self._write("reported", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
+
+    def move(self, *, role: str, actor: str, reference: str, target: str, reason: str, request_id: str | None = None) -> dict[str, Any]:
+        self._role(role, _ROLES)
+        if target == "in_progress":
+            raise TaskError("transition_forbidden", "in_progress is entered only by dispatcher claim", 3)
+        def mutation(task: dict[str, Any]) -> Any:
+            source = task["state"]
+            if (source, target) not in _TRANSITIONS[role]:
+                raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
+            if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
+                raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
+            board_id, columns, _ = self.reader._board()
+            column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+            if column_id is None:
+                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
+            if not isinstance(raw, dict):
+                raise TaskError("not_found", "task was not found", 2)
+            ok = self.client.call("moveTaskPosition", project_id=board_id, task_id=_task_number(task), column_id=column_id, position=1, swimlane_id=_positive_int(raw.get("swimlane_id")) or 0)
+            if not ok:
+                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            try:
+                if target == "ready":
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"claim": "", "resolved_head": "", "resolved_review_head": "", "retry_same": "", "retry_switch": "", "retry_heads": ""})
+                if reason.strip():
+                    self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+        return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
+
+    def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
+        request_id = request_id or str(uuid.uuid4())
+        existing = self.audit.event(request_id)
+        if existing is not None:
+            try:
+                event_id = self.audit.append(request_id, existing)
+            except OSError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
+        task = self.reader.show(reference)
+        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": payload}
+        self.audit.stage(request_id, event)
+        try:
+            mutation(task)
+        except _CommittedWriteError:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        except Exception:
+            self.audit.discard(request_id)
+            raise
+        try:
+            task = self.reader.show(reference)
+        except Exception:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        event["backend"]["revision"] = _revision(task)
+        self.audit.stage(request_id, event)
+        try:
+            event_id = self.audit.append(request_id, event)
+        except OSError:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        return {"action": kind, "task": task, "event_id": event_id}
+
+    def reconcile(self) -> tuple[int, int]:
+        repaired = 0
+        unresolved = 0
+        for event in self.audit.pending_events():
+            try:
+                task = self.reader.show(str(event["ref"]))
+                event["task_id"] = task["id"]
+                event["backend"]["revision"] = _revision(task)
+                self.audit.stage(str(event["request_id"]), event)
+                self.audit.append(str(event["request_id"]), event)
+                repaired += 1
+            except (TaskError, OSError, KeyError, TypeError):
+                unresolved += 1
+        return repaired, unresolved
+
+    @staticmethod
+    def _role(role: str, allowed: set[str]) -> None:
+        if role not in allowed:
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+
+
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else "" if value is None else str(value)
+
+
+def _task_number(task: dict[str, Any]) -> int:
+    value = _positive_int(str(task.get("id", "")).removeprefix("task_kanboard_"))
+    if value is None:
+        raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+    return value
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _revision(task: dict[str, Any]) -> str:
+    return "updated_at:" + str(task.get("audit", {}).get("updated_at") or "unknown")
 
 
 def _null_if_empty(value: Any) -> str | None:

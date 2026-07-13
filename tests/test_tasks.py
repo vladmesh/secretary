@@ -3,11 +3,14 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
-from secretary.tasks import KanboardClient, TaskError, TaskReader
+from secretary.data import export_board
+from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
 class FakeKanboard:
@@ -121,3 +124,94 @@ class KanboardClientTests(unittest.TestCase):
                 client.call("getAllTasks", project_id=1)
         self.assertEqual(raised.exception.code, "backend_error")
         self.assertNotIn("super-secret", raised.exception.message)
+
+
+class WriteKanboard(FakeKanboard):
+    fail_comments = False
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "getColumns":
+            return [
+                {"id": 1, "title": "Идеи"}, {"id": 2, "title": "Ready"},
+                {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+            ]
+        if method == "createComment":
+            self.calls.append((method, params))
+            if self.fail_comments:
+                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            return 1
+        if method == "moveTaskPosition":
+            self.calls.append((method, params))
+            self.tasks[0]["column_id"] = params["column_id"]
+            self.tasks[0]["date_modification"] = "1720000100"
+            return True
+        if method == "saveTaskMetadata":
+            self.calls.append((method, params))
+            self.metadata[int(params["task_id"])].update(params["values"])
+            return True
+        return super().call(method, **params)
+
+
+class TaskWriterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def test_forbidden_role_does_not_write(self) -> None:
+        with self.assertRaisesRegex(TaskError, "not permitted") as raised:
+            self.writer.report(role="reviewer", actor="r", reference="secretary-468", kind="done", body="")
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertEqual(self.client.calls, [])
+
+    def test_stale_transition_does_not_write(self) -> None:
+        with self.assertRaisesRegex(TaskError, "may not move") as raised:
+            self.writer.move(role="po", actor="p", reference="secretary-468", target="ready", reason="")
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
+    def test_retry_does_not_repeat_backend_write_or_event(self) -> None:
+        result = self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe", request_id="same")
+        second = self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe", request_id="same")
+        self.assertEqual(result["event_id"], second["event_id"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createComment"]), 1)
+        audit = TaskAudit(self.tmpdir.name)
+        with open(audit.events_path, encoding="utf-8") as events:
+            self.assertEqual(len(events.readlines()), 1)
+
+    def test_backend_failure_removes_uncommitted_pending_record(self) -> None:
+        self.client.fail_comments = True
+        with self.assertRaisesRegex(TaskError, "rejected"):
+            self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_pending_is_visible_and_reconciles_without_backend_retry(self) -> None:
+        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(TaskError, "committed") as raised:
+                self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe")
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        writes = len([call for call in self.client.calls if call[0] == "createComment"])
+        self.assertEqual(self.writer.audit.reconcile(), (1, 0))
+        self.assertEqual(writes, len([call for call in self.client.calls if call[0] == "createComment"]))
+
+    def test_partial_move_failure_keeps_pending_until_reconcile(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.fail_comments = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="validate", reason="why")
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.client.tasks[0]["column_id"], 4)
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.client.fail_comments = False
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_pending_blocks_export_from_the_same_data_root(self) -> None:
+        self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
+        with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
+            export_board(Path(self.tmpdir.name), command=["pipeline"])
