@@ -3,6 +3,8 @@
 Checked on 2026-07-13 against the deployed `/home/dev/secretary` checkout at
 `1113a81` and pilot card `secretary-471`.
 
+Implementation PR: https://github.com/vladmesh/secretary/pull/22
+
 ## Acceptance status
 
 | Criterion | Status | Evidence |
