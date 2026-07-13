@@ -165,6 +165,7 @@ class InstanceReport:
     name: str
     projects: int
     adapters: int
+    adapter_drafts: int
     has_manifest: bool
     manifest_path: Path | None
     errors: list[SchemaError]
@@ -202,6 +203,7 @@ def validate_instance(path: Path) -> InstanceReport:
             name="",
             projects=0,
             adapters=0,
+            adapter_drafts=0,
             has_manifest=False,
             manifest_path=None,
             errors=[SchemaError(str(instance_file), "<file>", str(exc))],
@@ -218,6 +220,9 @@ def validate_instance(path: Path) -> InstanceReport:
 
     projects = _validate_dir(instance_dir / "projects", "project-binding", errors)
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
+    adapter_drafts = _validate_dir(
+        instance_dir / "adapter-drafts", "onboarding-contract", errors
+    )
     bindings = _load_bindings(instance_dir / "projects")
 
     manifest_file = _find_manifest(instance_dir, instance)
@@ -244,6 +249,7 @@ def validate_instance(path: Path) -> InstanceReport:
         name=name,
         projects=projects,
         adapters=adapters,
+        adapter_drafts=adapter_drafts,
         has_manifest=has_manifest,
         manifest_path=manifest_file,
         errors=errors,

@@ -38,6 +38,7 @@ from secretary.memory_write import (
     supersede_memory_fact,
 )
 from secretary.offsite import check_last_fetch
+from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -222,8 +223,14 @@ def build_parser() -> argparse.ArgumentParser:
     project = subparsers.add_parser("project")
     project_subcommands = project.add_subparsers(dest="project_command")
     project_add = project_subcommands.add_parser("add")
-    project_add.add_argument("path_or_url", nargs="?")
-    project_add.set_defaults(handler=not_implemented("project add"))
+    project_add.add_argument("path_or_url")
+    project_add.add_argument("--dry-run", action="store_true")
+    project_add.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+    )
+    project_add.set_defaults(handler=run_project_add)
     project.set_defaults(handler=not_implemented("project"))
 
     task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
@@ -404,6 +411,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"name: {report.name or 'unnamed'}")
     print(f"projects: {report.projects}")
     print(f"adapters: {report.adapters}")
+    print(f"adapter drafts: {report.adapter_drafts}")
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
     if report.manifest_path:
         print(f"data manifest path: {report.manifest_path}")
@@ -432,6 +440,12 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
+
+
+def run_project_add(args: argparse.Namespace) -> int:
+    code, artifact = project_add(args.path_or_url, args.instance, dry_run=args.dry_run)
+    print(render_artifact(artifact), end="")
+    return code
 
 
 def print_offsite_status(instance_path: Path) -> tuple[list[str], list[str]]:
