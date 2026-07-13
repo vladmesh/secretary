@@ -150,6 +150,28 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(adapter_bytes, self.adapter_path.read_bytes())
         self.assertEqual(draft_bytes, self.draft_path.read_bytes())
 
+    def test_project_add_resets_provision_when_scanner_head_changes(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        (self.repo / "sample.py").write_text("VALUE = 4\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Change after draft")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertEqual(artifact["gate"]["status"], "pending")
+        self.assertEqual(artifact["provision"]["adapter"]["status"], "unresolved")
+        self.assertEqual(
+            artifact["ownership"]["adapter"]["storage"],
+            "secretary-instance/adapter-drafts/<project>.yaml",
+        )
+        stored = load_config(self.draft_path)
+        self.assertEqual(stored["provision"]["status"], "pending")
+
     def test_malformed_foreign_and_stale_results_do_not_publish(self):
         task = self.start()["task"]
         broken = self.instance / "broken.yaml"
@@ -169,6 +191,21 @@ class ProvisionTests(unittest.TestCase):
         code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(stale)))
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale_input")
+        self.assertFalse(self.adapter_path.exists())
+
+    def test_apply_rejects_result_when_repo_head_changed_after_start(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        (self.repo / "sample.py").write_text("VALUE = 3\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Change after provision start")
+
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "stale_input")
+        self.assertEqual(result["expected_scanner_head"], task["input_revision"]["scanner_head"])
+        self.assertNotEqual(result["expected_scanner_head"], result["actual_scanner_head"])
         self.assertFalse(self.adapter_path.exists())
 
     def test_undeclared_ci_invalid_adapter_and_project_local_write_are_rejected(self):
@@ -232,6 +269,29 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertTrue(self.adapter_path.exists())
 
+    def test_environment_failure_publication_error_is_structured(self):
+        task = self.start()["task"]
+        env = {
+            "version": 1,
+            "run_id": task["run_id"],
+            "identity": {"id": "sample-project", "adapter": "sample-project"},
+            "input_revision": dict(task["input_revision"]),
+            "status": "environment_failed",
+            "environment": {
+                "run_id": task["run_id"],
+                "status": "failed",
+                "message": "missing package manager",
+                "retry": "same-run",
+            },
+        }
+
+        with mock.patch("secretary.provision.os.replace", side_effect=OSError(5, "injected")):
+            code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "publication_failed")
+        self.assertFalse(self.adapter_path.exists())
+
     def test_partial_publication_failure_rolls_back_adapter(self):
         task = self.start()["task"]
         result_path = self.write_result(self.drafted_result(task))
@@ -246,7 +306,7 @@ class ProvisionTests(unittest.TestCase):
                 raise OSError(5, "injected")
             return real_replace(source, target)
 
-        with mock.patch("secretary.onboarding.os.replace", side_effect=fail_second):
+        with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
             code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
 
         self.assertEqual(code, 1)

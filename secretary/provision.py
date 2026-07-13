@@ -11,9 +11,9 @@ from typing import Any
 
 import yaml
 
+from secretary._fsutil import publish_pair_atomic, stage_text
 from secretary.config import ConfigError, load_config, validate
 from secretary.onboarding import scan_repo
-from secretary.onboarding import _publish_pair
 
 
 def start_provision(instance_value: str, project_id: str) -> tuple[int, dict[str, Any]]:
@@ -60,9 +60,22 @@ def apply_provision_result(
     if not isinstance(result, dict):
         return 1, _status("result_invalid", run_id=run_id, errors=["result is not a mapping"])
     outcome = _validate_result(result, draft, run_id)
+    if outcome and outcome["status"] not in {"environment_failed", "stale_input"}:
+        return 1, outcome
+    stale = _stale_reason(draft)
+    if stale and (not outcome or outcome["status"] != "stale_input"):
+        return 1, _status("stale_input", run_id=run_id, **stale)
     if outcome:
         if outcome["status"] == "environment_failed":
-            _record_provision_failure(instance, project_id, draft, "environment.failed", result["environment"]["message"])
+            failure = _record_provision_failure(
+                instance,
+                project_id,
+                draft,
+                "environment.failed",
+                result["environment"]["message"],
+            )
+            if failure:
+                return 1, failure
         return 1, outcome
     adapter = result["adapter"]
     project_local = result.get("project_local_adapter", {})
@@ -80,7 +93,7 @@ def apply_provision_result(
     if errors:
         return 1, _status("canonical_invalid", run_id=run_id, errors=[str(e) for e in errors])
     try:
-        _publish_pair(
+        publish_pair_atomic(
             adapter_path,
             yaml.safe_dump(adapter, sort_keys=False),
             draft_path,
@@ -244,7 +257,7 @@ def _record_provision_failure(
     draft: dict[str, Any],
     code: str,
     message: str,
-) -> None:
+) -> dict[str, Any] | None:
     updated = copy.deepcopy(draft)
     updated["provision"] = {
         "owner": "provision-agent",
@@ -259,14 +272,19 @@ def _record_provision_failure(
         "findings": [{"code": code, "severity": "error", "message": message}],
     }
     if validate(updated, "onboarding-contract", "failure"):
-        return
+        return _status("canonical_invalid", run_id=_run_id(draft), errors=["environment failure draft is invalid"])
     path = instance / "adapter-drafts" / f"{project_id}.yaml"
-    temp = path.with_name(f".{path.name}.tmp")
+    temp: Path | None = None
     try:
-        temp.write_text(yaml.safe_dump(updated, sort_keys=False), encoding="utf-8")
+        temp = stage_text(path, yaml.safe_dump(updated, sort_keys=False))
         os.replace(temp, path)
+        temp = None
+    except OSError as exc:
+        return _status("publication_failed", run_id=_run_id(draft), errors=[exc.strerror or "I/O error"])
     finally:
-        temp.unlink(missing_ok=True)
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+    return None
 
 
 def _status(status: str, **fields: Any) -> dict[str, Any]:

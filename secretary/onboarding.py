@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
+from secretary._fsutil import publish_pair_atomic
 from secretary.config import ConfigError, load_config, validate
 
 
@@ -88,7 +87,10 @@ def project_add(
             )
         artifact = existing_draft
         artifact["identity"] = identity
+        old_head = artifact.get("scanner", {}).get("repo", {}).get("head")
         artifact["scanner"] = scanner
+        if old_head and scanner.get("repo", {}).get("head") != old_head:
+            _reset_scanner_derived_state(artifact)
 
     binding = dict(identity)
     binding["enabled"] = False
@@ -102,7 +104,7 @@ def project_add(
         return 0, artifact
 
     try:
-        _publish_pair(
+        publish_pair_atomic(
             binding_path,
             yaml.safe_dump(binding, sort_keys=False, allow_unicode=True),
             draft_path,
@@ -367,45 +369,33 @@ def _base_artifact(repo: Path, project_id: str, branch: str, scanner: dict[str, 
     }
 
 
+def _reset_scanner_derived_state(artifact: dict[str, Any]) -> None:
+    artifact["provision"] = {
+        "owner": "provision-agent",
+        "status": "pending",
+        "binding": {"enabled": False},
+        "adapter": _unresolved_adapter(),
+        "findings": [],
+    }
+    artifact["gate"] = {
+        "owner": "onboarding-gate",
+        "status": "pending",
+        "checks": {
+            "clean_worktree": "not-run",
+            "setup": "not-run",
+            "smoke": "not-run",
+            "validation": "not-run",
+            "artifact_policy": "not-run",
+        },
+        "binding": {"enabled": False},
+        "findings": [],
+    }
+    artifact["ownership"]["adapter"]["storage"] = "secretary-instance/adapter-drafts/<project>.yaml"
+
+
 def _fail_draft(artifact: dict[str, Any], code: str, message: str) -> dict[str, Any]:
     failed = json.loads(json.dumps(artifact))
     failed["draft"].setdefault("findings", []).append(
         {"code": code, "severity": "error", "message": message}
     )
     return failed
-
-
-def _stage(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    return Path(name)
-
-
-def _publish_pair(first: Path, first_text: str, second: Path, second_text: str) -> None:
-    """Publish two files and restore the first if publishing the second fails."""
-    first_before = first.read_bytes() if first.exists() else None
-    first_temp: Path | None = None
-    second_temp: Path | None = None
-    try:
-        first_temp = _stage(first, first_text)
-        second_temp = _stage(second, second_text)
-        os.replace(first_temp, first)
-        first_temp = None
-        try:
-            os.replace(second_temp, second)
-            second_temp = None
-        except OSError:
-            if first_before is None:
-                first.unlink(missing_ok=True)
-            else:
-                restore = _stage(first, first_before.decode("utf-8"))
-                os.replace(restore, first)
-            raise
-    finally:
-        for temp in (first_temp, second_temp):
-            if temp is not None:
-                temp.unlink(missing_ok=True)

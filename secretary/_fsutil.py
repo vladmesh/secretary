@@ -42,6 +42,47 @@ def write_text_atomic(path: Path, payload: str) -> None:
                 pass
 
 
+def stage_text(path: Path, payload: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return Path(name)
+
+
+def publish_pair_atomic(first: Path, first_text: str, second: Path, second_text: str) -> None:
+    """Publish two files and restore the first if publishing the second fails."""
+    first_before = first.read_bytes() if first.exists() else None
+    first_temp: Path | None = None
+    second_temp: Path | None = None
+    try:
+        first_temp = stage_text(first, first_text)
+        second_temp = stage_text(second, second_text)
+        os.replace(first_temp, first)
+        first_temp = None
+        try:
+            os.replace(second_temp, second)
+            second_temp = None
+        except OSError:
+            if first_before is None:
+                first.unlink(missing_ok=True)
+            else:
+                restore = stage_text(first, first_before.decode("utf-8"))
+                os.replace(restore, first)
+            raise
+    finally:
+        for temp in (first_temp, second_temp):
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+
 def copy_tree(source: Path, destination: Path) -> None:
     try:
         paths = sorted(source.rglob("*"))
