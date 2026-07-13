@@ -23,6 +23,33 @@
     {
       "if": {
         "properties": {
+          "gate": {"properties": {"status": {"const": "passed"}}, "required": ["status"]}
+        },
+        "required": ["gate"]
+      },
+      "then": {
+        "properties": {
+          "scanner": {
+            "properties": {
+              "status": {"const": "ok"},
+              "findings": {"$ref": "#/$defs/noErrorFindings"}
+            },
+            "required": ["status", "findings"]
+          },
+          "provision": {
+            "properties": {
+              "status": {"const": "drafted"},
+              "findings": {"$ref": "#/$defs/noErrorFindings"}
+            },
+            "required": ["status", "findings"]
+          }
+        },
+        "required": ["scanner", "provision"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "gate": {
             "properties": {
               "status": {"const": "passed"},
@@ -361,6 +388,16 @@
         },
         "severity": {"type": "string", "enum": ["error", "warning", "info"]},
         "message": {"type": "string", "minLength": 1}
+      }
+    },
+    "noErrorFindings": {
+      "type": "array",
+      "not": {
+        "contains": {
+          "type": "object",
+          "required": ["severity"],
+          "properties": {"severity": {"const": "error"}}
+        }
       }
     }
   }

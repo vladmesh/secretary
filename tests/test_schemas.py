@@ -233,6 +233,32 @@ class SchemaInvalidTests(unittest.TestCase):
         errors = validate(data, "onboarding-contract", "no-ci-passed-validation.json")
         self.assertTrue(any(e.path == "gate.checks.validation" for e in errors), errors)
 
+    def test_onboarding_rejects_passed_gate_with_failed_scanner(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["scanner"]["status"] = "failed"
+        data["scanner"]["findings"] = [{"code": "scanner.failed", "severity": "error"}]
+        errors = validate(data, "onboarding-contract", "failed-scanner-passed-gate.json")
+        self.assertTrue(any(e.path in {"scanner.status", "scanner.findings"} for e in errors), errors)
+
+    def test_onboarding_rejects_passed_gate_with_failed_provision(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["provision"]["status"] = "failed"
+        data["provision"]["findings"] = [{"code": "draft.invalid", "severity": "error"}]
+        errors = validate(data, "onboarding-contract", "failed-provision-passed-gate.json")
+        self.assertTrue(any(e.path in {"provision.status", "provision.findings"} for e in errors), errors)
+
+    def test_onboarding_rejects_passed_gate_with_upstream_error_findings(self):
+        cases = [
+            ("scanner", {"code": "scanner.failed", "severity": "error"}),
+            ("provision", {"code": "ci.undeclared", "severity": "error"}),
+        ]
+        for section, finding in cases:
+            with self.subTest(section=section):
+                data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+                data[section]["findings"] = [finding]
+                errors = validate(data, "onboarding-contract", f"{section}-error-finding-passed-gate.json")
+                self.assertTrue(any(e.path == f"{section}.findings" for e in errors), errors)
+
     def test_onboarding_rejects_undeclared_ci(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
         del data["provision"]["adapter"]["validation"]["ci"]

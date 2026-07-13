@@ -32,7 +32,9 @@ artifact policy checks to be `passed`; validation must be `passed` or
 `declared-missing`. `declared-missing` is only for projects whose adapter
 explicitly uses `validation.ci: none` with missing coverage recorded. A passed
 gate with `validation.ci: github` or `validation.ci: local` must use
-`validation: passed`. A passed gate must not carry error findings.
+`validation: passed`. A passed gate also requires `scanner.status: ok`,
+`provision.status: drafted` and no `severity: error` findings in scanner,
+provision or gate.
 
 ## Ownership
 
