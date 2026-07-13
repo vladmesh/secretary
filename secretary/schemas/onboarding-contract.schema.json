@@ -31,14 +31,20 @@
         "repo": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["input", "exists", "default_branch"],
+          "required": ["input", "exists"],
           "properties": {
             "input": {"type": "string", "minLength": 1},
             "exists": {"type": "boolean"},
             "default_branch": {"type": "string", "minLength": 1},
             "head": {"type": "string", "minLength": 1},
             "worktree_clean": {"type": "boolean"}
-          }
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"exists": {"const": true}}, "required": ["exists"]},
+              "then": {"required": ["default_branch"]}
+            }
+          ]
         },
         "facts": {
           "type": "object",
@@ -115,7 +121,17 @@
                   "clean_worktree": {"const": "passed"},
                   "setup": {"const": "passed"},
                   "smoke": {"const": "passed"},
+                  "validation": {"enum": ["passed", "declared-missing"]},
                   "artifact_policy": {"const": "passed"}
+                }
+              },
+              "findings": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": ["severity"],
+                    "properties": {"severity": {"const": "error"}}
+                  }
                 }
               }
             }

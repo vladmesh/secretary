@@ -27,7 +27,11 @@ command, or `none` with the missing coverage declared.
 
 `gate` is written only by the onboarding gate. A passed gate is the only artifact
 that may set the binding to `enabled: true`. A failed gate keeps
-`enabled: false`.
+`enabled: false`. A passed gate requires clean worktree, setup, smoke and
+artifact policy checks to be `passed`; validation must be `passed` or
+`declared-missing`. `declared-missing` is only for projects whose adapter
+explicitly uses `validation.ci: none` with missing coverage recorded. A passed
+gate must not carry error findings.
 
 ## Ownership
 

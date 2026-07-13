@@ -180,6 +180,34 @@ class SchemaInvalidTests(unittest.TestCase):
         errors = validate(data, "onboarding-contract", "enabled-before-gate.json")
         self.assertTrue(any(e.path in {"draft.binding.enabled", "provision.binding.enabled"} for e in errors), errors)
 
+    def test_onboarding_rejects_passed_gate_with_failed_validation(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["gate"]["checks"]["validation"] = "failed"
+        errors = validate(data, "onboarding-contract", "failed-validation.json")
+        self.assertTrue(any(e.path == "gate.checks.validation" for e in errors), errors)
+
+    def test_onboarding_rejects_passed_gate_with_error_finding(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["gate"]["findings"] = [{"code": "gate.failed", "severity": "error"}]
+        errors = validate(data, "onboarding-contract", "gate-error.json")
+        self.assertTrue(any(e.path == "gate.findings" for e in errors), errors)
+
+    def test_onboarding_accepts_missing_repo_scanner_failure(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["scanner"]["status"] = "failed"
+        data["scanner"]["repo"] = {
+            "input": "/srv/projects/missing-project",
+            "exists": False,
+        }
+        data["scanner"]["findings"] = [{"code": "repo.missing", "severity": "error"}]
+        data["gate"]["status"] = "failed"
+        data["gate"]["binding"]["enabled"] = False
+        data["gate"]["checks"]["setup"] = "not-run"
+        data["gate"]["checks"]["smoke"] = "not-run"
+        data["gate"]["checks"]["validation"] = "not-run"
+        data["gate"]["findings"] = [{"code": "repo.missing", "severity": "error"}]
+        self.assertEqual(validate(data, "onboarding-contract", "missing-repo.json"), [])
+
     def test_onboarding_rejects_undeclared_ci(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
         del data["provision"]["adapter"]["validation"]["ci"]
