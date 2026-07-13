@@ -384,6 +384,150 @@ of the old repo is Phase 9 and out of scope.
 - Heads read, curator writes through the protocol, operator holds admin and the
   escape hatch, the service process is the sole file/git writer.
 
+## Live Cutover Record
+
+Run date: 2026-07-13. Operator card: `secretary-431`.
+
+### Backup and rollback checkpoint
+
+Checkpoint directory:
+
+```text
+/home/dev/secretary-data/backups/memory-cutover-20260713T001258Z
+```
+
+Contents:
+
+- `secretary-data-memory-pre-cutover.tar.gz`: full pre-cutover
+  `/home/dev/secretary-data/memory` archive.
+- `panelmem-kb-pre-cutover.tar.gz`: old canon archive with
+  `/home/dev/panelmem-kb/memory` and `.git`.
+- `memory-mcp.service.pre-cutover`: installed unit before the live restart.
+- `checkpoint.txt`: timestamp, old `panelmem-kb` HEAD and fact counts.
+- `SHA256SUMS`: verified with `sha256sum -c`.
+- `panelmem-kb-origin-push-url.pre-readonly`: old push URL, captured before
+  disabling pushes.
+
+Rollback commands:
+
+```bash
+chmod -R u+w /home/dev/panelmem-kb
+git -C /home/dev/panelmem-kb remote set-url --push origin "$(cat /home/dev/secretary-data/backups/memory-cutover-20260713T001258Z/panelmem-kb-origin-push-url.pre-readonly)"
+sudo cp /home/dev/secretary-data/backups/memory-cutover-20260713T001258Z/memory-mcp.service.pre-cutover /etc/systemd/system/memory-mcp.service
+sudo systemctl daemon-reload
+sudo systemctl restart memory-mcp
+```
+
+To force old-canon rollback rather than the saved unit shape, set
+`MEMORY_CANON_ROOT=/home/dev/panelmem-kb/memory`, remove
+`MEMORY_CANON_EXPORT`, set `MEMORY_DB=/home/dev/memory-mcp/memory.db`, reload
+systemd and restart `memory-mcp`. The new
+`/home/dev/secretary-data/memory/facts` journal is retained either way.
+
+### Import and service cutover
+
+Pre-import state:
+
+- `/home/dev/secretary-data/memory/facts`: 208 markdown facts, no `.git`.
+- `/home/dev/panelmem-kb/memory`: 232 markdown facts.
+- Installed `memory-mcp` unit had no `MEMORY_CANON_ROOT`,
+  `MEMORY_CANON_EXPORT` or `MEMORY_DB`; the running process used
+  `/home/dev/memory-mcp/memory.db`.
+
+Import:
+
+```text
+source head: bc49291654c6509d446d5a96d497db1cb4b5e9c8
+journal commit: 9e8cdf25239cec5483b68780b120acf5bd9de42b
+memory facts: 232
+```
+
+`panelmem-kb` HEAD was checked before and after import and stayed
+`bc49291654c6509d446d5a96d497db1cb4b5e9c8`.
+
+The installed unit was updated from `/home/dev/memory-mcp/memory-mcp.service`
+and restarted. The live process env after restart included:
+
+```text
+MEMORY_CANON_ROOT=/home/dev/secretary-data/memory/facts
+MEMORY_CANON_EXPORT=/home/dev/secretary-data/memory/export.ndjson
+MEMORY_DB=/home/dev/secretary-data/memory/index.sqlite
+```
+
+Readiness gate was not systemd `active`; it waited for `secretary memory verify`
+and `memory_search`. During model warmup, `memory_search` returned
+`status=not_ready`, `error=embedder_loading`, not a transport failure. After the
+initial rebuild:
+
+```text
+journal commit: 9e8cdf25239cec5483b68780b120acf5bd9de42b
+memory facts: 232
+export facts: 232
+index facts: 232
+journal dirty: no
+status: ok
+```
+
+`memory_search("Phase 4 memory plane cutover rollback acceptance",
+scope="project:secretary", caller="worker")` returned the imported Phase 4
+contract fact.
+
+### Protocol write proof
+
+A new durable fact was written only through the protocol:
+
+```text
+fact: secretary/secretary-431-live-cutover-proof
+proposal: 7d5f23cd575149b6a56547bb1c5bfc43
+journal commit: 856c9b3c7a622b71ea4ad58235aa0c6397a67a86
+source: secretary:worker/431
+```
+
+After watcher rebuild:
+
+```text
+journal commit: 856c9b3c7a622b71ea4ad58235aa0c6397a67a86
+memory facts: 233
+export facts: 233
+index facts: 233
+journal dirty: no
+status: ok
+```
+
+Search checks:
+
+- `memory_search(..., scope="project:secretary", caller="worker")` returned the
+  proof fact at top hit, score `0.9376`.
+- `memory_search(..., caller="reviewer")` returned the proof fact at top hit,
+  score `0.9313`.
+
+### Old writer sunset
+
+`panelmem-kb` was retained as the fallback archive, not deleted. The old push
+path was disabled and the tree was made readonly:
+
+```text
+origin push URL: DISABLED-readonly-after-secretary-431
+/home/dev/panelmem-kb mode: 555
+/home/dev/panelmem-kb/.git mode: 555
+/home/dev/panelmem-kb/memory mode: 555
+```
+
+A direct write probe under `/home/dev/panelmem-kb/memory` failed with
+`Permission denied`.
+
+Curator deterministic precheck was run once after readonly. It exited `0`, and
+`panelmem-kb` HEAD stayed
+`bc49291654c6509d446d5a96d497db1cb4b5e9c8` before and after the run. No
+`panelmem-kb` write or push occurred in that check.
+
+### Closure state
+
+Phase 4 live gates are green in the secretary appliance record above. The
+control-panel design/backlog text still contains older Phase 4 wording and is
+outside the `secretary` repository branch for this card; update it from this
+record after merging the secretary PR.
+
 ## Suggested Design Doc Edits
 
 - Fix the memory layout wording in `design-secretary-appliance.md`. It shows

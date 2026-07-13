@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -529,7 +530,7 @@ class CliTests(unittest.TestCase):
             commands = [
                 (
                     ["data", "export", "--instance", str(instance_dir)],
-                    "secretary data export: cannot prepare board data dir",
+                    "secretary data export: cannot prepare memory data dir",
                 ),
                 (
                     ["data", "export-board", "--instance", str(instance_dir)],
@@ -758,6 +759,69 @@ class CliTests(unittest.TestCase):
         self.assertEqual(committed["op"], "commit")
         self.assertEqual(committed["changed_facts"], ["secretary/cli-fact"])
         self.assertTrue(committed["commit"])
+
+    def test_memory_verify_command_reports_parity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            fact = root / "fact.md"
+            fact.write_text("verified cli fact\n", encoding="utf-8")
+            _propose_code, propose_output = self.run_cli(
+                [
+                    "memory",
+                    "propose",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--scope",
+                    "project:secretary",
+                    "--slug",
+                    "verified-cli",
+                    "--file",
+                    str(fact),
+                    "--source",
+                    "curator:claude/session",
+                ]
+            )
+            proposal = json.loads(propose_output)
+            self.run_cli(
+                [
+                    "memory",
+                    "commit",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "curator:claude/session",
+                    "--propose-id",
+                    proposal["propose_id"],
+                ]
+            )
+            index = data_dir / "memory" / "index.sqlite"
+
+            with sqlite3.connect(index) as conn:
+                conn.execute("create table memories(id integer primary key)")
+                conn.execute("insert into memories default values")
+                conn.commit()
+
+            code, output = self.run_cli(["memory", "verify", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("memory facts: 1", output)
+        self.assertIn("export facts: 1", output)
+        self.assertIn("index facts: 1", output)
+        self.assertIn("status: ok", output)
 
     def test_memory_commit_reports_export_failure_with_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:

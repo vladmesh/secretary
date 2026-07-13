@@ -508,8 +508,8 @@ def export_artifacts(
 
 def export_all(data_dir: Path, *, copy_transcripts: bool = False) -> dict[str, DataExport]:
     return {
-        "board": export_board(data_dir),
         "memory": export_memory(data_dir),
+        "board": export_board(data_dir),
         "runs": export_runs(data_dir),
         "transcripts": export_transcripts(data_dir, copy=copy_transcripts),
         "artifacts": export_artifacts(data_dir),
