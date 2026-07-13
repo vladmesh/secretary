@@ -21,6 +21,8 @@ SCHEMAS = {
     "instance": "instance.schema.json",
     "project-binding": "project-binding.schema.json",
     "adapter": "adapter.schema.json",
+    "provision-result": "provision-result.schema.json",
+    "provision-task": "provision-task.schema.json",
     "data-manifest": "data-manifest.schema.json",
     "onboarding-contract": "onboarding-contract.schema.json",
 }
