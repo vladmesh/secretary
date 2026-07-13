@@ -4,3 +4,6 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# Live operational state written by the board/task CLI; never a git repo.
+secretary-data/
