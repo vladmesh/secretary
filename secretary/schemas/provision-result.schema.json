@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "provision-result.schema.json",
+  "title": "Provision result artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "identity", "input_revision", "status"],
+  "properties": {
+    "version": {"const": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "adapter"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "adapter": {"type": "string", "minLength": 1}
+      }
+    },
+    "input_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanner_head"],
+      "properties": {
+        "scanner_head": {"type": "string", "minLength": 1}
+      }
+    },
+    "status": {"type": "string", "enum": ["drafted", "environment_failed", "stale_input"]},
+    "adapter": {"type": "object"},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "status", "code"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "status": {"const": "failed"},
+        "code": {
+          "type": "string",
+          "enum": ["dependency-missing", "tool-unavailable", "permission-denied", "runtime-error"]
+        },
+        "retry": {"type": "string", "enum": ["same-run"]}
+      }
+    },
+    "stale_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_scanner_head", "actual_scanner_head"],
+      "properties": {
+        "expected_scanner_head": {"type": "string", "minLength": 1},
+        "actual_scanner_head": {"type": "string", "minLength": 1}
+      }
+    },
+    "project_local_adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposed", "requires_opt_in"],
+      "properties": {
+        "proposed": {"type": "boolean"},
+        "path": {"type": "string", "minLength": 1},
+        "requires_opt_in": {"const": true}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "drafted"}}, "required": ["status"]},
+      "then": {"required": ["adapter"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "environment_failed"}}, "required": ["status"]},
+      "then": {"required": ["environment"], "not": {"required": ["adapter"]}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "stale_input"}}, "required": ["status"]},
+      "then": {"required": ["stale_input"], "not": {"required": ["adapter"]}}
+    }
+  ]
+}

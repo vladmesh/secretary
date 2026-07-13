@@ -28,9 +28,13 @@
               }
             },
             "required": ["adapter"]
+          },
+          "provision": {
+            "properties": {"status": {"const": "pending"}},
+            "required": ["status"]
           }
         },
-        "required": ["draft"]
+        "required": ["draft", "provision"]
       },
       "then": {
         "properties": {
@@ -457,7 +461,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "enum": ["repo.missing", "scanner.failed", "draft.invalid", "ci.undeclared", "tests.not-observed", "ci.not-observed", "gate.failed"]
+          "enum": ["repo.missing", "scanner.failed", "draft.invalid", "provision.invalid", "result.foreign", "stale.input", "environment.failed", "adapter.invalid", "ci.undeclared", "project-local.denied", "publication.failed", "tests.not-observed", "ci.not-observed", "gate.failed"]
         },
         "severity": {"type": "string", "enum": ["error", "warning", "info"]},
         "message": {"type": "string", "minLength": 1}

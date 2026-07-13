@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import shutil
 import stat as stat_module
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -40,6 +42,81 @@ def write_text_atomic(path: Path, payload: str) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def stage_text(path: Path, payload: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return Path(name)
+
+
+def publish_pair_atomic(first: Path, first_text: str, second: Path, second_text: str) -> None:
+    """Publish two files and restore the first if publishing the second fails."""
+    publish_state_atomic([(first, first_text), (second, second_text)])
+
+
+def publish_pair_and_remove_atomic(
+    first: Path,
+    first_text: str,
+    second: Path,
+    second_text: str,
+    remove: Path,
+) -> None:
+    """Publish two files and remove one stale file, rolling back on publish/remove errors."""
+    publish_state_atomic([(first, first_text), (second, second_text)], removes=[remove])
+
+
+def publish_state_atomic(
+    writes: list[tuple[Path, str]],
+    *,
+    removes: list[Path] | None = None,
+) -> None:
+    """Apply one onboarding state transition and restore every path on failure."""
+    removals = removes or []
+    paths = [path for path, _ in writes] + removals
+    before = {path: path.read_bytes() if path.exists() else None for path in paths}
+    staged: list[tuple[Path, Path]] = []
+    try:
+        staged = [(path, stage_text(path, text)) for path, text in writes]
+        for path, temp in staged:
+            os.replace(temp, path)
+        for path in removals:
+            path.unlink()
+    except OSError:
+        for path in reversed(paths):
+            _restore_file(path, before[path])
+        raise
+    finally:
+        for _, temp in staged:
+            temp.unlink(missing_ok=True)
+
+
+def _restore_file(path: Path, before: bytes | None) -> None:
+    if before is None:
+        path.unlink(missing_ok=True)
+    else:
+        restore = stage_text(path, before.decode("utf-8"))
+        os.replace(restore, path)
+
+
+@contextlib.contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def copy_tree(source: Path, destination: Path) -> None:

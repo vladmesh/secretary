@@ -39,6 +39,7 @@ from secretary.memory_write import (
 )
 from secretary.offsite import check_last_fetch
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
+from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -231,6 +232,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
     )
     project_add.set_defaults(handler=run_project_add)
+    provision_start = project_subcommands.add_parser("provision-start")
+    provision_start.add_argument("project_id")
+    provision_start.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+    )
+    provision_start.set_defaults(handler=run_project_provision_start)
+    provision_apply = project_subcommands.add_parser("provision-apply")
+    provision_apply.add_argument("project_id")
+    provision_apply.add_argument("--result")
+    provision_apply.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+    )
+    provision_apply.set_defaults(handler=run_project_provision_apply)
     project.set_defaults(handler=not_implemented("project"))
 
     task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
@@ -445,6 +463,18 @@ def run_doctor(args: argparse.Namespace) -> int:
 def run_project_add(args: argparse.Namespace) -> int:
     code, artifact = project_add(args.path_or_url, args.instance, dry_run=args.dry_run)
     print(render_artifact(artifact), end="")
+    return code
+
+
+def run_project_provision_start(args: argparse.Namespace) -> int:
+    code, result = start_provision(args.instance, args.project_id)
+    print(render_result(result), end="")
+    return code
+
+
+def run_project_provision_apply(args: argparse.Namespace) -> int:
+    code, result = apply_provision_result(args.instance, args.project_id, args.result)
+    print(render_result(result), end="")
     return code
 
 

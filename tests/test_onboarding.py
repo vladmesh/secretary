@@ -253,7 +253,7 @@ class OnboardingTests(unittest.TestCase):
                 raise OSError(5, "injected")
             return real_replace(source, target)
 
-        with mock.patch("secretary.onboarding.os.replace", side_effect=fail_second):
+        with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
             code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
 
         self.assertEqual(code, 1)

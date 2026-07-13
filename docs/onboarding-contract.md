@@ -52,11 +52,22 @@ the decisions still owned by provision, but has no setup, smoke, CI or artifact
 policy values. It is not a canonical adapter and is validated separately by
 `doctor`.
 
-`provision` is written by the provision-agent. It completes setup, smoke,
-validation and artifact policy, validates the result with the canonical adapter
-schema, then materializes `secretary-instance/adapters/<project>.yaml`. It keeps
-the binding at `enabled: false` and must choose CI policy explicitly: `github`,
-`local` with a command, or `none` with the missing coverage declared.
+`provision` is written by the provision-agent through two versioned artifacts.
+The runtime first creates `secretary-instance/provision-runs/<project>/<run>/task.yaml`
+from scanner facts, unresolved decisions and operator-owned constraints. The
+agent then writes a separate result artifact. A text report is only a signal to
+look for that artifact.
+
+The runtime rereads the result from disk, validates it, validates the completed
+adapter with the canonical adapter schema, then materializes
+`secretary-instance/adapters/<project>.yaml`. It keeps the binding at
+`enabled: false` and must choose CI policy explicitly: `github`, `local` with a
+command, or `none` with the missing coverage declared. Project-local adapter
+files are only a structured proposal for project-plane bindings and still
+require a later opt-in; this phase writes the external instance adapter only.
+Environment failures are reported with an allowlisted failure code. The runtime
+renders the stored summary, so arbitrary environment text is not copied into
+the result output or onboarding draft.
 
 `project add` and an unrun provision or gate use `status: pending`. Missing
 repositories and scanner failures still produce a complete, schema-valid v1
@@ -94,7 +105,14 @@ The contract reserves these finding codes:
 | `repo.missing` | The requested repo path or URL cannot be resolved. |
 | `scanner.failed` | Deterministic scanning could not complete. |
 | `draft.invalid` | The draft binding or adapter fails schema validation. |
+| `provision.invalid` | The provision task or result fails its versioned contract. |
+| `result.foreign` | The provision result belongs to another identity or run. |
+| `stale.input` | Scanner HEAD changed after the draft input was fixed. |
+| `environment.failed` | The provision run could not continue because the runtime environment is broken. |
+| `adapter.invalid` | The completed adapter fails the canonical adapter schema. |
 | `ci.undeclared` | The provision result did not choose a CI policy. |
+| `project-local.denied` | A project-local adapter write was attempted without opt-in. |
+| `publication.failed` | Atomic adapter/draft publication failed. |
 | `tests.not-observed` | The scanner did not observe test files. |
 | `ci.not-observed` | The scanner did not observe CI files. |
 | `gate.failed` | The clean-worktree/setup/smoke/validation gate failed. |
