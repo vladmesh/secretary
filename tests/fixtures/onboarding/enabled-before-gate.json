@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "project_id": "example-project",
+  "scanner": {
+    "version": 1,
+    "owner": "deterministic-scanner",
+    "status": "ok",
+    "repo": {
+      "input": "/srv/projects/example-project",
+      "exists": true,
+      "default_branch": "main"
+    },
+    "facts": {
+      "languages": ["python"],
+      "package_managers": ["pip"],
+      "ci_files": [],
+      "test_files": [],
+      "project_local_adapter": false
+    },
+    "findings": []
+  },
+  "draft": {
+    "owner": "project-add",
+    "binding": {
+      "id": "example-project",
+      "repo": "/srv/projects/example-project",
+      "enabled": true,
+      "adapter": "example-project",
+      "default_branch": "main"
+    },
+    "adapter": {
+      "setup": {"commands": ["python -m pip install -e ."]},
+      "smoke": {"command": "python -m compileall secretary"},
+      "validation": {"ci": "none", "missing": ["tests"]},
+      "artifact_policy": {"write_project_files": false}
+    }
+  },
+  "provision": {
+    "owner": "provision-agent",
+    "status": "drafted",
+    "binding": {
+      "id": "example-project",
+      "repo": "/srv/projects/example-project",
+      "enabled": true,
+      "adapter": "example-project",
+      "default_branch": "main"
+    },
+    "adapter": {
+      "setup": {"commands": ["python -m pip install -e ."]},
+      "smoke": {"command": "python -m compileall secretary"},
+      "validation": {"ci": "none", "missing": ["tests"]},
+      "artifact_policy": {"write_project_files": false}
+    },
+    "findings": []
+  },
+  "gate": {
+    "owner": "onboarding-gate",
+    "status": "failed",
+    "checks": {
+      "clean_worktree": "passed",
+      "setup": "not-run",
+      "smoke": "not-run",
+      "validation": "declared-missing",
+      "artifact_policy": "passed"
+    },
+    "binding": {
+      "id": "example-project",
+      "repo": "/srv/projects/example-project",
+      "enabled": false,
+      "adapter": "example-project",
+      "default_branch": "main"
+    },
+    "findings": [{"code": "gate.failed", "severity": "error"}]
+  },
+  "ownership": {
+    "binding": {
+      "draft_owner": "project-add",
+      "enable_owner": "onboarding-gate",
+      "initial_enabled": false
+    },
+    "adapter": {
+      "draft_owner": "project-add",
+      "provision_owner": "provision-agent",
+      "storage": "secretary-instance/adapters/<project>.yaml"
+    },
+    "enable_transition": {
+      "only_when": "gate.status == passed",
+      "forbidden_owners": ["deterministic-scanner", "project-add", "provision-agent"]
+    }
+  },
+  "compatibility_manifest": {
+    "consumer": "legacy-dispatcher",
+    "role": "derived-transition-consumer",
+    "canonical_source": "onboarding-contract-v1"
+  }
+}

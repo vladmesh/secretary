@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from secretary.config import validate, validate_instance
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
+ONBOARDING_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "onboarding"
 
 
 VALID_INSTANCE = {
@@ -63,6 +65,10 @@ class SchemaValidTests(unittest.TestCase):
         for data, schema in cases:
             with self.subTest(schema=schema):
                 self.assertEqual(validate(data, schema, schema), [])
+
+    def test_onboarding_happy_path_fixture_passes(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        self.assertEqual(validate(data, "onboarding-contract", "happy-path.json"), [])
 
     def test_adapter_local_ci_with_command_passes(self):
         data = copy.deepcopy(VALID_ADAPTER)
@@ -168,6 +174,18 @@ class SchemaInvalidTests(unittest.TestCase):
         del data["components"]["memory"]
         errors = validate(data, "data-manifest", "m.json")
         self.assertTrue(any("components" in e.path for e in errors), errors)
+
+    def test_onboarding_rejects_enabled_binding_before_gate(self):
+        data = json.loads((ONBOARDING_FIXTURES / "enabled-before-gate.json").read_text(encoding="utf-8"))
+        errors = validate(data, "onboarding-contract", "enabled-before-gate.json")
+        self.assertTrue(any(e.path in {"draft.binding.enabled", "provision.binding.enabled"} for e in errors), errors)
+
+    def test_onboarding_rejects_undeclared_ci(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        del data["provision"]["adapter"]["validation"]["ci"]
+        data["provision"]["findings"] = [{"code": "ci.undeclared", "severity": "error"}]
+        errors = validate(data, "onboarding-contract", "undeclared-ci.json")
+        self.assertTrue(any(e.path == "provision.adapter.validation" for e in errors), errors)
 
 
 class ErrorLeakTests(unittest.TestCase):

@@ -22,6 +22,7 @@ SCHEMAS = {
     "project-binding": "project-binding.schema.json",
     "adapter": "adapter.schema.json",
     "data-manifest": "data-manifest.schema.json",
+    "onboarding-contract": "onboarding-contract.schema.json",
 }
 
 
