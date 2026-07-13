@@ -61,6 +61,14 @@ _TRANSITIONS = {
         ("in_progress", "blocked"), ("validate", "blocked"),
     },
 }
+_READY_RESET_METADATA = {
+    "claim": "",
+    "resolved_head": "",
+    "resolved_review_head": "",
+    "retry_same": "",
+    "retry_switch": "",
+    "retry_heads": "",
+}
 
 
 class KanboardClient:
@@ -281,6 +289,12 @@ class TaskAudit:
         return {"ok": pending == 0, "pending": pending}
 
     def event(self, request_id: str) -> dict[str, Any] | None:
+        committed = self.committed_event(request_id)
+        if committed is not None:
+            return committed
+        return self.pending_event(request_id)
+
+    def committed_event(self, request_id: str) -> dict[str, Any] | None:
         try:
             with open(self.events_path, encoding="utf-8") as events:
                 for line in events:
@@ -290,6 +304,9 @@ class TaskAudit:
                             return candidate
         except FileNotFoundError:
             pass
+        return None
+
+    def pending_event(self, request_id: str) -> dict[str, Any] | None:
         pending = os.path.join(self.pending_dir, f"{request_id}.json")
         try:
             with open(pending, encoding="utf-8") as source:
@@ -360,7 +377,7 @@ class TaskWriter:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
             try:
                 if target == "ready":
-                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"claim": "", "resolved_head": "", "resolved_review_head": "", "retry_same": "", "retry_switch": "", "retry_heads": ""})
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
                 if reason.strip():
                     self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
             except Exception as exc:
@@ -369,11 +386,23 @@ class TaskWriter:
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
-        existing = self.audit.event(request_id)
-        if existing is not None:
+        committed = self.audit.committed_event(request_id)
+        if committed is not None:
             try:
-                event_id = self.audit.append(request_id, existing)
+                event_id = self.audit.append(request_id, committed)
             except OSError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
+        pending = self.audit.pending_event(request_id)
+        if pending is not None:
+            try:
+                self._finish_pending_cleanup(pending)
+                task = self.reader.show(str(pending["ref"]))
+                pending["task_id"] = task["id"]
+                pending["backend"]["revision"] = _revision(task)
+                self.audit.stage(request_id, pending)
+                event_id = self.audit.append(request_id, pending)
+            except (TaskError, OSError, KeyError, TypeError):
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
         task = self.reader.show(reference)
@@ -425,10 +454,7 @@ class TaskWriter:
         self.client.call(
             "saveTaskMetadata",
             task_id=_task_number(task),
-            values={
-                "claim": "", "resolved_head": "", "resolved_review_head": "",
-                "retry_same": "", "retry_switch": "", "retry_heads": "",
-            },
+            values=_READY_RESET_METADATA,
         )
         normalized = self.reader.show(str(event["ref"]))
         if (

@@ -232,6 +232,54 @@ class TaskWriterTests(unittest.TestCase):
         self.assertIsNone(task["claim"]["worker"])
         self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
 
+    def test_pending_ready_replay_finishes_cleanup_before_success_audit(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.metadata[12]["resolved_head"] = "codex-terra"
+        self.client.metadata[12]["resolved_review_head"] = "codex-reviewer"
+        self.client.fail_metadata = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-replay")
+
+        moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-replay")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+
+        self.client.fail_metadata = False
+        result = self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-replay")
+
+        self.assertEqual(result["task"]["state"], "ready")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            self.assertEqual(len(events.readlines()), 1)
+        task = self.writer.reader.show("secretary-468")
+        self.assertIsNone(task["claim"]["worker"])
+        self.assertIsNone(task["routing"]["resolved_worker_head"])
+        self.assertIsNone(task["routing"]["resolved_review_head"])
+        self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
+
+    def test_completed_ready_replay_does_not_reset_metadata_again(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-done")
+        metadata_writes = len([call for call in self.client.calls if call[0] == "saveTaskMetadata"])
+
+        self.client.tasks[0]["column_id"] = 4
+        self.client.metadata[12]["claim"] = "codex-terra"
+        self.client.metadata[12]["resolved_head"] = "codex-terra"
+        self.client.metadata[12]["resolved_review_head"] = "codex-reviewer"
+        self.client.metadata[12]["retry_same"] = "1"
+        second = self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-done")
+
+        self.assertEqual(second["task"]["state"], "validate")
+        self.assertEqual(metadata_writes, len([call for call in self.client.calls if call[0] == "saveTaskMetadata"]))
+        self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            self.assertEqual(len(events.readlines()), 1)
+
     def test_pending_blocks_export_from_the_same_data_root(self) -> None:
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
