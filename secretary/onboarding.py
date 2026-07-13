@@ -76,13 +76,18 @@ def project_add(
         errors = validate(existing_draft, "onboarding-contract", draft_path.name)
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
-        if existing_draft.get("identity") != identity:
+        draft_identity = existing_draft.get("identity")
+        if (
+            not isinstance(draft_identity, dict)
+            or _identity_core(draft_identity) != _identity_core(identity)
+        ):
             return 1, _fail_draft(
                 artifact,
                 "draft.invalid",
                 "existing draft identity does not match binding",
             )
         artifact = existing_draft
+        artifact["identity"] = identity
         artifact["scanner"] = scanner
 
     binding = dict(identity)
@@ -145,6 +150,13 @@ def _binding_conflict(binding: dict[str, Any], identity: dict[str, Any]) -> str 
             return f"existing binding has conflicting {field}"
     errors = validate(binding, "project-binding", "existing binding")
     return str(errors[0]) if errors else None
+
+
+def _identity_core(identity: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(
+        identity.get(field)
+        for field in ("id", "repo", "adapter", "default_branch")
+    )
 
 
 def _load_optional_mapping(path: Path) -> tuple[dict[str, Any] | None, str | None]:

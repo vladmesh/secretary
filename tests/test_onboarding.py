@@ -141,10 +141,6 @@ class OnboardingTests(unittest.TestCase):
         binding["plane"] = "project"
         binding["policy"] = {"code_concurrency": 3}
         self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
-        draft = load_config(self.draft)
-        draft["identity"]["plane"] = "project"
-        draft["identity"]["policy"] = {"code_concurrency": 3}
-        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
 
         second = project_add(str(self.repo), str(self.instance), dry_run=False)
         binding_bytes = self.binding.read_bytes()
@@ -162,9 +158,7 @@ class OnboardingTests(unittest.TestCase):
         binding["policy"] = {"code_concurrency": 2}
         self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
         draft = load_config(self.draft)
-        draft["identity"]["policy"] = {"code_concurrency": 2}
         old_head = draft["scanner"]["repo"]["head"]
-        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
         (self.repo / "sample.py").write_text("VALUE = 2\n", encoding="utf-8")
         git(self.repo, "add", "sample.py")
         git(self.repo, "commit", "-m", "Change")
@@ -173,7 +167,20 @@ class OnboardingTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertNotEqual(artifact["scanner"]["repo"]["head"], old_head)
+        self.assertEqual(artifact["identity"]["policy"], {"code_concurrency": 2})
         self.assertEqual(load_config(self.binding)["policy"], {"code_concurrency": 2})
+
+    def test_draft_policy_copy_is_refreshed_from_authoritative_binding(self):
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        draft = load_config(self.draft)
+        draft["identity"]["policy"] = {"code_concurrency": 9}
+        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("policy", artifact["identity"])
+        self.assertNotIn("policy", load_config(self.draft)["identity"])
 
     def test_missing_and_scanner_failure_are_valid_and_write_nothing(self):
         code, artifact = project_add(str(self.root / "missing"), str(self.instance), dry_run=False)
