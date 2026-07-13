@@ -7,6 +7,27 @@ artifacts exchanged between deterministic scanning, draft creation, provision
 analysis and the final onboarding gate. The executable shape is
 `secretary/schemas/onboarding-contract.schema.json`.
 
+## Identity
+
+`identity` is the single source of binding identity for the whole run: `id`,
+`repo`, `adapter`, `default_branch` and the optional `plane`/`policy`. It is
+fixed by `project add` and never re-declared downstream. The materialized
+`secretary-instance/projects/<project>.yaml` binding is `identity` plus the
+current `enabled` bit.
+
+The draft, provision and gate stages do not each carry their own copy of
+identity. Their `binding` object holds only the mutable `enabled` flag. Because
+the identity fields do not exist on a stage binding, and every object is
+`additionalProperties: false`, a stage cannot introduce an `id`, `repo`,
+`adapter` or `default_branch` that disagrees with `identity`. The forbidden
+divergence is not caught by an equality check, it is impossible to write down.
+A passed gate therefore enables the one binding that `project add` created and
+`provision-agent` kept disabled, never a neighbouring project.
+
+Consumers read identity from `identity` alone. They never re-derive it from a
+stage snapshot, so no consumer needs its own cross-stage equality check and no
+second source of identity exists.
+
 ## Artifacts
 
 `scanner` is written only by the deterministic scanner. It records facts read
@@ -15,18 +36,17 @@ language/package-manager hints, CI files, test files and whether a project-local
 adapter already exists. It does not make LLM conclusions and does not write
 bindings or adapters.
 
-`draft` is written by `project add`. It contains the first
-`secretary-instance/projects/<project>.yaml` binding and
-`secretary-instance/adapters/<project>.yaml` adapter draft. The binding starts
-with `enabled: false`.
+`draft` is written by `project add`. It creates the
+`secretary-instance/adapters/<project>.yaml` adapter draft and records the
+binding as `enabled: false`. The binding identity comes from `identity`.
 
 `provision` is written by the provision-agent. It may complete setup, smoke,
-validation and artifact policy in the adapter draft. It must keep the binding at
+validation and artifact policy in the adapter draft. It keeps the binding at
 `enabled: false` and must choose CI policy explicitly: `github`, `local` with a
 command, or `none` with the missing coverage declared.
 
 `gate` is written only by the onboarding gate. A passed gate is the only artifact
-that may set the binding to `enabled: true`. A failed gate keeps
+that may record the binding as `enabled: true`. A failed gate keeps
 `enabled: false`. A passed gate requires clean worktree, setup, smoke and
 artifact policy checks to be `passed`; validation must be `passed` or
 `declared-missing`. `declared-missing` is only for projects whose adapter

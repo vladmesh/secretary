@@ -1,6 +1,11 @@
 {
   "version": 1,
-  "project_id": "example-project",
+  "identity": {
+    "id": "example-project",
+    "repo": "/srv/projects/example-project",
+    "adapter": "example-project",
+    "default_branch": "main"
+  },
   "scanner": {
     "version": 1,
     "owner": "deterministic-scanner",
@@ -21,13 +26,7 @@
   },
   "draft": {
     "owner": "project-add",
-    "binding": {
-      "id": "example-project",
-      "repo": "/srv/projects/example-project",
-      "enabled": true,
-      "adapter": "example-project",
-      "default_branch": "main"
-    },
+    "binding": {"enabled": true},
     "adapter": {
       "setup": {"commands": ["python -m pip install -e ."]},
       "smoke": {"command": "python -m compileall secretary"},
@@ -38,13 +37,7 @@
   "provision": {
     "owner": "provision-agent",
     "status": "drafted",
-    "binding": {
-      "id": "example-project",
-      "repo": "/srv/projects/example-project",
-      "enabled": true,
-      "adapter": "example-project",
-      "default_branch": "main"
-    },
+    "binding": {"enabled": true},
     "adapter": {
       "setup": {"commands": ["python -m pip install -e ."]},
       "smoke": {"command": "python -m compileall secretary"},
@@ -63,13 +56,7 @@
       "validation": "declared-missing",
       "artifact_policy": "passed"
     },
-    "binding": {
-      "id": "example-project",
-      "repo": "/srv/projects/example-project",
-      "enabled": false,
-      "adapter": "example-project",
-      "default_branch": "main"
-    },
+    "binding": {"enabled": false},
     "findings": [{"code": "gate.failed", "severity": "error"}]
   },
   "ownership": {

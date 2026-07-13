@@ -2,16 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "onboarding-contract.schema.json",
   "title": "Project onboarding contract",
-  "description": "Versioned Phase 6 artifact for scanner output, draft binding/adapter, provision result and onboarding gate result.",
+  "description": "Versioned Phase 6 artifact for scanner output, draft binding/adapter, provision result and onboarding gate result. Binding identity (id, repo, adapter, default_branch) lives once in the top-level identity object; each stage only records the mutable enabled bit, so identity cannot diverge between draft, provision and gate.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "project_id", "scanner", "draft", "provision", "gate", "ownership", "compatibility_manifest"],
+  "required": ["version", "identity", "scanner", "draft", "provision", "gate", "ownership", "compatibility_manifest"],
   "properties": {
     "version": {"const": 1},
-    "project_id": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*$"
-    },
+    "identity": {"$ref": "#/$defs/identity"},
     "scanner": {"$ref": "#/$defs/scanner"},
     "draft": {"$ref": "#/$defs/draft"},
     "provision": {"$ref": "#/$defs/provision"},
@@ -120,6 +117,26 @@
     }
   ],
   "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repo", "adapter", "default_branch"],
+      "description": "The single source of binding identity. Fixed by project add and never re-declared downstream; the enable chain only flips the enabled bit recorded per stage.",
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "repo": {"type": "string", "minLength": 1},
+        "adapter": {"type": "string", "minLength": 1},
+        "default_branch": {"type": "string", "minLength": 1},
+        "plane": {"type": "string", "enum": ["orchestrator", "project", "memory", "ops"]},
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "code_concurrency": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
     "scanner": {
       "type": "object",
       "additionalProperties": false,
@@ -167,7 +184,7 @@
       "required": ["owner", "binding", "adapter"],
       "properties": {
         "owner": {"const": "project-add"},
-        "binding": {"$ref": "#/$defs/disabledBinding"},
+        "binding": {"$ref": "#/$defs/disabledStageBinding"},
         "adapter": {"$ref": "#/$defs/adapterDraft"}
       }
     },
@@ -178,7 +195,7 @@
       "properties": {
         "owner": {"const": "provision-agent"},
         "status": {"type": "string", "enum": ["drafted", "failed"]},
-        "binding": {"$ref": "#/$defs/disabledBinding"},
+        "binding": {"$ref": "#/$defs/disabledStageBinding"},
         "adapter": {"$ref": "#/$defs/adapterDraft"},
         "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
       }
@@ -202,12 +219,7 @@
             "artifact_policy": {"type": "string", "enum": ["passed", "failed"]}
           }
         },
-        "binding": {
-          "oneOf": [
-            {"$ref": "#/$defs/enabledBinding"},
-            {"$ref": "#/$defs/disabledBinding"}
-          ]
-        },
+        "binding": {"$ref": "#/$defs/stageBinding"},
         "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
       },
       "allOf": [
@@ -215,7 +227,7 @@
           "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
           "then": {
             "properties": {
-              "binding": {"$ref": "#/$defs/enabledBinding"},
+              "binding": {"properties": {"enabled": {"const": true}}},
               "checks": {
                 "properties": {
                   "clean_worktree": {"const": "passed"},
@@ -239,7 +251,7 @@
         },
         {
           "if": {"properties": {"status": {"const": "failed"}}, "required": ["status"]},
-          "then": {"properties": {"binding": {"$ref": "#/$defs/disabledBinding"}}}
+          "then": {"properties": {"binding": {"properties": {"enabled": {"const": false}}}}}
         }
       ]
     },
@@ -294,36 +306,21 @@
         "canonical_source": {"const": "onboarding-contract-v1"}
       }
     },
-    "disabledBinding": {
-      "allOf": [
-        {"$ref": "#/$defs/bindingBase"},
-        {"type": "object", "properties": {"enabled": {"const": false}}}
-      ]
-    },
-    "enabledBinding": {
-      "allOf": [
-        {"$ref": "#/$defs/bindingBase"},
-        {"type": "object", "properties": {"enabled": {"const": true}}}
-      ]
-    },
-    "bindingBase": {
+    "stageBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "repo", "enabled", "adapter", "default_branch"],
+      "required": ["enabled"],
+      "description": "A stage's contribution to the binding: only the mutable enabled bit. Identity is read from the top-level identity object, never re-declared here.",
       "properties": {
-        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
-        "repo": {"type": "string", "minLength": 1},
-        "enabled": {"type": "boolean"},
-        "adapter": {"type": "string", "minLength": 1},
-        "default_branch": {"type": "string", "minLength": 1},
-        "plane": {"type": "string", "enum": ["orchestrator", "project", "memory", "ops"]},
-        "policy": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "code_concurrency": {"type": "integer", "minimum": 0}
-          }
-        }
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "disabledStageBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"const": false}
       }
     },
     "adapterDraft": {

@@ -267,6 +267,60 @@ class SchemaInvalidTests(unittest.TestCase):
         self.assertTrue(any(e.path == "provision.adapter.validation" for e in errors), errors)
 
 
+class OnboardingIdentityTests(unittest.TestCase):
+    """Binding identity has one source; divergence must be unrepresentable."""
+
+    IDENTITY_FIELDS = {
+        "id": "other-project",
+        "repo": "/srv/projects/other-project",
+        "adapter": "other-adapter",
+        "default_branch": "release",
+    }
+
+    def _happy(self):
+        return json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+
+    def test_single_identity_is_required(self):
+        data = self._happy()
+        del data["identity"]
+        errors = validate(data, "onboarding-contract", "no-identity.json")
+        self.assertTrue(any(e.path == "<root>" and "identity" in e.message for e in errors), errors)
+
+    def test_stage_binding_carries_only_enabled(self):
+        # The happy path binding is exactly {"enabled": ...}; nothing else.
+        data = self._happy()
+        for stage in ("draft", "provision", "gate"):
+            self.assertEqual(list(data[stage]["binding"]), ["enabled"], stage)
+
+    def test_stage_binding_rejects_any_identity_field(self):
+        # A second copy of any identity fact cannot even be attached to a stage,
+        # so a draft/provision/gate binding can never point at another project.
+        for stage in ("draft", "provision", "gate"):
+            for field, value in self.IDENTITY_FIELDS.items():
+                with self.subTest(stage=stage, field=field):
+                    data = self._happy()
+                    data[stage]["binding"][field] = value
+                    errors = validate(data, "onboarding-contract", f"{stage}-{field}.json")
+                    self.assertTrue(
+                        any(e.path == f"{stage}.binding" for e in errors), errors
+                    )
+
+    def test_passed_gate_cannot_enable_a_foreign_binding(self):
+        # The prior review's escape: passed gate carrying another project's
+        # id/repo/adapter. There is nowhere to put those fields now.
+        data = self._happy()
+        data["gate"]["binding"].update(
+            {
+                "id": "other-project",
+                "repo": "/srv/projects/other-project",
+                "adapter": "other-adapter",
+                "default_branch": "release",
+            }
+        )
+        errors = validate(data, "onboarding-contract", "gate-foreign-binding.json")
+        self.assertTrue(any(e.path == "gate.binding" for e in errors), errors)
+
+
 class ErrorLeakTests(unittest.TestCase):
     def test_message_does_not_echo_offending_value(self):
         secret = "sk-live-do-not-print-3f9a"

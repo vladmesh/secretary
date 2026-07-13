@@ -1,6 +1,13 @@
 {
   "version": 1,
-  "project_id": "example-project",
+  "identity": {
+    "id": "example-project",
+    "repo": "/srv/projects/example-project",
+    "adapter": "example-project",
+    "default_branch": "main",
+    "plane": "project",
+    "policy": {"code_concurrency": 1}
+  },
   "scanner": {
     "version": 1,
     "owner": "deterministic-scanner",
@@ -23,15 +30,7 @@
   },
   "draft": {
     "owner": "project-add",
-    "binding": {
-      "id": "example-project",
-      "repo": "/srv/projects/example-project",
-      "enabled": false,
-      "adapter": "example-project",
-      "default_branch": "main",
-      "plane": "project",
-      "policy": {"code_concurrency": 1}
-    },
+    "binding": {"enabled": false},
     "adapter": {
       "setup": {"commands": ["python -m pip install -e ."]},
       "smoke": {"command": "python -m compileall secretary"},
@@ -42,15 +41,7 @@
   "provision": {
     "owner": "provision-agent",
     "status": "drafted",
-    "binding": {
-      "id": "example-project",
-      "repo": "/srv/projects/example-project",
-      "enabled": false,
-      "adapter": "example-project",
-      "default_branch": "main",
-      "plane": "project",
-      "policy": {"code_concurrency": 1}
-    },
+    "binding": {"enabled": false},
     "adapter": {
       "setup": {"commands": ["python -m pip install -e ."]},
       "smoke": {"command": "python -m compileall secretary"},
@@ -69,15 +60,7 @@
       "validation": "passed",
       "artifact_policy": "passed"
     },
-    "binding": {
-      "id": "example-project",
-      "repo": "/srv/projects/example-project",
-      "enabled": true,
-      "adapter": "example-project",
-      "default_branch": "main",
-      "plane": "project",
-      "policy": {"code_concurrency": 1}
-    },
+    "binding": {"enabled": true},
     "findings": []
   },
   "ownership": {
