@@ -175,6 +175,7 @@ class InstanceReport:
     warnings: list[SchemaError]
     bindings: list[dict[str, Any]]
     host: dict[str, Any]
+    instance: dict[str, Any]
 
     @property
     def ok(self) -> bool:
@@ -213,6 +214,7 @@ def validate_instance(path: Path) -> InstanceReport:
             warnings=[],
             bindings=[],
             host={},
+            instance={},
         )
 
     errors += validate(instance, "instance", instance_file.name)
@@ -259,6 +261,7 @@ def validate_instance(path: Path) -> InstanceReport:
         warnings=warnings,
         bindings=bindings,
         host=host,
+        instance=instance if isinstance(instance, dict) else {},
     )
 
 

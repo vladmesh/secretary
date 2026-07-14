@@ -10,12 +10,150 @@ material are never opened.
 from __future__ import annotations
 
 import subprocess
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 KINDS = ("projects", "units", "orca repos")
+
+
+@dataclass(frozen=True)
+class PlannedResource:
+    """One desired host resource and the evidence required to own it."""
+
+    logical_id: str
+    kind: str
+    name: str
+    spec: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class PlanChange:
+    logical_id: str
+    kind: str
+    name: str
+    action: str
+
+
+def _resource(logical_id: str, kind: str, name: str, payload: dict[str, str]) -> PlannedResource:
+    spec = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    value = json.dumps([logical_id, kind, name, spec], separators=(",", ":"))
+    return PlannedResource(logical_id, kind, name, spec, hashlib.sha256(value.encode()).hexdigest())
+
+
+def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[PlannedResource]:
+    """Render the supported host surface without consulting the live host.
+
+    Heads produce systemd services. Enabled project bindings produce Orca
+    registrations, whose names are explicit binding data. The host block only
+    supplies a namespace boundary; it never carries a second list of resources.
+    """
+    host = instance.get("host", {}) if isinstance(instance, dict) else {}
+    prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
+    result: list[PlannedResource] = []
+    heads = instance.get("heads", []) if isinstance(instance, dict) else []
+    if isinstance(heads, list) and prefix:
+        for head in heads:
+            if not isinstance(head, dict) or not isinstance(head.get("role"), str):
+                continue
+            role = head["role"]
+            logical_id = f"systemd:head:{role}"
+            name = f"{prefix}{role}.service"
+            model = head.get("model")
+            if not isinstance(model, str):
+                continue
+            result.append(_resource(logical_id, "unit", name, {"model": model, "role": role}))
+    for binding in bindings:
+        if not isinstance(binding, dict) or not binding.get("enabled"):
+            continue
+        project_id = binding.get("id")
+        name = binding.get("orca_binding")
+        if not isinstance(project_id, str) or not isinstance(name, str):
+            continue
+        logical_id = f"orca:project:{project_id}"
+        repo = binding.get("repo")
+        if not isinstance(repo, str):
+            continue
+        result.append(_resource(logical_id, "orca", name, {"repo": repo, "binding": name}))
+    return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
+
+
+def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[str]:
+    """Reject incomplete desired-state inputs before a plan can fail open."""
+    bindings = list(bindings)
+    host = instance.get("host", {}) if isinstance(instance, dict) else {}
+    prefix = host.get("unit_prefix") if isinstance(host, dict) else None
+    heads = instance.get("heads", []) if isinstance(instance, dict) else []
+    if isinstance(heads, list) and heads and not isinstance(prefix, str):
+        return ["host.unit_prefix is required when heads are configured"]
+    errors: list[str] = []
+    for binding in bindings:
+        if isinstance(binding, dict) and binding.get("enabled") and not isinstance(binding.get("orca_binding"), str):
+            errors.append("enabled binding requires explicit orca_binding")
+    desired = build_plan(instance, bindings)
+    logical_ids: set[str] = set()
+    names: set[tuple[str, str]] = set()
+    for resource in desired:
+        if resource.logical_id in logical_ids:
+            errors.append(f"duplicate desired logical_id: {resource.logical_id}")
+        logical_ids.add(resource.logical_id)
+        key = (resource.kind, resource.name)
+        if key in names:
+            errors.append(f"duplicate desired resource name: {resource.kind} {resource.name}")
+        names.add(key)
+    return errors
+
+
+def load_managed_manifest(path: Path) -> list[PlannedResource]:
+    """Load the applied state. Invalid or missing state proves no ownership."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    values = raw.get("resources", []) if isinstance(raw, dict) else []
+    resources: list[PlannedResource] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        fields = (value.get("logical_id"), value.get("kind"), value.get("name"), value.get("fingerprint"))
+        if all(isinstance(field, str) and field for field in fields):
+            spec = value.get("spec", "")
+            resources.append(PlannedResource(fields[0], fields[1], fields[2], spec if isinstance(spec, str) else "", fields[3]))
+    return resources
+
+
+def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, managed: Iterable[PlannedResource], unit_prefix: str = "") -> list[PlanChange]:
+    """Classify changes. A name match is a conflict unless exact state owns it."""
+    actual_names = {"unit": actual.units, "orca": actual.orca_repos}
+    managed_by_id = {resource.logical_id: resource for resource in managed}
+    desired_by_id = {resource.logical_id: resource for resource in desired}
+    changes: list[PlanChange] = []
+    for resource in desired_by_id.values():
+        present = resource.name in actual_names[resource.kind]
+        owned = managed_by_id.get(resource.logical_id)
+        if not present:
+            action = "create"
+        elif owned and owned.kind == resource.kind and owned.name == resource.name:
+            action = "update" if owned.fingerprint != resource.fingerprint else "unchanged"
+        else:
+            action = "conflict"
+        changes.append(PlanChange(resource.logical_id, resource.kind, resource.name, action))
+    for logical_id, resource in managed_by_id.items():
+        desired_resource = desired_by_id.get(logical_id)
+        renamed = desired_resource and (resource.kind != desired_resource.kind or resource.name != desired_resource.name)
+        if (desired_resource is None or renamed) and resource.name in actual_names.get(resource.kind, set()):
+            changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
+    known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
+    known_units.update(resource.name for resource in managed_by_id.values() if resource.kind == "unit")
+    if unit_prefix:
+        for name in actual.units:
+            if name.startswith(unit_prefix) and name not in known_units:
+                changes.append(PlanChange(f"systemd:conflict:{name}", "unit", name, "conflict"))
+    return sorted(changes, key=lambda change: (change.kind, change.logical_id))
 
 
 @dataclass(frozen=True)
@@ -145,22 +283,29 @@ class FixtureHostSource(HostSource):
     def __init__(self, root: Path):
         self.root = root
 
-    def _lines(self, name: str) -> set[str]:
-        path = self.root / name
-        if not path.is_file():
-            return set()
-        names: set[str] = set()
-        for line in path.read_text(encoding="utf-8").splitlines():
-            token = line.strip()
-            if token and not token.startswith("#"):
-                names.add(token)
-        return names
+    def _lines(self, name: str) -> tuple[set[str], str]:
+        try:
+            path = self.root / name
+            if not path.is_file():
+                return set(), ""
+            names = {
+                token for line in path.read_text(encoding="utf-8").splitlines()
+                if (token := line.strip()) and not token.startswith("#")
+            }
+            return names, ""
+        except UnicodeError:
+            return set(), "fixture host file is not valid UTF-8"
+        except OSError:
+            return set(), "fixture host file is unreadable"
 
-    def _projects(self) -> set[str]:
-        projects_dir = self.root / "projects"
-        if not projects_dir.is_dir():
-            return set()
-        return _names_from_dir(projects_dir)
+    def _projects(self) -> tuple[set[str], str]:
+        try:
+            projects_dir = self.root / "projects"
+            if not projects_dir.is_dir():
+                return set(), ""
+            return _names_from_dir(projects_dir), ""
+        except OSError:
+            return set(), "fixture projects directory is unreadable"
 
     def collect(self, expected: Expectations) -> CollectResult:
         if not self.root.is_dir():
@@ -172,13 +317,15 @@ class FixtureHostSource(HostSource):
                 inventory=HostInventory(),
                 errors={kind: reason for kind in KINDS},
             )
-        return CollectResult(
-            inventory=HostInventory(
-                projects=self._projects(),
-                units=self._lines("units.txt"),
-                orca_repos=self._lines("orca-repos.txt"),
-            )
-        )
+        projects, project_error = self._projects()
+        units, unit_error = self._lines("units.txt")
+        repos, repo_error = self._lines("orca-repos.txt")
+        errors = {
+            kind: reason for kind, reason in (
+                ("projects", project_error), ("units", unit_error), ("orca repos", repo_error)
+            ) if reason
+        }
+        return CollectResult(HostInventory(projects, units, repos), errors)
 
 
 @dataclass(frozen=True)
