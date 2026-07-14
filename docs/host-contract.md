@@ -14,8 +14,12 @@ manifest или проверяемая managed-метка. Префикс име
 сам по себе не даёт права менять ресурс. Чужие units, Orca bindings, worktrees и
 интерактивные сессии остаются вне владения secretary.
 
-Первый инкремент доступен как `secretary reconcile plan --host-fixture DIR`. Он не
-пишет manifest и не меняет host. Каждая строка плана содержит logical id, kind и
+Первый инкремент доступен как `secretary reconcile plan --instance PATH`; по умолчанию
+он читает тот же live inventory, что и `doctor`. `--host-fixture DIR` заменяет live
+inventory детерминированным fixture для тестов и offline-проверок. `--offline` нельзя
+совмещать с fixture и он не строит plan без inventory. Для offline plan нужен только
+`--host-fixture`. Plan не пишет manifest и не меняет host.
+Каждая строка плана содержит logical id, kind и
 host name. Managed manifest хранит те же поля, canonical desired spec и fingerprint
 применённого resource. Для service spec включает role/model, для Orca — explicit
 binding name/repo path. При совпадении имени без записи с тем же logical id план выводит
@@ -29,6 +33,10 @@ binding name/repo path. При совпадении имени без запис
 
 До diff plan validates unique logical id и unique pair kind/name. Два desired
 ресурса не могут претендовать на один systemd unit или Orca binding.
+
+Exit-коды plan: `0` для прочитанного inventory без conflicts, `1` для conflicts,
+`2` для невалидного input или недоступного kind inventory. При недоступности plan
+показывает причину для каждого недоступного kind и не строит diff против пустого host.
 
 Ни generic multi-instance, ни lease/fencing, ни отдельный `instance_id` в этот
 контур не входят. Старый dispatcher переносится pilot-фильтром: pause, cutover,

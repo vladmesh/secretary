@@ -4,9 +4,11 @@ import contextlib
 import io
 import json
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import secretary.cli as cli
+import secretary.host_commands as host_commands
 from secretary.cli import main
 from secretary.host import (
     CollectResult,
@@ -129,6 +131,67 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
+    def test_cli_plan_uses_live_source_by_default(self):
+        class FakeLiveHost:
+            def collect(self, expected):
+                return CollectResult(HostInventory(), {})
+
+        with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=FakeLiveHost()) as source:
+            code, output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE)])
+        self.assertEqual(code, 0, output)
+        source.assert_called_once_with()
+
+    def test_cli_plan_reports_each_unavailable_live_kind(self):
+        class FakeLiveHost:
+            def collect(self, expected):
+                return CollectResult(
+                    HostInventory(),
+                    {"units": "systemctl not found", "orca repos": "orca not found"},
+                )
+
+        with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=FakeLiveHost()):
+            code, output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE)])
+        self.assertEqual(code, 2, output)
+        self.assertIn("units: unavailable: systemctl not found", output)
+        self.assertIn("orca repos: unavailable: orca not found", output)
+
+    def test_live_plan_does_not_write_instance_or_managed_manifest(self):
+        import tempfile
+
+        class FakeLiveHost:
+            def collect(self, expected):
+                return CollectResult(HostInventory(units={"secretary-worker.service"}), {})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance.yaml"
+            data_dir = root / "data"
+            data_dir.mkdir()
+            instance.write_text(
+                "version: 1\nname: plan\ndata_dir: " + str(data_dir)
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n"
+                "  unit_prefix: secretary-\nheads:\n  - role: worker\n    model: test\n",
+                encoding="utf-8",
+            )
+            manifest = data_dir / "host-managed.json"
+            manifest.write_text('{"resources": []}', encoding="utf-8")
+            before = snapshot(root)
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=FakeLiveHost()):
+                code, output = run_cli(["reconcile", "plan", "--instance", str(instance)])
+            self.assertEqual(code, 1, output)
+            self.assertEqual(snapshot(root), before)
+
+    def test_cli_plan_offline_cannot_plan_and_is_incompatible_with_fixture(self):
+        code, output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE), "--offline"])
+        self.assertEqual(code, 2, output)
+        self.assertIn("--offline cannot produce a plan", output)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            main([
+                "reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE), "--offline",
+                "--host-fixture", str(HOST_FIXTURE),
+            ])
+        self.assertEqual(error.exception.code, 2)
+
     def test_runtime_payload_changes_require_an_update(self):
         instance = {"host": {"unit_prefix": "secretary-"}, "heads": [{"role": "worker", "model": "old"}]}
         bindings = [{"id": "project-id", "repo": "/srv/old-path", "orca_binding": "project_id", "enabled": True}]
