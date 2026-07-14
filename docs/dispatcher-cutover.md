@@ -162,6 +162,36 @@ Until a post-merge live pilot is completed, production dispatcher ownership stay
 with the legacy contour. The new runtime is the pilot owner only for the exact
 `--pilot-ref` recorded in its state file.
 
+## Live pilot checklist
+
+Record these facts in the pilot task report or operator log. The checklist is
+evidence for one pilot card, not a declaration that the full Phase 7 or Phase 9
+cutover is complete.
+
+Before starting `tick`:
+
+- active owner: legacy dispatcher is in verified `freeze` and the new dispatcher
+  state names the exact `--pilot-ref`;
+- card and claim: pilot card ref, state, claim worker and latest dispatcher
+  comment;
+- workspace: expected worker workspace path and branch;
+- neighboring Ready cards: refs that must remain Ready and unclaimed;
+- rollback state: whether prior pilot state is absent, already rolled back or
+  intentionally reused for the same ref.
+
+After the pilot reaches a terminal state:
+
+- active owner: new dispatcher handled only the pilot ref while legacy stayed in
+  `freeze`;
+- card and claim: final state, claim worker and dispatcher comments show the
+  expected In progress, Validate, review and terminal transitions;
+- workspace: worker workspace still matches the claimed ref and was not removed
+  by the legacy watchdog;
+- PR/CI/review: PR URL, commit, CI result and independent review verdict;
+- neighboring Ready cards: unchanged refs remain Ready and unclaimed;
+- rollback state: rollback was not needed for green, or rollback preserved card,
+  claim, comments, PR and review state for red.
+
 Full cutover still requires:
 
 - one low-risk live pilot after the branch is merged to `main`;
