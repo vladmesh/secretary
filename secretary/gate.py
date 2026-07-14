@@ -18,8 +18,15 @@ from secretary.config import ConfigError, load_config, validate
 from secretary.onboarding import scan_repo
 from secretary.provision import _instance_dir, _load_inputs, _project_lock_path, _run_id
 
-_SECRET = re.compile(r"(?i)(gh[pousr]_[A-Za-z0-9_]+|(?:token|password|secret|api[_-]?key)\s*[=:]\s*\S+)")
+_SECRET = re.compile(
+    r"(?is)(-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----"
+    r"|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+    r"|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]+"
+    r"|(?:token|password|secret|api[_-]?key)\s*[=:]\s*\S+)"
+)
 _TAIL = 4000
+_COMMAND_TIMEOUT = 300
+_GIT_TIMEOUT = 60
 
 
 def run_gate(instance_value: str, project_id: str) -> tuple[int, dict[str, Any]]:
@@ -37,20 +44,41 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     except ConfigError:
         existing_binding = existing_draft = None
     if isinstance(existing_binding, dict) and existing_binding.get("enabled") is True:
-        results = sorted((instance / "gate-runs" / project_id).glob("*/result.json"))
-        if isinstance(existing_draft, dict) and existing_draft.get("gate", {}).get("status") == "passed" and results:
-            previous = load_config(results[-1])
-            if isinstance(previous, dict) and previous.get("status") == "passed":
-                adapter_path = instance / "adapters" / f"{existing_binding['adapter']}.yaml"
-                try:
-                    current_head = scan_repo(Path(existing_binding["repo"]), existing_binding["default_branch"])["repo"]["head"]
-                    current_digest = "sha256:" + hashlib.sha256(adapter_path.read_bytes()).hexdigest()
-                except (OSError, KeyError):
-                    current_head = current_digest = "unavailable"
-                if (current_head == previous["input_revision"]["scanner_head"] and
-                        current_digest == previous["adapter_digest"]):
+        if isinstance(existing_draft, dict) and existing_draft.get("gate", {}).get("status") == "passed":
+            adapter_path = instance / "adapters" / f"{existing_binding['adapter']}.yaml"
+            try:
+                current_head = scan_repo(
+                    Path(existing_binding["repo"]), existing_binding["default_branch"]
+                )["repo"]["head"]
+                current_digest = "sha256:" + hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+            except (OSError, KeyError):
+                current_head = current_digest = "unavailable"
+            expected_head = existing_draft["scanner"]["repo"]["head"]
+            if current_head != expected_head:
+                return _disable_stale_enabled(
+                    instance, project_id, existing_binding, existing_draft, None
+                )
+            provision_run = _run_id(existing_draft)
+            expected_run = _gate_run_id(project_id, expected_head, provision_run, current_digest)
+            expected_path = instance / "gate-runs" / project_id / expected_run / "result.json"
+            if expected_path.exists():
+                previous = load_config(expected_path)
+                if (isinstance(previous, dict) and previous.get("status") == "passed" and
+                        previous.get("adapter_digest") == current_digest):
                     return 0, previous
-                return _disable_stale_enabled(instance, project_id, existing_binding, existing_draft, previous)
+            for candidate_path in (instance / "gate-runs" / project_id).glob("*/result.json"):
+                candidate = load_config(candidate_path)
+                revision = candidate.get("input_revision", {}) if isinstance(candidate, dict) else {}
+                if (candidate.get("status") == "passed" and
+                        revision.get("scanner_head") == expected_head and
+                        revision.get("provision_run_id") == provision_run):
+                    return _disable_stale_enabled(
+                        instance, project_id, existing_binding, existing_draft, candidate
+                    )
+            return 1, {
+                "status": "conflict",
+                "finding": "enabled binding has no passed result for its current inputs",
+            }
         return 1, {"status": "conflict", "finding": "enabled binding has no matching passed gate result"}
     loaded = _load_inputs(instance, project_id)
     if loaded["status"] != "ok":
@@ -69,9 +97,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         return 1, {"status": "conflict", "finding": "canonical adapter is invalid"}
     digest = "sha256:" + hashlib.sha256(adapter_bytes).hexdigest()
     provision_run = _run_id(draft)
-    run_id = "gate-" + hashlib.sha256(
-        f"{project_id}\0{draft['scanner']['repo']['head']}\0{provision_run}\0{digest}".encode()
-    ).hexdigest()[:20]
+    run_id = _gate_run_id(project_id, draft["scanner"]["repo"]["head"], provision_run, digest)
     result_path = instance / "gate-runs" / project_id / run_id / "result.json"
     if result_path.exists():
         previous = load_config(result_path)
@@ -91,7 +117,13 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         return _publish_stale(result_path, result, "scanner HEAD changed")
     with tempfile.TemporaryDirectory(prefix="secretary-gate-") as temp:
         worktree = Path(temp) / "worktree"
-        add = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), head], capture_output=True, text=True)
+        try:
+            add = subprocess.run(
+                ["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), head],
+                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            add = _timed_out(exc)
         if add.returncode:
             return _publish_failure(result_path, result, "clean_worktree", add)
         try:
@@ -117,7 +149,13 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                 result["checks"]["validation"] = {"status": "passed"}
             result["checks"]["artifact_policy"] = {"status": "passed"}
         finally:
-            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)], capture_output=True)
+            try:
+                subprocess.run(
+                    ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+                    capture_output=True, timeout=_GIT_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                pass
 
     latest = _load_inputs(instance, project_id)
     if latest["status"] != "ok" or latest["draft"]["scanner"]["repo"]["head"] != head:
@@ -138,6 +176,12 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     enabled = copy.deepcopy(binding)
     enabled["enabled"] = True
     result["status"] = "passed"
+    contract_errors = validate(updated, "onboarding-contract", draft_path.name)
+    result_errors = validate(result, "gate-result", result_path.name)
+    if contract_errors or result_errors:
+        result["status"] = "failed"
+        result["findings"] = [{"code": "gate.failed", "message": "gate output is invalid"}]
+        return _publish_result(result_path, result)
     compatibility = _compatibility_manifest(enabled, adapter)
     writes = [
         (result_path, json.dumps(result, indent=2, sort_keys=True) + "\n"),
@@ -163,21 +207,48 @@ def _base_result(draft: dict[str, Any], run_id: str, provision_run: str, digest:
 
 
 def _command(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, shell=True, capture_output=True, text=True)
+    try:
+        return subprocess.run(
+            command, cwd=cwd, shell=True, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return _timed_out(exc)
 
 
 def _publish_failure(path: Path, result: dict[str, Any], stage: str, outcome: subprocess.CompletedProcess[str]) -> tuple[int, dict[str, Any]]:
     result["checks"][stage] = {"status": "failed"}
     result["findings"] = [{"code": f"{stage}.failed", "message": f"{stage} command failed", "log_tail": _redact((outcome.stdout + outcome.stderr)[-_TAIL:])}]
-    publish_state_atomic([(path, json.dumps(result, indent=2, sort_keys=True) + "\n")])
-    return 1, result
+    return _publish_result(path, result)
 
 
 def _publish_stale(path: Path, result: dict[str, Any], message: str) -> tuple[int, dict[str, Any]]:
     result["status"] = "stale"
     result["findings"] = [{"code": "stale.input", "message": message}]
-    publish_state_atomic([(path, json.dumps(result, indent=2, sort_keys=True) + "\n")])
+    return _publish_result(path, result)
+
+
+def _publish_result(path: Path, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    try:
+        publish_state_atomic([(path, json.dumps(result, indent=2, sort_keys=True) + "\n")])
+    except OSError as exc:
+        result["status"] = "failed"
+        result["findings"] = [{
+            "code": "publication.failed",
+            "message": _redact(exc.strerror or "I/O error"),
+        }]
     return 1, result
+
+
+def _timed_out(exc: subprocess.TimeoutExpired) -> subprocess.CompletedProcess[str]:
+    stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+    stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
+    return subprocess.CompletedProcess(exc.cmd, 124, stdout, stderr + "\ncommand timed out")
+
+
+def _gate_run_id(project_id: str, head: str, provision_run: str, digest: str) -> str:
+    payload = f"{project_id}\0{head}\0{provision_run}\0{digest}".encode()
+    return "gate-" + hashlib.sha256(payload).hexdigest()[:20]
 
 
 def _conflict_result(draft: dict[str, Any], run_id: str, provision_run: str, digest: str, message: str) -> dict[str, Any]:
@@ -205,7 +276,7 @@ def _disable_stale_enabled(
     project_id: str,
     binding: dict[str, Any],
     draft: dict[str, Any],
-    previous: dict[str, Any],
+    previous: dict[str, Any] | None,
 ) -> tuple[int, dict[str, Any]]:
     disabled = copy.deepcopy(binding)
     disabled["enabled"] = False
@@ -216,7 +287,9 @@ def _disable_stale_enabled(
         "binding": {"enabled": False},
         "findings": [{"code": "stale.input", "severity": "error", "message": "enabled gate inputs changed"}],
     }
-    stale = copy.deepcopy(previous)
+    stale = copy.deepcopy(previous) if previous is not None else {
+        "status": "stale", "findings": []
+    }
     stale["status"] = "stale"
     stale["findings"] = [{"code": "stale.input", "message": "enabled gate inputs changed"}]
     try:

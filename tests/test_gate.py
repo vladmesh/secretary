@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest import mock
 import yaml
 
 from secretary.config import load_config, validate
-from secretary.gate import run_gate
+from secretary.gate import _timed_out, run_gate
 from secretary.onboarding import project_add
 from secretary.provision import apply_provision_result, start_provision
 from tests.test_onboarding import git, make_repo
@@ -132,6 +133,46 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result["status"], "stale")
         self.assertFalse(load_config(self.binding)["enabled"])
         self.assertFalse((self.instance / "compatibility-manifests/sample-project.toml").exists())
+
+    def test_repeat_selects_current_result_after_multiple_revisions(self):
+        self.provision()
+        self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
+        (self.repo / "sample.py").write_text("VALUE = 10\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Second gate revision")
+        self.assertEqual(run_gate(str(self.instance), "sample-project")[1]["status"], "stale")
+        self.assertEqual(project_add(str(self.repo), str(self.instance), dry_run=False)[0], 0)
+        code, started = start_provision(str(self.instance), "sample-project")
+        self.assertEqual(code, 0)
+        self.task = started["task"]
+        self.provision()
+        code, current = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 0, current)
+        self.assertGreaterEqual(len(list((self.instance / "gate-runs/sample-project").glob("*/result.json"))), 2)
+
+        repeat_code, repeated = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(repeat_code, 0, repeated)
+        self.assertEqual(repeated["run_id"], current["run_id"])
+        self.assertTrue(load_config(self.binding)["enabled"])
+
+    def test_failure_result_publication_error_is_structured(self):
+        self.provision(setup="false")
+        with mock.patch("secretary.gate.publish_state_atomic", side_effect=OSError(5, "injected")):
+            code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["findings"][0]["code"], "publication.failed")
+
+    def test_command_timeout_is_a_redacted_stage_failure(self):
+        self.provision(setup="slow command")
+        expired = subprocess.TimeoutExpired(
+            "slow command", 300, output="AKIAABCDEFGHIJKLMNOP", stderr=""
+        )
+        with mock.patch("secretary.gate._command", return_value=_timed_out(expired)):
+            code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["checks"]["setup"]["status"], "failed")
+        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", str(result))
 
 
 if __name__ == "__main__":
