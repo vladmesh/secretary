@@ -23,6 +23,14 @@ writes. The live runtime does not import Python modules from `triggered-agents`.
 - The new tick is serialized by `<data_dir>/dispatcher/pilot-tick.lock`.
 - Rollback stops new dispatcher terminals through the host adapter and leaves
   the card, claim, comments, PR and review state unchanged.
+- Worker worktrees are landed on `pipeline/<ref>`, the same branch name the
+  legacy Validate/reviewer path fetches. A rollback during Validate therefore
+  resumes against the existing PR head without a manual branch rename or push.
+- Claude worker/reviewer profiles are prepared before launch by setting
+  `projects["<workspace>"].hasTrustDialogAccepted = true` in the Claude config.
+  The write is per-workspace and fail-closed: an unreadable, corrupt, symlinked
+  or non-atomically writable config blocks the launch instead of opening an
+  interactive folder-trust prompt.
 - `SECRETARY_DISPATCHER_HOST_MODE=noop` is only for tests and fixture pilots. A
   live pilot must run with the default `real` host mode.
 
@@ -155,6 +163,20 @@ Then inspect the pilot card with:
 ```bash
 python3 -m secretary task show --ref "$PILOT_REF"
 ```
+
+If the rollback happened after the worker posted a PR and the card is in
+Validate, verify legacy continuation before resuming the old dispatcher:
+
+```bash
+PR=$(python3 -m secretary task show --ref "$PILOT_REF" | sed -n 's/.*\(https:\/\/github.com[^ ]*\/pull\/[0-9][0-9]*\).*/\1/p' | tail -1)
+BRANCH=$(gh pr view "$PR" --json headRefName --jq .headRefName)
+test "$BRANCH" = "pipeline/$PILOT_REF"
+git -C /home/dev/secretary fetch origin "$BRANCH"
+git -C /home/dev/secretary rev-parse "origin/$BRANCH"
+```
+
+After `resume`, the legacy reviewer should create its own `review/<ref>`
+worktree from that same PR head.
 
 ## Current owner
 

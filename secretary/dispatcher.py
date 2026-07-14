@@ -18,6 +18,7 @@ from secretary._fsutil import file_lock, write_json, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunchError,
+    ensure_claude_workspace_trusted as _ensure_claude_workspace_trusted,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     wrap_role_shell_command as _wrap_role_shell_command,
@@ -204,9 +205,10 @@ class InstanceCatalog:
         return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
-        profile = self._heads.get("profiles", {}).get(head, {})
+        profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
+            self.prepare_head_workspace(head, workspace)
             if adapter == "claude":
                 command = _render_claude_command(profile, prompt_file)
             else:
@@ -214,6 +216,20 @@ class InstanceCatalog:
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
         return _wrap_role_shell_command(role, command)
+
+    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+        profile = self._head_profile(head)
+        adapter = profile.get("adapter") if isinstance(profile, dict) else ""
+        if adapter != "claude":
+            return
+        try:
+            _ensure_claude_workspace_trusted(workspace)
+        except HeadLaunchError as exc:
+            raise HostError(str(exc)) from None
+
+    def _head_profile(self, head: str) -> dict[str, Any]:
+        profile = self._heads.get("profiles", {}).get(head, {})
+        return profile if isinstance(profile, dict) else {}
 
     @staticmethod
     def _load_optional_yaml(path: Path) -> dict[str, Any]:
@@ -234,6 +250,7 @@ class CommandHostRuntime:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
         workspace = self._create_workspace(project, worker_id, base)
+        self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
         self._run_setup(project, workspace)
         self._write_prompt(Path(workspace) / "TASK.md", self._worker_prompt(task, base))
         handle = self._launch(
@@ -337,12 +354,16 @@ class CommandHostRuntime:
     ) -> str:
         if self.mode == "noop":
             return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
-        command = os.environ.get(env_name) or self.catalog.head_command(
-            head,
-            prompt_file,
-            workspace=workspace,
-            role=role,
-        )
+        command = os.environ.get(env_name)
+        if command:
+            self.catalog.prepare_head_workspace(head, workspace)
+        else:
+            command = self.catalog.head_command(
+                head,
+                prompt_file,
+                workspace=workspace,
+                role=role,
+            )
         result = self._run_json([
             "orca", "terminal", "create",
             "--worktree", f"path:{workspace}",
@@ -356,10 +377,16 @@ class CommandHostRuntime:
             raise HostError("orca did not return a terminal handle")
         return handle
 
+    def _set_worker_branch(self, workspace: str, branch: str) -> None:
+        if self.mode == "noop":
+            return
+        self._run(["git", "-C", workspace, "branch", "-M", branch], "git branch")
+
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
 
     def _worker_prompt(self, task: dict[str, Any], base: str) -> str:
+        branch = _legacy_worker_branch(task["ref"])
         return "\n".join([
             f"# Task {task['ref']}",
             "",
@@ -369,6 +396,7 @@ class CommandHostRuntime:
             f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --body-file <file>',
             "",
             f"Base branch: {base}",
+            f"Worker branch: {branch}",
             "",
         ])
 
@@ -793,6 +821,10 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
 def _worker_id(task: dict[str, Any]) -> str:
     slug = task.get("workspace", {}).get("slug") or _slug(task.get("title") or task["ref"])
     return f"{task['ref']}-{slug}"[:80].strip("-")
+
+
+def _legacy_worker_branch(reference: str) -> str:
+    return f"pipeline/{reference}"
 
 
 def _slug(value: str) -> str:

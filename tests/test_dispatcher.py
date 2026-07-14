@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary import role_env
 from secretary.dispatcher import (
+    CommandHostRuntime,
     CutoverState,
     DispatcherRuntime,
     FileLegacyPauseProbe,
     HostError,
+    InstanceCatalog,
     LegacyPauseSnapshot,
     PilotSelector,
+    _legacy_worker_branch,
     _render_codex_command,
     _wrap_role_shell_command,
 )
+from secretary.dispatcher_launcher import ensure_claude_workspace_trusted
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
@@ -96,6 +103,9 @@ class FakeKanboard:
 
 
 class FakeCatalog:
+    def default_branch(self, project: str, override: str | None) -> str:
+        return override or "main"
+
     def worker_head(self, task: dict) -> str:
         return "codex"
 
@@ -445,6 +455,97 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn('"$(cat TASK.md)"', command)
         self.assertNotIn('codex "$(cat TASK.md)"', command)
 
+    def test_claude_command_trusts_workspace_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".claude.json"
+            workspace = str(Path(tmp) / "workspace")
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = {  # type: ignore[attr-defined]
+                "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
+            }
+            with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(config)}):
+                command = catalog.head_command(  # type: ignore[attr-defined]
+                    "claude-opus",
+                    "TASK.md",
+                    workspace=workspace,
+                    role="worker",
+                )
+            data = json.loads(config.read_text(encoding="utf-8"))
+
+        self.assertTrue(data["projects"][workspace]["hasTrustDialogAccepted"])
+        self.assertIn("claude --dangerously-skip-permissions --model opus", command)
+        self.assertIn("python3 -m secretary.role_env exec --role worker", command)
+
+    def test_claude_trust_preserves_other_config_entries_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".claude.json"
+            config.write_text(
+                json.dumps({
+                    "theme": "dark",
+                    "projects": {
+                        "/old": {"hasTrustDialogAccepted": False, "note": "keep"},
+                        "/ws/x": {"hasTrustDialogAccepted": True, "other": 1},
+                    },
+                    "other": {"keep": True},
+                }),
+                encoding="utf-8",
+            )
+
+            ensure_claude_workspace_trusted("/ws/new", config)
+            after_first = json.loads(config.read_text(encoding="utf-8"))
+            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+                ensure_claude_workspace_trusted("/ws/new", config)
+
+        self.assertEqual(after_first["theme"], "dark")
+        self.assertEqual(after_first["other"], {"keep": True})
+        self.assertEqual(after_first["projects"]["/old"], {"hasTrustDialogAccepted": False, "note": "keep"})
+        self.assertEqual(after_first["projects"]["/ws/x"], {"hasTrustDialogAccepted": True, "other": 1})
+        self.assertTrue(after_first["projects"]["/ws/new"]["hasTrustDialogAccepted"])
+        replace.assert_not_called()
+
+    def test_claude_trust_rejects_corrupt_or_symlinked_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corrupt = Path(tmp) / "corrupt.json"
+            corrupt.write_text("{not-json", encoding="utf-8")
+            target = Path(tmp) / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            symlink = Path(tmp) / "link.json"
+            symlink.symlink_to(target)
+
+            with self.assertRaisesRegex(RuntimeError, "cannot read Claude config"):
+                ensure_claude_workspace_trusted("/ws/x", corrupt)
+            with self.assertRaisesRegex(RuntimeError, "refusing symlinked Claude config"):
+                ensure_claude_workspace_trusted("/ws/x", symlink)
+
+    def test_claude_trust_fails_closed_when_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".claude.json"
+            config.write_text(json.dumps({"projects": {"/old": {"keep": True}}}), encoding="utf-8")
+
+            with mock.patch("secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")):
+                with self.assertRaisesRegex(RuntimeError, "cannot update Claude config"):
+                    ensure_claude_workspace_trusted("/ws/x", config)
+
+            data = json.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(data, {"projects": {"/old": {"keep": True}}})
+
+    def test_prepare_worker_lands_on_legacy_pipeline_branch_for_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "title": "Pilot",
+                "description": "body",
+                "workspace": {"base_branch": "main"},
+            }
+
+            result = host.prepare_worker(task, "secretary-510-pilot-pilot", "codex")
+            branch = git(Path(result["workspace"]), "branch", "--show-current")
+
+        self.assertEqual(branch, _legacy_worker_branch("secretary-510-pilot"))
+        self.assertEqual(host.launched, [("codex", "TASK.md")])
+
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
@@ -479,3 +580,49 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
+
+
+class GitBranchHost(CommandHostRuntime):
+    def __init__(self, root: Path) -> None:
+        super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.root = root
+        self.launched: list[tuple[str, str]] = []
+
+    def _create_workspace(self, project: str, worker_id: str, base: str) -> str:
+        workspace = self.root / worker_id
+        workspace.mkdir(parents=True)
+        git(workspace, "init", "--initial-branch", base)
+        git(workspace, "config", "user.name", "Test User")
+        git(workspace, "config", "user.email", "test@example.invalid")
+        (workspace / "README.md").write_text("seed\n", encoding="utf-8")
+        git(workspace, "add", "README.md")
+        git(workspace, "commit", "-m", "seed")
+        return str(workspace)
+
+    def _run_setup(self, project: str, workspace: str) -> None:
+        return None
+
+    def _launch(
+        self,
+        workspace: str,
+        title: str,
+        head: str,
+        prompt_file: str,
+        *,
+        role: str,
+        env_name: str,
+    ) -> str:
+        self.launched.append((head, prompt_file))
+        return f"test:{head}"
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
