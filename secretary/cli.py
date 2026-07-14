@@ -24,8 +24,11 @@ from secretary.host import (
     FixtureHostSource,
     KindDiff,
     LiveHostSource,
+    build_plan,
     build_expectations,
     inventory,
+    load_managed_manifest,
+    plan_changes,
 )
 from secretary.gate import run_gate
 from secretary.memory_journal import verify_memory_journal
@@ -65,21 +68,22 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
-    doctor.add_argument("--dry-run", action="store_true", help="required for the Phase 1 doctor")
+    doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     doctor.add_argument(
         "--instance",
         required=True,
         help="path to an instance dir or instance.yaml",
     )
     doctor.add_argument(
-        "--host",
+        "--offline",
         action="store_true",
-        help="also compare the instance against the live host (read-only inventory)",
+        help="check config and data without inspecting the host",
     )
+    doctor.add_argument("--host", action="store_true", help=argparse.SUPPRESS)
     doctor.add_argument(
         "--host-fixture",
         metavar="DIR",
-        help="compare against a fixture host dir instead of the live host (implies --host)",
+        help="compare against a fixture host dir instead of the live host",
     )
     doctor.add_argument(
         "--strict",
@@ -87,6 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="treat migration warnings as findings",
     )
     doctor.set_defaults(handler=run_doctor)
+
+    reconcile = subparsers.add_parser("reconcile", help="render a host plan without applying it")
+    reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
+    reconcile_plan = reconcile_subcommands.add_parser("plan", help="show the read-only desired host plan")
+    reconcile_plan.add_argument("--instance", required=True)
+    reconcile_plan.add_argument("--host-fixture", required=True, metavar="DIR")
+    reconcile_plan.add_argument("--managed-manifest", metavar="FILE")
+    reconcile_plan.set_defaults(handler=run_reconcile_plan)
+    reconcile.set_defaults(handler=not_implemented("reconcile"))
 
     data = subparsers.add_parser("data", help="manage the secretary-data layout")
     data_subcommands = data.add_subparsers(dest="data_command")
@@ -217,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     backup_verify.set_defaults(handler=run_backup_verify)
     backup.set_defaults(handler=not_implemented("backup"))
 
-    for name in ("reconcile", "restore"):
+    for name in ("restore",):
         command = subparsers.add_parser(name)
         command.add_argument("args", nargs="*")
         command.set_defaults(handler=not_implemented(name))
@@ -415,10 +428,6 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
 
 
 def run_doctor(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print("secretary doctor requires --dry-run in the Phase 1 skeleton")
-        return 2
-
     instance_path = Path(args.instance)
     report = validate_instance(instance_path)
 
@@ -426,10 +435,10 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"secretary doctor: {len(report.errors)} config problem(s):")
         for error in report.errors:
             print(f"  {error}")
-        return 1
+        return 1 if args.dry_run else 2
 
     print("Secretary doctor report")
-    print("mode: dry-run")
+    print("mode: dry-run" if args.dry_run else "mode: read-only")
     print(f"instance: {report.instance_path}")
     print(f"name: {report.name or 'unnamed'}")
     print(f"projects: {report.projects}")
@@ -447,14 +456,14 @@ def run_doctor(args: argparse.Namespace) -> int:
     backup_warnings = print_backup_status(report.instance_path)
 
     host_incomplete = False
-    if args.host or args.host_fixture:
+    if not args.offline and (not args.dry_run or args.host or args.host_fixture):
         host_incomplete = print_host_inventory(report, args)
 
     print("host changes: none")
     if host_incomplete:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
-        return 1
+        return 1 if args.dry_run else 2
     if offsite_findings:
         print("status: findings")
         return 1
@@ -463,6 +472,28 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
+
+
+def run_reconcile_plan(args: argparse.Namespace) -> int:
+    report = validate_instance(Path(args.instance))
+    if not report.ok:
+        print("secretary reconcile plan: invalid instance config")
+        return 2
+    collected = FixtureHostSource(Path(args.host_fixture)).collect(
+        build_expectations(report.bindings, report.host)
+    )
+    if collected.errors:
+        print("secretary reconcile plan: host inventory unavailable")
+        return 2
+    manifest = Path(args.managed_manifest) if args.managed_manifest else Path(report.instance["data_dir"]) / "host-managed.json"
+    changes = plan_changes(
+        build_plan(report.instance, report.bindings),
+        collected.inventory,
+        load_managed_manifest(manifest),
+    )
+    for change in changes:
+        print(f"{change.action} {change.logical_id} {change.kind} {change.name}")
+    return 1 if any(change.action == "conflict" for change in changes) else 0
 
 
 def run_project_add(args: argparse.Namespace) -> int:

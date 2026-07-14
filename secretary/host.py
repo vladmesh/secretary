@@ -10,12 +10,107 @@ material are never opened.
 from __future__ import annotations
 
 import subprocess
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 KINDS = ("projects", "units", "orca repos")
+
+
+@dataclass(frozen=True)
+class PlannedResource:
+    """One desired host resource and the evidence required to own it."""
+
+    logical_id: str
+    kind: str
+    name: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class PlanChange:
+    logical_id: str
+    kind: str
+    name: str
+    action: str
+
+
+def _fingerprint(logical_id: str, kind: str, name: str) -> str:
+    value = json.dumps([logical_id, kind, name], separators=(",", ":"))
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[PlannedResource]:
+    """Render the supported host surface without consulting the live host.
+
+    Heads produce systemd services. Enabled project bindings produce Orca
+    registrations, whose names are explicit binding data. The host block only
+    supplies a namespace boundary; it never carries a second list of resources.
+    """
+    host = instance.get("host", {}) if isinstance(instance, dict) else {}
+    prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
+    result: list[PlannedResource] = []
+    heads = instance.get("heads", []) if isinstance(instance, dict) else []
+    if isinstance(heads, list) and prefix:
+        for head in heads:
+            if not isinstance(head, dict) or not isinstance(head.get("role"), str):
+                continue
+            role = head["role"]
+            logical_id = f"systemd:head:{role}"
+            name = f"{prefix}{role}.service"
+            result.append(PlannedResource(logical_id, "unit", name, _fingerprint(logical_id, "unit", name)))
+    for binding in bindings:
+        if not isinstance(binding, dict) or not binding.get("enabled"):
+            continue
+        project_id = binding.get("id")
+        name = binding.get("orca_binding")
+        if not isinstance(project_id, str) or not isinstance(name, str):
+            continue
+        logical_id = f"orca:project:{project_id}"
+        result.append(PlannedResource(logical_id, "orca", name, _fingerprint(logical_id, "orca", name)))
+    return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
+
+
+def load_managed_manifest(path: Path) -> list[PlannedResource]:
+    """Load the applied state. Invalid or missing state proves no ownership."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    values = raw.get("resources", []) if isinstance(raw, dict) else []
+    resources: list[PlannedResource] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        fields = (value.get("logical_id"), value.get("kind"), value.get("name"), value.get("fingerprint"))
+        if all(isinstance(field, str) and field for field in fields):
+            resources.append(PlannedResource(*fields))
+    return resources
+
+
+def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, managed: Iterable[PlannedResource]) -> list[PlanChange]:
+    """Classify changes. A name match is a conflict unless exact state owns it."""
+    actual_names = {"unit": actual.units, "orca": actual.orca_repos}
+    managed_by_id = {resource.logical_id: resource for resource in managed}
+    desired_by_id = {resource.logical_id: resource for resource in desired}
+    changes: list[PlanChange] = []
+    for resource in desired_by_id.values():
+        present = resource.name in actual_names[resource.kind]
+        owned = managed_by_id.get(resource.logical_id)
+        if not present:
+            action = "create"
+        elif owned and owned.kind == resource.kind and owned.name == resource.name:
+            action = "update" if owned.fingerprint != resource.fingerprint else "unchanged"
+        else:
+            action = "conflict"
+        changes.append(PlanChange(resource.logical_id, resource.kind, resource.name, action))
+    for logical_id, resource in managed_by_id.items():
+        if logical_id not in desired_by_id and resource.name in actual_names.get(resource.kind, set()):
+            changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
+    return sorted(changes, key=lambda change: (change.kind, change.logical_id))
 
 
 @dataclass(frozen=True)

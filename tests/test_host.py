@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import unittest
 from pathlib import Path
 
@@ -15,7 +16,9 @@ from secretary.host import (
     LiveHostSource,
     _CmdResult as CmdResult,
     build_expectations,
+    build_plan,
     inventory,
+    plan_changes,
 )
 
 
@@ -113,6 +116,58 @@ class FixtureSourceTests(unittest.TestCase):
         source = FixtureHostSource(REPO_ROOT / "tests" / "fixtures" / "does-not-exist")
         result = source.collect(Expectations())
         self.assertEqual(set(result.errors), {"projects", "units", "orca repos"})
+
+
+class ReconcilePlanTests(unittest.TestCase):
+    def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
+        instance = {
+            "host": {"unit_prefix": "secretary-"},
+            "heads": [{"role": "worker", "model": "test"}],
+        }
+        bindings = [{"id": "project-id", "repo": "/srv/project_id", "orca_binding": "project_id", "enabled": True}]
+        desired = build_plan(instance, bindings)
+        self.assertEqual([resource.name for resource in desired], ["project_id", "secretary-worker.service"])
+        actual = HostInventory(units={"secretary-worker.service"}, orca_repos={"project_id"})
+        first = plan_changes(desired, actual, [])
+        second = plan_changes(desired, actual, [])
+        self.assertEqual(first, second)
+        self.assertEqual({change.action for change in first}, {"conflict"})
+
+    def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance"
+            (instance / "projects").mkdir(parents=True)
+            (instance / "instance.yaml").write_text(
+                "version: 1\nname: plan\ndata_dir: " + str(root / "data") + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\nheads:\n  - role: worker\n    model: test\n",
+                encoding="utf-8",
+            )
+            (instance / "projects" / "project-id.yaml").write_text(
+                "id: project-id\nrepo: /srv/project_id\norca_binding: project_id\nenabled: true\nadapter: project-id\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "units.txt").write_text("secretary-worker.service\n", encoding="utf-8")
+            (fixture / "orca-repos.txt").write_text("project_id\n", encoding="utf-8")
+            manifest = root / "managed.json"
+            manifest.write_text(json.dumps({"resources": [
+                {"logical_id": "systemd:head:worker", "kind": "unit", "name": "secretary-worker.service", "fingerprint": "old"},
+                {"logical_id": "systemd:head:retired", "kind": "unit", "name": "secretary-retired.service", "fingerprint": "old"},
+            ]}), encoding="utf-8")
+            (fixture / "units.txt").write_text("secretary-worker.service\nsecretary-retired.service\n", encoding="utf-8")
+            before = manifest.read_bytes()
+            argv = ["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture), "--managed-manifest", str(manifest)]
+            first = run_cli(argv)
+            second = run_cli(argv)
+            self.assertEqual(first, second)
+            self.assertEqual(first[0], 1)
+            self.assertIn("update systemd:head:worker", first[1])
+            self.assertIn("delete systemd:head:retired", first[1])
+            self.assertIn("conflict orca:project:project-id", first[1])
+            self.assertEqual(manifest.read_bytes(), before)
 
 
 def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):
@@ -268,6 +323,20 @@ class LiveSourceErrorTests(unittest.TestCase):
 
 
 class DoctorHostCliTests(unittest.TestCase):
+    def test_offline_doctor_does_not_construct_live_host_source(self):
+        class ForbiddenHost(LiveHostSource):
+            def __init__(self):
+                raise AssertionError("offline doctor touched host")
+
+        original = cli.LiveHostSource
+        cli.LiveHostSource = ForbiddenHost
+        try:
+            code, output = run_cli(["doctor", "--offline", "--instance", str(EXAMPLE_INSTANCE)])
+        finally:
+            cli.LiveHostSource = original
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("host inventory", output)
+
     def test_host_inventory_reports_three_sections(self):
         code, output = run_cli(
             [

@@ -29,17 +29,17 @@ python3 -m pip install .
 python3 -m unittest
 ```
 
-Run the dry-run doctor against the example instance:
+Run the read-only doctor against the example instance without accessing the host:
 
 ```bash
-python3 -m secretary doctor --dry-run --instance examples/instance
+python3 -m secretary doctor --offline --instance examples/instance
 ```
 
-`doctor --dry-run` validates `instance.yaml` plus every binding, adapter and the data
+`doctor` validates `instance.yaml` plus every binding, adapter and the data
 manifest it finds, and never touches the host. The canonical manifest location is
 `<data_dir>/data-manifest.json`; the old example-local `data-manifest.json` is still
 accepted for fixture compatibility. A missing manifest is a migration warning, so
-plain `doctor --dry-run` stays green and `--strict` returns non-zero. `--instance`
+plain `doctor --offline` stays green and `--strict` returns non-zero. `--instance`
 accepts an instance directory or a direct path to an `instance.yaml`. An invalid
 config prints one problem per line with a path to the offending field, and exits
 non-zero:
@@ -50,6 +50,25 @@ secretary doctor: 1 config problem(s):
 ```
 
 ## Host inventory
+
+Phase 7 renders a plan before it can change a host:
+
+```bash
+python3 -m secretary reconcile plan --instance ~/secretary-instance \
+  --host-fixture tests/fixtures/host --managed-manifest /path/to/host-managed.json
+```
+
+The plan is read-only and deterministic. Heads render supported systemd services;
+enabled project bindings render Orca registrations. A binding supplies its repo path
+and `orca_binding` explicitly. Neither name is derived from a project id. The managed
+manifest records the logical resource id, kind, name and fingerprint after a future
+apply. A host name match with no matching managed record is a `conflict`, not a right
+to change it. This card deliberately does not implement `reconcile --apply`.
+
+`doctor` checks the live host by default and never writes. Use `--offline` for
+config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for
+findings (and warnings with `--strict`), and 2 when config or inventory cannot be
+checked.
 
 `doctor --dry-run --host` adds a read-only comparison of the instance against the
 live host. For project repos, systemd units and Orca repo registrations it prints

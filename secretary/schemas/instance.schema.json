@@ -80,7 +80,7 @@
     "host": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Host resources this installation owns, used by doctor's read-only inventory. Names only; no secret values.",
+      "description": "Host ownership boundaries and inputs. Desired resources are derived by reconcile, not listed here.",
       "properties": {
         "projects_root": {
           "type": "string",
@@ -94,26 +94,17 @@
         },
         "units": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"
-          },
-          "description": "Full systemd unit file names this installation expects on the host, e.g. 'secretary-pipeline.service' or 'secretary-pipeline.timer', matching 'systemctl list-unit-files' output exactly. A suffixless name would never match the host, so the type suffix is required. Requires unit_prefix so unmanaged-on-host can be computed."
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"},
+          "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
         },
         "orca_repos": {
           "type": "array",
           "items": {"type": "string", "minLength": 1},
-          "description": "Orca repo registrations this installation expects."
+          "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
         }
       },
-      "if": {
-        "properties": {"units": {"type": "array", "minItems": 1}},
-        "required": ["units"]
-      },
-      "then": {
-        "required": ["unit_prefix"]
-      }
+      "if": {"properties": {"units": {"type": "array", "minItems": 1}}, "required": ["units"]},
+      "then": {"required": ["unit_prefix"]}
     }
   },
   "$defs": {

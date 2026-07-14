@@ -14,6 +14,12 @@ manifest или проверяемая managed-метка. Префикс име
 сам по себе не даёт права менять ресурс. Чужие units, Orca bindings, worktrees и
 интерактивные сессии остаются вне владения secretary.
 
+Первый инкремент доступен как `secretary reconcile plan --host-fixture DIR`. Он не
+пишет manifest и не меняет host. Каждая строка плана содержит logical id, kind и
+host name. Managed manifest хранит те же поля и fingerprint применённого desired
+resource. При совпадении имени без записи с тем же logical id план выводит
+`conflict`; только exact managed record может дать `update` или `delete`.
+
 Ни generic multi-instance, ни lease/fencing, ни отдельный `instance_id` в этот
 контур не входят. Старый dispatcher переносится pilot-фильтром: pause, cutover,
 проверка pilot-карточки и ручной rollback при неуспехе.

@@ -61,13 +61,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("status: ok", output)
 
-    def test_doctor_requires_dry_run(self):
+    def test_doctor_checks_live_host_by_default(self):
         code, output = self.run_cli(
             ["doctor", "--instance", str(EXAMPLE_INSTANCE)]
         )
 
-        self.assertEqual(code, 2)
-        self.assertIn("requires --dry-run", output)
+        self.assertIn("host inventory: read-only", output)
+        self.assertIn("mode: read-only", output)
 
     def test_doctor_reports_missing_field_with_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:

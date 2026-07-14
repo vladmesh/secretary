@@ -17,6 +17,11 @@
       "minLength": 1,
       "description": "Path or URL of the project repo."
     },
+    "orca_binding": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Explicit Orca registration name. It is never derived from id or repo."
+    },
     "enabled": {
       "type": "boolean",
       "description": "Only true after a green onboarding gate."
