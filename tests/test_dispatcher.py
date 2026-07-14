@@ -23,6 +23,7 @@ from secretary.dispatcher import (
     _wrap_role_shell_command,
 )
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
+from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
@@ -122,7 +123,14 @@ class FakeHost:
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
 
-    def prepare_worker(self, task: dict, worker_id: str, head: str) -> dict[str, str]:
+    def prepare_worker(
+        self,
+        task: dict,
+        worker_id: str,
+        head: str,
+        *,
+        attempt_id: str = "",
+    ) -> dict[str, str]:
         if self.fail_prepare_reason:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
@@ -195,6 +203,41 @@ class DispatcherRuntimeTests(unittest.TestCase):
         started = self.runtime.start_new_pilot(self.selector, actor="operator")
         self.assertEqual(started["status"], "ok")
 
+    def append_committed_claim(self, attempt_id: str) -> str:
+        request_id = _attempt_request_id(attempt_id, "claim", "secretary-510-pilot")
+        TaskAudit(self.data_dir).append(
+            request_id,
+            {
+                "event_id": f"evt_{attempt_id}",
+                "schema_version": 1,
+                "occurred_at": "2026-07-14T00:00:00Z",
+                "actor": {"role": "dispatcher", "id": "secretary-pilot"},
+                "kind": "claimed",
+                "outcome": "success",
+                "task_id": "task_kanboard_12",
+                "ref": "secretary-510-pilot",
+                "backend": {
+                    "kind": "kanboard",
+                    "task_id": 12,
+                    "revision": "updated_at:2026-07-14T00:00:00Z",
+                },
+                "request_id": request_id,
+                "payload": {
+                    "worker": "secretary-510-pilot-pilot",
+                    "resolved_head": "codex",
+                    "resolved_review_head": "codex-reviewer",
+                    "slug": "pilot",
+                    "base_branch": None,
+                    "cap": 3,
+                },
+            },
+        )
+        return request_id
+
+    def audit_events(self) -> list[dict]:
+        with open(TaskAudit(self.data_dir).events_path, encoding="utf-8") as events:
+            return [json.loads(line) for line in events if line.strip()]
+
     def test_tick_fails_closed_without_cutover_guard(self) -> None:
         result = self.runtime.tick(self.selector)
 
@@ -228,6 +271,108 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "legacy pause mode is drain, requires freeze")
         self.assertNotEqual(self.runtime.state.load().get("phase"), "new_pilot")
+
+    def test_start_new_pilot_assigns_stable_attempt_id_and_request_ids(self) -> None:
+        self.start_pilot()
+        first = self.runtime.state.load()["attempt_id"]
+
+        retried = self.runtime.start_new_pilot(self.selector, actor="operator")
+        self.assertEqual(retried["attempt_id"], first)
+        claimed = self.runtime.tick(self.selector)
+
+        self.assertEqual(claimed["attempt_id"], first)
+        events = self.audit_events()
+        self.assertIn(
+            _attempt_request_id(first, "claim", "secretary-510-pilot"),
+            [event["request_id"] for event in events],
+        )
+        self.assertTrue(all(first in event["request_id"] for event in events))
+        observed = self.runtime.observe(self.selector)
+        self.assertEqual(observed["attempt_id"], first)
+
+    def test_new_attempt_ignores_stale_committed_claim_after_ready_reset(self) -> None:
+        old_request = self.append_committed_claim("attempt-old")
+        self.board.tasks[0]["column_id"] = 2
+        self.board.metadata[12].update({
+            "claim": "",
+            "resolved_head": "",
+            "resolved_review_head": "",
+        })
+        self.start_pilot()
+        new_attempt = self.runtime.state.load()["attempt_id"]
+        self.board.calls.clear()
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["attempt_id"], new_attempt)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["claim"]["worker"], "secretary-510-pilot-pilot")
+        self.assertTrue(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+        claim_requests = [
+            event["request_id"]
+            for event in self.audit_events()
+            if event["kind"] == "claimed"
+        ]
+        self.assertIn(old_request, claim_requests)
+        self.assertIn(_attempt_request_id(new_attempt, "claim", "secretary-510-pilot"), claim_requests)
+
+    def test_claim_success_with_live_mismatch_fails_closed_before_host_launch(self) -> None:
+        self.start_pilot()
+        attempt_id = self.runtime.state.load()["attempt_id"]
+        self.append_committed_claim(attempt_id)
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "claim live board mismatch")
+        self.assertEqual(self.host.prepared, [])
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "ready")
+        self.assertIsNone(task["claim"]["worker"])
+        divergences = self.runtime.state.load()["controlled_divergences"]
+        self.assertEqual(divergences[-1]["attempt_id"], attempt_id)
+        self.assertEqual(divergences[-1]["actual"]["state"], "ready")
+
+    def test_claim_retry_inside_same_attempt_uses_verified_live_claim_without_backend_rewrite(self) -> None:
+        self.start_pilot()
+        attempt_id = self.runtime.state.load()["attempt_id"]
+        self.append_committed_claim(attempt_id)
+        self.board.tasks[0]["column_id"] = 3
+        self.board.metadata[12].update({
+            "claim": "secretary-510-pilot-pilot",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        self.board.calls.clear()
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["step"], "claim")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.board.calls))
+
+    def test_rollback_clears_current_records_preserves_attempt_history_and_audit(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        before = self.audit_events()
+        attempt_id = self.runtime.state.load()["attempt_id"]
+
+        self.runtime.rollback(self.selector, actor="operator", reason="pilot red")
+
+        payload = self.runtime.state.load()
+        self.assertEqual(payload["records"], {})
+        self.assertEqual(payload["attempts"][-1]["attempt_id"], attempt_id)
+        self.assertEqual(payload["attempts"][-1]["rolled_back_by"], "operator")
+        self.assertEqual(self.audit_events(), before)
+
+        self.runtime.pause_old(self.selector, actor="operator", evidence="legacy hard pause")
+        restarted = self.runtime.start_new_pilot(self.selector, actor="operator")
+
+        self.assertNotEqual(restarted["attempt_id"], attempt_id)
+        self.assertEqual(len(self.runtime.state.load()["attempts"]), 2)
 
     def test_tick_refuses_before_claim_when_legacy_watchdog_is_active(self) -> None:
         self.runtime.state.save({
