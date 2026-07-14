@@ -90,7 +90,7 @@ def publish_state_atomic(
         for path, temp in staged:
             os.replace(temp, path)
         for path in removals:
-            path.unlink()
+            path.unlink(missing_ok=True)
     except OSError:
         for path in reversed(paths):
             _restore_file(path, before[path])

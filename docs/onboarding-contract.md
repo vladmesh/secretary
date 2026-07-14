@@ -128,4 +128,6 @@ The gate always writes a copy under `compatibility-manifests/`. When
 `instance.yaml` sets `compatibility.dispatcher_manifest_dir`, the same atomic
 publication also writes `<dispatcher_manifest_dir>/<project>.toml`, the central
 lookup path used by the legacy dispatcher. Stale-input rollback removes both
-copies without changing the project repo.
+copies without changing the project repo. The enable transaction records its
+exact manifest paths in `compatibility-manifests/<project>.targets.json`, so
+rollback does not depend on later changes to `instance.yaml`.

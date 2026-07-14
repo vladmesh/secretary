@@ -85,12 +85,45 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         rendered = legacy / "sample-project.toml"
         self.assertEqual(tomllib.loads(rendered.read_text())["workspace"]["base_branch"], "main")
+        (self.instance / "instance.yaml").write_text(yaml.safe_dump({
+            "version": 1, "name": "test", "data_dir": str(self.root / "data"),
+            "offsite": {"instance_remote": "git@example.invalid:test/instance.git"},
+        }), encoding="utf-8")
 
         (self.repo / "sample.py").write_text("VALUE = 12\n", encoding="utf-8")
         git(self.repo, "add", "sample.py")
         git(self.repo, "commit", "-m", "Invalidate gate")
         self.assertEqual(run_gate(str(self.instance), "sample-project")[1]["status"], "stale")
         self.assertFalse(rendered.exists())
+
+    def test_stale_disable_tolerates_compatibility_path_added_after_enable(self):
+        self.provision()
+        self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
+        legacy = self.root / "new-control-panel" / "pipeline" / "manifests"
+        (self.instance / "instance.yaml").write_text(yaml.safe_dump({
+            "version": 1, "name": "test", "data_dir": str(self.root / "data"),
+            "offsite": {"instance_remote": "git@example.invalid:test/instance.git"},
+            "compatibility": {"dispatcher_manifest_dir": str(legacy)},
+        }), encoding="utf-8")
+        (self.repo / "sample.py").write_text("VALUE = 13\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Invalidate old gate")
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "stale")
+        self.assertFalse(load_config(self.binding)["enabled"])
+
+    def test_invalid_instance_config_on_enable_is_structured_conflict(self):
+        self.provision()
+        (self.instance / "instance.yaml").write_text("compatibility: [broken", encoding="utf-8")
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "conflict")
+        self.assertFalse(load_config(self.binding)["enabled"])
 
     def test_corrupt_current_result_is_structured_conflict(self):
         self.provision()
