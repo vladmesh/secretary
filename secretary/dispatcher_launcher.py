@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
 CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
+CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
+CLAUDE_THEME_DEFAULT = "dark"
 CODEX_EFFORTS = {
     "default": None,
     "low": "low",
@@ -21,6 +25,29 @@ CODEX_EFFORTS = {
 
 class HeadLaunchError(RuntimeError):
     pass
+
+
+def ensure_claude_workspace_trusted(workspace: str, config: Path | None = None) -> None:
+    """Mark one Claude Code workspace trusted before a headless launch."""
+    config_path = config or Path(os.environ.get("TA_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
+    data = _load_claude_config(config_path)
+    if _mark_claude_workspace_trusted(data, str(workspace), config_path):
+        _save_claude_config(config_path, data)
+
+
+def ensure_claude_workspace_ready(
+    workspace: str,
+    config: Path | None = None,
+    *,
+    default_theme: str = CLAUDE_THEME_DEFAULT,
+) -> None:
+    """Pre-answer Claude Code first-run prompts for one headless workspace."""
+    config_path = config or Path(os.environ.get("TA_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
+    data = _load_claude_config(config_path)
+    changed = _mark_claude_workspace_trusted(data, str(workspace), config_path)
+    changed = _ensure_claude_theme(data, default_theme) or changed
+    if changed:
+        _save_claude_config(config_path, data)
 
 
 def render_claude_command(profile: dict[str, Any], prompt_file: str) -> str:
@@ -52,6 +79,80 @@ def render_codex_command(profile: dict[str, Any], prompt_file: str, *, workspace
     for path in _codex_trust_paths(workspace):
         args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
     return f"CODEX_HOME={shlex.quote(home)} {shlex.join(args)} {_prompt_substitution(prompt_file)}"
+
+
+def _load_claude_config(config: Path) -> dict[str, Any]:
+    _reject_symlinked_claude_config(config)
+    try:
+        if not config.exists():
+            return {}
+        loaded = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HeadLaunchError(f"cannot read Claude config {config}: {exc}") from None
+    if not isinstance(loaded, dict):
+        raise HeadLaunchError(f"Claude config {config} has an unsupported shape")
+    return loaded
+
+
+def _mark_claude_workspace_trusted(data: dict[str, Any], workspace: str, config: Path) -> bool:
+    projects = data.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise HeadLaunchError(f"Claude config {config} has non-object projects")
+    entry = projects.setdefault(workspace, {})
+    if not isinstance(entry, dict):
+        raise HeadLaunchError(f"Claude config {config} has non-object project entry for {workspace}")
+    if entry.get("hasTrustDialogAccepted") is True:
+        return False
+    entry["hasTrustDialogAccepted"] = True
+    return True
+
+
+def _ensure_claude_theme(data: dict[str, Any], default_theme: str) -> bool:
+    if data.get("theme"):
+        return False
+    data["theme"] = default_theme
+    return True
+
+
+def _save_claude_config(config: Path, data: dict[str, Any]) -> None:
+    temp_path: Path | None = None
+    try:
+        _reject_symlinked_claude_config(config)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{config.name}.",
+            suffix=".tmp",
+            dir=config.parent,
+            text=True,
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _reject_symlinked_claude_config(config)
+        os.replace(temp_path, config)
+    except OSError as exc:
+        raise HeadLaunchError(f"cannot update Claude config {config}: {exc}") from None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _reject_symlinked_claude_config(config: Path) -> None:
+    try:
+        mode = config.lstat().st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise HeadLaunchError(f"cannot inspect Claude config {config}: {exc}") from None
+    if stat.S_ISLNK(mode):
+        raise HeadLaunchError(f"refusing symlinked Claude config {config}")
+    if not stat.S_ISREG(mode):
+        raise HeadLaunchError(f"Claude config {config} is not a regular file")
 
 
 def wrap_role_shell_command(role: str, command: str) -> str:
