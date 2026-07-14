@@ -4,7 +4,7 @@ Date: 2026-07-14
 
 Phase 6 is accepted. Two isolated live repositories completed scanner, provision and gate. The
 fixtures used local validation, so no GitHub check state is claimed. The full suite passed with
-256 tests.
+258 tests.
 
 ## Live runs
 
