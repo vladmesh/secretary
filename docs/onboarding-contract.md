@@ -123,3 +123,9 @@ The old dispatcher compatibility manifest is a derived transition consumer. It
 is allowed to read the v1 onboarding result and render the legacy dispatcher
 shape during migration, but it is not a second source of truth. If it disagrees
 with this contract, the onboarding contract wins.
+
+The gate always writes a copy under `compatibility-manifests/`. When
+`instance.yaml` sets `compatibility.dispatcher_manifest_dir`, the same atomic
+publication also writes `<dispatcher_manifest_dir>/<project>.toml`, the central
+lookup path used by the legacy dispatcher. Stale-input rollback removes both
+copies without changing the project repo.

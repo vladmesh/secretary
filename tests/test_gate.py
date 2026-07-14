@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -65,6 +66,44 @@ class GateTests(unittest.TestCase):
         self.assertTrue(manifest.exists())
         self.assertIn('project = "sample-project"', manifest.read_text())
         self.assertEqual(run_gate(str(self.instance), "sample-project"), (0, result))
+        dry_code, dry_result = project_add(str(self.repo), str(self.instance), dry_run=True)
+        self.assertEqual(dry_code, 0, dry_result)
+        self.assertEqual(dry_result["gate"]["status"], "passed")
+        self.assertTrue(load_config(self.binding)["enabled"])
+
+    def test_compatibility_is_published_to_legacy_dispatcher_lookup(self):
+        legacy = self.root / "control-panel" / "pipeline" / "manifests"
+        (self.instance / "instance.yaml").write_text(yaml.safe_dump({
+            "version": 1, "name": "test", "data_dir": str(self.root / "data"),
+            "offsite": {"instance_remote": "git@example.invalid:test/instance.git"},
+            "compatibility": {"dispatcher_manifest_dir": str(legacy)},
+        }), encoding="utf-8")
+        self.provision()
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 0, result)
+        rendered = legacy / "sample-project.toml"
+        self.assertEqual(tomllib.loads(rendered.read_text())["workspace"]["base_branch"], "main")
+
+        (self.repo / "sample.py").write_text("VALUE = 12\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Invalidate gate")
+        self.assertEqual(run_gate(str(self.instance), "sample-project")[1]["status"], "stale")
+        self.assertFalse(rendered.exists())
+
+    def test_corrupt_current_result_is_structured_conflict(self):
+        self.provision()
+        code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 0, result)
+        path = self.instance / "gate-runs" / "sample-project" / result["run_id"] / "result.json"
+        path.write_text("{broken", encoding="utf-8")
+
+        code, conflict = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(conflict["status"], "conflict")
+        self.assertTrue(load_config(self.binding)["enabled"])
 
     def assert_stage_failure(self, stage: str) -> None:
         command = "printf 'token=ghp_secret_value' >&2; false"
