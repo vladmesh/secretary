@@ -18,7 +18,7 @@ from secretary._fsutil import file_lock, write_json, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunchError,
-    ensure_claude_workspace_trusted as _ensure_claude_workspace_trusted,
+    ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     wrap_role_shell_command as _wrap_role_shell_command,
@@ -223,7 +223,7 @@ class InstanceCatalog:
         if adapter != "claude":
             return
         try:
-            _ensure_claude_workspace_trusted(workspace)
+            _ensure_claude_workspace_ready(workspace)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
 

@@ -22,7 +22,7 @@ from secretary.dispatcher import (
     _render_codex_command,
     _wrap_role_shell_command,
 )
-from secretary.dispatcher_launcher import ensure_claude_workspace_trusted
+from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
@@ -455,7 +455,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn('"$(cat TASK.md)"', command)
         self.assertNotIn('codex "$(cat TASK.md)"', command)
 
-    def test_claude_command_trusts_workspace_before_launch(self) -> None:
+    def test_claude_command_prepares_workspace_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".claude.json"
             workspace = str(Path(tmp) / "workspace")
@@ -473,8 +473,29 @@ class DispatcherLauncherTests(unittest.TestCase):
             data = json.loads(config.read_text(encoding="utf-8"))
 
         self.assertTrue(data["projects"][workspace]["hasTrustDialogAccepted"])
+        self.assertEqual(data["theme"], "dark")
         self.assertIn("claude --dangerously-skip-permissions --model opus", command)
         self.assertIn("python3 -m secretary.role_env exec --role worker", command)
+
+    def test_claude_ready_preserves_existing_theme_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".claude.json"
+            config.write_text(
+                json.dumps({
+                    "theme": "light",
+                    "projects": {"/ws/x": {"hasTrustDialogAccepted": True}},
+                }),
+                encoding="utf-8",
+            )
+
+            ensure_claude_workspace_ready("/ws/x", config)
+            after_first = json.loads(config.read_text(encoding="utf-8"))
+            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+                ensure_claude_workspace_ready("/ws/x", config)
+
+        self.assertEqual(after_first["theme"], "light")
+        self.assertTrue(after_first["projects"]["/ws/x"]["hasTrustDialogAccepted"])
+        replace.assert_not_called()
 
     def test_claude_trust_preserves_other_config_entries_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -528,6 +549,19 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             data = json.loads(config.read_text(encoding="utf-8"))
         self.assertEqual(data, {"projects": {"/old": {"keep": True}}})
+
+    def test_claude_ready_fails_closed_when_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".claude.json"
+            original = {"hasCompletedOnboarding": True, "projects": {"/old": {"keep": True}}}
+            config.write_text(json.dumps(original), encoding="utf-8")
+
+            with mock.patch("secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")):
+                with self.assertRaisesRegex(RuntimeError, "cannot update Claude config"):
+                    ensure_claude_workspace_ready("/ws/x", config)
+
+            data = json.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(data, original)
 
     def test_prepare_worker_lands_on_legacy_pipeline_branch_for_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

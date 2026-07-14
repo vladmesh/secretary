@@ -27,10 +27,12 @@ writes. The live runtime does not import Python modules from `triggered-agents`.
   legacy Validate/reviewer path fetches. A rollback during Validate therefore
   resumes against the existing PR head without a manual branch rename or push.
 - Claude worker/reviewer profiles are prepared before launch by setting
-  `projects["<workspace>"].hasTrustDialogAccepted = true` in the Claude config.
-  The write is per-workspace and fail-closed: an unreadable, corrupt, symlinked
-  or non-atomically writable config blocks the launch instead of opening an
-  interactive folder-trust prompt.
+  `projects["<workspace>"].hasTrustDialogAccepted = true` and a top-level
+  `theme` in the Claude config when it is absent. Those are the two Claude
+  first-run prompts the production launcher pre-answers. The write is
+  fail-closed: an unreadable, corrupt, symlinked or non-atomically writable
+  config blocks the launch instead of opening an interactive folder-trust
+  prompt or onboarding theme picker.
 - `SECRETARY_DISPATCHER_HOST_MODE=noop` is only for tests and fixture pilots. A
   live pilot must run with the default `real` host mode.
 

@@ -12,6 +12,7 @@ from typing import Any
 
 CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
+CLAUDE_THEME_DEFAULT = "dark"
 CODEX_EFFORTS = {
     "default": None,
     "low": "low",
@@ -30,16 +31,23 @@ def ensure_claude_workspace_trusted(workspace: str, config: Path | None = None) 
     """Mark one Claude Code workspace trusted before a headless launch."""
     config_path = config or Path(os.environ.get("TA_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
     data = _load_claude_config(config_path)
-    projects = data.setdefault("projects", {})
-    if not isinstance(projects, dict):
-        raise HeadLaunchError(f"Claude config {config_path} has non-object projects")
-    entry = projects.setdefault(str(workspace), {})
-    if not isinstance(entry, dict):
-        raise HeadLaunchError(f"Claude config {config_path} has non-object project entry for {workspace}")
-    if entry.get("hasTrustDialogAccepted") is True:
-        return
-    entry["hasTrustDialogAccepted"] = True
-    _save_claude_config(config_path, data)
+    if _mark_claude_workspace_trusted(data, str(workspace), config_path):
+        _save_claude_config(config_path, data)
+
+
+def ensure_claude_workspace_ready(
+    workspace: str,
+    config: Path | None = None,
+    *,
+    default_theme: str = CLAUDE_THEME_DEFAULT,
+) -> None:
+    """Pre-answer Claude Code first-run prompts for one headless workspace."""
+    config_path = config or Path(os.environ.get("TA_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
+    data = _load_claude_config(config_path)
+    changed = _mark_claude_workspace_trusted(data, str(workspace), config_path)
+    changed = _ensure_claude_theme(data, default_theme) or changed
+    if changed:
+        _save_claude_config(config_path, data)
 
 
 def render_claude_command(profile: dict[str, Any], prompt_file: str) -> str:
@@ -84,6 +92,26 @@ def _load_claude_config(config: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise HeadLaunchError(f"Claude config {config} has an unsupported shape")
     return loaded
+
+
+def _mark_claude_workspace_trusted(data: dict[str, Any], workspace: str, config: Path) -> bool:
+    projects = data.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise HeadLaunchError(f"Claude config {config} has non-object projects")
+    entry = projects.setdefault(workspace, {})
+    if not isinstance(entry, dict):
+        raise HeadLaunchError(f"Claude config {config} has non-object project entry for {workspace}")
+    if entry.get("hasTrustDialogAccepted") is True:
+        return False
+    entry["hasTrustDialogAccepted"] = True
+    return True
+
+
+def _ensure_claude_theme(data: dict[str, Any], default_theme: str) -> bool:
+    if data.get("theme"):
+        return False
+    data["theme"] = default_theme
+    return True
 
 
 def _save_claude_config(config: Path, data: dict[str, Any]) -> None:
