@@ -23,6 +23,7 @@ SCHEMAS = {
     "adapter": "adapter.schema.json",
     "provision-result": "provision-result.schema.json",
     "provision-task": "provision-task.schema.json",
+    "gate-result": "gate-result.schema.json",
     "data-manifest": "data-manifest.schema.json",
     "onboarding-contract": "onboarding-contract.schema.json",
 }

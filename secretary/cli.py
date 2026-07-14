@@ -27,6 +27,7 @@ from secretary.host import (
     build_expectations,
     inventory,
 )
+from secretary.gate import run_gate
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
     MemoryExportPublishError,
@@ -249,6 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
     )
     provision_apply.set_defaults(handler=run_project_provision_apply)
+    gate = project_subcommands.add_parser("gate")
+    gate.add_argument("project_id")
+    gate.add_argument("--instance", default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE))
+    gate.set_defaults(handler=run_project_gate)
     project.set_defaults(handler=not_implemented("project"))
 
     task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
@@ -474,6 +479,12 @@ def run_project_provision_start(args: argparse.Namespace) -> int:
 
 def run_project_provision_apply(args: argparse.Namespace) -> int:
     code, result = apply_provision_result(args.instance, args.project_id, args.result)
+    print(render_result(result), end="")
+    return code
+
+
+def run_project_gate(args: argparse.Namespace) -> int:
+    code, result = run_gate(args.instance, args.project_id)
     print(render_result(result), end="")
     return code
 

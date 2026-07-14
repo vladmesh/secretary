@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gate-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "identity", "input_revision", "adapter_digest", "status", "checks", "findings"],
+  "properties": {
+    "version": {"const": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "repo", "adapter", "default_branch"],
+      "properties": {
+        "id": {"type": "string"}, "repo": {"type": "string"},
+        "adapter": {"type": "string"}, "default_branch": {"type": "string"}
+      }
+    },
+    "input_revision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scanner_head", "provision_run_id"],
+      "properties": {"scanner_head": {"type": "string"}, "provision_run_id": {"type": "string"}}
+    },
+    "adapter_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "status": {"enum": ["passed", "failed", "stale", "conflict"]},
+    "checks": {
+      "type": "object", "additionalProperties": {"type": "object"},
+      "required": ["clean_worktree", "setup", "smoke", "validation", "artifact_policy"]
+    },
+    "missing_coverage": {"type": "array", "items": {"type": "string"}},
+    "findings": {"type": "array", "items": {"type": "object"}}
+  }
+}
