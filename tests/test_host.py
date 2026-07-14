@@ -119,6 +119,26 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
+    def test_runtime_payload_changes_require_an_update(self):
+        instance = {"host": {"unit_prefix": "secretary-"}, "heads": [{"role": "worker", "model": "old"}]}
+        bindings = [{"id": "project-id", "repo": "/srv/old-path", "orca_binding": "project_id", "enabled": True}]
+        original = build_plan(instance, bindings)
+        actual = HostInventory(units={"secretary-worker.service"}, orca_repos={"project_id"})
+        instance["heads"][0]["model"] = "new"
+        bindings[0]["repo"] = "/srv/new-path"
+        changed = build_plan(instance, bindings)
+        self.assertEqual({change.action for change in plan_changes(changed, actual, original)}, {"update"})
+
+    def test_enabled_binding_requires_explicit_orca_binding(self):
+        from secretary.config import validate
+
+        errors = validate(
+            {"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True, "adapter": "foo-bar", "default_branch": "main"},
+            "project-binding",
+            "binding.yaml",
+        )
+        self.assertTrue(any("orca_binding" in error.message for error in errors), errors)
+
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
         instance = {
             "host": {"unit_prefix": "secretary-"},
@@ -168,6 +188,23 @@ class ReconcilePlanTests(unittest.TestCase):
             self.assertIn("delete systemd:head:retired", first[1])
             self.assertIn("conflict orca:project:project-id", first[1])
             self.assertEqual(manifest.read_bytes(), before)
+
+    def test_cli_plan_reports_foreign_resource_under_unit_prefix(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: plan\ndata_dir: /tmp/data\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\nheads:\n  - role: worker\n    model: test\n",
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "units.txt").write_text("secretary-retro.timer\n", encoding="utf-8")
+            code, output = run_cli(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)])
+        self.assertEqual(code, 1, output)
+        self.assertIn("conflict systemd:conflict:secretary-retro.timer", output)
 
 
 def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):

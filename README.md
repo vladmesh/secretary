@@ -70,21 +70,18 @@ config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for
 findings (and warnings with `--strict`), and 2 when config or inventory cannot be
 checked.
 
-`doctor --dry-run --host` adds a read-only comparison of the instance against the
-live host. For project repos, systemd units and Orca repo registrations it prints
-three sets:
+The default doctor inventory is read-only. It compares project repos, systemd units
+and Orca repo registrations and prints three sets:
 
 - `matched` — described in the instance and present on the host;
 - `missing-on-host` — described in the instance but not found;
 - `unmanaged-on-host` — present on the host but not described (reconcile would
   leave these alone).
 
-What the instance owns is declared under `host` in `instance.yaml`: `projects_root`
-(where repos live), `unit_prefix` (the systemd namespace secretary manages), `units`
-and `orca_repos`. Expected project names come from the bindings under `projects/`.
-Declaring `units` requires `unit_prefix`: without a namespace to enumerate, doctor
-cannot see host units that the instance does not describe, so it would not compute
-`unmanaged-on-host` for units.
+The `host` block supplies `projects_root` and `unit_prefix` ownership boundaries.
+The plan does not read `host.units` or `host.orca_repos`; they remain deprecated
+doctor compatibility inputs, not desired state. Expected project names come from
+bindings under `projects/`.
 
 The inventory is strictly read-only: it enumerates resource names only and never
 opens env files, reads secrets, or changes host state. `--host-fixture DIR` runs the
@@ -92,11 +89,11 @@ same comparison against a fixture host directory instead of the live host, so it
 run offline and under test:
 
 ```bash
-python3 -m secretary doctor --dry-run --instance examples/instance \
+python3 -m secretary doctor --instance examples/instance \
   --host-fixture tests/fixtures/host
 ```
 
-The Phase 1 command surface is present, but only `doctor --dry-run` does useful work.
+Use `--offline` when an inventory source must not be accessed.
 
 ## Data exports
 
@@ -122,9 +119,10 @@ python3 -m secretary memory import --instance ~/secretary-instance \
 ```
 
 `panelmem-kb` remains readable and unchanged. It is retained as the rollback
-source until cutover moves writers to the secretary memory protocol. `reconcile`,
-`backup`, `restore`, `project add`, `task`, and public memory writer commands
-return an explicit `not implemented` message.
+source until cutover moves writers to the secretary memory protocol. `reconcile
+plan` is available as a read-only host planner; `reconcile --apply` is not part of
+this phase. `backup`, `restore`, `project add`, `task`, and public memory writer
+commands retain their individual command contracts.
 
 ## Data layout
 

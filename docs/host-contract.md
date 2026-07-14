@@ -16,8 +16,9 @@ manifest или проверяемая managed-метка. Префикс име
 
 Первый инкремент доступен как `secretary reconcile plan --host-fixture DIR`. Он не
 пишет manifest и не меняет host. Каждая строка плана содержит logical id, kind и
-host name. Managed manifest хранит те же поля и fingerprint применённого desired
-resource. При совпадении имени без записи с тем же logical id план выводит
+host name. Managed manifest хранит те же поля, canonical desired spec и fingerprint
+применённого resource. Для service spec включает role/model, для Orca — explicit
+binding name/repo path. При совпадении имени без записи с тем же logical id план выводит
 `conflict`; только exact managed record может дать `update` или `delete`.
 
 Ни generic multi-instance, ни lease/fencing, ни отдельный `instance_id` в этот

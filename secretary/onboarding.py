@@ -111,6 +111,8 @@ def _project_add_locked(
             _reset_scanner_derived_state(artifact)
 
     binding = dict(identity)
+    existing_orca_binding = existing_binding.get("orca_binding") if existing_binding else None
+    binding["orca_binding"] = existing_orca_binding if isinstance(existing_orca_binding, str) else repo.name
     binding["enabled"] = False
     binding_errors = validate(binding, "project-binding", binding_path.name)
     artifact_errors = validate(artifact, "onboarding-contract", draft_path.name)

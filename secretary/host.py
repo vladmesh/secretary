@@ -27,6 +27,7 @@ class PlannedResource:
     logical_id: str
     kind: str
     name: str
+    spec: str
     fingerprint: str
 
 
@@ -38,9 +39,10 @@ class PlanChange:
     action: str
 
 
-def _fingerprint(logical_id: str, kind: str, name: str) -> str:
-    value = json.dumps([logical_id, kind, name], separators=(",", ":"))
-    return hashlib.sha256(value.encode()).hexdigest()
+def _resource(logical_id: str, kind: str, name: str, payload: dict[str, str]) -> PlannedResource:
+    spec = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    value = json.dumps([logical_id, kind, name, spec], separators=(",", ":"))
+    return PlannedResource(logical_id, kind, name, spec, hashlib.sha256(value.encode()).hexdigest())
 
 
 def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[PlannedResource]:
@@ -61,7 +63,10 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
             role = head["role"]
             logical_id = f"systemd:head:{role}"
             name = f"{prefix}{role}.service"
-            result.append(PlannedResource(logical_id, "unit", name, _fingerprint(logical_id, "unit", name)))
+            model = head.get("model")
+            if not isinstance(model, str):
+                continue
+            result.append(_resource(logical_id, "unit", name, {"model": model, "role": role}))
     for binding in bindings:
         if not isinstance(binding, dict) or not binding.get("enabled"):
             continue
@@ -70,7 +75,10 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
         if not isinstance(project_id, str) or not isinstance(name, str):
             continue
         logical_id = f"orca:project:{project_id}"
-        result.append(PlannedResource(logical_id, "orca", name, _fingerprint(logical_id, "orca", name)))
+        repo = binding.get("repo")
+        if not isinstance(repo, str):
+            continue
+        result.append(_resource(logical_id, "orca", name, {"repo": repo, "binding": name}))
     return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
 
 
@@ -87,11 +95,12 @@ def load_managed_manifest(path: Path) -> list[PlannedResource]:
             continue
         fields = (value.get("logical_id"), value.get("kind"), value.get("name"), value.get("fingerprint"))
         if all(isinstance(field, str) and field for field in fields):
-            resources.append(PlannedResource(*fields))
+            spec = value.get("spec", "")
+            resources.append(PlannedResource(fields[0], fields[1], fields[2], spec if isinstance(spec, str) else "", fields[3]))
     return resources
 
 
-def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, managed: Iterable[PlannedResource]) -> list[PlanChange]:
+def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, managed: Iterable[PlannedResource], unit_prefix: str = "") -> list[PlanChange]:
     """Classify changes. A name match is a conflict unless exact state owns it."""
     actual_names = {"unit": actual.units, "orca": actual.orca_repos}
     managed_by_id = {resource.logical_id: resource for resource in managed}
@@ -110,6 +119,12 @@ def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, mana
     for logical_id, resource in managed_by_id.items():
         if logical_id not in desired_by_id and resource.name in actual_names.get(resource.kind, set()):
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
+    known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
+    known_units.update(resource.name for resource in managed_by_id.values() if resource.kind == "unit")
+    if unit_prefix:
+        for name in actual.units:
+            if name.startswith(unit_prefix) and name not in known_units:
+                changes.append(PlanChange(f"systemd:conflict:{name}", "unit", name, "conflict"))
     return sorted(changes, key=lambda change: (change.kind, change.logical_id))
 
 

@@ -23,6 +23,7 @@ VALID_INSTANCE = {
 VALID_BINDING = {
     "id": "example-project",
     "repo": "/srv/projects/example-project",
+    "orca_binding": "example-project",
     "enabled": True,
     "adapter": "example-project",
     "default_branch": "main",
