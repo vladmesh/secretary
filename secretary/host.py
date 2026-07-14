@@ -84,6 +84,7 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
 
 def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[str]:
     """Reject incomplete desired-state inputs before a plan can fail open."""
+    bindings = list(bindings)
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix") if isinstance(host, dict) else None
     heads = instance.get("heads", []) if isinstance(instance, dict) else []
@@ -93,6 +94,17 @@ def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any
     for binding in bindings:
         if isinstance(binding, dict) and binding.get("enabled") and not isinstance(binding.get("orca_binding"), str):
             errors.append("enabled binding requires explicit orca_binding")
+    desired = build_plan(instance, bindings)
+    logical_ids: set[str] = set()
+    names: set[tuple[str, str]] = set()
+    for resource in desired:
+        if resource.logical_id in logical_ids:
+            errors.append(f"duplicate desired logical_id: {resource.logical_id}")
+        logical_ids.add(resource.logical_id)
+        key = (resource.kind, resource.name)
+        if key in names:
+            errors.append(f"duplicate desired resource name: {resource.kind} {resource.name}")
+        names.add(key)
     return errors
 
 
@@ -271,22 +283,29 @@ class FixtureHostSource(HostSource):
     def __init__(self, root: Path):
         self.root = root
 
-    def _lines(self, name: str) -> set[str]:
-        path = self.root / name
-        if not path.is_file():
-            return set()
-        names: set[str] = set()
-        for line in path.read_text(encoding="utf-8").splitlines():
-            token = line.strip()
-            if token and not token.startswith("#"):
-                names.add(token)
-        return names
+    def _lines(self, name: str) -> tuple[set[str], str]:
+        try:
+            path = self.root / name
+            if not path.is_file():
+                return set(), ""
+            names = {
+                token for line in path.read_text(encoding="utf-8").splitlines()
+                if (token := line.strip()) and not token.startswith("#")
+            }
+            return names, ""
+        except UnicodeError:
+            return set(), "fixture host file is not valid UTF-8"
+        except OSError:
+            return set(), "fixture host file is unreadable"
 
-    def _projects(self) -> set[str]:
-        projects_dir = self.root / "projects"
-        if not projects_dir.is_dir():
-            return set()
-        return _names_from_dir(projects_dir)
+    def _projects(self) -> tuple[set[str], str]:
+        try:
+            projects_dir = self.root / "projects"
+            if not projects_dir.is_dir():
+                return set(), ""
+            return _names_from_dir(projects_dir), ""
+        except OSError:
+            return set(), "fixture projects directory is unreadable"
 
     def collect(self, expected: Expectations) -> CollectResult:
         if not self.root.is_dir():
@@ -298,13 +317,15 @@ class FixtureHostSource(HostSource):
                 inventory=HostInventory(),
                 errors={kind: reason for kind in KINDS},
             )
-        return CollectResult(
-            inventory=HostInventory(
-                projects=self._projects(),
-                units=self._lines("units.txt"),
-                orca_repos=self._lines("orca-repos.txt"),
-            )
-        )
+        projects, project_error = self._projects()
+        units, unit_error = self._lines("units.txt")
+        repos, repo_error = self._lines("orca-repos.txt")
+        errors = {
+            kind: reason for kind, reason in (
+                ("projects", project_error), ("units", unit_error), ("orca repos", repo_error)
+            ) if reason
+        }
+        return CollectResult(HostInventory(projects, units, repos), errors)
 
 
 @dataclass(frozen=True)

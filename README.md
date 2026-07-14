@@ -2,10 +2,8 @@
 
 Product repository for the portable secretary appliance.
 
-Phase 3 contains the first data-layout commands on top of the original CLI
-skeleton. It still does not own host
-processes, live project bindings, board data, memory data, secrets, transcripts, or
-instance-specific paths.
+Phase 7 adds a read-only host plan and inventory. It still does not apply host
+changes, own live board data, secrets, transcripts, or instance-specific paths.
 
 ## Config schemas
 
@@ -18,7 +16,7 @@ The contract between the product and a future `secretary-instance` repo lives in
 - `data-manifest.schema.json` — the `secretary-data` layout descriptor
 
 `examples/instance/` is a complete, valid instance tree with placeholder-only data
-(no live bindings). `doctor --dry-run` and the tests validate against it.
+(no live bindings). `doctor --offline` and the tests validate against it.
 
 ## CLI
 
@@ -36,7 +34,8 @@ python3 -m secretary doctor --offline --instance examples/instance
 ```
 
 `doctor` validates `instance.yaml` plus every binding, adapter and the data
-manifest it finds, and never touches the host. The canonical manifest location is
+manifest it finds. By default it also reads the live host inventory; `--offline`
+skips that inventory. The canonical manifest location is
 `<data_dir>/data-manifest.json`; the old example-local `data-manifest.json` is still
 accepted for fixture compatibility. A missing manifest is a migration warning, so
 plain `doctor --offline` stays green and `--strict` returns non-zero. `--instance`
@@ -68,6 +67,7 @@ to change it. This card deliberately does not implement `reconcile --apply`.
 The plan rejects incomplete desired inputs: heads require `host.unit_prefix`, and an
 enabled binding requires an explicit `orca_binding`. This validation is plan-local so
 `doctor --offline` can still inspect a pre-migration instance without changing it.
+Logical resource ids and host names must also be unique within a plan.
 
 `doctor` checks the live host by default and never writes. Use `--offline` for
 config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for

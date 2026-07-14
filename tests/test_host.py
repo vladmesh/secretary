@@ -118,6 +118,15 @@ class FixtureSourceTests(unittest.TestCase):
         result = source.collect(Expectations())
         self.assertEqual(set(result.errors), {"projects", "units", "orca repos"})
 
+    def test_invalid_utf8_marks_only_that_fixture_kind_unavailable(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "units.txt"
+            path.write_bytes(b"\xff")
+            result = FixtureHostSource(Path(tmp)).collect(Expectations())
+        self.assertEqual(result.errors, {"units": "fixture host file is not valid UTF-8"})
+
 
 class ReconcilePlanTests(unittest.TestCase):
     def test_runtime_payload_changes_require_an_update(self):
@@ -137,6 +146,17 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_plan_rejects_heads_without_unit_prefix(self):
         errors = plan_input_errors({"heads": [{"role": "worker", "model": "test"}]}, [])
         self.assertEqual(errors, ["host.unit_prefix is required when heads are configured"])
+
+    def test_plan_rejects_duplicate_logical_id_and_host_name(self):
+        duplicate_heads = {"host": {"unit_prefix": "secretary-"}, "heads": [
+            {"role": "worker", "model": "one"}, {"role": "worker", "model": "two"},
+        ]}
+        self.assertIn("duplicate desired logical_id: systemd:head:worker", plan_input_errors(duplicate_heads, []))
+        bindings = [
+            {"id": "alpha", "repo": "/srv/a", "orca_binding": "shared", "enabled": True},
+            {"id": "beta", "repo": "/srv/b", "orca_binding": "shared", "enabled": True},
+        ]
+        self.assertIn("duplicate desired resource name: orca shared", plan_input_errors({}, bindings))
 
     def test_renamed_managed_resource_is_deleted_alongside_create(self):
         old_instance = {"host": {"unit_prefix": "old-"}, "heads": [{"role": "worker", "model": "test"}]}
@@ -229,6 +249,21 @@ class ReconcilePlanTests(unittest.TestCase):
             code, output = run_cli(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)])
         self.assertEqual(code, 2, output)
         self.assertIn("host.unit_prefix is required", output)
+
+    def test_cli_fixture_decode_error_returns_controlled_exit(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "units.txt").write_bytes(b"\xff")
+            plan_code, plan_output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE), "--host-fixture", str(fixture)])
+            doctor_code, doctor_output = run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE), "--host-fixture", str(fixture)])
+        self.assertEqual(plan_code, 2, plan_output)
+        self.assertIn("host inventory unavailable", plan_output)
+        self.assertEqual(doctor_code, 2, doctor_output)
+        self.assertIn("units:\n  unavailable: fixture host file is not valid UTF-8", doctor_output)
 
 
 def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):

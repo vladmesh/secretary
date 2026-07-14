@@ -27,6 +27,9 @@ binding name/repo path. При совпадении имени без запис
 При смене host name того же logical id план показывает новый `create` и `delete`
 ранее managed старого имени.
 
+До diff plan validates unique logical id и unique pair kind/name. Два desired
+ресурса не могут претендовать на один systemd unit или Orca binding.
+
 Ни generic multi-instance, ни lease/fencing, ни отдельный `instance_id` в этот
 контур не входят. Старый dispatcher переносится pilot-фильтром: pause, cutover,
 проверка pilot-карточки и ручной rollback при неуспехе.
