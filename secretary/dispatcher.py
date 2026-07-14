@@ -31,6 +31,11 @@ class HostError(Exception):
     pass
 
 
+_ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
+_BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
+_HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
 @dataclass(frozen=True)
 class PilotSelector:
     reference: str
@@ -562,7 +567,7 @@ class DispatcherRuntime:
                 actor=self.owner,
                 reference=ref,
                 target="blocked",
-                reason=f"dispatcher bring-up failed: {exc}",
+                reason=f"dispatcher bring-up failed: {scrub_host_output(str(exc))}",
                 request_id=f"dispatcher-bringup-blocked-{ref}",
             )
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
@@ -624,7 +629,6 @@ class DispatcherRuntime:
         record = records.get(ref)
         if record is None:
             record = self._adopt(task)
-            record.review_baseline = len(task.get("comments") or [])
             records[ref] = record
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
@@ -661,7 +665,7 @@ class DispatcherRuntime:
                     actor=self.owner,
                     reference=ref,
                     target="blocked",
-                    reason=f"review bring-up failed: {exc}",
+                    reason=f"review bring-up failed: {scrub_host_output(str(exc))}",
                     request_id=f"dispatcher-review-blocked-{ref}",
                 )
                 records.pop(ref, None)
@@ -680,7 +684,7 @@ class DispatcherRuntime:
             head=self.catalog.worker_head(task),
             review_head=self.catalog.review_head(task),
             comment_baseline=len(task.get("comments") or []),
-            review_baseline=len(task.get("comments") or []),
+            review_baseline=_review_adoption_baseline(task),
             state="adopted",
             claimed_at=time.time(),
         )
@@ -719,6 +723,19 @@ def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str 
         if marker in markers:
             result = marker
     return result
+
+
+def _review_adoption_baseline(task: dict[str, Any]) -> int:
+    baseline = len(task.get("comments") or [])
+    for index, comment in enumerate(task.get("comments") or []):
+        if comment.get("marker") == "report:done":
+            baseline = index + 1
+    return baseline
+
+
+def scrub_host_output(text: str) -> str:
+    text = _ASSIGN_RE.sub(r"\1=<redacted>", text)
+    return _BLOB_RE.sub(lambda match: match.group(0) if _HEX_RE.match(match.group(0)) else "<redacted>", text)
 
 
 def _tail(text: str, lines: int = 40) -> str:

@@ -7,6 +7,7 @@ from pathlib import Path
 from secretary.dispatcher import (
     CutoverState,
     DispatcherRuntime,
+    HostError,
     PilotSelector,
 )
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
@@ -103,8 +104,11 @@ class FakeHost:
         self.reviews: list[str] = []
         self.stopped: list[str] = []
         self.completed: list[str] = []
+        self.fail_prepare_reason = ""
 
     def prepare_worker(self, task: dict, worker_id: str, head: str) -> dict[str, str]:
+        if self.fail_prepare_reason:
+            raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
         workspace.mkdir(parents=True, exist_ok=True)
         self.prepared.append(task["ref"])
@@ -218,6 +222,50 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["action"], "review-started")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_validate_adoption_processes_existing_review_verdict(self) -> None:
+        self.start_pilot()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="existing-report",
+        )
+        self.board.tasks[0]["column_id"] = 4
+        self.board.metadata[12]["claim"] = "secretary-510-pilot-pilot"
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="green",
+            request_id="existing-verdict",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["to"], "done")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "done")
+        self.assertEqual(self.host.reviews, [])
+
+    def test_host_error_comment_is_scrubbed(self) -> None:
+        self.start_pilot()
+        self.host.fail_prepare_reason = (
+            "setup failed: API_TOKEN=secret-token "
+            "raw abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789"
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        body = task["comments"][-1]["body"]
+        self.assertIn("API_TOKEN=<redacted>", body)
+        self.assertNotIn("secret-token", body)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789", body)
 
     def test_rollback_after_worker_report_preserves_validate_card_and_comments(self) -> None:
         self.start_pilot()

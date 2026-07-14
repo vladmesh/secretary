@@ -538,9 +538,14 @@ class TaskWriter:
         return repaired, unresolved
 
     def _finish_pending_cleanup(self, event: dict[str, Any]) -> None:
-        """Complete an idempotent Ready reset before recording its move event."""
+        """Complete idempotent backend cleanup before recording a pending event."""
         payload = event.get("payload")
-        if event.get("kind") != "moved" or not isinstance(payload, dict) or payload.get("to") != "ready":
+        if not isinstance(payload, dict):
+            return
+        if event.get("kind") == "claimed":
+            self._finish_pending_claim(event, payload)
+            return
+        if event.get("kind") != "moved" or payload.get("to") != "ready":
             return
         task = self.reader.show(str(event["ref"]))
         if task["state"] != "ready":
@@ -558,6 +563,27 @@ class TaskWriter:
             or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
         ):
             raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
+
+    def _finish_pending_claim(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Complete a claim whose metadata committed before the column move failed."""
+        ref = str(event["ref"])
+        worker = str(payload.get("worker") or "")
+        if not worker:
+            raise TaskError("backend_error", "pending claim is missing its worker id", 1)
+        task = self.reader.show(ref)
+        if task["claim"]["worker"] != worker:
+            raise TaskError("backend_error", "pending claim no longer matches task claim", 1)
+        if not _matches_optional(payload.get("resolved_head"), task["routing"]["resolved_worker_head"]):
+            raise TaskError("backend_error", "pending claim worker head remains incomplete", 1)
+        if not _matches_optional(payload.get("resolved_review_head"), task["routing"]["resolved_review_head"]):
+            raise TaskError("backend_error", "pending claim review head remains incomplete", 1)
+        if task["state"] == "ready":
+            self._move_raw(task, "in_progress")
+        elif task["state"] != "in_progress":
+            raise TaskError("backend_error", "pending claim no longer matches task state", 1)
+        normalized = self.reader.show(ref)
+        if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
+            raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:
@@ -619,6 +645,11 @@ def _enum_or_default(value: Any, allowed: set[str], default: str) -> str:
 
 def _is_steward_report(task: dict[str, Any]) -> bool:
     return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"
+
+
+def _matches_optional(expected: Any, actual: Any) -> bool:
+    expected_text = _text(expected)
+    return not expected_text or actual == expected_text
 
 
 def _rfc3339(value: Any) -> str | None:

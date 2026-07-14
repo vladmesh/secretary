@@ -129,6 +129,7 @@ class KanboardClientTests(unittest.TestCase):
 class WriteKanboard(FakeKanboard):
     fail_comments = False
     fail_metadata = False
+    fail_move = False
 
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
@@ -144,6 +145,8 @@ class WriteKanboard(FakeKanboard):
             return 1
         if method == "moveTaskPosition":
             self.calls.append((method, params))
+            if self.fail_move:
+                raise TaskError("backend_error", "Kanboard rejected the move", 1)
             self.tasks[0]["column_id"] = params["column_id"]
             self.tasks[0]["date_modification"] = "1720000100"
             return True
@@ -283,6 +286,61 @@ class TaskWriterTests(unittest.TestCase):
             event = json.loads(events.readline())
         self.assertEqual(event["kind"], "claimed")
         self.assertEqual(event["payload"]["worker"], "secretary-468-runtime")
+
+    def test_pending_claim_replay_finishes_move_before_success_audit(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        self.client.fail_move = True
+
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.claim(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+                resolved_head="codex",
+                request_id="claim-replay",
+            )
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        task = self.writer.reader.show("secretary-468")
+        self.assertEqual(task["state"], "ready")
+        self.assertEqual(task["claim"]["worker"], "secretary-468-runtime")
+
+        self.client.fail_move = False
+        replayed = self.writer.claim(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="secretary-468-runtime",
+            resolved_head="codex",
+            request_id="claim-replay",
+        )
+
+        self.assertEqual(replayed["task"]["state"], "in_progress")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            self.assertEqual(len(events.readlines()), 1)
+
+    def test_reconcile_finishes_pending_claim_move(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        self.client.fail_move = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.claim(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+                resolved_head="codex",
+                request_id="claim-reconcile",
+            )
+
+        self.client.fail_move = False
+
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        task = self.writer.reader.show("secretary-468")
+        self.assertEqual(task["state"], "in_progress")
+        self.assertEqual(task["claim"]["worker"], "secretary-468-runtime")
 
     def test_claim_rejects_project_code_capacity_without_write(self) -> None:
         self.client.metadata[12]["claim"] = ""
