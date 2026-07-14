@@ -114,10 +114,13 @@ python3 -m secretary dispatcher tick --instance ~/secretary-instance \
 ```
 
 The pilot dispatcher fails closed without an exact `--pilot-ref` and matching
-cutover state. It writes only through `secretary task`, including dispatcher
-claim, worker report handling, Validate moves, reviewer verdict handling and
-terminal transitions. Rollback stops the new host handles and leaves the board
-card, claim, comments, PR and review state intact for the old dispatcher.
+cutover state. `preflight` and `start-new-pilot` also require the live legacy
+pause state to be `freeze`; `drain` is blocked because the legacy watchdog and
+advance path remain active. It writes only through `secretary task`, including
+dispatcher claim, worker report handling, Validate moves, reviewer verdict
+handling and terminal transitions. Rollback stops the new host handles and
+leaves the board card, claim, comments, PR and review state intact for the old
+dispatcher.
 
 See `docs/dispatcher-cutover.md` for the full operator flow and the remaining
 post-merge live pilot condition before production ownership moves from the

@@ -16,6 +16,13 @@ import yaml
 
 from secretary._fsutil import file_lock, write_json, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
+from secretary.dispatcher_launcher import (
+    HeadLaunchError,
+    render_claude_command as _render_claude_command,
+    render_codex_command as _render_codex_command,
+    wrap_role_shell_command as _wrap_role_shell_command,
+)
+from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -196,12 +203,17 @@ class InstanceCatalog:
             return str(requested)
         return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
 
-    def head_command(self, head: str, prompt_file: str) -> str:
+    def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
         profile = self._heads.get("profiles", {}).get(head, {})
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
-        if adapter == "claude":
-            return f"claude \"$(cat {shlex.quote(prompt_file)})\""
-        return f"codex \"$(cat {shlex.quote(prompt_file)})\""
+        try:
+            if adapter == "claude":
+                command = _render_claude_command(profile, prompt_file)
+            else:
+                command = _render_codex_command(profile, prompt_file, workspace=workspace)
+        except HeadLaunchError as exc:
+            raise HostError(str(exc)) from None
+        return _wrap_role_shell_command(role, command)
 
     @staticmethod
     def _load_optional_yaml(path: Path) -> dict[str, Any]:
@@ -224,7 +236,14 @@ class CommandHostRuntime:
         workspace = self._create_workspace(project, worker_id, base)
         self._run_setup(project, workspace)
         self._write_prompt(Path(workspace) / "TASK.md", self._worker_prompt(task, base))
-        handle = self._launch(workspace, f"{task['ref']} worker", head, "TASK.md", "SECRETARY_DISPATCHER_WORKER_COMMAND")
+        handle = self._launch(
+            workspace,
+            f"{task['ref']} worker",
+            head,
+            "TASK.md",
+            role="worker",
+            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+        )
         return {"workspace": workspace, "handle": handle, "base_branch": base}
 
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> str:
@@ -237,7 +256,14 @@ class CommandHostRuntime:
             raise HostError("review workspace is missing")
         review_file = Path(record.workspace) / "REVIEW.md"
         self._write_prompt(review_file, self._review_prompt(task))
-        return self._launch(record.workspace, f"{task['ref']} review", record.review_head, "REVIEW.md", "SECRETARY_DISPATCHER_REVIEW_COMMAND")
+        return self._launch(
+            record.workspace,
+            f"{task['ref']} review",
+            record.review_head,
+            "REVIEW.md",
+            role="reviewer",
+            env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
+        )
 
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         if self.mode == "noop":
@@ -299,10 +325,24 @@ class CommandHostRuntime:
         if smoke:
             self._run_shell(str(smoke), Path(workspace), "smoke command")
 
-    def _launch(self, workspace: str, title: str, head: str, prompt_file: str, env_name: str) -> str:
+    def _launch(
+        self,
+        workspace: str,
+        title: str,
+        head: str,
+        prompt_file: str,
+        *,
+        role: str,
+        env_name: str,
+    ) -> str:
         if self.mode == "noop":
             return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
-        command = os.environ.get(env_name) or self.catalog.head_command(head, prompt_file)
+        command = os.environ.get(env_name) or self.catalog.head_command(
+            head,
+            prompt_file,
+            workspace=workspace,
+            role=role,
+        )
         result = self._run_json([
             "orca", "terminal", "create",
             "--worktree", f"path:{workspace}",
@@ -377,6 +417,7 @@ class DispatcherRuntime:
         host: CommandHostRuntime,
         *,
         owner: str = "secretary-dispatcher",
+        legacy_pause: FileLegacyPauseProbe | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -385,10 +426,12 @@ class DispatcherRuntime:
         self.catalog = catalog
         self.host = host
         self.owner = owner
+        self.legacy_pause = legacy_pause or FileLegacyPauseProbe()
 
     def preflight(self, selector: PilotSelector) -> dict[str, Any]:
         audit = self.audit.status()
         payload = self.state.load()
+        legacy_pause = self.legacy_pause.snapshot()
         status = "ok"
         reasons: list[str] = []
         if not audit["ok"]:
@@ -400,6 +443,9 @@ class DispatcherRuntime:
         if not payload.get("old_owner_paused"):
             status = "blocked"
             reasons.append("old dispatcher pause evidence is missing")
+        if not legacy_pause.sufficient:
+            status = "blocked"
+            reasons.append(legacy_pause.reason)
         return {
             "status": status,
             "step": "preflight",
@@ -407,10 +453,20 @@ class DispatcherRuntime:
             "audit": audit,
             "reasons": reasons,
             "phase": payload.get("phase", "new"),
+            "legacy_pause": legacy_pause.to_json(),
         }
 
     def pause_old(self, selector: PilotSelector, *, actor: str, evidence: str) -> dict[str, Any]:
         with file_lock(self.state.tick_lock):
+            legacy_pause = self.legacy_pause.snapshot()
+            if not legacy_pause.sufficient:
+                return {
+                    "status": "blocked",
+                    "step": "pause-old",
+                    "reason": legacy_pause.reason,
+                    "pilot_ref": selector.reference,
+                    "legacy_pause": legacy_pause.to_json(),
+                }
             payload = self.state.load()
             if payload.get("phase") == "new_pilot" and payload.get("pilot_ref") != selector.reference:
                 raise DispatcherError("pilot_conflict", "another pilot is already active", 3)
@@ -420,6 +476,7 @@ class DispatcherRuntime:
                 "pilot_ref": selector.reference,
                 "old_owner_paused": True,
                 "old_owner_evidence": evidence,
+                "old_owner_pause_snapshot": legacy_pause.to_json(),
                 "old_owner_paused_at": now_rfc3339(),
                 "old_owner_paused_by": actor,
             })
@@ -433,7 +490,16 @@ class DispatcherRuntime:
             if payload.get("pilot_ref") not in (None, selector.reference):
                 raise DispatcherError("pilot_conflict", "dispatcher state is bound to another pilot ref", 3)
             if not payload.get("old_owner_paused"):
-                return {"status": "blocked", "step": "start-new-pilot", "reason": "old dispatcher is not paused", "pilot_ref": selector.reference}
+                return {"status": "blocked", "step": "start-new-pilot", "reason": "old dispatcher pause evidence is missing", "pilot_ref": selector.reference}
+            legacy_pause = self.legacy_pause.snapshot()
+            if not legacy_pause.sufficient:
+                return {
+                    "status": "blocked",
+                    "step": "start-new-pilot",
+                    "reason": legacy_pause.reason,
+                    "pilot_ref": selector.reference,
+                    "legacy_pause": legacy_pause.to_json(),
+                }
             payload.update({
                 "version": 1,
                 "phase": "new_pilot",
@@ -441,6 +507,7 @@ class DispatcherRuntime:
                 "new_owner": self.owner,
                 "new_owner_started_at": now_rfc3339(),
                 "new_owner_started_by": actor,
+                "new_owner_legacy_pause_snapshot": legacy_pause.to_json(),
             })
             payload.setdefault("records", {})
             self.state.save(payload)
@@ -490,6 +557,9 @@ class DispatcherRuntime:
             guard = self._pilot_guard(payload, selector)
             if guard is not None:
                 return guard
+            legacy_guard = self._legacy_pause_guard("commit-cutover")
+            if legacy_guard is not None:
+                return legacy_guard
             payload["phase"] = "cutover_committed"
             payload["cutover_committed_at"] = now_rfc3339()
             payload["cutover_committed_by"] = actor
@@ -524,12 +594,26 @@ class DispatcherRuntime:
             return {"status": "blocked", "step": "tick", "reason": "new pilot is not started"}
         if not payload.get("old_owner_paused"):
             return {"status": "blocked", "step": "tick", "reason": "old dispatcher is not paused"}
+        legacy_guard = self._legacy_pause_guard("tick")
+        if legacy_guard is not None:
+            return legacy_guard
         return self._pilot_guard(payload, selector)
 
     def _pilot_guard(self, payload: dict[str, Any], selector: PilotSelector) -> dict[str, Any] | None:
         if payload.get("pilot_ref") != selector.reference:
             return {"status": "blocked", "step": "guard", "reason": "pilot selector does not match active state"}
         return None
+
+    def _legacy_pause_guard(self, step: str) -> dict[str, Any] | None:
+        legacy_pause = self.legacy_pause.snapshot()
+        if legacy_pause.sufficient:
+            return None
+        return {
+            "status": "blocked",
+            "step": step,
+            "reason": legacy_pause.reason,
+            "legacy_pause": legacy_pause.to_json(),
+        }
 
     def _tick_task(self, task: dict[str, Any], records: dict[str, DispatcherRecord]) -> dict[str, Any]:
         ref = task["ref"]

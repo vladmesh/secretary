@@ -12,8 +12,13 @@ writes. The live runtime does not import Python modules from `triggered-agents`.
 
 - `--pilot-ref` is required for every dispatcher command. There is no broad Ready
   scan mode in the pilot runtime.
-- `tick` refuses to mutate the board unless `pause-old` and `start-new-pilot`
-  have recorded matching state for the same pilot ref.
+- `preflight`, `pause-old`, `start-new-pilot`, `tick` and `commit-cutover` read
+  the live legacy pause file and require `freeze` (`mode: hard`). Operator
+  evidence alone is not enough, and `drain` is not enough because the old
+  dispatcher can still advance cards, run Validate and fire the watchdog.
+- A stale automation-owned `freeze` that the legacy dispatcher would auto-resume
+  is not enough. Use a human actor for the cutover window or disable the legacy
+  hard-pause auto-resume TTL for that maintenance window.
 - Cutover state is stored under `<data_dir>/dispatcher/pilot-state.json`.
 - The new tick is serialized by `<data_dir>/dispatcher/pilot-tick.lock`.
 - Rollback stops new dispatcher terminals through the host adapter and leaves
@@ -39,12 +44,35 @@ python3 -m secretary dispatcher preflight \
   --pilot-ref "$PILOT_REF"
 ```
 
-Pause the old dispatcher using the current production procedure. The secretary
-command records operator evidence, it does not claim the card:
+Freeze the old dispatcher using the current production procedure. This must be
+`freeze`, not `drain`: `freeze` stops claims, advance, Validate, retry and the
+watchdog. Run it from the legacy checkout or the provisioned pipeline worktree:
+
+```bash
+PYTHONPATH=/home/dev/triggered-agents BOARD_ROLE=steward \
+  python3 -m triggered_agents pipeline pause freeze \
+    --actor "$USER" \
+    --reason "secretary dispatcher pilot cutover"
+```
+
+Verify the live pause state before recording it in secretary:
+
+```bash
+PYTHONPATH=/home/dev/triggered-agents \
+  python3 -m triggered_agents pipeline pause-status
+```
+
+The status must show `paused: true`, `mode: freeze` and the live state path
+under the production pipeline worktree. If it shows `drain`, resume and freeze
+again. If it shows a stale automation-owned freeze that is auto-resume eligible,
+resume and freeze with a human actor or disable the TTL for the cutover window.
+
+The secretary command records operator evidence only after the live freeze check
+passes. It does not claim the card:
 
 ```bash
 cat > /tmp/old-dispatcher-paused.txt <<'EOF'
-legacy dispatcher hard-paused; active timer disabled or verified idle
+legacy dispatcher freeze verified with pause-status
 EOF
 
 python3 -m secretary dispatcher pause-old \
@@ -62,6 +90,10 @@ python3 -m secretary dispatcher start-new-pilot \
   --pilot-ref "$PILOT_REF" \
   --actor "$USER"
 ```
+
+If this returns `status: blocked`, do not run `tick`. Fix the legacy pause state,
+run `pause-old` again, then retry `start-new-pilot`. A blocked start does not
+claim or move the pilot card.
 
 Run ticks and observe after each step:
 
@@ -96,7 +128,7 @@ python3 -m secretary dispatcher commit-cutover \
 
 Rollback is an operator action. It does not reset the board card and does not
 delete comments or claim metadata, so the old dispatcher can continue from the
-same card state.
+same card state after the operator resumes it.
 
 ```bash
 cat > /tmp/dispatcher-rollback.txt <<'EOF'
@@ -111,7 +143,14 @@ python3 -m secretary dispatcher rollback \
 ```
 
 After rollback, resume the old dispatcher through the current production
-procedure and inspect the pilot card with:
+procedure and inspect the pilot card:
+
+```bash
+PYTHONPATH=/home/dev/triggered-agents BOARD_ROLE=steward \
+  python3 -m triggered_agents pipeline resume
+```
+
+Then inspect the pilot card with:
 
 ```bash
 python3 -m secretary task show --ref "$PILOT_REF"
