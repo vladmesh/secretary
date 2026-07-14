@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
 import time
@@ -25,6 +24,14 @@ from secretary.dispatcher_launcher import (
     render_codex_launch as _render_codex_launch,
     wrap_role_shell_command as _wrap_role_shell_command,
 )
+from secretary.dispatcher_helpers import (
+    _last_marker,
+    _legacy_worker_branch,
+    _review_adoption_baseline,
+    _tail,
+    _worker_id,
+    scrub_host_output,
+)
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -38,6 +45,8 @@ from secretary.dispatcher_state import (
     record_attempt as _record_attempt,
     record_divergence as _record_divergence,
 )
+from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
+from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -51,17 +60,6 @@ class DispatcherError(Exception):
 
 class HostError(Exception):
     pass
-
-
-_ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
-_BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
-_HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
-TUI_IDLE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000")))
-TUI_DELIVERY_RETRIES = int(os.environ.get("SECRETARY_TUI_DELIVERY_RETRIES", os.environ.get("TA_TUI_DELIVERY_RETRIES", "2")))
-TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_DELIVERY_TIMEOUT_S", "12")))
-TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
-TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
-_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -379,10 +377,10 @@ class CommandHostRuntime:
             raise HostError("orca did not return a terminal handle")
         if launch and launch.prompt_after_start:
             try:
-                self._deliver_tui_prompt(handle, workspace, prompt_file)
-            except HostError:
-                self._close_terminal(handle)
-                raise
+                _deliver_tui_prompt(handle, workspace, prompt_file, run_json=self._run_json)
+            except TuiDeliveryError as exc:
+                _close_tui_terminal(handle, run_json=self._run_json)
+                raise HostError(str(exc)) from None
         return handle
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
@@ -392,76 +390,6 @@ class CommandHostRuntime:
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
-
-    def _deliver_tui_prompt(self, handle: str, workspace: str, prompt_file: str) -> None:
-        try:
-            prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise HostError(f"TUI prompt file is unreadable: {exc}") from None
-        self._run_json([
-            "orca", "terminal", "wait",
-            "--terminal", handle,
-            "--for", "tui-idle",
-            "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS),
-            "--json",
-        ])
-        self._run_json([
-            "orca", "terminal", "send",
-            "--terminal", handle,
-            "--text", prompt,
-            "--enter",
-            "--json",
-        ])
-        self._confirm_tui_prompt_delivered(handle, prompt)
-
-    def _confirm_tui_prompt_delivered(self, handle: str, prompt: str) -> None:
-        deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
-        next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
-        resends = 0
-        last_reason = "no-start-signal"
-        while time.monotonic() < deadline:
-            screen = self._read_terminal_text(handle)
-            if _screen_started_turn(screen):
-                return
-            if _prompt_still_in_codex_composer(screen, prompt):
-                last_reason = "prompt-in-composer"
-                if resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
-                    self._run_json([
-                        "orca", "terminal", "send",
-                        "--terminal", handle,
-                        "--text", "",
-                        "--enter",
-                        "--json",
-                    ])
-                    resends += 1
-                    next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
-            else:
-                last_reason = "awaiting-start-signal"
-            time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
-        raise HostError(
-            f"TUI prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
-            f"(reason={last_reason}, resends={resends})"
-        )
-
-    def _read_terminal_text(self, handle: str) -> str:
-        data = self._run_json(["orca", "terminal", "read", "--terminal", handle, "--json"])
-        terminal = data.get("terminal") if isinstance(data.get("terminal"), dict) else data
-        if not isinstance(terminal, dict):
-            return ""
-        tail = terminal.get("tail")
-        if isinstance(tail, list):
-            return "\n".join(str(line) for line in tail)
-        for key in ("text", "content", "screen"):
-            value = terminal.get(key)
-            if isinstance(value, str):
-                return value
-        return ""
-
-    def _close_terminal(self, handle: str) -> None:
-        try:
-            self._run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
-        except HostError:
-            pass
 
     def _worker_prompt(self, task: dict[str, Any], base: str, attempt_id: str) -> str:
         branch = _legacy_worker_branch(task["ref"])
@@ -1048,65 +976,3 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
         CommandHostRuntime(catalog, data, mode=host_mode),
         owner=owner,
     )
-
-
-def _worker_id(task: dict[str, Any]) -> str:
-    slug = task.get("workspace", {}).get("slug") or _slug(task.get("title") or task["ref"])
-    return f"{task['ref']}-{slug}"[:80].strip("-")
-
-
-def _legacy_worker_branch(reference: str) -> str:
-    return f"pipeline/{reference}"
-
-
-def _slug(value: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return cleaned[:30] or "task"
-
-
-def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str | None:
-    result = None
-    for comment in (task.get("comments") or [])[baseline:]:
-        marker = comment.get("marker")
-        if marker in markers:
-            result = marker
-    return result
-
-
-def _review_adoption_baseline(task: dict[str, Any]) -> int:
-    baseline = len(task.get("comments") or [])
-    for index, comment in enumerate(task.get("comments") or []):
-        if comment.get("marker") == "report:done":
-            baseline = index + 1
-    return baseline
-
-
-def scrub_host_output(text: str) -> str:
-    text = _ASSIGN_RE.sub(r"\1=<redacted>", text)
-    return _BLOB_RE.sub(lambda match: match.group(0) if _HEX_RE.match(match.group(0)) else "<redacted>", text)
-
-
-def _prompt_signature(prompt: str) -> str:
-    for token in ("TASK.md", "REVIEW.md"):
-        if token in prompt:
-            return token
-    words = re.findall(r"\S+", prompt)
-    return " ".join(words[:6])
-
-
-def _prompt_still_in_codex_composer(screen: str, prompt: str) -> bool:
-    marker = screen.rfind("\u203a")
-    if marker < 0:
-        return False
-    signature = _prompt_signature(prompt)
-    return bool(signature and signature in screen[marker:])
-
-
-def _screen_started_turn(screen: str) -> bool:
-    marker = screen.rfind("\u203a")
-    status_area = screen[:marker] if marker >= 0 else screen
-    return bool(_WORKING_RE.search(status_area))
-
-
-def _tail(text: str, lines: int = 40) -> str:
-    return "\n".join(text.strip().splitlines()[-lines:])

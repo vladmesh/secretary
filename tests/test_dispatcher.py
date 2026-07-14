@@ -811,7 +811,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["Working"]}}])
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
 
             handle = host._launch(
                 str(workspace),
@@ -845,8 +845,8 @@ class DispatcherLauncherTests(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("secretary.dispatcher.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher.TUI_DELIVERY_POLL_S", 0.01):
+            with mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
                 host._launch(
                     str(workspace),
                     "title",
@@ -868,10 +868,10 @@ class DispatcherLauncherTests(unittest.TestCase):
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
 
-            with mock.patch("secretary.dispatcher.TUI_DELIVERY_TIMEOUT_S", 0.03), \
-                 mock.patch("secretary.dispatcher.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("secretary.dispatcher.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher.TUI_DELIVERY_RETRIES", 1), \
+            with mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.03), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 1), \
                  self.assertRaises(HostError):
                 host._launch(
                     str(workspace),
@@ -884,6 +884,41 @@ class DispatcherLauncherTests(unittest.TestCase):
                 )
 
         self.assertIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
+
+    def test_tui_delivery_accepts_codex_session_user_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
+            sessions = Path(tmp) / "sessions" / "2099" / "01" / "02"
+            sessions.mkdir(parents=True)
+            (sessions / "session.jsonl").write_text(
+                "\n".join([
+                    json.dumps({"type": "session_meta", "payload": {"cwd": str(workspace.resolve())}}),
+                    json.dumps({
+                        "type": "event_msg",
+                        "timestamp": "2099-01-02T03:04:05Z",
+                        "payload": {"type": "user_message"},
+                    }),
+                ]),
+                encoding="utf-8",
+            )
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["idle"]}}])
+
+            with mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+                handle = host._launch(
+                    str(workspace),
+                    "title",
+                    "codex",
+                    "TASK.md",
+                    role="worker",
+                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                    codex_mode="tui",
+                )
+
+        self.assertEqual(handle, "term-tui")
+        self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
 
 class GitBranchHost(CommandHostRuntime):
