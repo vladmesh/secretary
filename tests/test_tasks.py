@@ -29,6 +29,7 @@ class FakeKanboard:
                 "project": "secretary", "task_type": "code", "claim": "codex-terra",
                 "head": "codex-terra", "retry_same": "2", "retry_switch": "bad",
                 "retry_heads": "codex-terra,claude-opus", "steward_report": "1",
+                "codex_launch_mode": "tui",
             },
             13: {},
         }
@@ -66,6 +67,7 @@ class TaskReaderTests(unittest.TestCase):
         self.assertEqual(task["claim"], {"worker": "codex-terra", "claimed_at": None})
         self.assertEqual(task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]})
         self.assertEqual(task["routing"]["complexity"], "standard")
+        self.assertEqual(task["routing"]["codex_launch_mode"], "tui")
         self.assertEqual(task["extensions"]["kanboard"], {"steward_report": "1", "swimlane": "Secretary"})
         self.assertNotIn("comments", task)
 
@@ -112,6 +114,40 @@ class TaskCliTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
 
+    def test_create_rejects_codex_mode_for_non_codex_head_before_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "heads").mkdir()
+            (root / "instance.yaml").write_text("version: 1\nname: test\ndata_dir: /tmp/data\n", encoding="utf-8")
+            (root / "heads" / "heads.yaml").write_text(
+                "\n".join([
+                    "profiles:",
+                    "  claude-opus:",
+                    "    adapter: claude",
+                    "role_defaults:",
+                    "  new_card: claude-opus",
+                ]),
+                encoding="utf-8",
+            )
+            output, errors = io.StringIO(), io.StringIO()
+            with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = main([
+                    "task", "create",
+                    "--role", "po",
+                    "--instance", str(root),
+                    "--project", "secretary",
+                    "--type", "code",
+                    "--title", "T",
+                    "--head", "claude-opus",
+                    "--codex-mode", "tui",
+                ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(output.getvalue(), "")
+        error = json.loads(errors.getvalue())["error"]
+        self.assertEqual(error["code"], "validation")
+        self.assertIn("requires a Codex worker head", error["message"])
+
 
 class KanboardClientTests(unittest.TestCase):
     def test_rpc_error_is_sanitized(self) -> None:
@@ -130,6 +166,7 @@ class WriteKanboard(FakeKanboard):
     fail_comments = False
     fail_metadata = False
     fail_move = False
+    fail_update = False
 
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
@@ -143,6 +180,31 @@ class WriteKanboard(FakeKanboard):
             if self.fail_comments:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
             return 1
+        if method == "createTask":
+            self.calls.append((method, params))
+            task_id = max(int(task["id"]) for task in self.tasks) + 1
+            self.tasks.append({
+                "id": task_id,
+                "reference": "",
+                "title": params["title"],
+                "description": params.get("description", ""),
+                "column_id": params["column_id"],
+                "position": len(self.tasks) + 1,
+                "swimlane_id": params.get("swimlane_id") or 0,
+                "date_creation": "1720000200",
+                "date_modification": "1720000200",
+            })
+            self.metadata[task_id] = {}
+            return task_id
+        if method == "updateTask":
+            self.calls.append((method, params))
+            if self.fail_update:
+                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            task = next(task for task in self.tasks if int(task["id"]) == int(params["id"]))
+            if "reference" in params:
+                task["reference"] = params["reference"]
+            task["date_modification"] = "1720000201"
+            return True
         if method == "moveTaskPosition":
             self.calls.append((method, params))
             if self.fail_move:
@@ -286,6 +348,113 @@ class TaskWriterTests(unittest.TestCase):
             event = json.loads(events.readline())
         self.assertEqual(event["kind"], "claimed")
         self.assertEqual(event["payload"]["worker"], "secretary-468-runtime")
+
+    def test_create_stores_codex_launch_mode_and_audits(self) -> None:
+        result = self.writer.create(
+            role="po",
+            actor="operator",
+            project="secretary",
+            task_type="code",
+            title="Launch mode",
+            description="body",
+            target="ready",
+            reference="secretary-522",
+            head="codex-extra",
+            codex_launch_mode="tui",
+            request_id="create-tui",
+        )
+
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["task"]["ref"], "secretary-522")
+        self.assertEqual(result["task"]["state"], "ready")
+        self.assertEqual(result["task"]["routing"]["head_override"], "codex-extra")
+        self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
+        task_id = int(result["task"]["id"].removeprefix("task_kanboard_"))
+        self.assertEqual(self.client.metadata[task_id]["codex_launch_mode"], "tui")
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            event = json.loads(events.readline())
+        self.assertEqual(event["kind"], "created")
+        self.assertEqual(event["payload"]["codex_launch_mode"], "tui")
+        self.assertEqual(event["payload"]["head"], "codex-extra")
+        self.assertIn("title_sha256", event["payload"])
+
+    def test_pending_create_replay_restores_metadata_before_audit(self) -> None:
+        self.client.fail_metadata = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.create(
+                role="po",
+                actor="operator",
+                project="secretary",
+                task_type="code",
+                title="Launch mode",
+                target="ready",
+                reference="secretary-523",
+                codex_launch_mode="tui",
+                request_id="create-replay",
+            )
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        create_writes = len([call for call in self.client.calls if call[0] == "createTask"])
+
+        self.client.fail_metadata = False
+        result = self.writer.create(
+            role="po",
+            actor="operator",
+            project="secretary",
+            task_type="code",
+            title="Launch mode",
+            target="ready",
+            reference="secretary-523",
+            codex_launch_mode="tui",
+            request_id="create-replay",
+        )
+
+        self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
+        self.assertEqual(create_writes, len([call for call in self.client.calls if call[0] == "createTask"]))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_ready_reset_preserves_codex_launch_mode(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.metadata[12]["codex_launch_mode"] = "tui"
+
+        result = self.writer.move(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="ready",
+            reason="retry",
+            request_id="ready-preserves-mode",
+        )
+
+        self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
+        self.assertEqual(self.client.metadata[12]["codex_launch_mode"], "tui")
+
+    def test_create_rejects_invalid_codex_launch_mode_without_write(self) -> None:
+        with self.assertRaisesRegex(TaskError, "codex launch mode") as raised:
+            self.writer.create(
+                role="po",
+                actor="operator",
+                project="secretary",
+                task_type="code",
+                title="Launch mode",
+                codex_launch_mode="shell",
+            )
+
+        self.assertEqual(raised.exception.exit_code, 2)
+        self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
+
+    def test_worker_create_ready_is_forbidden_without_backend_write(self) -> None:
+        with self.assertRaisesRegex(TaskError, "only ideas") as raised:
+            self.writer.create(
+                role="worker",
+                actor="w",
+                project="secretary",
+                task_type="code",
+                title="Continuation",
+                target="ready",
+            )
+
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
 
     def test_pending_claim_replay_finishes_move_before_success_audit(self) -> None:
         self.client.metadata[12]["claim"] = ""

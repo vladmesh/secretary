@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
 import time
@@ -17,11 +16,21 @@ import yaml
 from secretary._fsutil import file_lock, write_json, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
+    HeadLaunch,
     HeadLaunchError,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
+    render_codex_launch as _render_codex_launch,
     wrap_role_shell_command as _wrap_role_shell_command,
+)
+from secretary.dispatcher_helpers import (
+    _last_marker,
+    _legacy_worker_branch,
+    _review_adoption_baseline,
+    _tail,
+    _worker_id,
+    scrub_host_output,
 )
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
 from secretary.dispatcher_state import (
@@ -36,6 +45,8 @@ from secretary.dispatcher_state import (
     record_attempt as _record_attempt,
     record_divergence as _record_divergence,
 )
+from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
+from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -49,11 +60,6 @@ class DispatcherError(Exception):
 
 class HostError(Exception):
     pass
-
-
-_ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
-_BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
-_HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 @dataclass(frozen=True)
@@ -173,17 +179,31 @@ class InstanceCatalog:
         return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
+        return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
+
+    def head_launch(
+        self,
+        head: str,
+        prompt_file: str,
+        *,
+        workspace: str,
+        role: str,
+        codex_mode: str | None = None,
+    ) -> HeadLaunch:
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
             self.prepare_head_workspace(head, workspace)
             if adapter == "claude":
-                command = _render_claude_command(profile, prompt_file)
+                launch = HeadLaunch(_render_claude_command(profile, prompt_file))
             else:
-                command = _render_codex_command(profile, prompt_file, workspace=workspace)
+                launch = _render_codex_launch(profile, prompt_file, workspace=workspace, mode=codex_mode)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
-        return _wrap_role_shell_command(role, command)
+        return HeadLaunch(
+            _wrap_role_shell_command(role, launch.command),
+            prompt_after_start=launch.prompt_after_start,
+        )
 
     def prepare_head_workspace(self, head: str, workspace: str) -> None:
         profile = self._head_profile(head)
@@ -235,6 +255,7 @@ class CommandHostRuntime:
             "TASK.md",
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            codex_mode=task.get("routing", {}).get("codex_launch_mode"),
         )
         return {"workspace": workspace, "handle": handle, "base_branch": base}
 
@@ -326,19 +347,23 @@ class CommandHostRuntime:
         *,
         role: str,
         env_name: str,
+        codex_mode: str | None = None,
     ) -> str:
         if self.mode == "noop":
             return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
         command = os.environ.get(env_name)
+        launch = HeadLaunch(command) if command else None
         if command:
             self.catalog.prepare_head_workspace(head, workspace)
         else:
-            command = self.catalog.head_command(
+            launch = self.catalog.head_launch(
                 head,
                 prompt_file,
                 workspace=workspace,
                 role=role,
+                codex_mode=codex_mode,
             )
+            command = launch.command
         result = self._run_json([
             "orca", "terminal", "create",
             "--worktree", f"path:{workspace}",
@@ -350,6 +375,15 @@ class CommandHostRuntime:
         handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
         if not isinstance(handle, str) or not handle:
             raise HostError("orca did not return a terminal handle")
+        if launch and launch.prompt_after_start:
+            try:
+                _deliver_tui_prompt(handle, workspace, prompt_file, run_json=self._run_json)
+            except TuiDeliveryError as exc:
+                _close_tui_terminal(handle, run_json=self._run_json)
+                raise HostError(str(exc)) from None
+            except HostError:
+                _close_tui_terminal(handle, run_json=self._run_json)
+                raise
         return handle
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
@@ -945,43 +979,3 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
         CommandHostRuntime(catalog, data, mode=host_mode),
         owner=owner,
     )
-
-
-def _worker_id(task: dict[str, Any]) -> str:
-    slug = task.get("workspace", {}).get("slug") or _slug(task.get("title") or task["ref"])
-    return f"{task['ref']}-{slug}"[:80].strip("-")
-
-
-def _legacy_worker_branch(reference: str) -> str:
-    return f"pipeline/{reference}"
-
-
-def _slug(value: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return cleaned[:30] or "task"
-
-
-def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str | None:
-    result = None
-    for comment in (task.get("comments") or [])[baseline:]:
-        marker = comment.get("marker")
-        if marker in markers:
-            result = marker
-    return result
-
-
-def _review_adoption_baseline(task: dict[str, Any]) -> int:
-    baseline = len(task.get("comments") or [])
-    for index, comment in enumerate(task.get("comments") or []):
-        if comment.get("marker") == "report:done":
-            baseline = index + 1
-    return baseline
-
-
-def scrub_host_output(text: str) -> str:
-    text = _ASSIGN_RE.sub(r"\1=<redacted>", text)
-    return _BLOB_RE.sub(lambda match: match.group(0) if _HEX_RE.match(match.group(0)) else "<redacted>", text)
-
-
-def _tail(text: str, lines: int = 40) -> str:
-    return "\n".join(text.strip().splitlines()[-lines:])

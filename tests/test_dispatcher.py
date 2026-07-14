@@ -600,6 +600,52 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn('"$(cat TASK.md)"', command)
         self.assertNotIn('codex "$(cat TASK.md)"', command)
 
+    def test_codex_tui_command_omits_exec_and_prompt_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+
+            command = _render_codex_command(
+                {"adapter": "codex", "model": "gpt-5.5", "effort": "extra", "codex_home": "/tmp/codex-home"},
+                "TASK.md",
+                workspace=str(workspace),
+                mode="tui",
+            )
+
+        self.assertIn("CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("codex exec", command)
+        self.assertNotIn("--skip-git-repo-check", command)
+        self.assertNotIn('"$(cat TASK.md)"', command)
+        self.assertIn("trust_level=\"trusted\"", command)
+
+    def test_card_launch_mode_overrides_codex_profile_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = {  # type: ignore[attr-defined]
+                "profiles": {
+                    "codex-tui": {
+                        "adapter": "codex",
+                        "model": "gpt-5.5",
+                        "codex_mode": "tui",
+                        "codex_home": "/tmp/codex-home",
+                    }
+                }
+            }
+
+            launch = catalog.head_launch(  # type: ignore[attr-defined]
+                "codex-tui",
+                "TASK.md",
+                workspace=str(workspace),
+                role="worker",
+                codex_mode="exec",
+            )
+
+        self.assertFalse(launch.prompt_after_start)
+        self.assertIn("codex exec", launch.command)
+        self.assertIn('"$(cat TASK.md)"', launch.command)
+
     def test_claude_command_prepares_workspace_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".claude.json"
@@ -760,7 +806,6 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 
-
 class GitBranchHost(CommandHostRuntime):
     def __init__(self, root: Path) -> None:
         super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
@@ -790,6 +835,7 @@ class GitBranchHost(CommandHostRuntime):
         *,
         role: str,
         env_name: str,
+        codex_mode: str | None = None,
     ) -> str:
         self.launched.append((head, prompt_file))
         return f"test:{head}"

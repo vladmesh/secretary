@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Callable
 
+from secretary.config import ConfigError, load_config
+from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -25,6 +27,32 @@ def add_task_subcommands(subparsers) -> None:
     task_show = task_subcommands.add_parser("show")
     task_show.add_argument("--ref", required=True)
     task_show.set_defaults(handler=run_task_show)
+    task_create = task_subcommands.add_parser("create")
+    task_create.add_argument("--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro"))
+    task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    task_create.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
+    task_create.add_argument("--request-id")
+    task_create.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+    )
+    task_create.add_argument("--project", required=True)
+    task_create.add_argument("--type", required=True, choices=("code", "research"))
+    task_create.add_argument("--title", required=True)
+    task_create.add_argument("--description", default="")
+    task_create.add_argument("--body-file")
+    task_create.add_argument("--ref", default="")
+    task_create.add_argument("--state", choices=("ideas", "ready"), default="ideas")
+    task_create.add_argument("--blocked-by", default="")
+    task_create.add_argument("--head", default="")
+    task_create.add_argument("--review-head", default="")
+    task_create.add_argument("--slug", default="")
+    task_create.add_argument("--base-branch", default="")
+    task_create.add_argument("--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard")
+    task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
+    task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", choices=("exec", "tui"), default="")
+    task_create.set_defaults(handler=run_task_create)
     for name, handler in (
         ("comment", run_task_comment),
         ("report", run_task_report),
@@ -120,6 +148,37 @@ def run_task_comment(args: argparse.Namespace) -> int:
     return _run_task_write(args, lambda writer, body, actor: writer.comment(role=args.role, actor=actor, reference=args.ref, body=body, request_id=args.request_id))
 
 
+def run_task_create(args: argparse.Namespace) -> int:
+    try:
+        _validate_codex_mode_for_create(args)
+        description = _read_body(args.body_file) if args.body_file else args.description
+        writer = TaskWriter(KanboardClient(), data_dir=args.data_dir)
+        result = writer.create(
+            role=args.role,
+            actor=args.actor or args.role,
+            project=args.project,
+            task_type=args.type,
+            title=args.title,
+            description=description,
+            target=args.state,
+            reference=args.ref,
+            blocked_by=args.blocked_by,
+            head=args.head,
+            review_head=args.review_head,
+            slug=args.slug,
+            base_branch=args.base_branch,
+            complexity=args.complexity,
+            family_preference=args.family_preference,
+            codex_launch_mode=args.codex_mode,
+            request_id=args.request_id,
+        )
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 def run_task_report(args: argparse.Namespace) -> int:
     return _run_task_write(args, lambda writer, body, actor: writer.report(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
 
@@ -164,3 +223,30 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
     status = TaskAudit(args.data_dir).status()
     print(json.dumps(status, sort_keys=True, separators=(",", ":")))
     return 0 if status["ok"] else 1
+
+
+def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
+    if not args.codex_mode:
+        return
+    heads = _load_heads(Path(args.instance))
+    head = args.head or str(heads.get("role_defaults", {}).get("new_card") or "codex")
+    profiles = heads.get("profiles", {})
+    profile = profiles.get(head) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict):
+        raise TaskError("validation", f"--codex-mode requires a known Codex worker head; {head!r} is not defined", 2)
+    adapter = str(profile.get("adapter") or "")
+    if adapter != "codex":
+        detail = adapter or "unknown"
+        raise TaskError("validation", f"--codex-mode requires a Codex worker head; {head!r} uses {detail}", 2)
+
+
+def _load_heads(instance: Path) -> dict:
+    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
+    heads_file = instance_file.parent / "heads" / "heads.yaml"
+    try:
+        loaded = load_config(heads_file)
+    except ConfigError as exc:
+        raise TaskError("validation", f"cannot validate --codex-mode: {exc}", 2) from None
+    if not isinstance(loaded, dict):
+        raise TaskError("validation", "cannot validate --codex-mode: heads config has an unsupported shape", 2)
+    return loaded
