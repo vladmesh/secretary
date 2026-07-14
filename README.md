@@ -78,6 +78,21 @@ for conflicts, and 2 for invalid input or an unavailable inventory kind. It neve
 writes the managed manifest or applies host changes; `reconcile --apply` remains
 out of scope.
 
+An existing desired Orca registration remains a conflict until an operator verifies
+and adopts it one resource at a time:
+
+```bash
+python3 -m secretary reconcile adopt --instance ~/secretary-instance \
+  --logical-id orca:project:secretary
+# inspect the fingerprint, then repeat with --yes
+```
+
+Adopt compares both the registration name and its normalized live repo path with the
+explicit binding. Without `--yes` it is preview-only. With confirmation it atomically
+writes only `host-managed.json`; it does not change Orca, systemd or worktrees. The
+command rejects corrupt, duplicate, drifted or symlinked state rather than replacing it.
+Rollback is restoring the previous manifest from backup before any later apply step.
+
 `doctor` checks the live host by default and never writes. Use `--offline` for
 config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for
 findings (and warnings with `--strict`), and 2 when config or inventory cannot be
