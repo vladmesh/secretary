@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,7 @@ class DispatcherRecord:
     handle: str
     head: str
     review_head: str
+    attempt_id: str
     comment_baseline: int
     review_baseline: int
     state: str
@@ -77,6 +79,7 @@ class DispatcherRecord:
             "comment_baseline": self.comment_baseline,
             "handle": self.handle,
             "head": self.head,
+            "attempt_id": self.attempt_id,
             "review_baseline": self.review_baseline,
             "review_head": self.review_head,
             "state": self.state,
@@ -92,6 +95,7 @@ class DispatcherRecord:
             handle=str(payload.get("handle") or ""),
             head=str(payload.get("head") or ""),
             review_head=str(payload.get("review_head") or ""),
+            attempt_id=str(payload.get("attempt_id") or ""),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
             state=str(payload.get("state") or "claimed"),
@@ -246,13 +250,20 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         self.mode = mode
 
-    def prepare_worker(self, task: dict[str, Any], worker_id: str, head: str) -> dict[str, str]:
+    def prepare_worker(
+        self,
+        task: dict[str, Any],
+        worker_id: str,
+        head: str,
+        *,
+        attempt_id: str = "",
+    ) -> dict[str, str]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
         workspace = self._create_workspace(project, worker_id, base)
         self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
         self._run_setup(project, workspace)
-        self._write_prompt(Path(workspace) / "TASK.md", self._worker_prompt(task, base))
+        self._write_prompt(Path(workspace) / "TASK.md", self._worker_prompt(task, base, attempt_id))
         handle = self._launch(
             workspace,
             f"{task['ref']} worker",
@@ -272,7 +283,7 @@ class CommandHostRuntime:
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
         review_file = Path(record.workspace) / "REVIEW.md"
-        self._write_prompt(review_file, self._review_prompt(task))
+        self._write_prompt(review_file, self._review_prompt(task, record.attempt_id))
         return self._launch(
             record.workspace,
             f"{task['ref']} review",
@@ -385,30 +396,33 @@ class CommandHostRuntime:
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
 
-    def _worker_prompt(self, task: dict[str, Any], base: str) -> str:
+    def _worker_prompt(self, task: dict[str, Any], base: str, attempt_id: str) -> str:
         branch = _legacy_worker_branch(task["ref"])
+        request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"])
         return "\n".join([
             f"# Task {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
             "",
             "Report through the secretary task protocol only:",
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --body-file <file>',
+            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file <file>',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
             "",
         ])
 
-    def _review_prompt(self, task: dict[str, Any]) -> str:
+    def _review_prompt(self, task: dict[str, Any], attempt_id: str) -> str:
+        green_request = _attempt_request_id(attempt_id, "review-green", task["ref"])
+        red_request = _attempt_request_id(attempt_id, "review-red", task["ref"])
         return "\n".join([
             f"# Review {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
             "",
             "Post exactly one review verdict through the secretary task protocol:",
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --body-file <file>',
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --body-file <file>',
+            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file <file>',
+            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file <file>',
             "",
         ])
 
@@ -478,6 +492,7 @@ class DispatcherRuntime:
             "status": status,
             "step": "preflight",
             "pilot_ref": selector.reference,
+            "attempt_id": payload.get("attempt_id"),
             "audit": audit,
             "reasons": reasons,
             "phase": payload.get("phase", "new"),
@@ -528,10 +543,21 @@ class DispatcherRuntime:
                     "pilot_ref": selector.reference,
                     "legacy_pause": legacy_pause.to_json(),
                 }
+            active_attempt = (
+                str(payload.get("attempt_id") or "")
+                if payload.get("phase") == "new_pilot" and payload.get("pilot_ref") == selector.reference
+                else ""
+            )
+            attempt_id = active_attempt or _new_attempt_id()
+            if not active_attempt:
+                _record_attempt(payload, attempt_id, selector.reference, actor, self.owner)
+                if payload.get("phase") != "new_pilot":
+                    payload["records"] = {}
             payload.update({
                 "version": 1,
                 "phase": "new_pilot",
                 "pilot_ref": selector.reference,
+                "attempt_id": attempt_id,
                 "new_owner": self.owner,
                 "new_owner_started_at": now_rfc3339(),
                 "new_owner_started_by": actor,
@@ -539,7 +565,13 @@ class DispatcherRuntime:
             })
             payload.setdefault("records", {})
             self.state.save(payload)
-        return {"status": "ok", "step": "start-new-pilot", "pilot_ref": selector.reference, "phase": "new_pilot"}
+        return {
+            "status": "ok",
+            "step": "start-new-pilot",
+            "pilot_ref": selector.reference,
+            "attempt_id": attempt_id,
+            "phase": "new_pilot",
+        }
 
     def tick(self, selector: PilotSelector) -> dict[str, Any]:
         with file_lock(self.state.tick_lock):
@@ -547,11 +579,12 @@ class DispatcherRuntime:
             guard = self._mutation_guard(payload, selector)
             if guard is not None:
                 return guard
+            attempt_id = _ensure_attempt(payload, selector.reference, self.owner, self.owner)
             records = self.state.records(payload)
             task = self.reader.show(selector.reference)
             if not selector.accepts(task):
                 return {"status": "skipped", "step": "tick", "reason": "pilot selector rejected task"}
-            outcome = self._tick_task(task, records)
+            outcome = self._tick_task(task, records, payload, attempt_id)
             self.state.put_records(payload, records)
             payload["last_tick_at"] = now_rfc3339()
             self.state.save(payload)
@@ -568,6 +601,7 @@ class DispatcherRuntime:
             "status": "ok",
             "step": "observe",
             "pilot_ref": selector.reference,
+            "attempt_id": payload.get("attempt_id"),
             "phase": payload.get("phase", "new"),
             "new_owner": payload.get("new_owner"),
             "old_owner_paused": bool(payload.get("old_owner_paused")),
@@ -577,6 +611,7 @@ class DispatcherRuntime:
                 "comments": len(task.get("comments") or []),
             },
             "records": list((payload.get("records") or {}).keys()),
+            "divergences": list((payload.get("controlled_divergences") or [])),
         }
 
     def commit_cutover(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
@@ -614,6 +649,8 @@ class DispatcherRuntime:
                 "reason": reason,
                 "stopped_workers": stopped,
             }
+            _mark_attempt_rolled_back(payload, actor, reason)
+            payload["records"] = {}
             self.state.save(payload)
         return {"status": "ok", "step": "rollback", "pilot_ref": selector.reference, "phase": "rolled_back", "stopped_workers": stopped}
 
@@ -643,18 +680,37 @@ class DispatcherRuntime:
             "legacy_pause": legacy_pause.to_json(),
         }
 
-    def _tick_task(self, task: dict[str, Any], records: dict[str, DispatcherRecord]) -> dict[str, Any]:
+    def _tick_task(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any]:
         ref = task["ref"]
         if task["state"] == "ready":
-            return self._claim(task, records)
+            return self._claim(task, records, payload, attempt_id)
         if task["state"] == "in_progress":
-            return self._advance_worker(task, records)
+            return self._advance_worker(task, records, payload, attempt_id)
         if task["state"] == "validate":
-            return self._advance_review(task, records)
+            return self._advance_review(task, records, attempt_id)
         records.pop(ref, None)
-        return {"status": "ok", "step": "tick", "action": "terminal-state", "state": task["state"], "pilot_ref": ref}
+        return {
+            "status": "ok",
+            "step": "tick",
+            "action": "terminal-state",
+            "state": task["state"],
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+        }
 
-    def _claim(self, task: dict[str, Any], records: dict[str, DispatcherRecord]) -> dict[str, Any]:
+    def _claim(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any]:
         ref = task["ref"]
         head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
@@ -668,11 +724,90 @@ class DispatcherRuntime:
             resolved_review_head=review_head,
             slug=task.get("workspace", {}).get("slug") or "",
             base_branch=task.get("workspace", {}).get("base_branch") or "",
-            request_id=f"dispatcher-claim-{ref}",
+            request_id=_attempt_request_id(attempt_id, "claim", ref),
         )
         claimed = self.reader.show(ref)
+        mismatch = _claim_mismatch(claimed, worker_id, head, review_head)
+        if mismatch:
+            divergence = _record_divergence(
+                payload,
+                attempt_id,
+                ref,
+                "claim",
+                "claim_live_mismatch",
+                expected={
+                    "state": "in_progress",
+                    "worker": worker_id,
+                    "resolved_head": head,
+                    "resolved_review_head": review_head,
+                },
+                actual=_claim_actual(claimed),
+                details=mismatch,
+            )
+            return {
+                "status": "blocked",
+                "step": "claim",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "reason": "claim live board mismatch",
+                "divergence_id": divergence["id"],
+            }
+        record = DispatcherRecord(
+            worker=worker_id,
+            workspace="",
+            handle="",
+            head=head,
+            review_head=review_head,
+            attempt_id=attempt_id,
+            comment_baseline=len(claimed.get("comments") or []),
+            review_baseline=0,
+            state="claim_verified",
+            claimed_at=time.time(),
+        )
+        records[ref] = record
+        self._save_records(payload, records)
+        return self._launch_worker_after_claim(claimed, record, records, payload)
+
+    def _launch_worker_after_claim(
+        self,
+        claimed: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        ref = claimed["ref"]
+        mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
+        if mismatch:
+            divergence = _record_divergence(
+                payload,
+                record.attempt_id,
+                ref,
+                "claim",
+                "claim_live_mismatch",
+                expected={
+                    "state": "in_progress",
+                    "worker": record.worker,
+                    "resolved_head": record.head,
+                    "resolved_review_head": record.review_head,
+                },
+                actual=_claim_actual(claimed),
+                details=mismatch,
+            )
+            return {
+                "status": "blocked",
+                "step": "claim",
+                "pilot_ref": ref,
+                "attempt_id": record.attempt_id,
+                "reason": "claim live board mismatch",
+                "divergence_id": divergence["id"],
+            }
         try:
-            prepared = self.host.prepare_worker(claimed, worker_id, head)
+            prepared = self.host.prepare_worker(
+                claimed,
+                record.worker,
+                record.head,
+                attempt_id=record.attempt_id,
+            )
         except HostError as exc:
             self.writer.move(
                 role="dispatcher",
@@ -680,35 +815,56 @@ class DispatcherRuntime:
                 reference=ref,
                 target="blocked",
                 reason=f"dispatcher bring-up failed: {scrub_host_output(str(exc))}",
-                request_id=f"dispatcher-bringup-blocked-{ref}",
+                request_id=_attempt_request_id(record.attempt_id, "bringup-blocked", ref),
             )
+            records.pop(ref, None)
+            self._save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
-        records[ref] = DispatcherRecord(
-            worker=worker_id,
-            workspace=prepared["workspace"],
-            handle=prepared["handle"],
-            head=head,
-            review_head=review_head,
-            comment_baseline=len(claimed.get("comments") or []),
-            review_baseline=0,
-            state="claimed",
-            claimed_at=time.time(),
-        )
+        record.workspace = prepared["workspace"]
+        record.handle = prepared["handle"]
+        record.state = "claimed"
+        records[ref] = record
+        self._save_records(payload, records)
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
-            body=f"Pilot dispatcher claimed {ref}, worker {worker_id}, workspace {prepared['workspace']}.",
-            request_id=f"dispatcher-claimed-comment-{ref}",
+            body=(
+                f"Pilot dispatcher claimed {ref}, attempt {record.attempt_id}, "
+                f"worker {record.worker}, workspace {prepared['workspace']}."
+            ),
+            request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
         )
-        return {"status": "ok", "step": "claim", "pilot_ref": ref, "worker": worker_id, "workspace": prepared["workspace"]}
+        return {
+            "status": "ok",
+            "step": "claim",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "worker": record.worker,
+            "workspace": prepared["workspace"],
+        }
 
-    def _advance_worker(self, task: dict[str, Any], records: dict[str, DispatcherRecord]) -> dict[str, Any]:
+    def _advance_worker(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any]:
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
-            record = self._adopt(task)
+            record = self._adopt(task, attempt_id)
             records[ref] = record
+            current_claim = _attempt_request_id(attempt_id, "claim", ref)
+            if self.audit.committed_event(current_claim) is not None:
+                mismatch = _claim_mismatch(task, record.worker, record.head, record.review_head)
+                if not mismatch:
+                    record.state = "claim_verified"
+                    self._save_records(payload, records)
+                    return self._launch_worker_after_claim(task, record, records, payload)
+        if record.state == "claim_verified":
+            return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
         if marker == "report:done":
             record.review_baseline = len(task.get("comments") or [])
@@ -719,9 +875,9 @@ class DispatcherRuntime:
                 reference=ref,
                 target="validate",
                 reason="worker report:done",
-                request_id=f"dispatcher-worker-done-{ref}-{record.review_baseline}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-done", ref, str(record.review_baseline)),
             )
-            return {"status": "ok", "step": "advance", "pilot_ref": ref, "to": "validate"}
+            return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "validate"}
         if marker == "report:blocked":
             self.host.stop(record)
             self.writer.move(
@@ -730,17 +886,28 @@ class DispatcherRuntime:
                 reference=ref,
                 target="blocked",
                 reason="worker report:blocked",
-                request_id=f"dispatcher-worker-blocked-{ref}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-blocked", ref),
             )
             records.pop(ref, None)
-            return {"status": "ok", "step": "advance", "pilot_ref": ref, "to": "blocked"}
-        return {"status": "ok", "step": "advance", "pilot_ref": ref, "action": "waiting-worker-report"}
+            return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+        return {
+            "status": "ok",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "waiting-worker-report",
+        }
 
-    def _advance_review(self, task: dict[str, Any], records: dict[str, DispatcherRecord]) -> dict[str, Any]:
+    def _advance_review(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        attempt_id: str,
+    ) -> dict[str, Any]:
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
-            record = self._adopt(task)
+            record = self._adopt(task, attempt_id)
             records[ref] = record
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
@@ -752,10 +919,10 @@ class DispatcherRuntime:
                 reference=ref,
                 target="done",
                 reason="review:green",
-                request_id=f"dispatcher-review-green-{ref}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
             )
             records.pop(ref, None)
-            return {"status": "ok", "step": "review", "pilot_ref": ref, "to": "done"}
+            return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
         if marker == "review:red":
             self.writer.move(
                 role="dispatcher",
@@ -763,11 +930,16 @@ class DispatcherRuntime:
                 reference=ref,
                 target="in_progress",
                 reason="review:red",
-                request_id=f"dispatcher-review-red-{ref}-{len(task.get('comments') or [])}",
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id,
+                    "review-red",
+                    ref,
+                    str(len(task.get("comments") or [])),
+                ),
             )
             record.comment_baseline = len(task.get("comments") or [])
             record.state = "claimed"
-            return {"status": "ok", "step": "review", "pilot_ref": ref, "to": "in_progress"}
+            return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "in_progress"}
         if record.state != "reviewing":
             try:
                 record.handle = self.host.start_review(task, record)
@@ -778,16 +950,33 @@ class DispatcherRuntime:
                     reference=ref,
                     target="blocked",
                     reason=f"review bring-up failed: {scrub_host_output(str(exc))}",
-                    request_id=f"dispatcher-review-blocked-{ref}",
+                    request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-blocked", ref),
                 )
                 records.pop(ref, None)
                 return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
             record.review_baseline = len(task.get("comments") or [])
             record.state = "reviewing"
-            return {"status": "ok", "step": "review", "pilot_ref": ref, "action": "review-started"}
-        return {"status": "ok", "step": "review", "pilot_ref": ref, "action": "waiting-review-verdict"}
+            return {
+                "status": "ok",
+                "step": "review",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": "review-started",
+            }
+        return {
+            "status": "ok",
+            "step": "review",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "waiting-review-verdict",
+        }
 
-    def _adopt(self, task: dict[str, Any]) -> DispatcherRecord:
+    def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
+        self.state.put_records(payload, records)
+        payload["last_tick_at"] = now_rfc3339()
+        self.state.save(payload)
+
+    def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
         return DispatcherRecord(
             worker=worker,
@@ -795,6 +984,7 @@ class DispatcherRuntime:
             handle="",
             head=self.catalog.worker_head(task),
             review_head=self.catalog.review_head(task),
+            attempt_id=attempt_id,
             comment_baseline=len(task.get("comments") or []),
             review_baseline=_review_adoption_baseline(task),
             state="adopted",
@@ -847,6 +1037,126 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
         if comment.get("marker") == "report:done":
             baseline = index + 1
     return baseline
+
+
+def _new_attempt_id() -> str:
+    return f"attempt-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
+
+
+def _ensure_attempt(payload: dict[str, Any], reference: str, actor: str, owner: str) -> str:
+    attempt_id = str(payload.get("attempt_id") or "")
+    if attempt_id:
+        return attempt_id
+    attempt_id = _new_attempt_id()
+    payload["attempt_id"] = attempt_id
+    _record_attempt(payload, attempt_id, reference, actor, owner)
+    return attempt_id
+
+
+def _record_attempt(
+    payload: dict[str, Any],
+    attempt_id: str,
+    reference: str,
+    actor: str,
+    owner: str,
+) -> None:
+    attempts = payload.setdefault("attempts", [])
+    if not isinstance(attempts, list):
+        attempts = []
+        payload["attempts"] = attempts
+    if any(isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id for attempt in attempts):
+        return
+    attempts.append({
+        "attempt_id": attempt_id,
+        "pilot_ref": reference,
+        "owner": owner,
+        "started_at": now_rfc3339(),
+        "started_by": actor,
+    })
+
+
+def _mark_attempt_rolled_back(payload: dict[str, Any], actor: str, reason: str) -> None:
+    attempt_id = str(payload.get("attempt_id") or "")
+    attempts = payload.get("attempts")
+    if not attempt_id or not isinstance(attempts, list):
+        return
+    for attempt in reversed(attempts):
+        if isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id:
+            attempt["rolled_back_at"] = now_rfc3339()
+            attempt["rolled_back_by"] = actor
+            attempt["rollback_reason"] = reason
+            return
+
+
+def _attempt_request_id(attempt_id: str, action: str, reference: str, suffix: str = "") -> str:
+    parts = ["dispatcher", _request_token(attempt_id or "attempt-missing"), action, reference]
+    if suffix:
+        parts.append(suffix)
+    return "-".join(_request_token(part) for part in parts)
+
+
+def _request_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
+    return token or "empty"
+
+
+def _claim_mismatch(
+    task: dict[str, Any],
+    worker: str,
+    resolved_head: str,
+    resolved_review_head: str,
+) -> list[str]:
+    mismatches = []
+    if task.get("state") != "in_progress":
+        mismatches.append("state")
+    if task.get("claim", {}).get("worker") != worker:
+        mismatches.append("worker")
+    routing = task.get("routing", {})
+    if routing.get("resolved_worker_head") != resolved_head:
+        mismatches.append("resolved_head")
+    if routing.get("resolved_review_head") != resolved_review_head:
+        mismatches.append("resolved_review_head")
+    return mismatches
+
+
+def _claim_actual(task: dict[str, Any]) -> dict[str, Any]:
+    routing = task.get("routing", {})
+    return {
+        "state": task.get("state"),
+        "worker": task.get("claim", {}).get("worker"),
+        "resolved_head": routing.get("resolved_worker_head"),
+        "resolved_review_head": routing.get("resolved_review_head"),
+    }
+
+
+def _record_divergence(
+    payload: dict[str, Any],
+    attempt_id: str,
+    reference: str,
+    step: str,
+    reason: str,
+    *,
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+    details: list[str],
+) -> dict[str, Any]:
+    divergences = payload.setdefault("controlled_divergences", [])
+    if not isinstance(divergences, list):
+        divergences = []
+        payload["controlled_divergences"] = divergences
+    divergence = {
+        "id": f"div_{uuid.uuid4().hex[:16]}",
+        "at": now_rfc3339(),
+        "attempt_id": attempt_id,
+        "pilot_ref": reference,
+        "step": step,
+        "reason": reason,
+        "expected": expected,
+        "actual": actual,
+        "details": details,
+    }
+    divergences.append(divergence)
+    return divergence
 
 
 def scrub_host_output(text: str) -> str:

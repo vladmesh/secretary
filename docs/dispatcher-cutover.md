@@ -21,6 +21,10 @@ writes. The live runtime does not import Python modules from `triggered-agents`.
   hard-pause auto-resume TTL for that maintenance window.
 - Cutover state is stored under `<data_dir>/dispatcher/pilot-state.json`.
 - The new tick is serialized by `<data_dir>/dispatcher/pilot-tick.lock`.
+- Each `start-new-pilot` attempt records a stable `attempt_id`. Dispatcher board
+  writes include that id in their `secretary task --request-id`, so retrying one
+  attempt is idempotent but a later pilot attempt cannot replay old committed
+  claim events.
 - Rollback stops new dispatcher terminals through the host adapter and leaves
   the card, claim, comments, PR and review state unchanged.
 - Worker worktrees are landed on `pipeline/<ref>`, the same branch name the
@@ -116,6 +120,19 @@ python3 -m secretary dispatcher observe \
   --instance "$SECRETARY_INSTANCE" \
   --pilot-ref "$PILOT_REF"
 ```
+
+`observe` prints the current `attempt_id`. After the first successful tick,
+verify the live board state before letting the worker continue:
+
+```bash
+python3 -m secretary task show --ref "$PILOT_REF"
+```
+
+The card must be `in_progress`, `claim.worker` must be the worker from the tick
+output, and `routing.resolved_worker_head` plus
+`routing.resolved_review_head` must match that attempt. If `tick` returns a
+controlled divergence, do not start or resume a head manually; keep the legacy
+dispatcher frozen and run rollback.
 
 Expected pilot path:
 
