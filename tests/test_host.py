@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import unittest
@@ -329,6 +330,215 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn("units:\n  unavailable: fixture host file is not valid UTF-8", doctor_output)
 
 
+class ReconcileAdoptTests(unittest.TestCase):
+    @staticmethod
+    def _record(logical_id: str, kind: str, name: str, spec: str) -> dict[str, str]:
+        value = json.dumps([logical_id, kind, name, spec], separators=(",", ":"))
+        return {
+            "logical_id": logical_id,
+            "kind": kind,
+            "name": name,
+            "spec": spec,
+            "fingerprint": hashlib.sha256(value.encode()).hexdigest(),
+        }
+
+    def _instance(self, root: Path) -> tuple[Path, Path]:
+        instance = root / "instance"
+        (instance / "projects").mkdir(parents=True)
+        data = root / "data"
+        repo = root / "repo"
+        repo.mkdir()
+        (instance / "instance.yaml").write_text(
+            "version: 1\nname: adopt\ndata_dir: " + str(data)
+            + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n"
+            "  projects_root: " + str(root) + "\n  unit_prefix: secretary-\n",
+            encoding="utf-8",
+        )
+        (instance / "projects" / "project.yaml").write_text(
+            "id: project\nrepo: " + str(repo)
+            + "\norca_binding: project-live\nenabled: true\nadapter: project\n"
+            "default_branch: main\n",
+            encoding="utf-8",
+        )
+        return instance, repo
+
+    def _live(self, paths):
+        class FakeLiveHost:
+            def orca_repo_paths(self):
+                return paths, ""
+
+        return FakeLiveHost()
+
+    def test_preview_requires_confirmation_and_does_not_write(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, repo = self._instance(root)
+            manifest = root / "managed.json"
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})):
+                code, output = run_cli([
+                    "reconcile", "adopt", "--instance", str(instance),
+                    "--logical-id", "orca:project:project", "--managed-manifest", str(manifest),
+                ])
+            self.assertEqual(code, 0, output)
+            self.assertIn("preview only", output)
+            self.assertFalse(manifest.exists())
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["instance", "repo"])
+
+    def test_confirmed_adopt_is_idempotent_and_plan_becomes_unchanged(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, repo = self._instance(root)
+            manifest = root / "managed.json"
+            argv = [
+                "reconcile", "adopt", "--instance", str(instance),
+                "--logical-id", "orca:project:project", "--managed-manifest", str(manifest), "--yes",
+            ]
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})):
+                first = run_cli(argv)
+                before = manifest.read_bytes()
+                second = run_cli(argv)
+            self.assertEqual(first[0], 0, first[1])
+            self.assertEqual(second[0], 0, second[1])
+            self.assertEqual(manifest.read_bytes(), before)
+            payload = json.loads(before)
+            self.assertEqual(payload["version"], 1)
+            self.assertEqual([row["logical_id"] for row in payload["resources"]], ["orca:project:project"])
+
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "orca-repos.txt").write_text("project-live\n", encoding="utf-8")
+            code, output = run_cli([
+                "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
+                "--managed-manifest", str(manifest),
+            ])
+            self.assertEqual(code, 0, output)
+            self.assertIn("unchanged orca:project:project", output)
+
+    def test_adopt_rejects_missing_or_mismatched_live_identity(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, repo = self._instance(root)
+            base = ["reconcile", "adopt", "--instance", str(instance), "--logical-id", "orca:project:project", "--yes"]
+            for paths, message in (({}, "is missing"), ({"project-live": str(root / "other")}, "does not match")):
+                with self.subTest(message=message), unittest.mock.patch.object(
+                    host_commands, "LiveHostSource", return_value=self._live(paths)
+                ):
+                    code, output = run_cli(base)
+                self.assertEqual(code, 2, output)
+                self.assertIn(message, output)
+            self.assertFalse((root / "data" / "host-managed.json").exists())
+
+    def test_adopt_rejects_unknown_id_and_unverifiable_kind(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, _ = self._instance(root)
+            code, output = run_cli([
+                "reconcile", "adopt", "--instance", str(instance), "--logical-id", "orca:project:missing", "--yes",
+            ])
+            self.assertEqual(code, 2, output)
+            self.assertIn("not in desired state", output)
+
+    def test_adopt_rejects_drifted_existing_owned_record(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, repo = self._instance(root)
+            manifest = root / "managed.json"
+            manifest.write_text(json.dumps({"version": 1, "resources": [
+                self._record("orca:project:project", "orca", "old-name", "{}"),
+            ]}), encoding="utf-8")
+            before = manifest.read_bytes()
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})):
+                code, output = run_cli([
+                    "reconcile", "adopt", "--instance", str(instance), "--logical-id", "orca:project:project",
+                    "--managed-manifest", str(manifest), "--yes",
+                ])
+            self.assertEqual(code, 2, output)
+            self.assertIn("has drifted", output)
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_adopt_fails_closed_for_corrupt_duplicate_or_symlink_manifest(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, repo = self._instance(root)
+            manifest = root / "managed.json"
+            cases = [
+                ("not-json", "not valid JSON"),
+                (json.dumps({"version": 1, "resources": [
+                    self._record("x", "orca", "x", "{}"),
+                    self._record("x", "orca", "y", "{}"),
+                ]}), "duplicate logical ids"),
+            ]
+            for body, message in cases:
+                with self.subTest(message=message):
+                    manifest.unlink(missing_ok=True)
+                    manifest.write_text(body, encoding="utf-8")
+                    before = manifest.read_bytes()
+                    with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})):
+                        code, output = run_cli([
+                            "reconcile", "adopt", "--instance", str(instance), "--logical-id", "orca:project:project",
+                            "--managed-manifest", str(manifest), "--yes",
+                        ])
+                    self.assertEqual(code, 2, output)
+                    self.assertIn(message, output)
+                    self.assertEqual(manifest.read_bytes(), before)
+            target = root / "target.json"
+            target.write_text('{"version": 1, "resources": []}', encoding="utf-8")
+            manifest.unlink()
+            manifest.symlink_to(target)
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})):
+                code, output = run_cli([
+                    "reconcile", "adopt", "--instance", str(instance), "--logical-id", "orca:project:project",
+                    "--managed-manifest", str(manifest), "--yes",
+                ])
+            self.assertEqual(code, 2, output)
+            self.assertIn("must not be a symlink", output)
+
+    def test_adopt_preserves_neighbors_and_reports_atomic_write_failure(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, repo = self._instance(root)
+            manifest = root / "managed.json"
+            neighbor = self._record("orca:project:neighbor", "orca", "neighbor", "{}")
+            manifest.write_text(json.dumps({"version": 1, "resources": [neighbor]}), encoding="utf-8")
+            argv = [
+                "reconcile", "adopt", "--instance", str(instance), "--logical-id", "orca:project:project",
+                "--managed-manifest", str(manifest), "--yes",
+            ]
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})):
+                code, output = run_cli(argv)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(
+                [row["logical_id"] for row in json.loads(manifest.read_text())["resources"]],
+                ["orca:project:neighbor", "orca:project:project"],
+            )
+
+            before = manifest.read_bytes()
+            # Force a new record so the write path is exercised again.
+            manifest.write_text(json.dumps({"version": 1, "resources": [neighbor]}), encoding="utf-8")
+            before = manifest.read_bytes()
+            with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=self._live({"project-live": str(repo.resolve())})), unittest.mock.patch.object(
+                host_commands, "write_text_atomic", side_effect=RuntimeError("injected publish failure")
+            ):
+                code, output = run_cli(argv)
+            self.assertEqual(code, 2, output)
+            self.assertIn("injected publish failure", output)
+            self.assertEqual(manifest.read_bytes(), before)
+
+
 def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):
     return CmdResult(ran, returncode, stdout, stderr, reason)
 
@@ -447,6 +657,23 @@ class LiveSourceErrorTests(unittest.TestCase):
         )
         result = host.collect(Expectations(orca_repos={"r"}))
         self.assertIn("orca repos", result.errors)
+
+    def test_orca_json_paths_are_normalized_and_duplicates_fail(self):
+        root = Path("/tmp") / "orca-json-path"
+        payload = json.dumps({"result": {"repos": [
+            {"displayName": "one", "path": str(root / "a" / ".." / "repo")},
+        ]}})
+        host = self._host({"orca": _cmd(stdout=payload), "systemctl": _cmd()})
+        paths, error = host.orca_repo_paths()
+        self.assertEqual(error, "")
+        self.assertEqual(paths, {"one": str((root / "repo").resolve(strict=False))})
+
+        duplicate = json.dumps({"result": {"repos": [
+            {"displayName": "one", "path": "/srv/a"},
+            {"displayName": "one", "path": "/srv/b"},
+        ]}})
+        host = self._host({"orca": _cmd(stdout=duplicate), "systemctl": _cmd()})
+        self.assertEqual(host.orca_repo_paths()[1], "orca returned duplicate registration names")
 
     def test_declared_projects_without_root_is_unavailable(self):
         expected = Expectations(projects={"a"}, projects_root="")

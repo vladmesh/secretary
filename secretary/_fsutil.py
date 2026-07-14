@@ -119,6 +119,19 @@ def file_lock(path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextlib.contextmanager
+def directory_lock(path: Path) -> Iterator[None]:
+    """Serialize a state-file transition without creating a lock artifact."""
+    path.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def copy_tree(source: Path, destination: Path) -> None:
     try:
         paths = sorted(source.rglob("*"))

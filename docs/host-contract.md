@@ -38,6 +38,13 @@ Exit-коды plan: `0` для прочитанного inventory без conflic
 `2` для невалидного input или недоступного kind inventory. При недоступности plan
 показывает причину для каждого недоступного kind и не строит diff против пустого host.
 
+Существующий desired Orca binding принимается во владение только по одному logical id
+через `secretary reconcile adopt`. Команда сверяет имя и нормализованный repo path с
+live Orca registry. Без `--yes` она только показывает canonical record и fingerprint;
+с `--yes` атомарно обновляет managed manifest. Orca registry, systemd и worktrees при
+этом не меняются. Corrupt, duplicate, drifted или symlinked manifest блокирует запись.
+Rollback до будущего apply — восстановить предыдущую копию manifest.
+
 Ни generic multi-instance, ни lease/fencing, ни отдельный `instance_id` в этот
 контур не входят. Старый dispatcher переносится pilot-фильтром: pause, cutover,
 проверка pilot-карточки и ручной rollback при неуспехе.

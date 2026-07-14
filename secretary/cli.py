@@ -27,7 +27,7 @@ from secretary.host import (
     build_expectations,
     inventory,
 )
-from secretary.host_commands import run_reconcile_plan
+from secretary.host_commands import add_reconcile_subcommands
 from secretary.gate import run_gate
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
@@ -92,21 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconcile = subparsers.add_parser("reconcile", help="render a host plan without applying it")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
-    reconcile_plan = reconcile_subcommands.add_parser("plan", help="show the read-only desired host plan")
-    reconcile_plan.add_argument("--instance", required=True)
-    reconcile_plan_source = reconcile_plan.add_mutually_exclusive_group()
-    reconcile_plan_source.add_argument(
-        "--host-fixture",
-        metavar="DIR",
-        help="read a deterministic fixture inventory instead of the live host",
-    )
-    reconcile_plan_source.add_argument(
-        "--offline",
-        action="store_true",
-        help="reject live inventory; use --host-fixture for an offline plan",
-    )
-    reconcile_plan.add_argument("--managed-manifest", metavar="FILE")
-    reconcile_plan.set_defaults(handler=run_reconcile_plan)
+    add_reconcile_subcommands(reconcile_subcommands)
     reconcile.set_defaults(handler=not_implemented("reconcile"))
 
     data = subparsers.add_parser("data", help="manage the secretary-data layout")

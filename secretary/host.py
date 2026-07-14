@@ -9,9 +9,9 @@ material are never opened.
 
 from __future__ import annotations
 
-import subprocess
 import hashlib
 import json
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -449,6 +449,44 @@ class LiveHostSource(HostSource):
             if len(parts) >= 2:
                 names.add(parts[1])
         return names, ""
+
+    def orca_repo_paths(self) -> tuple[dict[str, str], str]:
+        """Return Orca registration name -> normalized repo path.
+
+        Adoption needs stronger evidence than the name-only inventory used by
+        ``plan``. JSON output lets us compare the registered path with the
+        explicit binding without reading project files or secrets.
+        """
+        result = self._run(["orca", "repo", "list", "--json"])
+        if not result.ran:
+            return {}, result.reason
+        if result.returncode != 0:
+            return {}, f"orca exited {result.returncode}"
+        try:
+            payload = json.loads(result.stdout)
+        except ValueError:
+            return {}, "orca returned invalid JSON"
+        repos = payload.get("result", {}).get("repos") if isinstance(payload, dict) else None
+        if not isinstance(repos, list):
+            return {}, "orca JSON has no repo inventory"
+        paths: dict[str, str] = {}
+        for repo in repos:
+            if not isinstance(repo, dict):
+                continue
+            name, path = repo.get("displayName"), repo.get("path")
+            if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
+                continue
+            candidate = Path(path).expanduser()
+            if not candidate.is_absolute():
+                return {}, "orca returned a non-absolute repo path"
+            try:
+                normalized = str(candidate.resolve(strict=False))
+            except (OSError, RuntimeError):
+                return {}, "orca repo path could not be normalized"
+            if name in paths and paths[name] != normalized:
+                return {}, "orca returned duplicate registration names"
+            paths[name] = normalized
+        return paths, ""
 
     def _run(self, cmd: list[str]) -> _CmdResult:
         tool = cmd[0]
