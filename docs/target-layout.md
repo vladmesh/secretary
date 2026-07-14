@@ -84,23 +84,30 @@ are not the canonical memory source.
 
 ## Target Commands
 
-`secretary doctor --dry-run` validates an instance tree and reports what would
-need attention without changing the host. In Phase 1 it reads the mock instance
-under `examples/instance` and validates `instance.yaml`, project bindings,
-adapters and the data manifest.
+In the Phase 7 target contract, `secretary doctor` validates config, data and the
+live host without changing it. Host inventory is on by default; `--offline`
+skips only that inventory for fixtures and isolated config/data checks. There is
+no `--dry-run`, because doctor never writes. It inventories names only, never
+opens env files or secrets.
 
-With `--host` it also runs a Phase 2 read-only inventory: for project repos,
-systemd units and Orca repo registrations it reports what is matched, described
-but missing on the host, and present on the host but unmanaged. The instance
-declares its owned host surface under `host` (`projects_root`, `unit_prefix`,
-`units`, `orca_repos`); project names come from the bindings. The inventory only
-lists resource names, never reads secrets or env files, and changes nothing.
-`--host-fixture DIR` points the same comparison at a fixture host for offline use.
+Exit `0` means no findings (warnings are allowed), `1` means findings, and `2`
+means the check could not complete. `--strict` turns warnings into exit `1`.
+Undeclared host surface is a warning rather than permission for reconcile to
+adopt it.
 
-`secretary reconcile` will render desired process state from product and instance
-config, then create or update only resources marked as managed by secretary.
-Planned managed resources include systemd units, Orca bindings, generated env
-files, memory indexes and board schema. In Phase 1 it is an explicit stub.
+`secretary reconcile` will render desired process state from instance config,
+heads, policies, projects and runtime components. `host.units` and
+`host.orca_repos` are not a second desired-state list: the instance supplies
+ownership boundaries and inputs, while reconcile records its applied result in a
+managed manifest. It may create, update or delete a resource only when that
+manifest or a verifiable managed marker proves ownership. A name prefix only
+detects a conflict; it never grants mutation rights. Planned managed resources
+include systemd units, Orca bindings, generated env files, memory indexes and
+board schema. In Phase 1 it is an explicit stub.
+
+Project `id` is a stable logical identifier. A repository path and Orca binding
+name are explicit binding fields, not transformations of the id; in particular,
+the CLI does not infer a dash/underscore conversion.
 
 `secretary backup create` will create a consistent archive of operational data:
 board export, memory facts and export, run state, transcripts, artifacts and
