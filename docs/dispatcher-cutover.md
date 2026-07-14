@@ -142,6 +142,28 @@ Expected pilot path:
 4. Reviewer posts `secretary task verdict --kind green`.
 5. Dispatcher moves the card to Done.
 
+Before committing cutover, keep a short evidence checklist for the exact pilot
+card. This is evidence for one live pilot only; it does not mark the full Phase 7
+or Phase 9 cutover complete.
+
+```text
+Before live pilot:
+- active owner: legacy dispatcher freeze-paused; new dispatcher not started
+- card and claim: <ref> Ready, no unexpected claim or comments
+- workspace: no existing pilot workspace, or old workspace accounted for
+- PR/CI/review: no open pilot PR for this attempt
+- neighboring Ready cards: listed and unchanged while the old owner is frozen
+- rollback state: no active rolled-back attempt for this ref, or reason recorded
+
+After live pilot:
+- active owner: new dispatcher owned only <ref>; legacy stayed freeze-paused
+- card and claim: <ref> moved In progress -> Validate -> Done with expected claim
+- workspace: worker and reviewer workspaces match the attempt and branch
+- PR/CI/review: PR, green CI and independent green review recorded on the card
+- neighboring Ready cards: same cards remain Ready with unchanged claim/comments
+- rollback state: unused for a green pilot, or rollback reason and preserved card
+```
+
 Commit cutover only after the pilot is green and the old owner is still paused:
 
 ```bash
