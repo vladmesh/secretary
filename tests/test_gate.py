@@ -10,7 +10,7 @@ import yaml
 
 from secretary.config import load_config, validate
 from secretary.gate import _timed_out, run_gate
-from secretary.onboarding import project_add
+from secretary.onboarding import ScannerError, project_add
 from secretary.provision import apply_provision_result, start_provision
 from tests.test_onboarding import git, make_repo
 
@@ -173,6 +173,42 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["checks"]["setup"]["status"], "failed")
         self.assertNotIn("AKIAABCDEFGHIJKLMNOP", str(result))
+
+    def test_scan_failure_invalidates_enabled_project_without_traceback(self):
+        self.provision()
+        self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
+        manifest = self.instance / "compatibility-manifests/sample-project.toml"
+        with mock.patch("secretary.gate.scan_repo", side_effect=ScannerError("injected")):
+            code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "stale")
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertFalse(manifest.exists())
+
+    def test_scan_failure_on_disabled_project_is_structured_stale(self):
+        self.provision()
+        with mock.patch("secretary.gate.scan_repo", side_effect=ScannerError("injected")):
+            code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "stale")
+        self.assertFalse(load_config(self.binding)["enabled"])
+
+    def test_enabled_adapter_read_failure_is_conflict_without_state_change(self):
+        self.provision()
+        self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
+        real_read_bytes = Path.read_bytes
+
+        def fail_adapter(path: Path) -> bytes:
+            if path == self.adapter:
+                raise OSError(5, "injected")
+            return real_read_bytes(path)
+
+        with mock.patch("pathlib.Path.read_bytes", autospec=True, side_effect=fail_adapter):
+            code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "conflict")
+        self.assertTrue(load_config(self.binding)["enabled"])
+        self.assertTrue((self.instance / "compatibility-manifests/sample-project.toml").exists())
 
 
 if __name__ == "__main__":

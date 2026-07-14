@@ -15,7 +15,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import scan_repo
+from secretary.onboarding import ScannerError, scan_repo
 from secretary.provision import _instance_dir, _load_inputs, _project_lock_path, _run_id
 
 _SECRET = re.compile(
@@ -50,14 +50,20 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                 current_head = scan_repo(
                     Path(existing_binding["repo"]), existing_binding["default_branch"]
                 )["repo"]["head"]
-                current_digest = "sha256:" + hashlib.sha256(adapter_path.read_bytes()).hexdigest()
-            except (OSError, KeyError):
-                current_head = current_digest = "unavailable"
+            except (OSError, KeyError, ScannerError, subprocess.TimeoutExpired):
+                current_head = "unavailable"
             expected_head = existing_draft["scanner"]["repo"]["head"]
             if current_head != expected_head:
                 return _disable_stale_enabled(
                     instance, project_id, existing_binding, existing_draft, None
                 )
+            try:
+                current_digest = "sha256:" + hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                return 1, {
+                    "status": "conflict",
+                    "finding": _redact(exc.strerror or "canonical adapter is unavailable"),
+                }
             provision_run = _run_id(existing_draft)
             expected_run = _gate_run_id(project_id, expected_head, provision_run, current_digest)
             expected_path = instance / "gate-runs" / project_id / expected_run / "result.json"
@@ -111,7 +117,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     head = draft["scanner"]["repo"]["head"]
     try:
         current_head = scan_repo(repo, draft["identity"]["default_branch"])["repo"]["head"]
-    except (OSError, KeyError):
+    except (OSError, KeyError, ScannerError, subprocess.TimeoutExpired):
         current_head = "unavailable"
     if current_head != head:
         return _publish_stale(result_path, result, "scanner HEAD changed")
