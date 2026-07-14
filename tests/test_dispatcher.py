@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from secretary import role_env
 from secretary.dispatcher import (
     CutoverState,
     DispatcherRuntime,
+    FileLegacyPauseProbe,
     HostError,
+    LegacyPauseSnapshot,
     PilotSelector,
+    _render_codex_command,
+    _wrap_role_shell_command,
 )
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
@@ -128,6 +134,28 @@ class FakeHost:
         self.stopped.append(record.worker)
 
 
+class FakeLegacyPause:
+    def __init__(self) -> None:
+        self.sufficient = True
+        self.reason = "legacy dispatcher is freeze-paused"
+        self.mode = "freeze"
+
+    def set(self, *, sufficient: bool, reason: str, mode: str = "") -> None:
+        self.sufficient = sufficient
+        self.reason = reason
+        self.mode = mode
+
+    def snapshot(self) -> LegacyPauseSnapshot:
+        return LegacyPauseSnapshot(
+            self.sufficient,
+            self.reason,
+            path="/tmp/pause.json",
+            mode=self.mode,
+            actor="operator",
+            since="2026-07-14T00:00:00+00:00",
+        )
+
+
 class DispatcherRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -136,6 +164,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
         self.host = FakeHost(self.data_dir / "workspaces")
+        self.legacy_pause = FakeLegacyPause()
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -144,6 +173,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             FakeCatalog(),  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
+            legacy_pause=self.legacy_pause,  # type: ignore[arg-type]
         )
         self.selector = PilotSelector.exact("secretary-510-pilot")
 
@@ -159,6 +189,56 @@ class DispatcherRuntimeTests(unittest.TestCase):
         result = self.runtime.tick(self.selector)
 
         self.assertEqual(result["status"], "blocked")
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+
+    def test_pause_old_rejects_drain_evidence_without_board_mutation(self) -> None:
+        self.legacy_pause.set(
+            sufficient=False,
+            reason="legacy pause mode is drain, requires freeze",
+            mode="drain",
+        )
+
+        result = self.runtime.pause_old(self.selector, actor="operator", evidence="legacy paused")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "legacy pause mode is drain, requires freeze")
+        self.assertNotEqual(self.runtime.state.load().get("old_owner_paused"), True)
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+
+    def test_start_new_pilot_rechecks_legacy_freeze_before_state_change(self) -> None:
+        self.runtime.pause_old(self.selector, actor="operator", evidence="legacy freeze")
+        self.legacy_pause.set(
+            sufficient=False,
+            reason="legacy pause mode is drain, requires freeze",
+            mode="drain",
+        )
+
+        result = self.runtime.start_new_pilot(self.selector, actor="operator")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "legacy pause mode is drain, requires freeze")
+        self.assertNotEqual(self.runtime.state.load().get("phase"), "new_pilot")
+
+    def test_tick_refuses_before_claim_when_legacy_watchdog_is_active(self) -> None:
+        self.runtime.state.save({
+            "version": 1,
+            "phase": "new_pilot",
+            "pilot_ref": "secretary-510-pilot",
+            "old_owner_paused": True,
+            "records": {},
+        })
+        self.legacy_pause.set(
+            sufficient=False,
+            reason="legacy pause mode is drain, requires freeze",
+            mode="drain",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "legacy pause mode is drain, requires freeze")
+        self.assertEqual(self.host.prepared, [])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
 
     def test_full_pilot_lifecycle_ignores_neighbor_ready_card(self) -> None:
@@ -212,6 +292,30 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(task["state"], "in_progress")
         self.assertEqual(task["claim"]["worker"], "secretary-510-pilot-pilot")
         self.assertEqual(len(task["comments"]), 1)
+
+    def test_rollback_after_claim_is_idempotent_for_board_state(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        self.runtime.rollback(self.selector, actor="operator", reason="pilot red")
+        result = self.runtime.rollback(self.selector, actor="operator", reason="pilot red")
+
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(result["phase"], "rolled_back")
+        self.assertEqual(task["state"], "in_progress")
+        self.assertEqual(task["claim"]["worker"], "secretary-510-pilot-pilot")
+        self.assertEqual([comment["marker"] for comment in task["comments"]], ["dispatcher"])
+
+    def test_rollback_before_claim_preserves_ready_card(self) -> None:
+        self.start_pilot()
+
+        result = self.runtime.rollback(self.selector, actor="operator", reason="pilot red")
+
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(result["phase"], "rolled_back")
+        self.assertEqual(task["state"], "ready")
+        self.assertIsNone(task["claim"]["worker"])
+        self.assertEqual(task["comments"], [])
 
     def test_validate_adoption_restores_workspace_from_claim(self) -> None:
         self.start_pilot()
@@ -289,3 +393,89 @@ class DispatcherRuntimeTests(unittest.TestCase):
             [comment["marker"] for comment in task["comments"]],
             ["dispatcher", "report:done", "dispatcher"],
         )
+
+
+class LegacyPauseProbeTests(unittest.TestCase):
+    def test_file_probe_requires_freeze_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pause = Path(tmp) / "pause.json"
+            pause.write_text(json.dumps({"mode": "soft", "actor": "operator"}), encoding="utf-8")
+
+            result = FileLegacyPauseProbe(pause).snapshot()
+
+        self.assertFalse(result.sufficient)
+        self.assertEqual(result.reason, "legacy pause mode is drain, requires freeze")
+
+    def test_file_probe_rejects_stale_auto_resume_freeze(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pause = Path(tmp) / "pause.json"
+            pause.write_text(
+                json.dumps({
+                    "mode": "hard",
+                    "actor": "secretary",
+                    "since": "2000-01-01T00:00:00+00:00",
+                }),
+                encoding="utf-8",
+            )
+
+            result = FileLegacyPauseProbe(pause).snapshot()
+
+        self.assertFalse(result.sufficient)
+        self.assertEqual(result.reason, "legacy freeze is stale and auto-resume eligible")
+
+
+class DispatcherLauncherTests(unittest.TestCase):
+    def test_codex_command_uses_unattended_profile_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+
+            command = _render_codex_command(
+                {"adapter": "codex", "model": "gpt-5.5", "effort": "extra", "codex_home": "/tmp/codex-home"},
+                "TASK.md",
+                workspace=str(workspace),
+            )
+
+        self.assertIn("CODEX_HOME=/tmp/codex-home codex exec", command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("--skip-git-repo-check", command)
+        self.assertIn("-m gpt-5.5", command)
+        self.assertIn('model_reasoning_effort="xhigh"', command)
+        self.assertIn("trust_level=\"trusted\"", command)
+        self.assertIn('"$(cat TASK.md)"', command)
+        self.assertNotIn('codex "$(cat TASK.md)"', command)
+
+    def test_worker_command_is_wrapped_in_role_env(self) -> None:
+        wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
+
+        self.assertIn("python3 -m secretary.role_env exec --role worker", wrapped)
+        self.assertIn("/bin/sh -lc", wrapped)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", wrapped)
+
+    def test_role_env_loads_board_env_and_strips_unallowed_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text(
+                "\n".join([
+                    "KANBOARD_URL=https://kanboard.example",
+                    "KANBOARD_API_USER=bot",
+                    "KANBOARD_API_TOKEN=board-token",
+                    "PANELMEM_KB_PAT=memory-token",
+                    "TA_CODEX_MODE=exec",
+                ]),
+                encoding="utf-8",
+            )
+
+            env = role_env.runtime_env(
+                "worker",
+                base_env={"GITHUB_TOKEN": "github-token", "PATH": "/usr/bin"},
+                env_file=env_file,
+                require=True,
+            )
+
+        self.assertEqual(env["BOARD_ROLE"], "worker")
+        self.assertEqual(env["KANBOARD_API_TOKEN"], "board-token")
+        self.assertEqual(env["TA_CODEX_MODE"], "exec")
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertNotIn("PANELMEM_KB_PAT", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
