@@ -54,7 +54,7 @@ Phase 7 renders a plan before it can change a host:
 
 ```bash
 python3 -m secretary reconcile plan --instance ~/secretary-instance \
-  --host-fixture tests/fixtures/host --managed-manifest /path/to/host-managed.json
+  --managed-manifest /path/to/host-managed.json
 ```
 
 The plan is read-only and deterministic. Heads render supported systemd services;
@@ -68,6 +68,15 @@ The plan rejects incomplete desired inputs: heads require `host.unit_prefix`, an
 enabled binding requires an explicit `orca_binding`. This validation is plan-local so
 `doctor --offline` can still inspect a pre-migration instance without changing it.
 Logical resource ids and host names must also be unique within a plan.
+
+By default `reconcile plan` reads the same live, read-only inventory boundary as
+`doctor`: project directories, `systemctl list-unit-files`, and `orca repo list`.
+Use `--host-fixture DIR` for deterministic tests or offline checks. `--offline`
+cannot produce a plan because a plan needs inventory; use the fixture override
+without `--offline`. The plan exits 0 when inventory was read and there are no conflicts, 1
+for conflicts, and 2 for invalid input or an unavailable inventory kind. It never
+writes the managed manifest or applies host changes; `reconcile --apply` remains
+out of scope.
 
 `doctor` checks the live host by default and never writes. Use `--offline` for
 config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for

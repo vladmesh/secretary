@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from secretary.config import validate_instance
-from secretary.host import FixtureHostSource, build_expectations, build_plan, load_managed_manifest, plan_changes, plan_input_errors
+from secretary.host import (
+    FixtureHostSource,
+    LiveHostSource,
+    build_expectations,
+    build_plan,
+    load_managed_manifest,
+    plan_changes,
+    plan_input_errors,
+)
 
 
 def run_reconcile_plan(args) -> int:
@@ -17,11 +25,17 @@ def run_reconcile_plan(args) -> int:
     if errors:
         print("secretary reconcile plan: " + errors[0])
         return 2
-    collected = FixtureHostSource(Path(args.host_fixture)).collect(
-        build_expectations(report.bindings, report.host)
-    )
+    if args.offline:
+        print("secretary reconcile plan: --offline cannot produce a plan; use --host-fixture instead")
+        return 2
+    expected = build_expectations(report.bindings, report.host)
+    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
+    collected = source.collect(expected)
     if collected.errors:
         print("secretary reconcile plan: host inventory unavailable")
+        for kind in ("projects", "units", "orca repos"):
+            if reason := collected.errors.get(kind):
+                print(f"  {kind}: unavailable: {reason}")
         return 2
     manifest = Path(args.managed_manifest) if args.managed_manifest else Path(report.instance["data_dir"]) / "host-managed.json"
     prefix = report.host.get("unit_prefix", "")
