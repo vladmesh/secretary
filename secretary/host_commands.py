@@ -5,13 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from secretary.config import validate_instance
-from secretary.host import FixtureHostSource, build_expectations, build_plan, load_managed_manifest, plan_changes
+from secretary.host import FixtureHostSource, build_expectations, build_plan, load_managed_manifest, plan_changes, plan_input_errors
 
 
 def run_reconcile_plan(args) -> int:
     report = validate_instance(Path(args.instance))
     if not report.ok:
         print("secretary reconcile plan: invalid instance config")
+        return 2
+    errors = plan_input_errors(report.instance, report.bindings)
+    if errors:
+        print("secretary reconcile plan: " + errors[0])
         return 2
     collected = FixtureHostSource(Path(args.host_fixture)).collect(
         build_expectations(report.bindings, report.host)

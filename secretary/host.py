@@ -82,6 +82,20 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
     return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
 
 
+def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[str]:
+    """Reject incomplete desired-state inputs before a plan can fail open."""
+    host = instance.get("host", {}) if isinstance(instance, dict) else {}
+    prefix = host.get("unit_prefix") if isinstance(host, dict) else None
+    heads = instance.get("heads", []) if isinstance(instance, dict) else []
+    if isinstance(heads, list) and heads and not isinstance(prefix, str):
+        return ["host.unit_prefix is required when heads are configured"]
+    errors: list[str] = []
+    for binding in bindings:
+        if isinstance(binding, dict) and binding.get("enabled") and not isinstance(binding.get("orca_binding"), str):
+            errors.append("enabled binding requires explicit orca_binding")
+    return errors
+
+
 def load_managed_manifest(path: Path) -> list[PlannedResource]:
     """Load the applied state. Invalid or missing state proves no ownership."""
     try:
@@ -117,7 +131,9 @@ def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, mana
             action = "conflict"
         changes.append(PlanChange(resource.logical_id, resource.kind, resource.name, action))
     for logical_id, resource in managed_by_id.items():
-        if logical_id not in desired_by_id and resource.name in actual_names.get(resource.kind, set()):
+        desired_resource = desired_by_id.get(logical_id)
+        renamed = desired_resource and (resource.kind != desired_resource.kind or resource.name != desired_resource.name)
+        if (desired_resource is None or renamed) and resource.name in actual_names.get(resource.kind, set()):
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
     known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
     known_units.update(resource.name for resource in managed_by_id.values() if resource.kind == "unit")

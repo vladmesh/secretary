@@ -18,6 +18,7 @@ from secretary.host import (
     build_expectations,
     build_plan,
     inventory,
+    plan_input_errors,
     plan_changes,
 )
 
@@ -129,15 +130,22 @@ class ReconcilePlanTests(unittest.TestCase):
         changed = build_plan(instance, bindings)
         self.assertEqual({change.action for change in plan_changes(changed, actual, original)}, {"update"})
 
-    def test_enabled_binding_requires_explicit_orca_binding(self):
-        from secretary.config import validate
+    def test_plan_rejects_enabled_binding_without_explicit_orca_binding(self):
+        errors = plan_input_errors({}, [{"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True}])
+        self.assertEqual(errors, ["enabled binding requires explicit orca_binding"])
 
-        errors = validate(
-            {"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True, "adapter": "foo-bar", "default_branch": "main"},
-            "project-binding",
-            "binding.yaml",
-        )
-        self.assertTrue(any("orca_binding" in error.message for error in errors), errors)
+    def test_plan_rejects_heads_without_unit_prefix(self):
+        errors = plan_input_errors({"heads": [{"role": "worker", "model": "test"}]}, [])
+        self.assertEqual(errors, ["host.unit_prefix is required when heads are configured"])
+
+    def test_renamed_managed_resource_is_deleted_alongside_create(self):
+        old_instance = {"host": {"unit_prefix": "old-"}, "heads": [{"role": "worker", "model": "test"}]}
+        new_instance = {"host": {"unit_prefix": "new-"}, "heads": [{"role": "worker", "model": "test"}]}
+        managed = build_plan(old_instance, [])
+        desired = build_plan(new_instance, [])
+        actual = HostInventory(units={"old-worker.service"})
+        changes = plan_changes(desired, actual, managed, "new-")
+        self.assertEqual([(change.action, change.name) for change in changes], [("create", "new-worker.service"), ("delete", "old-worker.service")])
 
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
         instance = {
@@ -205,6 +213,22 @@ class ReconcilePlanTests(unittest.TestCase):
             code, output = run_cli(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)])
         self.assertEqual(code, 1, output)
         self.assertIn("conflict systemd:conflict:secretary-retro.timer", output)
+
+    def test_cli_plan_rejects_heads_without_unit_prefix(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: plan\ndata_dir: /tmp/data\noffsite:\n  instance_remote: git@example.invalid:x/y\nheads:\n  - role: worker\n    model: test\n",
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+            code, output = run_cli(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)])
+        self.assertEqual(code, 2, output)
+        self.assertIn("host.unit_prefix is required", output)
 
 
 def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):

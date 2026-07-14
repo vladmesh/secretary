@@ -21,6 +21,12 @@ host name. Managed manifest хранит те же поля, canonical desired s
 binding name/repo path. При совпадении имени без записи с тем же logical id план выводит
 `conflict`; только exact managed record может дать `update` или `delete`.
 
+План fail-closed: heads требуют `host.unit_prefix`, enabled binding требует
+явный `orca_binding`. Это plan validation, а не hard schema migration, поэтому
+`doctor --offline` остаётся совместимым с instance до явного переноса binding.
+При смене host name того же logical id план показывает новый `create` и `delete`
+ранее managed старого имени.
+
 Ни generic multi-instance, ни lease/fencing, ни отдельный `instance_id` в этот
 контур не входят. Старый dispatcher переносится pilot-фильтром: pause, cutover,
 проверка pilot-карточки и ручной rollback при неуспехе.

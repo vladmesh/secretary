@@ -65,6 +65,10 @@ manifest records the logical resource id, kind, name and fingerprint after a fut
 apply. A host name match with no matching managed record is a `conflict`, not a right
 to change it. This card deliberately does not implement `reconcile --apply`.
 
+The plan rejects incomplete desired inputs: heads require `host.unit_prefix`, and an
+enabled binding requires an explicit `orca_binding`. This validation is plan-local so
+`doctor --offline` can still inspect a pre-migration instance without changing it.
+
 `doctor` checks the live host by default and never writes. Use `--offline` for
 config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for
 findings (and warnings with `--strict`), and 2 when config or inventory cannot be
