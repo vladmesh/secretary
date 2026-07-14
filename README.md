@@ -126,6 +126,25 @@ See `docs/dispatcher-cutover.md` for the full operator flow and the remaining
 post-merge live pilot condition before production ownership moves from the
 legacy dispatcher.
 
+## Task creation
+
+`secretary task create` writes a Pipeline card through the task protocol and
+records the creation in `secretary-data/board/events.ndjson`.
+
+```bash
+python3 -m secretary task create --role po --project secretary --type code \
+  --title "Codex exec worker" --state ready --head codex-extra \
+  --codex-mode exec
+
+python3 -m secretary task create --role po --project secretary --type code \
+  --title "Codex TUI worker" --state ready --head codex-extra \
+  --codex-mode tui
+```
+
+`--codex-mode` is accepted only when the worker head profile is a Codex profile.
+If it is omitted, the dispatcher uses the head profile's `codex_mode`; profiles
+without that field launch through the safe `exec` path.
+
 The default doctor inventory is read-only. It compares project repos, systemd units
 and Orca repo registrations and prints three sets:
 

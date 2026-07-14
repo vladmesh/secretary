@@ -17,10 +17,12 @@ import yaml
 from secretary._fsutil import file_lock, write_json, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
+    HeadLaunch,
     HeadLaunchError,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
+    render_codex_launch as _render_codex_launch,
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
@@ -54,6 +56,12 @@ class HostError(Exception):
 _ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
 _BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+TUI_IDLE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000")))
+TUI_DELIVERY_RETRIES = int(os.environ.get("SECRETARY_TUI_DELIVERY_RETRIES", os.environ.get("TA_TUI_DELIVERY_RETRIES", "2")))
+TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_DELIVERY_TIMEOUT_S", "12")))
+TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
+TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
+_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -173,17 +181,31 @@ class InstanceCatalog:
         return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
+        return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
+
+    def head_launch(
+        self,
+        head: str,
+        prompt_file: str,
+        *,
+        workspace: str,
+        role: str,
+        codex_mode: str | None = None,
+    ) -> HeadLaunch:
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
             self.prepare_head_workspace(head, workspace)
             if adapter == "claude":
-                command = _render_claude_command(profile, prompt_file)
+                launch = HeadLaunch(_render_claude_command(profile, prompt_file))
             else:
-                command = _render_codex_command(profile, prompt_file, workspace=workspace)
+                launch = _render_codex_launch(profile, prompt_file, workspace=workspace, mode=codex_mode)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
-        return _wrap_role_shell_command(role, command)
+        return HeadLaunch(
+            _wrap_role_shell_command(role, launch.command),
+            prompt_after_start=launch.prompt_after_start,
+        )
 
     def prepare_head_workspace(self, head: str, workspace: str) -> None:
         profile = self._head_profile(head)
@@ -235,6 +257,7 @@ class CommandHostRuntime:
             "TASK.md",
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            codex_mode=task.get("routing", {}).get("codex_launch_mode"),
         )
         return {"workspace": workspace, "handle": handle, "base_branch": base}
 
@@ -326,19 +349,23 @@ class CommandHostRuntime:
         *,
         role: str,
         env_name: str,
+        codex_mode: str | None = None,
     ) -> str:
         if self.mode == "noop":
             return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
         command = os.environ.get(env_name)
+        launch = HeadLaunch(command) if command else None
         if command:
             self.catalog.prepare_head_workspace(head, workspace)
         else:
-            command = self.catalog.head_command(
+            launch = self.catalog.head_launch(
                 head,
                 prompt_file,
                 workspace=workspace,
                 role=role,
+                codex_mode=codex_mode,
             )
+            command = launch.command
         result = self._run_json([
             "orca", "terminal", "create",
             "--worktree", f"path:{workspace}",
@@ -350,6 +377,12 @@ class CommandHostRuntime:
         handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
         if not isinstance(handle, str) or not handle:
             raise HostError("orca did not return a terminal handle")
+        if launch and launch.prompt_after_start:
+            try:
+                self._deliver_tui_prompt(handle, workspace, prompt_file)
+            except HostError:
+                self._close_terminal(handle)
+                raise
         return handle
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
@@ -359,6 +392,76 @@ class CommandHostRuntime:
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
+
+    def _deliver_tui_prompt(self, handle: str, workspace: str, prompt_file: str) -> None:
+        try:
+            prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise HostError(f"TUI prompt file is unreadable: {exc}") from None
+        self._run_json([
+            "orca", "terminal", "wait",
+            "--terminal", handle,
+            "--for", "tui-idle",
+            "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS),
+            "--json",
+        ])
+        self._run_json([
+            "orca", "terminal", "send",
+            "--terminal", handle,
+            "--text", prompt,
+            "--enter",
+            "--json",
+        ])
+        self._confirm_tui_prompt_delivered(handle, prompt)
+
+    def _confirm_tui_prompt_delivered(self, handle: str, prompt: str) -> None:
+        deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
+        next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
+        resends = 0
+        last_reason = "no-start-signal"
+        while time.monotonic() < deadline:
+            screen = self._read_terminal_text(handle)
+            if _screen_started_turn(screen):
+                return
+            if _prompt_still_in_codex_composer(screen, prompt):
+                last_reason = "prompt-in-composer"
+                if resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
+                    self._run_json([
+                        "orca", "terminal", "send",
+                        "--terminal", handle,
+                        "--text", "",
+                        "--enter",
+                        "--json",
+                    ])
+                    resends += 1
+                    next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
+            else:
+                last_reason = "awaiting-start-signal"
+            time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
+        raise HostError(
+            f"TUI prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
+            f"(reason={last_reason}, resends={resends})"
+        )
+
+    def _read_terminal_text(self, handle: str) -> str:
+        data = self._run_json(["orca", "terminal", "read", "--terminal", handle, "--json"])
+        terminal = data.get("terminal") if isinstance(data.get("terminal"), dict) else data
+        if not isinstance(terminal, dict):
+            return ""
+        tail = terminal.get("tail")
+        if isinstance(tail, list):
+            return "\n".join(str(line) for line in tail)
+        for key in ("text", "content", "screen"):
+            value = terminal.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
+
+    def _close_terminal(self, handle: str) -> None:
+        try:
+            self._run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
+        except HostError:
+            pass
 
     def _worker_prompt(self, task: dict[str, Any], base: str, attempt_id: str) -> str:
         branch = _legacy_worker_branch(task["ref"])
@@ -981,6 +1084,28 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
 def scrub_host_output(text: str) -> str:
     text = _ASSIGN_RE.sub(r"\1=<redacted>", text)
     return _BLOB_RE.sub(lambda match: match.group(0) if _HEX_RE.match(match.group(0)) else "<redacted>", text)
+
+
+def _prompt_signature(prompt: str) -> str:
+    for token in ("TASK.md", "REVIEW.md"):
+        if token in prompt:
+            return token
+    words = re.findall(r"\S+", prompt)
+    return " ".join(words[:6])
+
+
+def _prompt_still_in_codex_composer(screen: str, prompt: str) -> bool:
+    marker = screen.rfind("\u203a")
+    if marker < 0:
+        return False
+    signature = _prompt_signature(prompt)
+    return bool(signature and signature in screen[marker:])
+
+
+def _screen_started_turn(screen: str) -> bool:
+    marker = screen.rfind("\u203a")
+    status_area = screen[:marker] if marker >= 0 else screen
+    return bool(_WORKING_RE.search(status_area))
 
 
 def _tail(text: str, lines: int = 40) -> str:

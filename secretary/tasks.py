@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.request
@@ -41,12 +42,15 @@ _KNOWN_METADATA = {
     "task_type", "project", "blocked_by", "claim", "slug", "base_branch",
     "head", "resolved_head", "review_head", "resolved_review_head", "retry_same",
     "retry_switch", "retry_heads", "complexity", "family_preference", "routing_reason",
-    "quota_snapshot_at",
+    "quota_snapshot_at", "codex_launch_mode",
 }
+_TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
+_CODEX_LAUNCH_MODES = {"exec", "tui"}
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro"}
 _COMMENT_ROLES = _ROLES
+_CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro"}
 _TRANSITIONS = {
     "po": {("ideas", "ready"), ("blocked", "ready")},
     "dispatcher": {
@@ -69,6 +73,7 @@ _READY_RESET_METADATA = {
     "retry_switch": "",
     "retry_heads": "",
 }
+_SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
 
 class KanboardClient:
@@ -197,6 +202,7 @@ class TaskReader:
                 "resolved_worker_family": None, "resolved_worker_head": _null_if_empty(meta.get("resolved_head")),
                 "resolved_review_family": None, "resolved_review_head": _null_if_empty(meta.get("resolved_review_head")),
                 "routing_reason": _null_if_empty(meta.get("routing_reason")), "quota_snapshot_at": _null_if_empty(meta.get("quota_snapshot_at")),
+                "codex_launch_mode": _enum_or_none(meta.get("codex_launch_mode"), _CODEX_LAUNCH_MODES),
             },
             "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
             "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
@@ -343,6 +349,218 @@ class TaskWriter:
         self.client = client
         self.reader = TaskReader(client)
         self.audit = TaskAudit(data_dir)
+
+    def create(
+        self,
+        *,
+        role: str,
+        actor: str,
+        project: str,
+        task_type: str,
+        title: str,
+        description: str = "",
+        target: str = "ideas",
+        reference: str = "",
+        blocked_by: str = "",
+        head: str = "",
+        review_head: str = "",
+        slug: str = "",
+        base_branch: str = "",
+        complexity: str = "standard",
+        family_preference: str = "auto",
+        codex_launch_mode: str = "",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._role(role, _CREATE_ROLES)
+        project = project.strip()
+        task_type = task_type.strip()
+        title = title.strip()
+        target = target.strip()
+        reference = reference.strip()
+        blocked_by = blocked_by.strip()
+        head = head.strip()
+        review_head = review_head.strip()
+        slug = slug.strip()
+        base_branch = base_branch.strip()
+        complexity = complexity.strip() or "standard"
+        family_preference = family_preference.strip() or "auto"
+        codex_launch_mode = codex_launch_mode.strip()
+        if not project:
+            raise TaskError("validation", "create requires a non-empty project", 2)
+        if task_type not in _TASK_TYPES:
+            known = ", ".join(sorted(_TASK_TYPES))
+            raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
+        if not title:
+            raise TaskError("validation", "create requires a non-empty title", 2)
+        if target not in {"ideas", "ready"}:
+            raise TaskError("validation", "create target must be ideas or ready", 2)
+        if role in {"worker", "reviewer", "retro"} and target != "ideas":
+            raise TaskError("role_forbidden", f"{role} may create only ideas cards", 3)
+        if complexity not in _COMPLEXITIES:
+            raise TaskError("validation", "complexity must be one of: " + ", ".join(sorted(_COMPLEXITIES)), 2)
+        if family_preference not in _FAMILY_PREFERENCES:
+            raise TaskError("validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2)
+        if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
+            raise TaskError("validation", "codex launch mode must be exec or tui", 2)
+        if slug and not _SLUG_RE.match(slug):
+            raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
+
+        request_id = request_id or str(uuid.uuid4())
+        committed = self.audit.committed_event(request_id)
+        if committed is not None:
+            try:
+                event_id = self.audit.append(request_id, committed)
+            except OSError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            return {"action": "created", "task": self.reader.show(str(committed["ref"])), "event_id": event_id}
+        pending = self.audit.pending_event(request_id)
+        if pending is not None:
+            try:
+                self._finish_pending_cleanup(pending)
+                task = self.reader.show(str(pending["ref"]))
+                pending["task_id"] = task["id"]
+                pending["backend"]["revision"] = _revision(task)
+                self.audit.stage(request_id, pending)
+                event_id = self.audit.append(request_id, pending)
+            except (TaskError, OSError, KeyError, TypeError):
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            return {"action": "created", "task": self.reader.show(str(pending["ref"])), "event_id": event_id}
+
+        event = {
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": role, "id": actor},
+            "kind": "created",
+            "outcome": "success",
+            "task_id": "",
+            "ref": reference,
+            "backend": {"kind": "kanboard", "task_id": None, "revision": "pending"},
+            "request_id": request_id,
+            "payload": {
+                "project": project,
+                "task_type": task_type,
+                "target": target,
+                "reference": reference or None,
+                "blocked_by": blocked_by or None,
+                "head": head or None,
+                "review_head": review_head or None,
+                "slug": slug or None,
+                "base_branch": base_branch or None,
+                "complexity": complexity,
+                "family_preference": family_preference,
+                "codex_launch_mode": codex_launch_mode or None,
+                "title_sha256": _digest(title),
+                "description_sha256": _digest(description),
+            },
+        }
+        self.audit.stage(request_id, event)
+        try:
+            created_ref = self._create_backend(
+                project=project,
+                task_type=task_type,
+                title=title,
+                description=description,
+                target=target,
+                reference=reference,
+                blocked_by=blocked_by,
+                head=head,
+                review_head=review_head,
+                slug=slug,
+                base_branch=base_branch,
+                complexity=complexity,
+                family_preference=family_preference,
+                codex_launch_mode=codex_launch_mode,
+                event=event,
+                request_id=request_id,
+            )
+        except _CommittedWriteError:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        except Exception:
+            self.audit.discard(request_id)
+            raise
+        try:
+            task = self.reader.show(created_ref)
+        except Exception:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        event["task_id"] = task["id"]
+        event["ref"] = created_ref
+        event["backend"]["revision"] = _revision(task)
+        self.audit.stage(request_id, event)
+        try:
+            event_id = self.audit.append(request_id, event)
+        except OSError:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        return {"action": "created", "task": task, "event_id": event_id}
+
+    def _create_backend(
+        self,
+        *,
+        project: str,
+        task_type: str,
+        title: str,
+        description: str,
+        target: str,
+        reference: str,
+        blocked_by: str,
+        head: str,
+        review_head: str,
+        slug: str,
+        base_branch: str,
+        complexity: str,
+        family_preference: str,
+        codex_launch_mode: str,
+        event: dict[str, Any],
+        request_id: str,
+    ) -> str:
+        board_id, columns, swimlanes = self.reader._board()
+        if reference and self.client.call("getTaskByReference", project_id=board_id, reference=reference):
+            raise TaskError("validation", "task reference already exists", 2)
+        column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+        if column_id is None:
+            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+        swimlane_id = _matching_swimlane(swimlanes, project)
+        task_id = _positive_int(self.client.call(
+            "createTask",
+            project_id=board_id,
+            title=title,
+            description=description,
+            column_id=column_id,
+            swimlane_id=swimlane_id or 0,
+        ))
+        if task_id is None:
+            raise TaskError("backend_error", "Kanboard rejected the write", 1)
+        created_ref = reference or f"{project}-{task_id}"
+        event["ref"] = created_ref
+        event["task_id"] = f"task_kanboard_{task_id}"
+        event["backend"]["task_id"] = task_id
+        self.audit.stage(request_id, event)
+        try:
+            ok = self.client.call("updateTask", id=task_id, reference=created_ref)
+            if not ok:
+                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            values = {
+                "task_type": task_type,
+                "project": project,
+                "complexity": complexity,
+                "family_preference": family_preference,
+            }
+            if blocked_by:
+                values["blocked_by"] = blocked_by
+            if head:
+                values["head"] = head
+            if review_head:
+                values["review_head"] = review_head
+            if slug:
+                values["slug"] = slug
+            if base_branch:
+                values["base_branch"] = base_branch
+            if codex_launch_mode:
+                values["codex_launch_mode"] = codex_launch_mode
+            self.client.call("saveTaskMetadata", task_id=task_id, values=values)
+        except Exception as exc:
+            raise _CommittedWriteError() from exc
+        return created_ref
 
     def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, _COMMENT_ROLES)
@@ -542,6 +760,9 @@ class TaskWriter:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             return
+        if event.get("kind") == "created":
+            self._finish_pending_create(event, payload)
+            return
         if event.get("kind") == "claimed":
             self._finish_pending_claim(event, payload)
             return
@@ -584,6 +805,21 @@ class TaskWriter:
         normalized = self.reader.show(ref)
         if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
+
+    def _finish_pending_create(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        ref = str(event.get("ref") or "")
+        if not ref:
+            raise TaskError("backend_error", "pending create is missing its task ref", 1)
+        task = self.reader.show(ref)
+        self.client.call(
+            "saveTaskMetadata",
+            task_id=_task_number(task),
+            values=_create_metadata_values(payload),
+        )
+        normalized = self.reader.show(ref)
+        expected_mode = _text(payload.get("codex_launch_mode"))
+        if expected_mode and normalized["routing"]["codex_launch_mode"] != expected_mode:
+            raise TaskError("backend_error", "pending create metadata remains incomplete", 1)
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:
@@ -643,6 +879,20 @@ def _enum_or_default(value: Any, allowed: set[str], default: str) -> str:
     return candidate if candidate in allowed else default
 
 
+def _enum_or_none(value: Any, allowed: set[str]) -> str | None:
+    candidate = _text(value)
+    return candidate if candidate in allowed else None
+
+
+def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:
+    wanted = re.sub(r"[^a-z0-9]+", "", project.lower())
+    for identifier, name in swimlanes.items():
+        candidate = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if candidate == wanted:
+            return identifier
+    return None
+
+
 def _is_steward_report(task: dict[str, Any]) -> bool:
     return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"
 
@@ -650,6 +900,27 @@ def _is_steward_report(task: dict[str, Any]) -> bool:
 def _matches_optional(expected: Any, actual: Any) -> bool:
     expected_text = _text(expected)
     return not expected_text or actual == expected_text
+
+
+def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
+    values = {
+        "task_type": _text(payload.get("task_type")),
+        "project": _text(payload.get("project")),
+        "complexity": _text(payload.get("complexity")) or "standard",
+        "family_preference": _text(payload.get("family_preference")) or "auto",
+    }
+    for payload_key, metadata_key in (
+        ("blocked_by", "blocked_by"),
+        ("head", "head"),
+        ("review_head", "review_head"),
+        ("slug", "slug"),
+        ("base_branch", "base_branch"),
+        ("codex_launch_mode", "codex_launch_mode"),
+    ):
+        value = _text(payload.get(payload_key))
+        if value:
+            values[metadata_key] = value
+    return values
 
 
 def _rfc3339(value: Any) -> str | None:

@@ -7,6 +7,7 @@ import os
 import shlex
 import stat
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +22,17 @@ CODEX_EFFORTS = {
     "extra": "xhigh",
     "xhigh": "xhigh",
 }
+CODEX_LAUNCH_MODES = {"exec", "tui"}
 
 
 class HeadLaunchError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class HeadLaunch:
+    command: str
+    prompt_after_start: bool = False
 
 
 def ensure_claude_workspace_trusted(workspace: str, config: Path | None = None) -> None:
@@ -58,27 +66,77 @@ def render_claude_command(profile: dict[str, Any], prompt_file: str) -> str:
     return f"{shlex.join(args)} {_prompt_substitution(prompt_file)}"
 
 
-def render_codex_command(profile: dict[str, Any], prompt_file: str, *, workspace: str) -> str:
-    home = str(profile.get("codex_home") or os.environ.get("TA_CODEX_HOME") or CODEX_HOME_DEFAULT)
+def render_codex_command(
+    profile: dict[str, Any],
+    prompt_file: str,
+    *,
+    workspace: str,
+    mode: str | None = None,
+) -> str:
+    return render_codex_launch(profile, prompt_file, workspace=workspace, mode=mode).command
+
+
+def render_codex_launch(
+    profile: dict[str, Any],
+    prompt_file: str,
+    *,
+    workspace: str,
+    mode: str | None = None,
+) -> HeadLaunch:
+    launch_mode = _codex_launch_mode(profile, mode)
+    if launch_mode == "tui":
+        return HeadLaunch(_render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True)
+    return HeadLaunch(_render_codex_exec_command(profile, prompt_file, workspace=workspace))
+
+
+def _render_codex_exec_command(profile: dict[str, Any], prompt_file: str, *, workspace: str) -> str:
+    args = _codex_base_args(profile)
+    args.insert(1, "exec")
+    args.append("--skip-git-repo-check")
+    for path in _codex_trust_paths(workspace):
+        args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
+    return f"CODEX_HOME={shlex.quote(_codex_home(profile))} {shlex.join(args)} {_prompt_substitution(prompt_file)}"
+
+
+def _render_codex_tui_command(profile: dict[str, Any], *, workspace: str) -> str:
+    args = _codex_base_args(profile)
+    for path in _codex_trust_paths(workspace):
+        args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
+    return f"CODEX_HOME={shlex.quote(_codex_home(profile))} {shlex.join(args)}"
+
+
+def _codex_base_args(profile: dict[str, Any]) -> list[str]:
     args = [
         "codex",
-        "exec",
         "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
     ]
     model = profile.get("model")
     if model:
         args += ["-m", str(model)]
+    effort = _codex_effort(profile)
+    if effort:
+        args += ["-c", f'model_reasoning_effort="{effort}"']
+    return args
+
+
+def _codex_home(profile: dict[str, Any]) -> str:
+    return str(profile.get("codex_home") or os.environ.get("TA_CODEX_HOME") or CODEX_HOME_DEFAULT)
+
+
+def _codex_effort(profile: dict[str, Any]) -> str | None:
     effort_name = str(profile.get("effort") or "default")
     if effort_name not in CODEX_EFFORTS:
         known = ", ".join(sorted(CODEX_EFFORTS))
         raise HeadLaunchError(f"codex profile has unknown effort {effort_name!r} (known: {known})")
-    effort = CODEX_EFFORTS[effort_name]
-    if effort:
-        args += ["-c", f'model_reasoning_effort="{effort}"']
-    for path in _codex_trust_paths(workspace):
-        args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
-    return f"CODEX_HOME={shlex.quote(home)} {shlex.join(args)} {_prompt_substitution(prompt_file)}"
+    return CODEX_EFFORTS[effort_name]
+
+
+def _codex_launch_mode(profile: dict[str, Any], override: str | None) -> str:
+    mode = (override or str(profile.get("codex_mode") or "exec")).strip()
+    if mode not in CODEX_LAUNCH_MODES:
+        known = ", ".join(sorted(CODEX_LAUNCH_MODES))
+        raise HeadLaunchError(f"codex profile has unknown launch mode {mode!r} (known: {known})")
+    return mode
 
 
 def _load_claude_config(config: Path) -> dict[str, Any]:

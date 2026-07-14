@@ -23,6 +23,7 @@ from secretary.dispatcher import (
     _wrap_role_shell_command,
 )
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
+from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
@@ -600,6 +601,52 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn('"$(cat TASK.md)"', command)
         self.assertNotIn('codex "$(cat TASK.md)"', command)
 
+    def test_codex_tui_command_omits_exec_and_prompt_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+
+            command = _render_codex_command(
+                {"adapter": "codex", "model": "gpt-5.5", "effort": "extra", "codex_home": "/tmp/codex-home"},
+                "TASK.md",
+                workspace=str(workspace),
+                mode="tui",
+            )
+
+        self.assertIn("CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("codex exec", command)
+        self.assertNotIn("--skip-git-repo-check", command)
+        self.assertNotIn('"$(cat TASK.md)"', command)
+        self.assertIn("trust_level=\"trusted\"", command)
+
+    def test_card_launch_mode_overrides_codex_profile_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = {  # type: ignore[attr-defined]
+                "profiles": {
+                    "codex-tui": {
+                        "adapter": "codex",
+                        "model": "gpt-5.5",
+                        "codex_mode": "tui",
+                        "codex_home": "/tmp/codex-home",
+                    }
+                }
+            }
+
+            launch = catalog.head_launch(  # type: ignore[attr-defined]
+                "codex-tui",
+                "TASK.md",
+                workspace=str(workspace),
+                role="worker",
+                codex_mode="exec",
+            )
+
+        self.assertFalse(launch.prompt_after_start)
+        self.assertIn("codex exec", launch.command)
+        self.assertIn('"$(cat TASK.md)"', launch.command)
+
     def test_claude_command_prepares_workspace_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".claude.json"
@@ -760,6 +807,84 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 
+    def test_tui_launch_waits_then_sends_initial_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["Working"]}}])
+
+            handle = host._launch(
+                str(workspace),
+                "title",
+                "codex",
+                "TASK.md",
+                role="worker",
+                env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                codex_mode="tui",
+            )
+
+        self.assertEqual(handle, "term-tui")
+        create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
+        wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
+        send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
+        self.assertLess(create_i, wait_i)
+        self.assertLess(wait_i, send_i)
+        self.assertEqual(host.calls[wait_i][host.calls[wait_i].index("--terminal") + 1], "term-tui")
+        self.assertIn("Read TASK.md", host.calls[send_i][host.calls[send_i].index("--text") + 1])
+        self.assertEqual(host.catalog.modes, ["tui"])
+
+    def test_tui_delivery_resends_enter_when_prompt_stays_in_composer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
+            host = RecordingTuiHost(
+                workspace,
+                [
+                    {"terminal": {"tail": ["\u203a Read TASK.md"]}},
+                    {"terminal": {"tail": ["thinking"]}},
+                ],
+            )
+
+            with mock.patch("secretary.dispatcher.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("secretary.dispatcher.TUI_DELIVERY_POLL_S", 0.01):
+                host._launch(
+                    str(workspace),
+                    "title",
+                    "codex",
+                    "TASK.md",
+                    role="worker",
+                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                    codex_mode="tui",
+                )
+
+        sends = [call for call in host.calls if call[:3] == ["orca", "terminal", "send"]]
+        self.assertEqual(len(sends), 2)
+        self.assertIn("Read TASK.md", sends[0][sends[0].index("--text") + 1])
+        self.assertEqual(sends[1][sends[1].index("--text") + 1], "")
+
+    def test_tui_delivery_failure_closes_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
+
+            with mock.patch("secretary.dispatcher.TUI_DELIVERY_TIMEOUT_S", 0.03), \
+                 mock.patch("secretary.dispatcher.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("secretary.dispatcher.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("secretary.dispatcher.TUI_DELIVERY_RETRIES", 1), \
+                 self.assertRaises(HostError):
+                host._launch(
+                    str(workspace),
+                    "title",
+                    "codex",
+                    "TASK.md",
+                    role="worker",
+                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                    codex_mode="tui",
+                )
+
+        self.assertIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
+
 
 class GitBranchHost(CommandHostRuntime):
     def __init__(self, root: Path) -> None:
@@ -790,9 +915,48 @@ class GitBranchHost(CommandHostRuntime):
         *,
         role: str,
         env_name: str,
+        codex_mode: str | None = None,
     ) -> str:
         self.launched.append((head, prompt_file))
         return f"test:{head}"
+
+
+class TuiCatalog:
+    def __init__(self) -> None:
+        self.modes: list[str | None] = []
+
+    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+        return None
+
+    def head_launch(
+        self,
+        head: str,
+        prompt_file: str,
+        *,
+        workspace: str,
+        role: str,
+        codex_mode: str | None = None,
+    ) -> HeadLaunch:
+        self.modes.append(codex_mode)
+        return HeadLaunch("CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox", prompt_after_start=True)
+
+
+class RecordingTuiHost(CommandHostRuntime):
+    def __init__(self, root: Path, reads: list[dict]) -> None:
+        self.catalog = TuiCatalog()
+        super().__init__(self.catalog, root, mode="real")  # type: ignore[arg-type]
+        self.calls: list[list[str]] = []
+        self.reads = list(reads)
+
+    def _run_json(self, args: list[str]) -> dict:
+        self.calls.append(args)
+        if args[:3] == ["orca", "terminal", "create"]:
+            return {"terminal": {"handle": "term-tui"}}
+        if args[:3] == ["orca", "terminal", "read"]:
+            if len(self.reads) > 1:
+                return self.reads.pop(0)
+            return self.reads[0] if self.reads else {"terminal": {"tail": []}}
+        return {}
 
 
 def git(cwd: Path, *args: str) -> str:
