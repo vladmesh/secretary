@@ -98,6 +98,31 @@ config/data-only checks. Its exit codes are 0 for a completed clean check, 1 for
 findings (and warnings with `--strict`), and 2 when config or inventory cannot be
 checked.
 
+## Dispatcher pilot
+
+Phase 7 includes a product-owned pilot dispatcher:
+
+```bash
+python3 -m secretary dispatcher preflight --instance ~/secretary-instance \
+  --pilot-ref secretary-000
+python3 -m secretary dispatcher pause-old --instance ~/secretary-instance \
+  --pilot-ref secretary-000 --evidence-file /tmp/old-dispatcher-paused.txt
+python3 -m secretary dispatcher start-new-pilot --instance ~/secretary-instance \
+  --pilot-ref secretary-000
+python3 -m secretary dispatcher tick --instance ~/secretary-instance \
+  --pilot-ref secretary-000
+```
+
+The pilot dispatcher fails closed without an exact `--pilot-ref` and matching
+cutover state. It writes only through `secretary task`, including dispatcher
+claim, worker report handling, Validate moves, reviewer verdict handling and
+terminal transitions. Rollback stops the new host handles and leaves the board
+card, claim, comments, PR and review state intact for the old dispatcher.
+
+See `docs/dispatcher-cutover.md` for the full operator flow and the remaining
+post-merge live pilot condition before production ownership moves from the
+legacy dispatcher.
+
 The default doctor inventory is read-only. It compares project repos, systemd units
 and Orca repo registrations and prints three sets:
 

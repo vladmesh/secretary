@@ -355,34 +355,128 @@ class TaskWriter:
         marker = f"report:{kind}"
         return self._write("reported", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
 
+    def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+        self._role(role, {"reviewer"})
+        if kind not in {"green", "red"} or (kind == "red" and not body.strip()):
+            raise TaskError("validation", "red verdicts require a non-empty body", 2)
+        marker = f"review:{kind}"
+        return self._write("verdict", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
+
+    def claim(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        worker: str,
+        resolved_head: str = "",
+        resolved_review_head: str = "",
+        slug: str = "",
+        base_branch: str = "",
+        cap: int = 3,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._role(role, {"dispatcher"})
+        worker = worker.strip()
+        if not worker:
+            raise TaskError("validation", "claim requires a non-empty worker id", 2)
+        if cap < 1:
+            raise TaskError("validation", "claim cap must be positive", 2)
+
+        def mutation(task: dict[str, Any]) -> Any:
+            if task["state"] != "ready":
+                raise TaskError("claim_conflict", "claim requires a Ready task", 3)
+            if task["claim"]["worker"] is not None:
+                raise TaskError("claim_conflict", "task is already claimed", 3)
+            blocked_by = task.get("blocked_by")
+            if blocked_by:
+                predecessor = self.reader.show(str(blocked_by))
+                if predecessor["state"] != "done":
+                    raise TaskError("predecessor_open", "blocked_by task is not Done", 3)
+            for active in self.reader.list(states={"in_progress", "validate"}):
+                if active["id"] == task["id"] or _is_steward_report(active):
+                    continue
+                if active["type"] == "code" and task["type"] == "code" and active["project"] == task["project"]:
+                    raise TaskError("capacity_reached", "one active code task per project is already claimed", 3)
+            active_count = sum(
+                1
+                for active in self.reader.list(states={"in_progress", "validate"})
+                if active["id"] != task["id"] and not _is_steward_report(active)
+            )
+            if active_count >= cap:
+                raise TaskError("capacity_reached", "active task capacity is reached", 3)
+
+            values = {
+                "claim": worker,
+                "resolved_head": resolved_head or task["routing"]["head_override"] or "",
+            }
+            if resolved_review_head:
+                values["resolved_review_head"] = resolved_review_head
+            if slug:
+                values["slug"] = slug
+            if base_branch:
+                values["base_branch"] = base_branch
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=values)
+            try:
+                self._move_raw(task, "in_progress")
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+
+        return self._write(
+            "claimed",
+            role,
+            actor,
+            reference,
+            request_id,
+            {
+                "worker": worker,
+                "resolved_head": resolved_head or None,
+                "resolved_review_head": resolved_review_head or None,
+                "slug": slug or None,
+                "base_branch": base_branch or None,
+                "cap": cap,
+            },
+            mutation,
+        )
+
     def move(self, *, role: str, actor: str, reference: str, target: str, reason: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, _ROLES)
-        if target == "in_progress":
-            raise TaskError("transition_forbidden", "in_progress is entered only by dispatcher claim", 3)
         def mutation(task: dict[str, Any]) -> Any:
             source = task["state"]
             if (source, target) not in _TRANSITIONS[role]:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            board_id, columns, _ = self.reader._board()
-            column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
-            if column_id is None:
-                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
-            raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
-            if not isinstance(raw, dict):
-                raise TaskError("not_found", "task was not found", 2)
-            ok = self.client.call("moveTaskPosition", project_id=board_id, task_id=_task_number(task), column_id=column_id, position=1, swimlane_id=_positive_int(raw.get("swimlane_id")) or 0)
-            if not ok:
-                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            self._move_raw(task, target)
             try:
                 if target == "ready":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
+                elif source == "validate":
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
                 if reason.strip():
                     self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
             except Exception as exc:
                 raise _CommittedWriteError() from exc
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
+
+    def _move_raw(self, task: dict[str, Any], target: str) -> None:
+        board_id, columns, _ = self.reader._board()
+        column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+        if column_id is None:
+            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+        raw = self.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
+        if not isinstance(raw, dict):
+            raise TaskError("not_found", "task was not found", 2)
+        ok = self.client.call(
+            "moveTaskPosition",
+            project_id=board_id,
+            task_id=_task_number(task),
+            column_id=column_id,
+            position=1,
+            swimlane_id=_positive_int(raw.get("swimlane_id")) or 0,
+        )
+        if not ok:
+            raise TaskError("backend_error", "Kanboard rejected the write", 1)
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
@@ -444,9 +538,14 @@ class TaskWriter:
         return repaired, unresolved
 
     def _finish_pending_cleanup(self, event: dict[str, Any]) -> None:
-        """Complete an idempotent Ready reset before recording its move event."""
+        """Complete idempotent backend cleanup before recording a pending event."""
         payload = event.get("payload")
-        if event.get("kind") != "moved" or not isinstance(payload, dict) or payload.get("to") != "ready":
+        if not isinstance(payload, dict):
+            return
+        if event.get("kind") == "claimed":
+            self._finish_pending_claim(event, payload)
+            return
+        if event.get("kind") != "moved" or payload.get("to") != "ready":
             return
         task = self.reader.show(str(event["ref"]))
         if task["state"] != "ready":
@@ -464,6 +563,27 @@ class TaskWriter:
             or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
         ):
             raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
+
+    def _finish_pending_claim(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Complete a claim whose metadata committed before the column move failed."""
+        ref = str(event["ref"])
+        worker = str(payload.get("worker") or "")
+        if not worker:
+            raise TaskError("backend_error", "pending claim is missing its worker id", 1)
+        task = self.reader.show(ref)
+        if task["claim"]["worker"] != worker:
+            raise TaskError("backend_error", "pending claim no longer matches task claim", 1)
+        if not _matches_optional(payload.get("resolved_head"), task["routing"]["resolved_worker_head"]):
+            raise TaskError("backend_error", "pending claim worker head remains incomplete", 1)
+        if not _matches_optional(payload.get("resolved_review_head"), task["routing"]["resolved_review_head"]):
+            raise TaskError("backend_error", "pending claim review head remains incomplete", 1)
+        if task["state"] == "ready":
+            self._move_raw(task, "in_progress")
+        elif task["state"] != "in_progress":
+            raise TaskError("backend_error", "pending claim no longer matches task state", 1)
+        normalized = self.reader.show(ref)
+        if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
+            raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:
@@ -521,6 +641,15 @@ def _split_heads(value: Any) -> list[str]:
 def _enum_or_default(value: Any, allowed: set[str], default: str) -> str:
     candidate = _text(value)
     return candidate if candidate in allowed else default
+
+
+def _is_steward_report(task: dict[str, Any]) -> bool:
+    return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"
+
+
+def _matches_optional(expected: Any, actual: Any) -> bool:
+    expected_text = _text(expected)
+    return not expected_text or actual == expected_text
 
 
 def _rfc3339(value: Any) -> str | None:

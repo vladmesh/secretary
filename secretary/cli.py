@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Callable
 
 from secretary.backup import check_backup_health, create_backups, verify_backup
 from secretary.config import ConfigError, load_config, validate, validate_instance
@@ -20,6 +19,7 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
+from secretary.dispatcher_commands import add_dispatcher_subcommands
 from secretary.host import (
     FixtureHostSource,
     KindDiff,
@@ -42,7 +42,7 @@ from secretary.memory_write import (
 from secretary.offsite import check_last_fetch
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.task_commands import add_task_subcommands
 
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="secretary")
     subparsers = parser.add_subparsers(dest="command")
+    add_dispatcher_subcommands(subparsers)
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
@@ -263,40 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.set_defaults(handler=run_project_gate)
     project.set_defaults(handler=not_implemented("project"))
 
-    task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
-    task_subcommands = task.add_subparsers(dest="task_command")
-    task_list = task_subcommands.add_parser("list")
-    task_list.add_argument(
-        "--state",
-        action="append",
-        choices=("ideas", "ready", "in_progress", "validate", "blocked", "done"),
-    )
-    task_list.add_argument("--project")
-    task_list.set_defaults(handler=run_task_list)
-    task_show = task_subcommands.add_parser("show")
-    task_show.add_argument("--ref", required=True)
-    task_show.set_defaults(handler=run_task_show)
-    for name, handler in (("comment", run_task_comment), ("report", run_task_report), ("move", run_task_move)):
-        command = task_subcommands.add_parser(name)
-        command.add_argument("--ref", required=True)
-        command.add_argument("--role", required=True, choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro"))
-        command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
-        command.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
-        command.add_argument("--request-id")
-        command.add_argument("--body-file")
-        if name == "report":
-            command.add_argument("--kind", required=True, choices=("done", "blocked"))
-        if name == "move":
-            command.add_argument("--to", required=True, choices=("ideas", "ready", "in_progress", "validate", "blocked", "done"))
-            command.add_argument("--reason-file")
-        command.set_defaults(handler=handler)
-    reconcile_audit = task_subcommands.add_parser("reconcile-audit")
-    reconcile_audit.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
-    reconcile_audit.set_defaults(handler=run_task_reconcile_audit)
-    verify_audit = task_subcommands.add_parser("verify-audit")
-    verify_audit.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
-    verify_audit.set_defaults(handler=run_task_verify_audit)
-    task.set_defaults(handler=not_implemented("task"))
+    add_task_subcommands(subparsers)
 
     memory = subparsers.add_parser("memory", help="manage the memory journal")
     memory_subcommands = memory.add_subparsers(dest="memory_command")
@@ -352,73 +320,6 @@ def add_memory_write_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--data-dir")
     parser.add_argument("--actor", required=True)
-
-
-def run_task_list(args: argparse.Namespace) -> int:
-    return _run_task_read(lambda reader: reader.list(states=set(args.state or ()), project=args.project))
-
-
-def run_task_show(args: argparse.Namespace) -> int:
-    return _run_task_read(lambda reader: reader.show(args.ref))
-
-
-def _run_task_read(operation: Callable[[TaskReader], object]) -> int:
-    try:
-        reader = TaskReader(KanboardClient())
-        result = operation(reader)
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
-
-
-def _read_body(path: str | None) -> str:
-    if path is None:
-        return ""
-    try:
-        return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
-
-
-def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
-    try:
-        body = _read_body(getattr(args, "body_file", None) or getattr(args, "reason_file", None))
-        result = operation(TaskWriter(KanboardClient(), data_dir=args.data_dir), body, args.actor or args.role)
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
-
-
-def run_task_comment(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.comment(role=args.role, actor=actor, reference=args.ref, body=body, request_id=args.request_id))
-
-
-def run_task_report(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.report(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
-
-
-def run_task_move(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.move(role=args.role, actor=actor, reference=args.ref, target=args.to, reason=body, request_id=args.request_id))
-
-
-def run_task_reconcile_audit(args: argparse.Namespace) -> int:
-    try:
-        repaired, unresolved = TaskWriter(KanboardClient(), data_dir=args.data_dir).reconcile()
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps({"repaired": repaired, "unresolved": unresolved}, sort_keys=True, separators=(",", ":")))
-    return 0 if unresolved == 0 else 1
-
-
-def run_task_verify_audit(args: argparse.Namespace) -> int:
-    status = TaskAudit(args.data_dir).status()
-    print(json.dumps(status, sort_keys=True, separators=(",", ":")))
-    return 0 if status["ok"] else 1
 
 
 def run_doctor(args: argparse.Namespace) -> int:
