@@ -1,0 +1,176 @@
+"""State helpers for the pilot dispatcher."""
+
+from __future__ import annotations
+
+import re
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class DispatcherRecord:
+    worker: str
+    workspace: str
+    handle: str
+    head: str
+    review_head: str
+    attempt_id: str
+    comment_baseline: int
+    review_baseline: int
+    state: str
+    claimed_at: float
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "claimed_at": self.claimed_at,
+            "comment_baseline": self.comment_baseline,
+            "handle": self.handle,
+            "head": self.head,
+            "attempt_id": self.attempt_id,
+            "review_baseline": self.review_baseline,
+            "review_head": self.review_head,
+            "state": self.state,
+            "worker": self.worker,
+            "workspace": self.workspace,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "DispatcherRecord":
+        return cls(
+            worker=str(payload.get("worker") or ""),
+            workspace=str(payload.get("workspace") or ""),
+            handle=str(payload.get("handle") or ""),
+            head=str(payload.get("head") or ""),
+            review_head=str(payload.get("review_head") or ""),
+            attempt_id=str(payload.get("attempt_id") or ""),
+            comment_baseline=int(payload.get("comment_baseline") or 0),
+            review_baseline=int(payload.get("review_baseline") or 0),
+            state=str(payload.get("state") or "claimed"),
+            claimed_at=float(payload.get("claimed_at") or time.time()),
+        )
+
+
+def now_rfc3339() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def new_attempt_id() -> str:
+    return f"attempt-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
+
+
+def ensure_attempt(payload: dict[str, Any], reference: str, actor: str, owner: str) -> str:
+    attempt_id = str(payload.get("attempt_id") or "")
+    if attempt_id:
+        return attempt_id
+    attempt_id = new_attempt_id()
+    payload["attempt_id"] = attempt_id
+    record_attempt(payload, attempt_id, reference, actor, owner)
+    return attempt_id
+
+
+def record_attempt(
+    payload: dict[str, Any],
+    attempt_id: str,
+    reference: str,
+    actor: str,
+    owner: str,
+) -> None:
+    attempts = payload.setdefault("attempts", [])
+    if not isinstance(attempts, list):
+        attempts = []
+        payload["attempts"] = attempts
+    if any(isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id for attempt in attempts):
+        return
+    attempts.append({
+        "attempt_id": attempt_id,
+        "pilot_ref": reference,
+        "owner": owner,
+        "started_at": now_rfc3339(),
+        "started_by": actor,
+    })
+
+
+def mark_attempt_rolled_back(payload: dict[str, Any], actor: str, reason: str) -> None:
+    attempt_id = str(payload.get("attempt_id") or "")
+    attempts = payload.get("attempts")
+    if not attempt_id or not isinstance(attempts, list):
+        return
+    for attempt in reversed(attempts):
+        if isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id:
+            attempt["rolled_back_at"] = now_rfc3339()
+            attempt["rolled_back_by"] = actor
+            attempt["rollback_reason"] = reason
+            return
+
+
+def attempt_request_id(attempt_id: str, action: str, reference: str, suffix: str = "") -> str:
+    parts = ["dispatcher", request_token(attempt_id or "attempt-missing"), action, reference]
+    if suffix:
+        parts.append(suffix)
+    return "-".join(request_token(part) for part in parts)
+
+
+def request_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
+    return token or "empty"
+
+
+def claim_mismatch(
+    task: dict[str, Any],
+    worker: str,
+    resolved_head: str,
+    resolved_review_head: str,
+) -> list[str]:
+    mismatches = []
+    if task.get("state") != "in_progress":
+        mismatches.append("state")
+    if task.get("claim", {}).get("worker") != worker:
+        mismatches.append("worker")
+    routing = task.get("routing", {})
+    if routing.get("resolved_worker_head") != resolved_head:
+        mismatches.append("resolved_head")
+    if routing.get("resolved_review_head") != resolved_review_head:
+        mismatches.append("resolved_review_head")
+    return mismatches
+
+
+def claim_actual(task: dict[str, Any]) -> dict[str, Any]:
+    routing = task.get("routing", {})
+    return {
+        "state": task.get("state"),
+        "worker": task.get("claim", {}).get("worker"),
+        "resolved_head": routing.get("resolved_worker_head"),
+        "resolved_review_head": routing.get("resolved_review_head"),
+    }
+
+
+def record_divergence(
+    payload: dict[str, Any],
+    attempt_id: str,
+    reference: str,
+    step: str,
+    reason: str,
+    *,
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+    details: list[str],
+) -> dict[str, Any]:
+    divergences = payload.setdefault("controlled_divergences", [])
+    if not isinstance(divergences, list):
+        divergences = []
+        payload["controlled_divergences"] = divergences
+    divergence = {
+        "id": f"div_{uuid.uuid4().hex[:16]}",
+        "at": now_rfc3339(),
+        "attempt_id": attempt_id,
+        "pilot_ref": reference,
+        "step": step,
+        "reason": reason,
+        "expected": expected,
+        "actual": actual,
+        "details": details,
+    }
+    divergences.append(divergence)
+    return divergence

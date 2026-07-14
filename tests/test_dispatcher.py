@@ -19,11 +19,11 @@ from secretary.dispatcher import (
     LegacyPauseSnapshot,
     PilotSelector,
     _legacy_worker_branch,
-    _attempt_request_id,
     _render_codex_command,
     _wrap_role_shell_command,
 )
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
+from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
