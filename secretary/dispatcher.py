@@ -381,6 +381,9 @@ class CommandHostRuntime:
             except TuiDeliveryError as exc:
                 _close_tui_terminal(handle, run_json=self._run_json)
                 raise HostError(str(exc)) from None
+            except HostError:
+                _close_tui_terminal(handle, run_json=self._run_json)
+                raise
         return handle
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
