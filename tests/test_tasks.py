@@ -262,6 +262,87 @@ class TaskWriterTests(unittest.TestCase):
         self.assertIsNone(task["routing"]["resolved_review_head"])
         self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
 
+    def test_dispatcher_claim_stamps_metadata_moves_and_audits(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        result = self.writer.claim(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="secretary-468-runtime",
+            resolved_head="codex",
+            resolved_review_head="codex-reviewer",
+            request_id="claim-once",
+        )
+
+        self.assertEqual(result["action"], "claimed")
+        self.assertEqual(result["task"]["state"], "in_progress")
+        self.assertEqual(self.client.metadata[12]["claim"], "secretary-468-runtime")
+        self.assertEqual(self.client.metadata[12]["resolved_head"], "codex")
+        self.assertEqual(self.client.metadata[12]["resolved_review_head"], "codex-reviewer")
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            event = json.loads(events.readline())
+        self.assertEqual(event["kind"], "claimed")
+        self.assertEqual(event["payload"]["worker"], "secretary-468-runtime")
+
+    def test_claim_rejects_project_code_capacity_without_write(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        self.client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-999",
+                "title": "Other code",
+                "column_id": 3,
+                "position": 1,
+                "swimlane_id": 4,
+            }
+        )
+        self.client.metadata[14] = {
+            "project": "secretary",
+            "task_type": "code",
+            "claim": "other-worker",
+        }
+
+        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+            self.writer.claim(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+            )
+
+        self.assertEqual(raised.exception.code, "capacity_reached")
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.client.calls))
+
+    def test_reviewer_verdict_uses_review_marker(self) -> None:
+        result = self.writer.verdict(
+            role="reviewer",
+            actor="r",
+            reference="secretary-468",
+            kind="green",
+            body="ok",
+            request_id="green",
+        )
+
+        self.assertEqual(result["action"], "verdict")
+        comment = [call for call in self.client.calls if call[0] == "createComment"][-1]
+        self.assertEqual(comment[1]["content"], "[review:green]\nok")
+
+    def test_validate_to_in_progress_rework_is_dispatcher_only(self) -> None:
+        self.client.tasks[0]["column_id"] = 4
+        self.client.metadata[12]["resolved_review_head"] = "codex-reviewer"
+
+        result = self.writer.move(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="in_progress",
+            reason="review:red",
+            request_id="rework",
+        )
+
+        self.assertEqual(result["task"]["state"], "in_progress")
+        self.assertEqual(self.client.metadata[12]["resolved_review_head"], "")
+
     def test_completed_ready_replay_does_not_reset_metadata_again(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-done")
