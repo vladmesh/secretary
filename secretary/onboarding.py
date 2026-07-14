@@ -73,7 +73,7 @@ def _project_add_locked(
 
     identity = _identity(repo, project_id, default_branch, existing_binding)
     if existing_binding:
-        conflict = _binding_conflict(existing_binding, identity)
+        conflict = _binding_conflict(existing_binding, identity, allow_enabled=dry_run)
         if conflict:
             artifact = _base_artifact(
                 repo, project_id, default_branch, _safe_scan(repo, default_branch)
@@ -177,8 +177,10 @@ def _identity(
     return identity
 
 
-def _binding_conflict(binding: dict[str, Any], identity: dict[str, Any]) -> str | None:
-    if binding.get("enabled") is True:
+def _binding_conflict(
+    binding: dict[str, Any], identity: dict[str, Any], *, allow_enabled: bool = False
+) -> str | None:
+    if binding.get("enabled") is True and not allow_enabled:
         return "existing binding is enabled"
     for field in ("id", "repo", "adapter", "default_branch"):
         if binding.get(field) != identity[field]:

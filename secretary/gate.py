@@ -68,12 +68,18 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
             expected_run = _gate_run_id(project_id, expected_head, provision_run, current_digest)
             expected_path = instance / "gate-runs" / project_id / expected_run / "result.json"
             if expected_path.exists():
-                previous = load_config(expected_path)
+                try:
+                    previous = load_config(expected_path)
+                except ConfigError:
+                    return 1, {"status": "conflict", "finding": "current gate result is corrupt"}
                 if (isinstance(previous, dict) and previous.get("status") == "passed" and
                         previous.get("adapter_digest") == current_digest):
                     return 0, previous
             for candidate_path in (instance / "gate-runs" / project_id).glob("*/result.json"):
-                candidate = load_config(candidate_path)
+                try:
+                    candidate = load_config(candidate_path)
+                except ConfigError:
+                    continue
                 revision = candidate.get("input_revision", {}) if isinstance(candidate, dict) else {}
                 if (candidate.get("status") == "passed" and
                         revision.get("scanner_head") == expected_head and
@@ -106,7 +112,12 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     run_id = _gate_run_id(project_id, draft["scanner"]["repo"]["head"], provision_run, digest)
     result_path = instance / "gate-runs" / project_id / run_id / "result.json"
     if result_path.exists():
-        previous = load_config(result_path)
+        try:
+            previous = load_config(result_path)
+        except ConfigError:
+            return 1, _conflict_result(
+                draft, run_id, provision_run, digest, "current gate result is corrupt"
+            )
         if previous.get("status") == "passed" and binding.get("enabled") is True:
             return 0, previous
         if previous.get("status") == "passed":
@@ -189,11 +200,17 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         result["findings"] = [{"code": "gate.failed", "message": "gate output is invalid"}]
         return _publish_result(result_path, result)
     compatibility = _compatibility_manifest(enabled, adapter)
+    try:
+        compatibility_paths = _compatibility_paths(instance, project_id)
+    except ConfigError:
+        return 1, {"status": "conflict", "finding": "instance compatibility config is invalid"}
+    target_record = _compatibility_target_record(instance, project_id)
     writes = [
         (result_path, json.dumps(result, indent=2, sort_keys=True) + "\n"),
         (instance / "adapter-drafts" / f"{project_id}.yaml", yaml.safe_dump(updated, sort_keys=False)),
         (instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(enabled, sort_keys=False)),
-        (instance / "compatibility-manifests" / f"{project_id}.toml", compatibility),
+        *((path, compatibility) for path in compatibility_paths),
+        (target_record, json.dumps({"version": 1, "paths": [str(path) for path in compatibility_paths]}, indent=2, sort_keys=True) + "\n"),
     ]
     try:
         publish_state_atomic(writes)
@@ -277,6 +294,42 @@ def _compatibility_manifest(binding: dict[str, Any], adapter: dict[str, Any]) ->
     return "\n".join(lines) + "\n"
 
 
+def _compatibility_paths(instance: Path, project_id: str) -> list[Path]:
+    paths = [instance / "compatibility-manifests" / f"{project_id}.toml"]
+    config_path = instance / "instance.yaml"
+    if config_path.exists():
+        config = load_config(config_path)
+        if not isinstance(config, dict):
+            raise ConfigError("instance config must be a mapping")
+        compatibility = config.get("compatibility", {})
+        if not isinstance(compatibility, dict):
+            raise ConfigError("instance compatibility config must be a mapping")
+        manifest_dir = compatibility.get("dispatcher_manifest_dir")
+        if manifest_dir:
+            paths.append(Path(manifest_dir) / f"{project_id}.toml")
+    return paths
+
+
+def _compatibility_target_record(instance: Path, project_id: str) -> Path:
+    return instance / "compatibility-manifests" / f"{project_id}.targets.json"
+
+
+def _recorded_compatibility_paths(instance: Path, project_id: str) -> list[Path]:
+    record_path = _compatibility_target_record(instance, project_id)
+    if not record_path.exists():
+        return []
+    record = load_config(record_path)
+    if not isinstance(record, dict) or record.get("version") != 1:
+        raise ConfigError("compatibility target record is invalid")
+    values = record.get("paths")
+    if not isinstance(values, list) or not values or not all(isinstance(value, str) for value in values):
+        raise ConfigError("compatibility target record is invalid")
+    paths = [Path(value) for value in values]
+    if any(path.name != f"{project_id}.toml" for path in paths):
+        raise ConfigError("compatibility target record is invalid")
+    return paths
+
+
 def _disable_stale_enabled(
     instance: Path,
     project_id: str,
@@ -299,10 +352,20 @@ def _disable_stale_enabled(
     stale["status"] = "stale"
     stale["findings"] = [{"code": "stale.input", "message": "enabled gate inputs changed"}]
     try:
+        recorded_paths = _recorded_compatibility_paths(instance, project_id)
+        try:
+            current_paths = _compatibility_paths(instance, project_id)
+        except ConfigError:
+            current_paths = [instance / "compatibility-manifests" / f"{project_id}.toml"]
+        removal_paths = list(dict.fromkeys(recorded_paths + current_paths))
+        removal_paths.append(_compatibility_target_record(instance, project_id))
+    except ConfigError:
+        return 1, {"status": "conflict", "finding": "compatibility target record is invalid"}
+    try:
         publish_state_atomic(
             [(instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(disabled, sort_keys=False)),
              (instance / "adapter-drafts" / f"{project_id}.yaml", yaml.safe_dump(updated, sort_keys=False))],
-            removes=[instance / "compatibility-manifests" / f"{project_id}.toml"],
+            removes=removal_paths,
         )
     except OSError as exc:
         return 1, {"status": "publication_failed", "finding": _redact(exc.strerror or "I/O error")}
