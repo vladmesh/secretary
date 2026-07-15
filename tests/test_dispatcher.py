@@ -561,14 +561,14 @@ class LegacyPauseProbeTests(unittest.TestCase):
         self.assertFalse(result.sufficient)
         self.assertEqual(result.reason, "legacy pause mode is drain, requires freeze")
 
-    def test_file_probe_rejects_stale_auto_resume_freeze(self) -> None:
+    def test_file_probe_rejects_fresh_automation_owned_auto_resume_freeze(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pause = Path(tmp) / "pause.json"
             pause.write_text(
                 json.dumps({
                     "mode": "hard",
                     "actor": "secretary",
-                    "since": "2000-01-01T00:00:00+00:00",
+                    "since": "2026-07-14T00:00:00+00:00",
                 }),
                 encoding="utf-8",
             )
@@ -576,7 +576,26 @@ class LegacyPauseProbeTests(unittest.TestCase):
             result = FileLegacyPauseProbe(pause).snapshot()
 
         self.assertFalse(result.sufficient)
-        self.assertEqual(result.reason, "legacy freeze is stale and auto-resume eligible")
+        self.assertEqual(result.reason, "legacy freeze is automation-owned and auto-resume eligible")
+
+    def test_file_probe_rejects_automation_owned_freeze_without_since(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pause = Path(tmp) / "pause.json"
+            pause.write_text(json.dumps({"mode": "hard", "actor": "secretary"}), encoding="utf-8")
+
+            result = FileLegacyPauseProbe(pause).snapshot()
+
+        self.assertFalse(result.sufficient)
+        self.assertEqual(result.reason, "legacy freeze is automation-owned and auto-resume eligible")
+
+    def test_file_probe_accepts_automation_owned_freeze_when_auto_resume_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"TA_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
+            pause = Path(tmp) / "pause.json"
+            pause.write_text(json.dumps({"mode": "hard", "actor": "secretary"}), encoding="utf-8")
+
+            result = FileLegacyPauseProbe(pause).snapshot()
+
+        self.assertTrue(result.sufficient)
 
 
 class DispatcherLauncherTests(unittest.TestCase):

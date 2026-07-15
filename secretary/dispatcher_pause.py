@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +86,7 @@ class FileLegacyPauseProbe:
         if auto_resume.get("eligible"):
             return LegacyPauseSnapshot(
                 False,
-                "legacy freeze is stale and auto-resume eligible",
+                "legacy freeze is automation-owned and auto-resume eligible",
                 warnings=(str(auto_resume.get("reason") or ""),),
                 **base,
             )
@@ -155,30 +154,6 @@ def _legacy_hard_pause_auto_resume_status(payload: dict[str, Any]) -> dict[str, 
     if actor not in actors:
         out["reason"] = "manual-or-unknown-actor"
         return out
-    since = _parse_legacy_since(payload.get("since"))
-    if since is None:
-        out["reason"] = "missing-or-invalid-since"
-        return out
-    age = max(0, int((datetime.now(timezone.utc) - since).total_seconds()))
-    out["age_seconds"] = age
-    if age < ttl:
-        out["reason"] = "fresh"
-        return out
     out["eligible"] = True
-    out["reason"] = "stale-automation-hard-pause"
+    out["reason"] = "automation-hard-pause"
     return out
-
-
-def _parse_legacy_since(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)

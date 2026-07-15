@@ -16,9 +16,9 @@ writes. The live runtime does not import Python modules from `triggered-agents`.
   the live legacy pause file and require `freeze` (`mode: hard`). Operator
   evidence alone is not enough, and `drain` is not enough because the old
   dispatcher can still advance cards, run Validate and fire the watchdog.
-- A stale automation-owned `freeze` that the legacy dispatcher would auto-resume
-  is not enough. Use a human actor for the cutover window or disable the legacy
-  hard-pause auto-resume TTL for that maintenance window.
+- An automation-owned `freeze` is not enough while the legacy dispatcher
+  auto-resume TTL is enabled. Use a human actor for the cutover window or disable
+  the legacy hard-pause auto-resume TTL for that maintenance window.
 - Cutover state is stored under `<data_dir>/dispatcher/pilot-state.json`.
 - The new tick is serialized by `<data_dir>/dispatcher/pilot-tick.lock`.
 - Each `start-new-pilot` attempt records a stable `attempt_id`. Dispatcher board
@@ -78,7 +78,7 @@ PYTHONPATH=/home/dev/triggered-agents \
 
 The status must show `paused: true`, `mode: freeze` and the live state path
 under the production pipeline worktree. If it shows `drain`, resume and freeze
-again. If it shows a stale automation-owned freeze that is auto-resume eligible,
+again. If it shows an automation-owned freeze that is auto-resume eligible,
 resume and freeze with a human actor or disable the TTL for the cutover window.
 
 The secretary command records operator evidence only after the live freeze check
