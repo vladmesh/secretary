@@ -124,6 +124,7 @@ class FakeHost:
         self.stopped: list[str] = []
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
+        self.fail_review_error: Exception | None = None
 
     def prepare_worker(
         self,
@@ -141,6 +142,8 @@ class FakeHost:
         return {"workspace": str(workspace), "handle": f"term:{worker_id}"}
 
     def start_review(self, task: dict, record) -> str:
+        if self.fail_review_error is not None:
+            raise self.fail_review_error
         self.reviews.append(task["ref"])
         return f"review:{task['ref']}"
 
@@ -536,6 +539,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["status"], "blocked")
         self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_production_review_unexpected_launch_error_moves_card_blocked(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="production-review-error-report",
+        )
+        self.runtime.production_tick()
+        self.host.fail_review_error = OSError(
+            "review write failed: API_TOKEN=secret-token raw abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789"
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "blocked")
+        self.assertEqual(result["actions"][0]["reason"], "host review failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.reviews, [])
+        self.assertEqual(self.runtime.production_state.load()["records"], {})
+        body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("review bring-up failed", body)
+        self.assertIn("API_TOKEN=<redacted>", body)
+        self.assertNotIn("secret-token", body)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789", body)
 
     def test_pause_old_rejects_drain_evidence_without_board_mutation(self) -> None:
         self.legacy_pause.set(

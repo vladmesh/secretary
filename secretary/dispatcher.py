@@ -910,7 +910,7 @@ class DispatcherRuntime:
             record.state = "review_starting"
             try:
                 record.handle = self.host.start_review(task, record)
-            except HostError as exc:
+            except Exception as exc:
                 self.writer.move(
                     role="dispatcher",
                     actor=self.owner,
