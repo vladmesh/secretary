@@ -142,6 +142,20 @@ Expected pilot path:
 4. Reviewer posts `secretary task verdict --kind green`.
 5. Dispatcher moves the card to Done.
 
+Record these facts before the first live tick and after the card reaches Done.
+This is evidence for one pilot card only; it does not mark the full Phase 7 or
+Phase 9 cutover complete.
+
+- Active owner: legacy dispatcher freeze status, new dispatcher attempt id and
+  pilot ref.
+- Card and claim: board state, claim worker and latest dispatcher/comment marker.
+- Workspace: worker and reviewer workspace paths plus branch names.
+- PR, CI and review: PR URL, head SHA, CI conclusion and review verdict marker.
+- Neighboring Ready cards: refs observed before and after the pilot, with no
+  unexpected claims.
+- Rollback state: whether rollback was unused, still available, or already
+  executed, and the preserved card/PR state if it ran.
+
 Commit cutover only after the pilot is green and the old owner is still paused:
 
 ```bash
