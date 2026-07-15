@@ -1,14 +1,15 @@
-# Dispatcher pilot cutover
+# Dispatcher cutover
 
-This runbook covers the reversible Phase 7 pilot. The old dispatcher remains the
-production owner until an operator pauses it and starts the new dispatcher against
-one exact pilot card.
+This runbook covers the reversible Phase 7 pilot and the later production
+dispatcher cutover. The old dispatcher remains the production owner until an
+operator freezes it, commits cutover state and starts the managed production
+dispatcher.
 
 The product runtime lives in `secretary.dispatcher` and the CLI entrypoint is
 `secretary dispatcher`. It uses the public `secretary task` protocol for all board
 writes. The live runtime does not import Python modules from `triggered-agents`.
 
-## Safety contract
+## Pilot safety contract
 
 - `--pilot-ref` is required for every dispatcher command. There is no broad Ready
   scan mode in the pilot runtime.
@@ -223,3 +224,129 @@ Full cutover still requires:
 - before and after notes for active dispatcher owner, card claim, workspace,
   PR/CI/review state and absence of double claim;
 - rollback if the live pilot is red.
+
+## Production dispatcher
+
+The production entrypoints are separate from the pilot commands and do not accept
+`--pilot-ref`:
+
+```bash
+python3 -m secretary dispatcher production-observe \
+  --instance "$SECRETARY_INSTANCE"
+
+python3 -m secretary dispatcher production-tick \
+  --instance "$SECRETARY_INSTANCE"
+
+python3 -m secretary dispatcher production-run \
+  --instance "$SECRETARY_INSTANCE" \
+  --interval-seconds 60
+```
+
+Production mode is fail-closed. A tick mutates the board only when:
+
+- `pilot-state.json` is in `phase: cutover_committed`;
+- the live legacy pause probe confirms a hard `freeze`;
+- `production-state.json` has no owner or is already fenced to the same owner;
+- the singleton tick lock is available.
+
+Production ticks first recover and advance existing `In progress` / `Validate`
+cards, then scan the shared Ready queue in stable board order. The claim still
+goes through `secretary task claim`, so the active code-task-per-project guard
+remains the source of truth. If a project already has an active code task, the
+scanner skips later Ready code cards for that project and can claim a different
+project. A repeated tick or process restart reuses durable records and audit
+request ids, so it does not create a second workspace, reviewer or merge.
+
+State lives under `<data_dir>/dispatcher/`:
+
+- `pilot-state.json`: pilot and committed cutover state.
+- `production-state.json`: production owner fence and in-flight records.
+- `production-tick.lock`: singleton mutation lock for one tick.
+- `production-run.lock`: singleton long-running service lock.
+
+`production-run` keeps the process alive, backs off on temporary backend or host
+errors and continues after one card returns a controlled failure. Use
+`production-tick` for smoke tests and manual diagnostics only.
+
+## Production operator flow
+
+Do not perform these live cutover commands as part of an implementation PR. Run
+them only after the branch is merged and an operator has scheduled the cutover
+window.
+
+Set the instance:
+
+```bash
+export SECRETARY_INSTANCE=/home/dev/secretary-instance
+```
+
+Freeze the legacy dispatcher with the current production procedure and verify
+that the live pause state is `freeze`, not `drain`:
+
+```bash
+PYTHONPATH=/home/dev/triggered-agents BOARD_ROLE=steward \
+  python3 -m triggered_agents pipeline pause freeze \
+    --actor "$USER" \
+    --reason "secretary production dispatcher cutover"
+
+PYTHONPATH=/home/dev/triggered-agents \
+  python3 -m triggered_agents pipeline pause-status
+```
+
+Commit cutover state from the already completed pilot:
+
+```bash
+python3 -m secretary dispatcher commit-cutover \
+  --instance "$SECRETARY_INSTANCE" \
+  --pilot-ref "$PILOT_REF" \
+  --actor "$USER"
+```
+
+Render the managed host plan. This is read-only and should show the production
+dispatcher service and timer as managed resources, not silently adopt existing
+unmanaged units:
+
+```bash
+python3 -m secretary reconcile plan --dry-run \
+  --instance "$SECRETARY_INSTANCE"
+```
+
+Apply the managed service/timer through the operator-owned host deployment
+procedure, then verify doctor before starting broad queue service:
+
+```bash
+python3 -m secretary doctor \
+  --instance "$SECRETARY_INSTANCE" \
+  --host
+```
+
+Smoke with one manual tick, then start the long-running service:
+
+```bash
+python3 -m secretary dispatcher production-tick \
+  --instance "$SECRETARY_INSTANCE"
+
+systemctl --user start secretary-dispatcher-production.service
+```
+
+Create or move a low-risk smoke card to Ready and watch it pass worker, review
+and Done through `secretary task show`. Keep the legacy dispatcher frozen until
+the smoke card reaches Done and `doctor --host` reports a single production
+owner.
+
+## Production rollback
+
+Rollback before decommission keeps the legacy dispatcher frozen, stops the
+managed production service and moves ownership back manually:
+
+```bash
+systemctl --user stop secretary-dispatcher-production.service
+systemctl --user stop secretary-dispatcher-production.timer
+python3 -m secretary dispatcher production-observe \
+  --instance "$SECRETARY_INSTANCE"
+```
+
+Inspect active cards with `secretary task list` and resume the legacy dispatcher
+only after the operator has confirmed no production tick is still running. Do
+not force-reset task state; preserve claims, comments, PRs and review evidence
+for manual continuation or retry.

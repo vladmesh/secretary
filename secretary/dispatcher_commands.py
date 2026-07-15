@@ -30,12 +30,25 @@ def add_dispatcher_subcommands(subparsers) -> None:
         ("rollback", run_dispatcher_rollback),
     ):
         command = commands.add_parser(name)
-        add_common(command)
+        add_pilot_common(command)
         command.set_defaults(handler=handler)
         if name == "pause-old":
             command.add_argument("--evidence-file")
         if name == "rollback":
             command.add_argument("--reason-file")
+
+    for name, handler in (
+        ("production-tick", run_dispatcher_production_tick),
+        ("production-observe", run_dispatcher_production_observe),
+        ("production-run", run_dispatcher_production_run),
+    ):
+        command = commands.add_parser(name)
+        add_production_common(command)
+        command.set_defaults(handler=handler)
+        if name == "production-run":
+            command.add_argument("--interval-seconds", type=float, default=60.0)
+            command.add_argument("--max-interval-seconds", type=float, default=300.0)
+            command.add_argument("--max-ticks", type=int)
 
     dispatcher.set_defaults(handler=not_implemented_dispatcher)
 
@@ -43,7 +56,6 @@ def add_dispatcher_subcommands(subparsers) -> None:
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--data-dir")
-    parser.add_argument("--pilot-ref", required=True)
     parser.add_argument("--owner", default=os.environ.get("SECRETARY_DISPATCHER_OWNER", "secretary-dispatcher"))
     parser.add_argument("--actor", default=os.environ.get("BOARD_ACTOR", "operator"))
     parser.add_argument(
@@ -51,6 +63,15 @@ def add_common(parser: argparse.ArgumentParser) -> None:
         choices=("real", "noop"),
         default=os.environ.get("SECRETARY_DISPATCHER_HOST_MODE", "real"),
     )
+
+
+def add_pilot_common(parser: argparse.ArgumentParser) -> None:
+    add_common(parser)
+    parser.add_argument("--pilot-ref", required=True)
+
+
+def add_production_common(parser: argparse.ArgumentParser) -> None:
+    add_common(parser)
 
 
 def not_implemented_dispatcher(args: argparse.Namespace) -> int:
@@ -93,11 +114,44 @@ def run_dispatcher_rollback(args: argparse.Namespace) -> int:
     return _run(args, operation)
 
 
+def run_dispatcher_production_tick(args: argparse.Namespace) -> int:
+    return _run_production(args, lambda runtime: runtime.production_tick())
+
+
+def run_dispatcher_production_observe(args: argparse.Namespace) -> int:
+    return _run_production(args, lambda runtime: runtime.production_observe())
+
+
+def run_dispatcher_production_run(args: argparse.Namespace) -> int:
+    return _run_production(
+        args,
+        lambda runtime: runtime.production_run(
+            interval_seconds=args.interval_seconds,
+            max_interval_seconds=args.max_interval_seconds,
+            max_ticks=args.max_ticks,
+        ),
+    )
+
+
 def _run(args: argparse.Namespace, operation) -> int:
     try:
         selector = PilotSelector.exact(args.pilot_ref)
         runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
         result = operation(runtime, selector)
+    except (DispatcherError, TaskError) as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")))
+        return exc.exit_code
+    except HostError as exc:
+        print(json.dumps({"error": {"code": "host_error", "message": str(exc)}}, sort_keys=True, separators=(",", ":")))
+        return 1
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0 if result.get("status") in {"ok", "skipped"} else 3
+
+
+def _run_production(args: argparse.Namespace, operation) -> int:
+    try:
+        runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
+        result = operation(runtime)
     except (DispatcherError, TaskError) as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")))
         return exc.exit_code

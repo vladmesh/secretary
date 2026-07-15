@@ -197,11 +197,19 @@ class ReconcilePlanTests(unittest.TestCase):
         instance = {"host": {"unit_prefix": "secretary-"}, "heads": [{"role": "worker", "model": "old"}]}
         bindings = [{"id": "project-id", "repo": "/srv/old-path", "orca_binding": "project_id", "enabled": True}]
         original = build_plan(instance, bindings)
-        actual = HostInventory(units={"secretary-worker.service"}, orca_repos={"project_id"})
+        actual = HostInventory(
+            units={
+                "secretary-worker.service",
+                "secretary-dispatcher-production.service",
+                "secretary-dispatcher-production.timer",
+            },
+            orca_repos={"project_id"},
+        )
         instance["heads"][0]["model"] = "new"
         bindings[0]["repo"] = "/srv/new-path"
         changed = build_plan(instance, bindings)
-        self.assertEqual({change.action for change in plan_changes(changed, actual, original)}, {"update"})
+        changes = [change for change in plan_changes(changed, actual, original) if change.action != "unchanged"]
+        self.assertEqual({change.action for change in changes}, {"update"})
 
     def test_plan_rejects_enabled_binding_without_explicit_orca_binding(self):
         errors = plan_input_errors({}, [{"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True}])
@@ -225,8 +233,8 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_renamed_managed_resource_is_deleted_alongside_create(self):
         old_instance = {"host": {"unit_prefix": "old-"}, "heads": [{"role": "worker", "model": "test"}]}
         new_instance = {"host": {"unit_prefix": "new-"}, "heads": [{"role": "worker", "model": "test"}]}
-        managed = build_plan(old_instance, [])
-        desired = build_plan(new_instance, [])
+        managed = [resource for resource in build_plan(old_instance, []) if resource.logical_id == "systemd:head:worker"]
+        desired = [resource for resource in build_plan(new_instance, []) if resource.logical_id == "systemd:head:worker"]
         actual = HostInventory(units={"old-worker.service"})
         changes = plan_changes(desired, actual, managed, "new-")
         self.assertEqual([(change.action, change.name) for change in changes], [("create", "new-worker.service"), ("delete", "old-worker.service")])
@@ -238,12 +246,41 @@ class ReconcilePlanTests(unittest.TestCase):
         }
         bindings = [{"id": "project-id", "repo": "/srv/project_id", "orca_binding": "project_id", "enabled": True}]
         desired = build_plan(instance, bindings)
-        self.assertEqual([resource.name for resource in desired], ["project_id", "secretary-worker.service"])
-        actual = HostInventory(units={"secretary-worker.service"}, orca_repos={"project_id"})
+        self.assertEqual(
+            [resource.name for resource in desired],
+            [
+                "project_id",
+                "secretary-dispatcher-production.service",
+                "secretary-dispatcher-production.timer",
+                "secretary-worker.service",
+            ],
+        )
+        actual = HostInventory(
+            units={
+                "secretary-worker.service",
+                "secretary-dispatcher-production.service",
+                "secretary-dispatcher-production.timer",
+            },
+            orca_repos={"project_id"},
+        )
         first = plan_changes(desired, actual, [])
         second = plan_changes(desired, actual, [])
         self.assertEqual(first, second)
         self.assertEqual({change.action for change in first}, {"conflict"})
+
+    def test_production_dispatcher_units_carry_runtime_bindings(self):
+        resources = build_plan({"host": {"unit_prefix": "secretary-"}}, [])
+        by_id = {resource.logical_id: resource for resource in resources}
+
+        service = json.loads(by_id["systemd:dispatcher:production.service"].spec)
+        timer = json.loads(by_id["systemd:dispatcher:production.timer"].spec)
+
+        self.assertEqual(by_id["systemd:dispatcher:production.service"].name, "secretary-dispatcher-production.service")
+        self.assertEqual(by_id["systemd:dispatcher:production.timer"].name, "secretary-dispatcher-production.timer")
+        self.assertEqual(service["managed_by"], "secretary")
+        self.assertIn("production-run", service["runtime"])
+        self.assertIn("KANBOARD_API_TOKEN", service["env"])
+        self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
@@ -709,6 +746,22 @@ class LiveSourceErrorTests(unittest.TestCase):
 
 
 class DoctorHostCliTests(unittest.TestCase):
+    def _dispatcher_instance(self, root: Path) -> tuple[Path, Path]:
+        instance = root / "instance.yaml"
+        data = root / "data"
+        (data / "dispatcher").mkdir(parents=True)
+        instance.write_text(
+            "version: 1\n"
+            "name: dispatcher-doctor\n"
+            f"data_dir: {data}\n"
+            "offsite:\n"
+            "  instance_remote: git@example.invalid:x/y.git\n"
+            "host:\n"
+            "  unit_prefix: secretary-\n",
+            encoding="utf-8",
+        )
+        return instance, data
+
     def test_offline_doctor_does_not_construct_live_host_source(self):
         class ForbiddenHost(LiveHostSource):
             def __init__(self):
@@ -722,6 +775,126 @@ class DoctorHostCliTests(unittest.TestCase):
             cli.LiveHostSource = original
         self.assertEqual(code, 0, output)
         self.assertNotIn("host inventory", output)
+
+    def test_doctor_reports_pilot_only_without_production_findings(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, data = self._dispatcher_instance(root)
+            (data / "dispatcher" / "pilot-state.json").write_text(
+                json.dumps({"version": 1, "phase": "new_pilot", "pilot_ref": "secretary-1"}),
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+
+            code, output = run_cli([
+                "doctor", "--dry-run", "--instance", str(instance), "--host-fixture", str(fixture),
+            ])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("state: pilot-only", output)
+        self.assertNotIn("dispatcher findings", output)
+
+    def test_offline_doctor_reports_dispatcher_state_without_live_probe(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, data = self._dispatcher_instance(root)
+            (data / "dispatcher" / "pilot-state.json").write_text(
+                json.dumps({"version": 1, "phase": "cutover_committed"}),
+                encoding="utf-8",
+            )
+            with unittest.mock.patch.object(cli, "FileLegacyPauseProbe", side_effect=AssertionError("live probe")):
+                code, output = run_cli(["doctor", "--offline", "--instance", str(instance)])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("legacy freeze: not inspected", output)
+
+    def test_doctor_reds_after_cutover_without_production_service(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, data = self._dispatcher_instance(root)
+            (data / "dispatcher" / "pilot-state.json").write_text(
+                json.dumps({"version": 1, "phase": "cutover_committed"}),
+                encoding="utf-8",
+            )
+            (data / "dispatcher" / "production-state.json").write_text(
+                json.dumps({"version": 1, "mode": "production", "phase": "production", "owner": "secretary-dispatcher"}),
+                encoding="utf-8",
+            )
+            pause = root / "pause.json"
+            pause.write_text(json.dumps({"mode": "soft", "actor": "operator"}), encoding="utf-8")
+            fixture = root / "host"
+            fixture.mkdir()
+
+            with unittest.mock.patch.dict("os.environ", {"SECRETARY_LEGACY_PAUSE_FILE": str(pause)}, clear=False):
+                code, output = run_cli([
+                    "doctor", "--dry-run", "--instance", str(instance), "--host-fixture", str(fixture),
+                ])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("state: production-owner", output)
+        self.assertIn("double owner", output)
+        self.assertIn("create secretary-dispatcher-production.service", output)
+
+    def test_doctor_accepts_managed_production_owner_after_cutover(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, data = self._dispatcher_instance(root)
+            (data / "dispatcher" / "pilot-state.json").write_text(
+                json.dumps({"version": 1, "phase": "cutover_committed"}),
+                encoding="utf-8",
+            )
+            (data / "dispatcher" / "production-state.json").write_text(
+                json.dumps({"version": 1, "mode": "production", "phase": "production", "owner": "secretary-dispatcher"}),
+                encoding="utf-8",
+            )
+            desired = [
+                resource for resource in build_plan({"host": {"unit_prefix": "secretary-"}}, [])
+                if resource.logical_id.startswith("systemd:dispatcher:production")
+            ]
+            (data / "host-managed.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "resources": [
+                        {
+                            "logical_id": resource.logical_id,
+                            "kind": resource.kind,
+                            "name": resource.name,
+                            "spec": resource.spec,
+                            "fingerprint": resource.fingerprint,
+                        }
+                        for resource in desired
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            pause = root / "pause.json"
+            pause.write_text(json.dumps({"mode": "hard", "actor": "operator"}), encoding="utf-8")
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "units.txt").write_text(
+                "secretary-dispatcher-production.service\n"
+                "secretary-dispatcher-production.timer\n",
+                encoding="utf-8",
+            )
+
+            with unittest.mock.patch.dict("os.environ", {"SECRETARY_LEGACY_PAUSE_FILE": str(pause)}, clear=False):
+                code, output = run_cli([
+                    "doctor", "--dry-run", "--instance", str(instance), "--host-fixture", str(fixture),
+                ])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("state: production-owner", output)
+        self.assertIn("legacy freeze: confirmed", output)
+        self.assertNotIn("dispatcher findings", output)
 
     def test_host_inventory_reports_three_sections(self):
         code, output = run_cli(

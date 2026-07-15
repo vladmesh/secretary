@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from secretary._fsutil import file_lock, write_json, write_text_atomic
+from secretary._fsutil import file_lock, try_file_lock, write_json, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunch,
@@ -44,6 +44,7 @@ from secretary.dispatcher_state import (
     now_rfc3339,
     record_attempt as _record_attempt,
     record_divergence as _record_divergence,
+    request_token as _request_token,
 )
 from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
@@ -123,6 +124,21 @@ class CutoverState:
 
     def put_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         payload["records"] = {ref: record.to_json() for ref, record in sorted(records.items())}
+
+
+class ProductionState(CutoverState):
+    def __init__(self, data_dir: Path) -> None:
+        self.root = data_dir / "dispatcher"
+        self.path = self.root / "production-state.json"
+        self.tick_lock = self.root / "production-tick.lock"
+        self.run_lock = self.root / "production-run.lock"
+
+    def load(self) -> dict[str, Any]:
+        payload = super().load()
+        payload.setdefault("version", 1)
+        payload.setdefault("mode", "production")
+        payload.setdefault("phase", "new")
+        return payload
 
 
 class InstanceCatalog:
@@ -458,11 +474,13 @@ class DispatcherRuntime:
         *,
         owner: str = "secretary-dispatcher",
         legacy_pause: FileLegacyPauseProbe | None = None,
+        production_state: ProductionState | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
         self.audit = audit
         self.state = state
+        self.production_state = production_state or ProductionState(state.root.parent)
         self.catalog = catalog
         self.host = host
         self.owner = owner
@@ -612,6 +630,116 @@ class DispatcherRuntime:
             "divergences": list((payload.get("controlled_divergences") or [])),
         }
 
+    def production_observe(self) -> dict[str, Any]:
+        pilot = self.state.load()
+        payload = self.production_state.load()
+        legacy_pause = self.legacy_pause.snapshot()
+        return {
+            "status": "ok",
+            "step": "production-observe",
+            "phase": payload.get("phase", "new"),
+            "owner": payload.get("owner", ""),
+            "cutover_phase": pilot.get("phase", "new"),
+            "cutover_committed": pilot.get("phase") == "cutover_committed",
+            "legacy_pause": legacy_pause.to_json(),
+            "records": list((payload.get("records") or {}).keys()),
+            "divergences": list((payload.get("controlled_divergences") or [])),
+        }
+
+    def production_tick(self) -> dict[str, Any]:
+        with try_file_lock(self.production_state.tick_lock) as acquired:
+            if not acquired:
+                return {
+                    "status": "blocked",
+                    "step": "production-tick",
+                    "reason": "production dispatcher singleton lock is held",
+                }
+            payload = self.production_state.load()
+            guard = self._production_mutation_guard(payload)
+            if guard is not None:
+                return guard
+
+            records = self.production_state.records(payload)
+            payload.update({
+                "version": 1,
+                "mode": "production",
+                "phase": "production",
+                "owner": self.owner,
+            })
+            payload.setdefault("owner_acquired_at", now_rfc3339())
+            payload["last_tick_started_at"] = now_rfc3339()
+
+            outcomes: list[dict[str, Any]] = []
+            errors: list[dict[str, str]] = []
+            active_blocked = False
+            active_tasks = self._production_tasks({"in_progress", "validate"})
+            for task in active_tasks:
+                if _is_steward_report(task):
+                    continue
+                try:
+                    outcome = self._production_tick_active(task, records, payload)
+                except TaskError as exc:
+                    errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})
+                    continue
+                if outcome.get("status") == "blocked":
+                    active_blocked = True
+                outcomes.append(outcome)
+
+            if not active_blocked:
+                ready_outcome = self._production_claim_ready(records, payload, active_tasks)
+                if ready_outcome is not None:
+                    outcomes.append(ready_outcome)
+
+            self.production_state.put_records(payload, records)
+            payload["last_tick_finished_at"] = now_rfc3339()
+            self.production_state.save(payload)
+            return {
+                "status": "ok" if not errors else "degraded",
+                "step": "production-tick",
+                "owner": self.owner,
+                "actions": outcomes,
+                "errors": errors,
+            }
+
+    def production_run(
+        self,
+        *,
+        interval_seconds: float,
+        max_interval_seconds: float,
+        max_ticks: int | None = None,
+    ) -> dict[str, Any]:
+        interval_seconds = max(1.0, interval_seconds)
+        max_interval_seconds = max(interval_seconds, max_interval_seconds)
+        with try_file_lock(self.production_state.run_lock) as acquired:
+            if not acquired:
+                raise DispatcherError(
+                    "production_already_running",
+                    "production dispatcher run loop is already active",
+                    3,
+                )
+            ticks = 0
+            failures = 0
+            last: dict[str, Any] = {"status": "ok", "step": "production-run", "action": "start"}
+            while max_ticks is None or ticks < max_ticks:
+                try:
+                    last = self.production_tick()
+                    failures = 0 if last.get("status") != "degraded" else failures + 1
+                except (TaskError, HostError, DispatcherError) as exc:
+                    failures += 1
+                    code = getattr(exc, "code", "host_error")
+                    message = getattr(exc, "message", str(exc))
+                    last = {
+                        "status": "degraded",
+                        "step": "production-run",
+                        "error": {"code": code, "message": message},
+                    }
+                ticks += 1
+                if max_ticks is not None and ticks >= max_ticks:
+                    break
+                delay = min(max_interval_seconds, interval_seconds * (2 ** min(failures, 5)))
+                time.sleep(delay)
+            return {"status": "ok", "step": "production-run", "ticks": ticks, "last": last}
+
     def commit_cutover(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
         with file_lock(self.state.tick_lock):
             payload = self.state.load()
@@ -677,6 +805,123 @@ class DispatcherRuntime:
             "reason": legacy_pause.reason,
             "legacy_pause": legacy_pause.to_json(),
         }
+
+    def _production_mutation_guard(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        cutover = self.state.load()
+        if cutover.get("phase") != "cutover_committed":
+            return {
+                "status": "blocked",
+                "step": "production-guard",
+                "reason": "production cutover is not committed",
+                "cutover_phase": cutover.get("phase", "new"),
+            }
+        legacy_guard = self._legacy_pause_guard("production-guard")
+        if legacy_guard is not None:
+            legacy_guard["reason"] = "old dispatcher hard freeze is not confirmed: " + str(legacy_guard.get("reason") or "")
+            return legacy_guard
+        owner = str(payload.get("owner") or "")
+        if owner and owner != self.owner:
+            return {
+                "status": "blocked",
+                "step": "production-guard",
+                "reason": "production ownership fence is held by another owner",
+                "owner": owner,
+            }
+        phase = str(payload.get("phase") or "new")
+        if phase not in {"new", "production"}:
+            return {
+                "status": "blocked",
+                "step": "production-guard",
+                "reason": "production state is not writable",
+                "phase": phase,
+            }
+        return None
+
+    def _production_tasks(self, states: set[str]) -> list[dict[str, Any]]:
+        return sorted(self.reader.list(states=states), key=_task_sort_key)
+
+    def _production_tick_active(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        ref = task["ref"]
+        task = self.reader.show(ref)
+        record = records.get(ref)
+        mismatch = self._production_active_mismatch(task, record, payload)
+        if mismatch is not None:
+            return mismatch
+        attempt_id = record.attempt_id if record is not None and record.attempt_id else _production_adopt_attempt_id(ref)
+        return self._tick_task(task, records, payload, attempt_id)
+
+    def _production_active_mismatch(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if record is None:
+            return None
+        actual_worker = task.get("claim", {}).get("worker")
+        if actual_worker in (None, record.worker):
+            return None
+        divergence = _record_divergence(
+            payload,
+            record.attempt_id,
+            task["ref"],
+            "production-recovery",
+            "active_claim_mismatch",
+            expected={"worker": record.worker, "state": task.get("state")},
+            actual={"worker": actual_worker, "state": task.get("state")},
+            details=["worker"],
+        )
+        return {
+            "status": "blocked",
+            "step": "production-recovery",
+            "ref": task["ref"],
+            "reason": "active task claim no longer matches production record",
+            "divergence_id": divergence["id"],
+        }
+
+    def _production_claim_ready(
+        self,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        active_tasks: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        active_code_projects = {
+            str(task.get("project") or "")
+            for task in active_tasks
+            if task.get("type") == "code" and task.get("project") and not _is_steward_report(task)
+        }
+        skipped: list[dict[str, str]] = []
+        for task in self._production_tasks({"ready"}):
+            if task.get("type") == "code" and task.get("project") in active_code_projects:
+                skipped.append({
+                    "ref": task["ref"],
+                    "reason": "project has an active code task",
+                })
+                continue
+            attempt_id = _new_attempt_id()
+            try:
+                outcome = self._claim(task, records, payload, attempt_id)
+            except TaskError as exc:
+                if exc.code in {"capacity_reached", "claim_conflict", "predecessor_open"}:
+                    skipped.append({"ref": task["ref"], "reason": exc.message})
+                    continue
+                raise
+            if skipped:
+                outcome["skipped_ready"] = skipped
+            return outcome
+        if skipped:
+            return {
+                "status": "skipped",
+                "step": "production-claim",
+                "reason": "no claimable Ready task",
+                "skipped_ready": skipped,
+            }
+        return None
 
     def _tick_task(
         self,
@@ -803,7 +1048,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"Pilot dispatcher claimed {ref}, attempt {record.attempt_id}, "
+                f"{_dispatcher_label(payload)} claimed {ref}, attempt {record.attempt_id}, "
                 f"worker {record.worker}, workspace {prepared['workspace']}."
             ),
             request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
@@ -929,6 +1174,13 @@ class DispatcherRuntime:
                 return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
             record.review_baseline = len(task.get("comments") or [])
             record.state = "reviewing"
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                body=f"Dispatcher review started for {ref}, attempt {record.attempt_id or attempt_id}.",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-started-comment", ref),
+            )
             return {
                 "status": "ok",
                 "step": "review",
@@ -945,12 +1197,14 @@ class DispatcherRuntime:
         }
 
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        self.state.put_records(payload, records)
+        state = self.production_state if payload.get("mode") == "production" else self.state
+        state.put_records(payload, records)
         payload["last_tick_at"] = now_rfc3339()
-        self.state.save(payload)
+        state.save(payload)
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
+        state = "reviewing" if task.get("state") == "validate" and _has_review_started_marker(task) else "adopted"
         return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
@@ -960,7 +1214,7 @@ class DispatcherRuntime:
             attempt_id=attempt_id,
             comment_baseline=len(task.get("comments") or []),
             review_baseline=_review_adoption_baseline(task),
-            state="adopted",
+            state=state,
             claimed_at=time.time(),
         )
 
@@ -979,3 +1233,26 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
         CommandHostRuntime(catalog, data, mode=host_mode),
         owner=owner,
     )
+
+
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, str, str]:
+    return (int(task.get("position") or 0), str(task.get("ref") or ""), str(task.get("id") or ""))
+
+
+def _production_adopt_attempt_id(reference: str) -> str:
+    return "production-adopt-" + _request_token(reference)
+
+
+def _dispatcher_label(payload: dict[str, Any]) -> str:
+    return "Production dispatcher" if payload.get("mode") == "production" else "Pilot dispatcher"
+
+
+def _has_review_started_marker(task: dict[str, Any]) -> bool:
+    for comment in task.get("comments") or []:
+        if comment.get("marker") == "dispatcher" and "review started" in str(comment.get("body") or ""):
+            return True
+    return False
+
+
+def _is_steward_report(task: dict[str, Any]) -> bool:
+    return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -204,6 +205,7 @@ def add_reconcile_subcommands(subcommands) -> None:
     """Register the Phase 7 host commands outside the already busy CLI module."""
     plan = subcommands.add_parser("plan", help="show the read-only desired host plan")
     plan.add_argument("--instance", required=True)
+    plan.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     source = plan.add_mutually_exclusive_group()
     source.add_argument(
         "--host-fixture", metavar="DIR",
