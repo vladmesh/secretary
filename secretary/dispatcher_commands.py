@@ -13,6 +13,7 @@ from secretary.dispatcher import (
     PilotSelector,
     runtime_from_args,
 )
+from secretary.dispatcher_state import DispatcherStateError
 from secretary.tasks import TaskError
 
 
@@ -138,7 +139,7 @@ def _run(args: argparse.Namespace, operation) -> int:
         selector = PilotSelector.exact(args.pilot_ref)
         runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
         result = operation(runtime, selector)
-    except (DispatcherError, TaskError) as exc:
+    except (DispatcherError, DispatcherStateError, TaskError) as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")))
         return exc.exit_code
     except HostError as exc:
@@ -152,7 +153,7 @@ def _run_production(args: argparse.Namespace, operation) -> int:
     try:
         runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
         result = operation(runtime)
-    except (DispatcherError, TaskError) as exc:
+    except (DispatcherError, DispatcherStateError, TaskError) as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")))
         return exc.exit_code
     except HostError as exc:

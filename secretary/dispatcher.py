@@ -7,13 +7,12 @@ import os
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from secretary._fsutil import file_lock, try_file_lock, write_json, write_text_atomic
+from secretary._fsutil import file_lock, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunch,
@@ -33,7 +32,14 @@ from secretary.dispatcher_helpers import (
     scrub_host_output,
 )
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
+from secretary.dispatcher_production import (
+    ProductionState,
+    production_observe as _production_observe,
+    production_run as _production_run,
+    production_tick as _production_tick,
+)
 from secretary.dispatcher_state import (
+    CutoverState,
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
     claim_actual as _claim_actual,
@@ -44,38 +50,11 @@ from secretary.dispatcher_state import (
     now_rfc3339,
     record_attempt as _record_attempt,
     record_divergence as _record_divergence,
-    request_token as _request_token,
 )
 from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
+from secretary.dispatcher_types import DispatcherError, HostError, PilotSelector
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
-
-
-class DispatcherError(Exception):
-    def __init__(self, code: str, message: str, exit_code: int = 2) -> None:
-        self.code = code
-        self.message = message
-        self.exit_code = exit_code
-        super().__init__(message)
-
-
-class HostError(Exception):
-    pass
-
-
-@dataclass(frozen=True)
-class PilotSelector:
-    reference: str
-
-    @classmethod
-    def exact(cls, reference: str | None) -> "PilotSelector":
-        value = (reference or "").strip()
-        if not value:
-            raise DispatcherError("pilot_selector_required", "dispatcher requires an exact pilot ref")
-        return cls(value)
-
-    def accepts(self, task: dict[str, Any]) -> bool:
-        return task.get("ref") == self.reference
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -90,55 +69,6 @@ def default_data_dir(instance_path: Path) -> Path:
 
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
-
-
-class CutoverState:
-    def __init__(self, data_dir: Path) -> None:
-        self.root = data_dir / "dispatcher"
-        self.path = self.root / "pilot-state.json"
-        self.tick_lock = self.root / "pilot-tick.lock"
-
-    def load(self) -> dict[str, Any]:
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {"version": 1, "phase": "new"}
-        except (OSError, ValueError, UnicodeError):
-            raise DispatcherError("state_unavailable", "dispatcher state is unreadable", 2) from None
-        if not isinstance(payload, dict):
-            raise DispatcherError("state_unavailable", "dispatcher state has an unsupported shape", 2)
-        return payload
-
-    def save(self, payload: dict[str, Any]) -> None:
-        write_json(self.path, payload)
-
-    def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
-        raw = payload.get("records") or {}
-        if not isinstance(raw, dict):
-            return {}
-        return {
-            str(ref): DispatcherRecord.from_json(record)
-            for ref, record in raw.items()
-            if isinstance(record, dict)
-        }
-
-    def put_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        payload["records"] = {ref: record.to_json() for ref, record in sorted(records.items())}
-
-
-class ProductionState(CutoverState):
-    def __init__(self, data_dir: Path) -> None:
-        self.root = data_dir / "dispatcher"
-        self.path = self.root / "production-state.json"
-        self.tick_lock = self.root / "production-tick.lock"
-        self.run_lock = self.root / "production-run.lock"
-
-    def load(self) -> dict[str, Any]:
-        payload = super().load()
-        payload.setdefault("version", 1)
-        payload.setdefault("mode", "production")
-        payload.setdefault("phase", "new")
-        return payload
 
 
 class InstanceCatalog:
@@ -631,75 +561,10 @@ class DispatcherRuntime:
         }
 
     def production_observe(self) -> dict[str, Any]:
-        pilot = self.state.load()
-        payload = self.production_state.load()
-        legacy_pause = self.legacy_pause.snapshot()
-        return {
-            "status": "ok",
-            "step": "production-observe",
-            "phase": payload.get("phase", "new"),
-            "owner": payload.get("owner", ""),
-            "cutover_phase": pilot.get("phase", "new"),
-            "cutover_committed": pilot.get("phase") == "cutover_committed",
-            "legacy_pause": legacy_pause.to_json(),
-            "records": list((payload.get("records") or {}).keys()),
-            "divergences": list((payload.get("controlled_divergences") or [])),
-        }
+        return _production_observe(self)
 
     def production_tick(self) -> dict[str, Any]:
-        with try_file_lock(self.production_state.tick_lock) as acquired:
-            if not acquired:
-                return {
-                    "status": "blocked",
-                    "step": "production-tick",
-                    "reason": "production dispatcher singleton lock is held",
-                }
-            payload = self.production_state.load()
-            guard = self._production_mutation_guard(payload)
-            if guard is not None:
-                return guard
-
-            records = self.production_state.records(payload)
-            payload.update({
-                "version": 1,
-                "mode": "production",
-                "phase": "production",
-                "owner": self.owner,
-            })
-            payload.setdefault("owner_acquired_at", now_rfc3339())
-            payload["last_tick_started_at"] = now_rfc3339()
-
-            outcomes: list[dict[str, Any]] = []
-            errors: list[dict[str, str]] = []
-            active_blocked = False
-            active_tasks = self._production_tasks({"in_progress", "validate"})
-            for task in active_tasks:
-                if _is_steward_report(task):
-                    continue
-                try:
-                    outcome = self._production_tick_active(task, records, payload)
-                except TaskError as exc:
-                    errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})
-                    continue
-                if outcome.get("status") == "blocked":
-                    active_blocked = True
-                outcomes.append(outcome)
-
-            if not active_blocked:
-                ready_outcome = self._production_claim_ready(records, payload, active_tasks)
-                if ready_outcome is not None:
-                    outcomes.append(ready_outcome)
-
-            self.production_state.put_records(payload, records)
-            payload["last_tick_finished_at"] = now_rfc3339()
-            self.production_state.save(payload)
-            return {
-                "status": "ok" if not errors else "degraded",
-                "step": "production-tick",
-                "owner": self.owner,
-                "actions": outcomes,
-                "errors": errors,
-            }
+        return _production_tick(self)
 
     def production_run(
         self,
@@ -708,37 +573,12 @@ class DispatcherRuntime:
         max_interval_seconds: float,
         max_ticks: int | None = None,
     ) -> dict[str, Any]:
-        interval_seconds = max(1.0, interval_seconds)
-        max_interval_seconds = max(interval_seconds, max_interval_seconds)
-        with try_file_lock(self.production_state.run_lock) as acquired:
-            if not acquired:
-                raise DispatcherError(
-                    "production_already_running",
-                    "production dispatcher run loop is already active",
-                    3,
-                )
-            ticks = 0
-            failures = 0
-            last: dict[str, Any] = {"status": "ok", "step": "production-run", "action": "start"}
-            while max_ticks is None or ticks < max_ticks:
-                try:
-                    last = self.production_tick()
-                    failures = 0 if last.get("status") != "degraded" else failures + 1
-                except (TaskError, HostError, DispatcherError) as exc:
-                    failures += 1
-                    code = getattr(exc, "code", "host_error")
-                    message = getattr(exc, "message", str(exc))
-                    last = {
-                        "status": "degraded",
-                        "step": "production-run",
-                        "error": {"code": code, "message": message},
-                    }
-                ticks += 1
-                if max_ticks is not None and ticks >= max_ticks:
-                    break
-                delay = min(max_interval_seconds, interval_seconds * (2 ** min(failures, 5)))
-                time.sleep(delay)
-            return {"status": "ok", "step": "production-run", "ticks": ticks, "last": last}
+        return _production_run(
+            self,
+            interval_seconds=interval_seconds,
+            max_interval_seconds=max_interval_seconds,
+            max_ticks=max_ticks,
+        )
 
     def commit_cutover(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
         with file_lock(self.state.tick_lock):
@@ -805,123 +645,6 @@ class DispatcherRuntime:
             "reason": legacy_pause.reason,
             "legacy_pause": legacy_pause.to_json(),
         }
-
-    def _production_mutation_guard(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        cutover = self.state.load()
-        if cutover.get("phase") != "cutover_committed":
-            return {
-                "status": "blocked",
-                "step": "production-guard",
-                "reason": "production cutover is not committed",
-                "cutover_phase": cutover.get("phase", "new"),
-            }
-        legacy_guard = self._legacy_pause_guard("production-guard")
-        if legacy_guard is not None:
-            legacy_guard["reason"] = "old dispatcher hard freeze is not confirmed: " + str(legacy_guard.get("reason") or "")
-            return legacy_guard
-        owner = str(payload.get("owner") or "")
-        if owner and owner != self.owner:
-            return {
-                "status": "blocked",
-                "step": "production-guard",
-                "reason": "production ownership fence is held by another owner",
-                "owner": owner,
-            }
-        phase = str(payload.get("phase") or "new")
-        if phase not in {"new", "production"}:
-            return {
-                "status": "blocked",
-                "step": "production-guard",
-                "reason": "production state is not writable",
-                "phase": phase,
-            }
-        return None
-
-    def _production_tasks(self, states: set[str]) -> list[dict[str, Any]]:
-        return sorted(self.reader.list(states=states), key=_task_sort_key)
-
-    def _production_tick_active(
-        self,
-        task: dict[str, Any],
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        ref = task["ref"]
-        task = self.reader.show(ref)
-        record = records.get(ref)
-        mismatch = self._production_active_mismatch(task, record, payload)
-        if mismatch is not None:
-            return mismatch
-        attempt_id = record.attempt_id if record is not None and record.attempt_id else _production_adopt_attempt_id(ref)
-        return self._tick_task(task, records, payload, attempt_id)
-
-    def _production_active_mismatch(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord | None,
-        payload: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if record is None:
-            return None
-        actual_worker = task.get("claim", {}).get("worker")
-        if actual_worker in (None, record.worker):
-            return None
-        divergence = _record_divergence(
-            payload,
-            record.attempt_id,
-            task["ref"],
-            "production-recovery",
-            "active_claim_mismatch",
-            expected={"worker": record.worker, "state": task.get("state")},
-            actual={"worker": actual_worker, "state": task.get("state")},
-            details=["worker"],
-        )
-        return {
-            "status": "blocked",
-            "step": "production-recovery",
-            "ref": task["ref"],
-            "reason": "active task claim no longer matches production record",
-            "divergence_id": divergence["id"],
-        }
-
-    def _production_claim_ready(
-        self,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        active_tasks: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        active_code_projects = {
-            str(task.get("project") or "")
-            for task in active_tasks
-            if task.get("type") == "code" and task.get("project") and not _is_steward_report(task)
-        }
-        skipped: list[dict[str, str]] = []
-        for task in self._production_tasks({"ready"}):
-            if task.get("type") == "code" and task.get("project") in active_code_projects:
-                skipped.append({
-                    "ref": task["ref"],
-                    "reason": "project has an active code task",
-                })
-                continue
-            attempt_id = _new_attempt_id()
-            try:
-                outcome = self._claim(task, records, payload, attempt_id)
-            except TaskError as exc:
-                if exc.code in {"capacity_reached", "claim_conflict", "predecessor_open"}:
-                    skipped.append({"ref": task["ref"], "reason": exc.message})
-                    continue
-                raise
-            if skipped:
-                outcome["skipped_ready"] = skipped
-            return outcome
-        if skipped:
-            return {
-                "status": "skipped",
-                "step": "production-claim",
-                "reason": "no claimable Ready task",
-                "skipped_ready": skipped,
-            }
-        return None
 
     def _tick_task(
         self,
@@ -1158,7 +881,34 @@ class DispatcherRuntime:
             record.comment_baseline = len(task.get("comments") or [])
             record.state = "claimed"
             return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "in_progress"}
+        if record.state == "review_starting":
+            return {
+                "status": "blocked",
+                "step": "review",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "reason": "review launch outcome is unknown",
+            }
         if record.state != "reviewing":
+            launch_request = _review_launch_request_id(record.attempt_id or attempt_id, ref)
+            if self.audit.committed_event(launch_request) is not None:
+                record.state = "review_starting"
+                return {
+                    "status": "blocked",
+                    "step": "review",
+                    "pilot_ref": ref,
+                    "attempt_id": attempt_id,
+                    "reason": "review launch outcome is unknown",
+                }
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                body=f"Dispatcher review launch requested for {ref}, attempt {record.attempt_id or attempt_id}.",
+                request_id=launch_request,
+            )
+            record.review_baseline = len(self.reader.show(ref).get("comments") or [])
+            record.state = "review_starting"
             try:
                 record.handle = self.host.start_review(task, record)
             except HostError as exc:
@@ -1172,15 +922,7 @@ class DispatcherRuntime:
                 )
                 records.pop(ref, None)
                 return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
-            record.review_baseline = len(task.get("comments") or [])
             record.state = "reviewing"
-            self.writer.comment(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                body=f"Dispatcher review started for {ref}, attempt {record.attempt_id or attempt_id}.",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-started-comment", ref),
-            )
             return {
                 "status": "ok",
                 "step": "review",
@@ -1204,7 +946,7 @@ class DispatcherRuntime:
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
-        state = "reviewing" if task.get("state") == "validate" and _has_review_started_marker(task) else "adopted"
+        state = "review_starting" if self._review_launch_recorded(task, attempt_id) else "adopted"
         return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
@@ -1217,6 +959,11 @@ class DispatcherRuntime:
             state=state,
             claimed_at=time.time(),
         )
+
+    def _review_launch_recorded(self, task: dict[str, Any], attempt_id: str) -> bool:
+        if task.get("state") != "validate":
+            return False
+        return self.audit.committed_event(_review_launch_request_id(attempt_id, task["ref"])) is not None
 
 
 def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, owner: str) -> DispatcherRuntime:
@@ -1235,24 +982,9 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
     )
 
 
-def _task_sort_key(task: dict[str, Any]) -> tuple[int, str, str]:
-    return (int(task.get("position") or 0), str(task.get("ref") or ""), str(task.get("id") or ""))
-
-
-def _production_adopt_attempt_id(reference: str) -> str:
-    return "production-adopt-" + _request_token(reference)
-
-
 def _dispatcher_label(payload: dict[str, Any]) -> str:
     return "Production dispatcher" if payload.get("mode") == "production" else "Pilot dispatcher"
 
 
-def _has_review_started_marker(task: dict[str, Any]) -> bool:
-    for comment in task.get("comments") or []:
-        if comment.get("marker") == "dispatcher" and "review started" in str(comment.get("body") or ""):
-            return True
-    return False
-
-
-def _is_steward_report(task: dict[str, Any]) -> bool:
-    return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"
+def _review_launch_request_id(attempt_id: str, reference: str) -> str:
+    return _attempt_request_id(attempt_id, "review-start-intent", reference)

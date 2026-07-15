@@ -318,6 +318,56 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
         self.assertEqual(claimed["skipped_ready"][0]["ref"], "secretary-510-neighbor")
 
+    def test_production_scan_skips_ready_steward_report(self) -> None:
+        self.commit_cutover()
+        self.board.metadata[12]["steward_report"] = "1"
+
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(claimed["skipped_ready"][0]["reason"], "steward report is not claimable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+
+    def test_production_tick_contains_unexpected_card_exception(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 3
+        original_tick_task = self.runtime._tick_task
+
+        def fail_once(task, records, payload, attempt_id):
+            if task["ref"] == "secretary-510-pilot":
+                raise KeyError("bad card")
+            return original_tick_task(task, records, payload, attempt_id)
+
+        self.runtime._tick_task = fail_once  # type: ignore[method-assign]
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["errors"][0]["ref"], "secretary-510-pilot")
+        self.assertEqual(result["errors"][0]["code"], "unexpected_error")
+        self.assertEqual(result["errors"][0]["message"], "KeyError")
+
+    def test_production_run_backs_off_on_blocked_ticks(self) -> None:
+        calls = []
+
+        def blocked_tick():
+            calls.append("tick")
+            return {"status": "blocked", "step": "production-guard"}
+
+        self.runtime.production_tick = blocked_tick  # type: ignore[method-assign]
+
+        with mock.patch("secretary.dispatcher_production.time.sleep") as sleep:
+            result = self.runtime.production_run(
+                interval_seconds=1,
+                max_interval_seconds=10,
+                max_ticks=3,
+            )
+
+        self.assertEqual(result["ticks"], 3)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
     def test_production_owner_fence_loss_stops_mutations(self) -> None:
         self.commit_cutover()
         self.runtime.production_state.save({
@@ -404,7 +454,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("singleton lock", result["reason"])
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
 
-    def test_production_validate_recovery_does_not_start_second_reviewer(self) -> None:
+    def test_production_validate_recovery_with_review_intent_does_not_start_second_reviewer(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 4
         self.board.metadata[12].update({
@@ -420,17 +470,19 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body="done",
             request_id="existing-report",
         )
+        attempt_id = "production-adopt-secretary-510-pilot"
         self.writer.comment(
             role="dispatcher",
             actor="secretary-pilot",
             reference="secretary-510-pilot",
-            body="Dispatcher review started for secretary-510-pilot, attempt production-adopt-secretary-510-pilot.",
-            request_id="existing-review-start",
+            body="Dispatcher review launch requested.",
+            request_id=_attempt_request_id(attempt_id, "review-start-intent", "secretary-510-pilot"),
         )
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["actions"][0]["action"], "waiting-review-verdict")
+        self.assertEqual(result["actions"][0]["status"], "blocked")
+        self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
         self.assertEqual(self.host.reviews, [])
 
     def test_pause_old_rejects_drain_evidence_without_board_mutation(self) -> None:

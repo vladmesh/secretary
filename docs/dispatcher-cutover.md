@@ -249,6 +249,11 @@ Production mode is fail-closed. A tick mutates the board only when:
 - `production-state.json` has no owner or is already fenced to the same owner;
 - the singleton tick lock is available.
 
+The managed production dispatcher is a single-host appliance service. The local
+`production-tick.lock` serializes processes on that host; do not run a second
+host against the same data directory unless it has a distinct
+`SECRETARY_DISPATCHER_OWNER` and an operator is deliberately moving the fence.
+
 Production ticks first recover and advance existing `In progress` / `Validate`
 cards, then scan the shared Ready queue in stable board order. The claim still
 goes through `secretary task claim`, so the active code-task-per-project guard
