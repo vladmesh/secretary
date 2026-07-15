@@ -890,7 +890,7 @@ class DispatcherRuntime:
                 "reason": "review launch outcome is unknown",
             }
         if record.state != "reviewing":
-            launch_request = _review_launch_request_id(record.attempt_id or attempt_id, ref)
+            launch_request = _review_launch_request_id(ref, record.review_baseline)
             if self.audit.committed_event(launch_request) is not None:
                 record.state = "review_starting"
                 return {
@@ -904,10 +904,9 @@ class DispatcherRuntime:
                 role="dispatcher",
                 actor=self.owner,
                 reference=ref,
-                body=f"Dispatcher review launch requested for {ref}, attempt {record.attempt_id or attempt_id}.",
+                body=f"Dispatcher review launch requested for {ref}, review baseline {record.review_baseline}.",
                 request_id=launch_request,
             )
-            record.review_baseline = len(self.reader.show(ref).get("comments") or [])
             record.state = "review_starting"
             try:
                 record.handle = self.host.start_review(task, record)
@@ -946,7 +945,8 @@ class DispatcherRuntime:
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
-        state = "review_starting" if self._review_launch_recorded(task, attempt_id) else "adopted"
+        review_baseline = _review_adoption_baseline(task)
+        state = "review_starting" if self._review_launch_recorded(task, review_baseline) else "adopted"
         return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
@@ -955,15 +955,15 @@ class DispatcherRuntime:
             review_head=self.catalog.review_head(task),
             attempt_id=attempt_id,
             comment_baseline=len(task.get("comments") or []),
-            review_baseline=_review_adoption_baseline(task),
+            review_baseline=review_baseline,
             state=state,
             claimed_at=time.time(),
         )
 
-    def _review_launch_recorded(self, task: dict[str, Any], attempt_id: str) -> bool:
+    def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:
         if task.get("state") != "validate":
             return False
-        return self.audit.committed_event(_review_launch_request_id(attempt_id, task["ref"])) is not None
+        return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
 
 
 def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, owner: str) -> DispatcherRuntime:
@@ -986,5 +986,5 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
     return "Production dispatcher" if payload.get("mode") == "production" else "Pilot dispatcher"
 
 
-def _review_launch_request_id(attempt_id: str, reference: str) -> str:
-    return _attempt_request_id(attempt_id, "review-start-intent", reference)
+def _review_launch_request_id(reference: str, review_baseline: int) -> str:
+    return _attempt_request_id("review", "start-intent", reference, str(review_baseline))

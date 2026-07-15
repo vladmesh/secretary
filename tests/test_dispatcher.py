@@ -470,13 +470,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body="done",
             request_id="existing-report",
         )
-        attempt_id = "production-adopt-secretary-510-pilot"
+        review_baseline = 1
         self.writer.comment(
             role="dispatcher",
             actor="secretary-pilot",
             reference="secretary-510-pilot",
             body="Dispatcher review launch requested.",
-            request_id=_attempt_request_id(attempt_id, "review-start-intent", "secretary-510-pilot"),
+            request_id=_attempt_request_id("review", "start-intent", "secretary-510-pilot", str(review_baseline)),
         )
 
         result = self.runtime.production_tick()
@@ -484,6 +484,58 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["status"], "blocked")
         self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
         self.assertEqual(self.host.reviews, [])
+
+    def test_cutover_after_pilot_review_start_does_not_start_second_reviewer(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="worker-done-before-cutover",
+        )
+        self.runtime.tick(self.selector)
+        review_started = self.runtime.tick(self.selector)
+        review_request = _attempt_request_id("review", "start-intent", "secretary-510-pilot", "2")
+
+        self.assertEqual(review_started["action"], "review-started")
+        self.assertIsNotNone(TaskAudit(self.data_dir).committed_event(review_request))
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+        self.commit_cutover()
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "blocked")
+        self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_production_review_recovery_lost_state_does_not_start_second_reviewer(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="production-worker-done",
+        )
+        self.runtime.production_tick()
+        review_started = self.runtime.production_tick()
+        review_request = _attempt_request_id("review", "start-intent", "secretary-510-pilot", "2")
+
+        self.assertEqual(review_started["actions"][0]["action"], "review-started")
+        self.assertIsNotNone(TaskAudit(self.data_dir).committed_event(review_request))
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+        self.runtime.production_state.path.unlink()
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "blocked")
+        self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
     def test_pause_old_rejects_drain_evidence_without_board_mutation(self) -> None:
         self.legacy_pause.set(
