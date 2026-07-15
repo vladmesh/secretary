@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from secretary._fsutil import write_json
+
+
+class DispatcherStateError(Exception):
+    def __init__(self, code: str, message: str, exit_code: int = 2) -> None:
+        self.code = code
+        self.message = message
+        self.exit_code = exit_code
+        super().__init__(message)
 
 
 @dataclass
@@ -50,6 +62,40 @@ class DispatcherRecord:
             state=str(payload.get("state") or "claimed"),
             claimed_at=float(payload.get("claimed_at") or time.time()),
         )
+
+
+class CutoverState:
+    def __init__(self, data_dir: Path) -> None:
+        self.root = data_dir / "dispatcher"
+        self.path = self.root / "pilot-state.json"
+        self.tick_lock = self.root / "pilot-tick.lock"
+
+    def load(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"version": 1, "phase": "new"}
+        except (OSError, ValueError, UnicodeError):
+            raise DispatcherStateError("state_unavailable", "dispatcher state is unreadable", 2) from None
+        if not isinstance(payload, dict):
+            raise DispatcherStateError("state_unavailable", "dispatcher state has an unsupported shape", 2)
+        return payload
+
+    def save(self, payload: dict[str, Any]) -> None:
+        write_json(self.path, payload)
+
+    def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
+        raw = payload.get("records") or {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(ref): DispatcherRecord.from_json(record)
+            for ref, record in raw.items()
+            if isinstance(record, dict)
+        }
+
+    def put_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
+        payload["records"] = {ref: record.to_json() for ref, record in sorted(records.items())}
 
 
 def now_rfc3339() -> str:

@@ -7,13 +7,12 @@ import os
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from secretary._fsutil import file_lock, write_json, write_text_atomic
+from secretary._fsutil import file_lock, write_text_atomic
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunch,
@@ -33,7 +32,19 @@ from secretary.dispatcher_helpers import (
     scrub_host_output,
 )
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
+from secretary.dispatcher_production import (
+    ProductionState,
+    production_observe as _production_observe,
+    production_run as _production_run,
+    production_tick as _production_tick,
+)
+from secretary.dispatcher_review import (
+    command_review_running as _command_review_running,
+    recover_review_launch as _recover_review_launch,
+    start_review as _start_review,
+)
 from secretary.dispatcher_state import (
+    CutoverState,
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
     claim_actual as _claim_actual,
@@ -47,34 +58,8 @@ from secretary.dispatcher_state import (
 )
 from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
+from secretary.dispatcher_types import DispatcherError, HostError, PilotSelector
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
-
-
-class DispatcherError(Exception):
-    def __init__(self, code: str, message: str, exit_code: int = 2) -> None:
-        self.code = code
-        self.message = message
-        self.exit_code = exit_code
-        super().__init__(message)
-
-
-class HostError(Exception):
-    pass
-
-
-@dataclass(frozen=True)
-class PilotSelector:
-    reference: str
-
-    @classmethod
-    def exact(cls, reference: str | None) -> "PilotSelector":
-        value = (reference or "").strip()
-        if not value:
-            raise DispatcherError("pilot_selector_required", "dispatcher requires an exact pilot ref")
-        return cls(value)
-
-    def accepts(self, task: dict[str, Any]) -> bool:
-        return task.get("ref") == self.reference
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -89,40 +74,6 @@ def default_data_dir(instance_path: Path) -> Path:
 
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
-
-
-class CutoverState:
-    def __init__(self, data_dir: Path) -> None:
-        self.root = data_dir / "dispatcher"
-        self.path = self.root / "pilot-state.json"
-        self.tick_lock = self.root / "pilot-tick.lock"
-
-    def load(self) -> dict[str, Any]:
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {"version": 1, "phase": "new"}
-        except (OSError, ValueError, UnicodeError):
-            raise DispatcherError("state_unavailable", "dispatcher state is unreadable", 2) from None
-        if not isinstance(payload, dict):
-            raise DispatcherError("state_unavailable", "dispatcher state has an unsupported shape", 2)
-        return payload
-
-    def save(self, payload: dict[str, Any]) -> None:
-        write_json(self.path, payload)
-
-    def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
-        raw = payload.get("records") or {}
-        if not isinstance(raw, dict):
-            return {}
-        return {
-            str(ref): DispatcherRecord.from_json(record)
-            for ref, record in raw.items()
-            if isinstance(record, dict)
-        }
-
-    def put_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        payload["records"] = {ref: record.to_json() for ref, record in sorted(records.items())}
 
 
 class InstanceCatalog:
@@ -277,6 +228,9 @@ class CommandHostRuntime:
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
         )
+
+    def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
+        return _command_review_running(self, task, record)
 
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         if self.mode == "noop":
@@ -458,11 +412,13 @@ class DispatcherRuntime:
         *,
         owner: str = "secretary-dispatcher",
         legacy_pause: FileLegacyPauseProbe | None = None,
+        production_state: ProductionState | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
         self.audit = audit
         self.state = state
+        self.production_state = production_state or ProductionState(state.root.parent)
         self.catalog = catalog
         self.host = host
         self.owner = owner
@@ -611,6 +567,26 @@ class DispatcherRuntime:
             "records": list((payload.get("records") or {}).keys()),
             "divergences": list((payload.get("controlled_divergences") or [])),
         }
+
+    def production_observe(self) -> dict[str, Any]:
+        return _production_observe(self)
+
+    def production_tick(self) -> dict[str, Any]:
+        return _production_tick(self)
+
+    def production_run(
+        self,
+        *,
+        interval_seconds: float,
+        max_interval_seconds: float,
+        max_ticks: int | None = None,
+    ) -> dict[str, Any]:
+        return _production_run(
+            self,
+            interval_seconds=interval_seconds,
+            max_interval_seconds=max_interval_seconds,
+            max_ticks=max_ticks,
+        )
 
     def commit_cutover(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
         with file_lock(self.state.tick_lock):
@@ -803,7 +779,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"Pilot dispatcher claimed {ref}, attempt {record.attempt_id}, "
+                f"{_dispatcher_label(payload)} claimed {ref}, attempt {record.attempt_id}, "
                 f"worker {record.worker}, workspace {prepared['workspace']}."
             ),
             request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
@@ -913,29 +889,22 @@ class DispatcherRuntime:
             record.comment_baseline = len(task.get("comments") or [])
             record.state = "claimed"
             return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "in_progress"}
+        if record.state == "review_starting":
+            return _recover_review_launch(self, task, records, record, attempt_id)
         if record.state != "reviewing":
-            try:
-                record.handle = self.host.start_review(task, record)
-            except HostError as exc:
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
-                    target="blocked",
-                    reason=f"review bring-up failed: {scrub_host_output(str(exc))}",
-                    request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-blocked", ref),
-                )
-                records.pop(ref, None)
-                return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
-            record.review_baseline = len(task.get("comments") or [])
-            record.state = "reviewing"
-            return {
-                "status": "ok",
-                "step": "review",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "action": "review-started",
-            }
+            launch_request = _review_launch_request_id(ref, record.review_baseline)
+            if self.audit.committed_event(launch_request) is not None:
+                record.state = "review_starting"
+                return _recover_review_launch(self, task, records, record, attempt_id)
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                body=f"Dispatcher review launch requested for {ref}, review baseline {record.review_baseline}.",
+                request_id=launch_request,
+            )
+            record.state = "review_starting"
+            return _start_review(self, task, records, record, attempt_id, action="review-started")
         return {
             "status": "ok",
             "step": "review",
@@ -945,12 +914,15 @@ class DispatcherRuntime:
         }
 
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        self.state.put_records(payload, records)
+        state = self.production_state if payload.get("mode") == "production" else self.state
+        state.put_records(payload, records)
         payload["last_tick_at"] = now_rfc3339()
-        self.state.save(payload)
+        state.save(payload)
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
+        review_baseline = _review_adoption_baseline(task)
+        state = "review_starting" if self._review_launch_recorded(task, review_baseline) else "adopted"
         return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
@@ -959,10 +931,15 @@ class DispatcherRuntime:
             review_head=self.catalog.review_head(task),
             attempt_id=attempt_id,
             comment_baseline=len(task.get("comments") or []),
-            review_baseline=_review_adoption_baseline(task),
-            state="adopted",
+            review_baseline=review_baseline,
+            state=state,
             claimed_at=time.time(),
         )
+
+    def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:
+        if task.get("state") != "validate":
+            return False
+        return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
 
 
 def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, owner: str) -> DispatcherRuntime:
@@ -979,3 +956,11 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
         CommandHostRuntime(catalog, data, mode=host_mode),
         owner=owner,
     )
+
+
+def _dispatcher_label(payload: dict[str, Any]) -> str:
+    return "Production dispatcher" if payload.get("mode") == "production" else "Pilot dispatcher"
+
+
+def _review_launch_request_id(reference: str, review_baseline: int) -> str:
+    return _attempt_request_id("review", "start-intent", reference, str(review_baseline))

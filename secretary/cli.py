@@ -20,12 +20,17 @@ from secretary.data import (
     raw_kanboard_dump,
 )
 from secretary.dispatcher_commands import add_dispatcher_subcommands
+from secretary.dispatcher_pause import FileLegacyPauseProbe
 from secretary.host import (
+    CollectResult,
     FixtureHostSource,
     KindDiff,
     LiveHostSource,
     build_expectations,
+    build_plan,
     inventory,
+    load_managed_manifest,
+    plan_changes,
 )
 from secretary.host_commands import add_reconcile_subcommands
 from secretary.gate import run_gate
@@ -351,14 +356,20 @@ def run_doctor(args: argparse.Namespace) -> int:
     backup_warnings = print_backup_status(report.instance_path)
 
     host_incomplete = False
+    collected_host: CollectResult | None = None
     if not args.offline and (not args.dry_run or args.host or args.host_fixture):
-        host_incomplete = print_host_inventory(report, args)
+        host_incomplete, collected_host = print_host_inventory(report, args)
+
+    dispatcher_findings = print_dispatcher_status(report, collected_host, inspect_live=not args.offline)
 
     print("host changes: none")
     if host_incomplete:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
         return 1 if args.dry_run else 2
+    if dispatcher_findings:
+        print("status: findings")
+        return 1
     if offsite_findings:
         print("status: findings")
         return 1
@@ -423,6 +434,87 @@ def print_backup_status(instance_path: Path) -> list[str]:
         for warning in status.warnings:
             print(f"  {warning}")
     return status.warnings
+
+
+def print_dispatcher_status(
+    report,
+    collected_host: CollectResult | None,
+    *,
+    inspect_live: bool,
+) -> bool:
+    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
+    if not isinstance(data_dir_value, str) or not data_dir_value:
+        return False
+    data_dir = Path(data_dir_value).expanduser()
+    pilot = _load_dispatcher_state(data_dir / "dispatcher" / "pilot-state.json")
+    production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    pilot_phase = str(pilot.get("phase") or "new")
+    production_phase = str(production.get("phase") or "new")
+    production_owner = str(production.get("owner") or "")
+    cutover_committed = pilot_phase == "cutover_committed"
+
+    if not (pilot or production or cutover_committed):
+        return False
+
+    if cutover_committed and production_owner:
+        owner_state = "production-owner"
+    elif pilot_phase == "new_pilot":
+        owner_state = "pilot-only"
+    else:
+        owner_state = "legacy-owner"
+
+    findings: list[str] = []
+    print("")
+    print("dispatcher ownership: read-only")
+    print(f"  state: {owner_state}")
+    print(f"  pilot phase: {pilot_phase}")
+    print(f"  production phase: {production_phase}")
+    print(f"  production owner: {production_owner or '(none)'}")
+
+    if cutover_committed and inspect_live:
+        legacy_pause = FileLegacyPauseProbe().snapshot()
+        print(f"  legacy freeze: {'confirmed' if legacy_pause.sufficient else 'not confirmed'}")
+        if production_owner and not legacy_pause.sufficient:
+            findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
+        if not production_owner:
+            findings.append("production owner fence is missing after cutover")
+        findings.extend(_production_host_findings(report, data_dir, collected_host))
+    elif cutover_committed:
+        print("  legacy freeze: not inspected")
+
+    if findings:
+        print("dispatcher findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return bool(findings)
+
+
+def _load_dispatcher_state(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _production_host_findings(report, data_dir: Path, collected_host: CollectResult | None) -> list[str]:
+    if collected_host is None or collected_host.errors.get("units"):
+        return []
+    prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
+    prefix = prefix if isinstance(prefix, str) else ""
+    desired = build_plan(report.instance, report.bindings)
+    managed = load_managed_manifest(data_dir / "host-managed.json")
+    changes = plan_changes(desired, collected_host.inventory, managed, prefix)
+    findings = []
+    for change in changes:
+        if not change.logical_id.startswith("systemd:dispatcher:production"):
+            continue
+        if change.action == "unchanged":
+            continue
+        findings.append(
+            f"production dispatcher managed unit mismatch: {change.action} {change.name}"
+        )
+    return findings
 
 
 def run_data_init(args: argparse.Namespace) -> int:
@@ -793,7 +885,7 @@ def run_backup_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_host_inventory(report, args: argparse.Namespace) -> bool:
+def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, CollectResult]:
     """Print the read-only host inventory: matched / missing / unmanaged per kind.
 
     Returns True if any kind could not be inspected (reported as unavailable).
@@ -816,7 +908,7 @@ def print_host_inventory(report, args: argparse.Namespace) -> bool:
             print(f"  unavailable: {reason}")
         else:
             _print_kind(kind, diffs[kind])
-    return bool(collected.errors)
+    return bool(collected.errors), collected
 
 
 def _print_kind(kind: str, diff: KindDiff) -> None:

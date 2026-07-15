@@ -67,6 +67,8 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
             if not isinstance(model, str):
                 continue
             result.append(_resource(logical_id, "unit", name, {"model": model, "role": role}))
+    if prefix:
+        result.extend(_production_dispatcher_units(prefix))
     for binding in bindings:
         if not isinstance(binding, dict) or not binding.get("enabled"):
             continue
@@ -80,6 +82,36 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
             continue
         result.append(_resource(logical_id, "orca", name, {"repo": repo, "binding": name}))
     return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
+
+
+def _production_dispatcher_units(prefix: str) -> list[PlannedResource]:
+    service = f"{prefix}dispatcher-production.service"
+    timer = f"{prefix}dispatcher-production.timer"
+    return [
+        _resource(
+            "systemd:dispatcher:production.service",
+            "unit",
+            service,
+            {
+                "component": "dispatcher-production",
+                "managed_by": "secretary",
+                "runtime": "python3 -m secretary dispatcher production-run --instance $SECRETARY_INSTANCE",
+                "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER",
+            },
+        ),
+        _resource(
+            "systemd:dispatcher:production.timer",
+            "unit",
+            timer,
+            {
+                "component": "dispatcher-production",
+                "managed_by": "secretary",
+                "service": service,
+                "on_boot_sec": "30s",
+                "on_unit_active_sec": "60s",
+            },
+        ),
+    ]
 
 
 def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[str]:

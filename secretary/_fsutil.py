@@ -120,6 +120,21 @@ def file_lock(path: Path) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def try_file_lock(path: Path) -> Iterator[bool]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
 def directory_lock(path: Path) -> Iterator[None]:
     """Serialize a state-file transition without creating a lock artifact."""
     path.mkdir(parents=True, exist_ok=True)

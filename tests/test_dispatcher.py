@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -122,6 +124,7 @@ class FakeHost:
         self.stopped: list[str] = []
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
+        self.fail_review_error: Exception | None = None
 
     def prepare_worker(
         self,
@@ -139,8 +142,13 @@ class FakeHost:
         return {"workspace": str(workspace), "handle": f"term:{worker_id}"}
 
     def start_review(self, task: dict, record) -> str:
+        if self.fail_review_error is not None:
+            raise self.fail_review_error
         self.reviews.append(task["ref"])
         return f"review:{task['ref']}"
+
+    def review_running(self, task: dict, record) -> bool:
+        return task["ref"] in self.reviews
 
     def restore_workspace(self, task: dict, worker: str) -> str:
         return str(self.root / worker)
@@ -203,6 +211,15 @@ class DispatcherRuntimeTests(unittest.TestCase):
         started = self.runtime.start_new_pilot(self.selector, actor="operator")
         self.assertEqual(started["status"], "ok")
 
+    def commit_cutover(self) -> None:
+        self.runtime.state.save({
+            "version": 1,
+            "phase": "cutover_committed",
+            "pilot_ref": "secretary-510-pilot",
+            "old_owner_paused": True,
+            "records": {},
+        })
+
     def append_committed_claim(self, attempt_id: str) -> str:
         request_id = _attempt_request_id(attempt_id, "claim", "secretary-510-pilot")
         TaskAudit(self.data_dir).append(
@@ -243,6 +260,383 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "blocked")
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+
+    def test_production_tick_fails_closed_before_committed_cutover(self) -> None:
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "production cutover is not committed")
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+
+    def test_production_tick_claims_first_ready_card_deterministically(self) -> None:
+        self.commit_cutover()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["actions"][0]["step"], "claim")
+        self.assertEqual(result["actions"][0]["pilot_ref"], "secretary-510-pilot")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        payload = self.runtime.production_state.load()
+        self.assertEqual(payload["mode"], "production")
+        self.assertEqual(list(payload["records"]), ["secretary-510-pilot"])
+
+    def test_production_tick_repeat_does_not_launch_second_workspace(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["action"], "waiting-worker-report")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        claim_events = [event for event in self.audit_events() if event["kind"] == "claimed"]
+        self.assertEqual(len(claim_events), 1)
+
+    def test_production_scan_skips_project_with_active_code_task(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 3
+        self.board.metadata[12].update({
+            "claim": "secretary-510-pilot-pilot",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        self.board.tasks.append({
+            "id": 14,
+            "reference": "other-1",
+            "title": "Other project",
+            "description": "other spec",
+            "column_id": 2,
+            "position": 3,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.board.metadata[14] = {"project": "other", "task_type": "code", "slug": "other"}
+        self.board.comments[14] = []
+
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "other-1")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
+        self.assertEqual(claimed["skipped_ready"][0]["ref"], "secretary-510-neighbor")
+
+    def test_production_scan_skips_ready_steward_report(self) -> None:
+        self.commit_cutover()
+        self.board.metadata[12]["steward_report"] = "1"
+
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(claimed["skipped_ready"][0]["reason"], "steward report is not claimable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+
+    def test_production_tick_contains_unexpected_card_exception(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 3
+        original_tick_task = self.runtime._tick_task
+
+        def fail_once(task, records, payload, attempt_id):
+            if task["ref"] == "secretary-510-pilot":
+                raise KeyError("bad card")
+            return original_tick_task(task, records, payload, attempt_id)
+
+        self.runtime._tick_task = fail_once  # type: ignore[method-assign]
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["errors"][0]["ref"], "secretary-510-pilot")
+        self.assertEqual(result["errors"][0]["code"], "unexpected_error")
+        self.assertEqual(result["errors"][0]["message"], "KeyError")
+
+    def test_production_run_backs_off_on_blocked_ticks(self) -> None:
+        calls = []
+
+        def blocked_tick():
+            calls.append("tick")
+            return {"status": "blocked", "step": "production-guard"}
+
+        self.runtime.production_tick = blocked_tick  # type: ignore[method-assign]
+
+        with mock.patch("secretary.dispatcher_production.time.sleep") as sleep:
+            result = self.runtime.production_run(
+                interval_seconds=1,
+                max_interval_seconds=10,
+                max_ticks=3,
+            )
+
+        self.assertEqual(result["ticks"], 3)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
+    def test_production_owner_fence_loss_stops_mutations(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "another-dispatcher",
+            "records": {},
+        })
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("ownership fence", result["reason"])
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+
+    def test_production_active_claim_divergence_blocks_once_and_resumes_queue(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 3
+        self.board.tasks[1]["column_id"] = 5
+        self.board.metadata[12].update({
+            "claim": "foreign-worker",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        self.board.tasks.append({
+            "id": 14,
+            "reference": "other-9",
+            "title": "Other project",
+            "description": "other spec",
+            "column_id": 2,
+            "position": 3,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.board.metadata[14] = {"project": "other", "task_type": "code", "slug": "other"}
+        self.board.comments[14] = []
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "secretary-pilot",
+            "records": {
+                "secretary-510-pilot": {
+                    "attempt_id": "production-existing",
+                    "claimed_at": 1720000000,
+                    "comment_baseline": 0,
+                    "handle": "term",
+                    "head": "codex",
+                    "review_baseline": 0,
+                    "review_head": "codex-reviewer",
+                    "state": "claimed",
+                    "worker": "secretary-510-pilot-pilot",
+                    "workspace": str(self.data_dir / "workspaces" / "secretary-510-pilot-pilot"),
+                },
+            },
+        })
+
+        results = [self.runtime.production_tick() for _ in range(3)]
+
+        self.assertEqual(results[0]["actions"][0]["status"], "blocked")
+        self.assertEqual(results[0]["actions"][0]["step"], "production-recovery")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.reader.show("other-9")["state"], "in_progress")
+        self.assertEqual(self.host.prepared, ["other-9"])
+        payload = self.runtime.production_state.load()
+        self.assertEqual(len(payload["controlled_divergences"]), 1)
+        self.assertNotIn("secretary-510-pilot", payload["records"])
+
+    def test_production_singleton_lock_blocks_parallel_tick(self) -> None:
+        self.commit_cutover()
+        marker = self.data_dir / "lock-ready"
+        lock_path = self.runtime.production_state.tick_lock
+        holder = subprocess.Popen([
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, pathlib, sys, time;"
+                "path=pathlib.Path(sys.argv[1]); marker=pathlib.Path(sys.argv[2]);"
+                "path.parent.mkdir(parents=True, exist_ok=True);"
+                "handle=path.open('a+');"
+                "fcntl.flock(handle.fileno(), fcntl.LOCK_EX);"
+                "marker.write_text('ready', encoding='utf-8');"
+                "time.sleep(5)"
+            ),
+            str(lock_path),
+            str(marker),
+        ])
+        try:
+            for _ in range(50):
+                if marker.exists():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(marker.exists())
+            result = self.runtime.production_tick()
+        finally:
+            holder.terminate()
+            holder.wait(timeout=5)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("singleton lock", result["reason"])
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+
+    def test_production_validate_recovery_with_review_intent_restarts_missing_reviewer(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 4
+        self.board.metadata[12].update({
+            "claim": "secretary-510-pilot-pilot",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="existing-report",
+        )
+        review_baseline = 1
+        self.writer.comment(
+            role="dispatcher",
+            actor="secretary-pilot",
+            reference="secretary-510-pilot",
+            body="Dispatcher review launch requested.",
+            request_id=_attempt_request_id("review", "start-intent", "secretary-510-pilot", str(review_baseline)),
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(result["actions"][0]["action"], "review-restarted")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_production_review_starting_recovery_does_not_freeze_other_projects(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 4
+        self.board.metadata[12].update({
+            "claim": "secretary-510-pilot-pilot",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        self.board.tasks.append({
+            "id": 14,
+            "reference": "other-9",
+            "title": "Other project",
+            "description": "other spec",
+            "column_id": 2,
+            "position": 3,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.board.metadata[14] = {"project": "other", "task_type": "code", "slug": "other"}
+        self.board.comments[14] = []
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="hard-kill-report",
+        )
+        review_baseline = 1
+        self.writer.comment(
+            role="dispatcher",
+            actor="secretary-pilot",
+            reference="secretary-510-pilot",
+            body="Dispatcher review launch requested.",
+            request_id=_attempt_request_id("review", "start-intent", "secretary-510-pilot", str(review_baseline)),
+        )
+
+        results = [self.runtime.production_tick() for _ in range(3)]
+
+        self.assertEqual([result["status"] for result in results], ["ok", "ok", "ok"])
+        actions = [action for result in results for action in result["actions"]]
+        self.assertNotIn("review launch outcome is unknown", [action.get("reason") for action in actions])
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.reader.show("other-9")["state"], "in_progress")
+        self.assertEqual(self.host.prepared, ["other-9"])
+
+    def test_cutover_after_pilot_review_start_does_not_start_second_reviewer(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="worker-done-before-cutover",
+        )
+        self.runtime.tick(self.selector)
+        review_started = self.runtime.tick(self.selector)
+        review_request = _attempt_request_id("review", "start-intent", "secretary-510-pilot", "2")
+
+        self.assertEqual(review_started["action"], "review-started")
+        self.assertIsNotNone(TaskAudit(self.data_dir).committed_event(review_request))
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+        self.commit_cutover()
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(result["actions"][0]["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_production_review_recovery_lost_state_does_not_start_second_reviewer(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="production-worker-done",
+        )
+        self.runtime.production_tick()
+        review_started = self.runtime.production_tick()
+        review_request = _attempt_request_id("review", "start-intent", "secretary-510-pilot", "2")
+
+        self.assertEqual(review_started["actions"][0]["action"], "review-started")
+        self.assertIsNotNone(TaskAudit(self.data_dir).committed_event(review_request))
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+        self.runtime.production_state.path.unlink()
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(result["actions"][0]["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_production_review_unexpected_launch_error_moves_card_blocked(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="production-review-error-report",
+        )
+        self.runtime.production_tick()
+        self.host.fail_review_error = OSError(
+            "review write failed: API_TOKEN=secret-token raw abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789"
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["actions"][0]["status"], "blocked")
+        self.assertEqual(result["actions"][0]["reason"], "host review failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.reviews, [])
+        self.assertEqual(self.runtime.production_state.load()["records"], {})
+        body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("review bring-up failed", body)
+        self.assertIn("API_TOKEN=<redacted>", body)
+        self.assertNotIn("secret-token", body)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789", body)
 
     def test_pause_old_rejects_drain_evidence_without_board_mutation(self) -> None:
         self.legacy_pause.set(
