@@ -10,6 +10,7 @@ from typing import Any
 from secretary._fsutil import try_file_lock, write_json
 from secretary.dispatcher_state import (
     DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
     new_attempt_id,
     now_rfc3339,
     record_divergence,
@@ -234,7 +235,7 @@ def _production_tick_active(
     ref = task["ref"]
     task = runtime.reader.show(ref)
     record = records.get(ref)
-    mismatch = _production_active_mismatch(task, record, payload)
+    mismatch = _production_active_mismatch(runtime, task, record, records, payload)
     if mismatch is not None:
         return mismatch
     attempt_id = record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
@@ -242,8 +243,10 @@ def _production_tick_active(
 
 
 def _production_active_mismatch(
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord | None,
+    records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     if record is None:
@@ -251,6 +254,14 @@ def _production_active_mismatch(
     actual_worker = task.get("claim", {}).get("worker")
     if actual_worker in (None, record.worker):
         return None
+    runtime.writer.move(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=task["ref"],
+        target="blocked",
+        reason="production recovery blocked: active task claim no longer matches production record",
+        request_id=_attempt_request_id(record.attempt_id, "active-mismatch-blocked", task["ref"]),
+    )
     divergence = record_divergence(
         payload,
         record.attempt_id,
@@ -261,6 +272,7 @@ def _production_active_mismatch(
         actual={"worker": actual_worker, "state": task.get("state")},
         details=["worker"],
     )
+    records.pop(task["ref"], None)
     return {
         "status": "blocked",
         "step": "production-recovery",

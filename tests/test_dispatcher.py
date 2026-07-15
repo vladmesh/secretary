@@ -390,14 +390,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("ownership fence", result["reason"])
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
 
-    def test_production_active_claim_divergence_does_not_claim_ready_neighbor(self) -> None:
+    def test_production_active_claim_divergence_blocks_once_and_resumes_queue(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 3
+        self.board.tasks[1]["column_id"] = 5
         self.board.metadata[12].update({
             "claim": "foreign-worker",
             "resolved_head": "codex",
             "resolved_review_head": "codex-reviewer",
         })
+        self.board.tasks.append({
+            "id": 14,
+            "reference": "other-9",
+            "title": "Other project",
+            "description": "other spec",
+            "column_id": 2,
+            "position": 3,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.board.metadata[14] = {"project": "other", "task_type": "code", "slug": "other"}
+        self.board.comments[14] = []
         self.runtime.production_state.save({
             "version": 1,
             "mode": "production",
@@ -419,12 +433,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
             },
         })
 
-        result = self.runtime.production_tick()
+        results = [self.runtime.production_tick() for _ in range(3)]
 
-        self.assertEqual(result["actions"][0]["status"], "blocked")
-        self.assertEqual(result["actions"][0]["step"], "production-recovery")
-        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
-        self.assertEqual(self.host.prepared, [])
+        self.assertEqual(results[0]["actions"][0]["status"], "blocked")
+        self.assertEqual(results[0]["actions"][0]["step"], "production-recovery")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.reader.show("other-9")["state"], "in_progress")
+        self.assertEqual(self.host.prepared, ["other-9"])
+        payload = self.runtime.production_state.load()
+        self.assertEqual(len(payload["controlled_divergences"]), 1)
+        self.assertNotIn("secretary-510-pilot", payload["records"])
 
     def test_production_singleton_lock_blocks_parallel_tick(self) -> None:
         self.commit_cutover()
