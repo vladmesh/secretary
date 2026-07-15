@@ -147,6 +147,9 @@ class FakeHost:
         self.reviews.append(task["ref"])
         return f"review:{task['ref']}"
 
+    def review_running(self, task: dict, record) -> bool:
+        return task["ref"] in self.reviews
+
     def restore_workspace(self, task: dict, worker: str) -> str:
         return str(self.root / worker)
 
@@ -457,7 +460,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("singleton lock", result["reason"])
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
 
-    def test_production_validate_recovery_with_review_intent_does_not_start_second_reviewer(self) -> None:
+    def test_production_validate_recovery_with_review_intent_restarts_missing_reviewer(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 4
         self.board.metadata[12].update({
@@ -484,9 +487,57 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["actions"][0]["status"], "blocked")
-        self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
-        self.assertEqual(self.host.reviews, [])
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(result["actions"][0]["action"], "review-restarted")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_production_review_starting_recovery_does_not_freeze_other_projects(self) -> None:
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 4
+        self.board.metadata[12].update({
+            "claim": "secretary-510-pilot-pilot",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        self.board.tasks.append({
+            "id": 14,
+            "reference": "other-9",
+            "title": "Other project",
+            "description": "other spec",
+            "column_id": 2,
+            "position": 3,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.board.metadata[14] = {"project": "other", "task_type": "code", "slug": "other"}
+        self.board.comments[14] = []
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="hard-kill-report",
+        )
+        review_baseline = 1
+        self.writer.comment(
+            role="dispatcher",
+            actor="secretary-pilot",
+            reference="secretary-510-pilot",
+            body="Dispatcher review launch requested.",
+            request_id=_attempt_request_id("review", "start-intent", "secretary-510-pilot", str(review_baseline)),
+        )
+
+        results = [self.runtime.production_tick() for _ in range(3)]
+
+        self.assertEqual([result["status"] for result in results], ["ok", "ok", "ok"])
+        actions = [action for result in results for action in result["actions"]]
+        self.assertNotIn("review launch outcome is unknown", [action.get("reason") for action in actions])
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.reader.show("other-9")["state"], "in_progress")
+        self.assertEqual(self.host.prepared, ["other-9"])
 
     def test_cutover_after_pilot_review_start_does_not_start_second_reviewer(self) -> None:
         self.start_pilot()
@@ -510,8 +561,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.commit_cutover()
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["actions"][0]["status"], "blocked")
-        self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(result["actions"][0]["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
     def test_production_review_recovery_lost_state_does_not_start_second_reviewer(self) -> None:
@@ -536,8 +587,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.production_state.path.unlink()
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["actions"][0]["status"], "blocked")
-        self.assertEqual(result["actions"][0]["reason"], "review launch outcome is unknown")
+        self.assertEqual(result["actions"][0]["status"], "ok")
+        self.assertEqual(result["actions"][0]["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
     def test_production_review_unexpected_launch_error_moves_card_blocked(self) -> None:

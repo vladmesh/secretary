@@ -38,6 +38,11 @@ from secretary.dispatcher_production import (
     production_run as _production_run,
     production_tick as _production_tick,
 )
+from secretary.dispatcher_review import (
+    command_review_running as _command_review_running,
+    recover_review_launch as _recover_review_launch,
+    start_review as _start_review,
+)
 from secretary.dispatcher_state import (
     CutoverState,
     DispatcherRecord,
@@ -223,6 +228,9 @@ class CommandHostRuntime:
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
         )
+
+    def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
+        return _command_review_running(self, task, record)
 
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         if self.mode == "noop":
@@ -882,24 +890,12 @@ class DispatcherRuntime:
             record.state = "claimed"
             return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "in_progress"}
         if record.state == "review_starting":
-            return {
-                "status": "blocked",
-                "step": "review",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "reason": "review launch outcome is unknown",
-            }
+            return _recover_review_launch(self, task, records, record, attempt_id)
         if record.state != "reviewing":
             launch_request = _review_launch_request_id(ref, record.review_baseline)
             if self.audit.committed_event(launch_request) is not None:
                 record.state = "review_starting"
-                return {
-                    "status": "blocked",
-                    "step": "review",
-                    "pilot_ref": ref,
-                    "attempt_id": attempt_id,
-                    "reason": "review launch outcome is unknown",
-                }
+                return _recover_review_launch(self, task, records, record, attempt_id)
             self.writer.comment(
                 role="dispatcher",
                 actor=self.owner,
@@ -908,27 +904,7 @@ class DispatcherRuntime:
                 request_id=launch_request,
             )
             record.state = "review_starting"
-            try:
-                record.handle = self.host.start_review(task, record)
-            except Exception as exc:
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
-                    target="blocked",
-                    reason=f"review bring-up failed: {scrub_host_output(str(exc))}",
-                    request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-blocked", ref),
-                )
-                records.pop(ref, None)
-                return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
-            record.state = "reviewing"
-            return {
-                "status": "ok",
-                "step": "review",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "action": "review-started",
-            }
+            return _start_review(self, task, records, record, attempt_id, action="review-started")
         return {
             "status": "ok",
             "step": "review",
