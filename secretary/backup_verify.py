@@ -284,6 +284,10 @@ def _verify_memory_journal(plain_archive: Path) -> list[str]:
                     if not member.name.startswith(prefix):
                         continue
                     relative = Path(member.name.removeprefix(prefix))
+                    if is_memory_journal_git_runtime_entry(
+                        Path("memory", "facts") / relative
+                    ):
+                        continue
                     if _unsafe_member(member):
                         return [f"unsafe archive entry: {member.name}"]
                     destination = journal / relative

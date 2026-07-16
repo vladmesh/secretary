@@ -672,6 +672,46 @@ class RestoreTests(unittest.TestCase):
             )
             self.assertEqual(tracked.stdout.splitlines(), ["fact.md", "second-fact.md"])
 
+    def test_verify_and_restore_ignore_memory_journal_runtime_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            git_dir = payload / "secretary-data" / "memory" / "facts" / ".git"
+            marker = root / "runtime-hook-ran"
+            hooks = git_dir / "hooks"
+            hooks.mkdir()
+            hook = hooks / "post-checkout"
+            hook.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+            hook.chmod(0o755)
+            (git_dir / "config").write_text(
+                "[core]\n\thooksPath = hooks\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            verified = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+            restore_backup(
+                archive,
+                instance,
+                age_identity=None,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+            restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
+            self.assertEqual(verified.code, 0, verified.findings)
+            self.assertFalse(marker.exists())
+            self.assertFalse((restored_git / "config").exists())
+            self.assertFalse((restored_git / "hooks").exists())
+
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
