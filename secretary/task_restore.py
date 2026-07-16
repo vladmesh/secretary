@@ -42,14 +42,14 @@ def restore_card(
 
 
 def restore_comment(
-    writer: Any, reference: str, body: str, index: int, request_id: str | None
+    writer: Any, reference: str, body: str, occurrence: int, request_id: str | None
 ) -> dict[str, Any]:
     """Append one comment and retain pending state when its reply is lost."""
     from secretary.tasks import _CommittedWriteError, TaskError, _digest, _task_number
 
     payload: dict[str, Any] = {
         "body_sha256": _digest(body),
-        "restore_index": index,
+        "restore_occurrence": occurrence,
         "restore_body": body,
     }
 
@@ -98,18 +98,18 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
 
     ref = str(event.get("ref") or "")
     body = payload.get("restore_body")
-    index = payload.get("restore_index")
-    if not ref or not isinstance(body, str) or not isinstance(index, int) or index < 0:
+    occurrence = payload.get("restore_occurrence")
+    if not ref or not isinstance(body, str) or not isinstance(occurrence, int) or occurrence < 0:
         raise TaskError("backend_error", "pending restore comment is invalid", 1)
     digest = payload.get("body_sha256")
     matches = sum(
         _digest(str(comment.get("body") or "")) == digest
         for comment in writer.reader.show(ref).get("comments", [])
     )
-    if matches <= index:
+    if matches <= occurrence:
         writer.client.call("createComment", task_id=_task_number(writer.reader.show(ref)), user_id=0, content=body)
         matches += 1
-    if matches <= index:
+    if matches <= occurrence:
         raise TaskError("backend_error", "pending restore comment remains incomplete", 1)
     payload.pop("restore_body", None)
 

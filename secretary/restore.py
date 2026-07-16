@@ -79,9 +79,12 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
                 position=_restore_position(card), swimlane=str(card.get("swimlane") or ""),
                 request_id=f"restore-card:{card['reference']}",
             )
+            occurrences: dict[str, int] = {}
             for index, comment in enumerate(_restore_comments(card)):
+                occurrence = occurrences.get(comment, 0)
+                occurrences[comment] = occurrence + 1
                 writer.restore_comment(
-                    reference=card["reference"], body=comment, index=index,
+                    reference=card["reference"], body=comment, occurrence=occurrence,
                     request_id=f"restore-comment:{card['reference']}:{index}",
                 )
         actual = {card["reference"]: reader.show(card["reference"]) for card in cards}

@@ -304,7 +304,7 @@ class TaskWriterTests(unittest.TestCase):
         self.client.lose_comment_reply = True
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
             self.writer.restore_comment(
-                reference="secretary-468", body="[report:done]\\nrestored", index=0,
+                reference="secretary-468", body="[report:done]\\nrestored", occurrence=0,
                 request_id="restore-comment-lost-reply",
             )
         self.assertEqual(raised.exception.code, "audit_pending")
@@ -313,7 +313,7 @@ class TaskWriterTests(unittest.TestCase):
 
         self.client.lose_comment_reply = False
         self.writer.restore_comment(
-            reference="secretary-468", body="[report:done]\\nrestored", index=0,
+            reference="secretary-468", body="[report:done]\\nrestored", occurrence=0,
             request_id="restore-comment-lost-reply",
         )
 
@@ -321,6 +321,37 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         with open(self.writer.audit.events_path, encoding="utf-8") as events:
             self.assertNotIn("restore_body", events.read())
+
+    def test_restore_comment_retry_uses_digest_occurrence_not_history_index(self) -> None:
+        self.client.comments[12].append({"date_creation": "1720000020", "comment": "first"})
+        self.client.lose_comment_reply = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.restore_comment(
+                reference="secretary-468", body="second", occurrence=0,
+                request_id="restore-second-lost-reply",
+            )
+        self.client.lose_comment_reply = False
+        self.writer.restore_comment(
+            reference="secretary-468", body="second", occurrence=0,
+            request_id="restore-second-lost-reply",
+        )
+        self.assertEqual([comment["comment"] for comment in self.client.comments[12]], ["first", "second"])
+
+        self.client.lose_comment_reply = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.restore_comment(
+                reference="secretary-468", body="second", occurrence=1,
+                request_id="restore-duplicate-lost-reply",
+            )
+        self.client.lose_comment_reply = False
+        self.writer.restore_comment(
+            reference="secretary-468", body="second", occurrence=1,
+            request_id="restore-duplicate-lost-reply",
+        )
+        self.assertEqual(
+            [comment["comment"] for comment in self.client.comments[12]],
+            ["first", "second", "second"],
+        )
 
     def test_partial_move_failure_keeps_pending_until_reconcile(self) -> None:
         self.client.tasks[0]["column_id"] = 3

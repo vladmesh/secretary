@@ -692,11 +692,11 @@ class TaskWriter:
         return restore_card(self, reference, metadata, target, position, swimlane, request_id)
 
     def restore_comment(
-        self, *, reference: str, body: str, index: int, request_id: str | None = None
+        self, *, reference: str, body: str, occurrence: int, request_id: str | None = None
     ) -> dict[str, Any]:
         from secretary.task_restore import restore_comment
 
-        return restore_comment(self, reference, body, index, request_id)
+        return restore_comment(self, reference, body, occurrence, request_id)
 
     def _move_raw(
         self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int
