@@ -21,6 +21,7 @@ from secretary.data import DataExport, export_memory, init_layout, normalize_boa
 from secretary.host import CollectResult, HostInventory, build_plan
 import secretary.restore_commands as restore_commands
 import secretary.restore as restore_module
+import secretary.backup_verify as backup_verify_module
 from secretary.restore import (
     RestoreError,
     bootstrap_empty,
@@ -369,6 +370,27 @@ class RestoreTests(unittest.TestCase):
             )
             self.assertTrue((data_dir / "board" / "cards.json").is_file())
             self.assertTrue((data_dir / "memory" / "facts").is_dir())
+
+    def test_restore_runs_checksum_preflight_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            original = backup_verify_module.verify_restore_payload
+
+            with mock.patch.object(
+                backup_verify_module,
+                "verify_restore_payload",
+                wraps=original,
+            ) as verify:
+                restore_backup(
+                    archive,
+                    instance,
+                    age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+
+        verify.assert_called_once()
 
     def test_restore_cli_publishes_and_returns_stable_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -21,7 +21,7 @@ from secretary.backup_policy import (
     restore_plan_components,
     should_skip_data_entry,
 )
-from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar, verify_restore_payload
+from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
 from secretary._fsutil import file_lock, write_text_atomic
@@ -377,7 +377,6 @@ def restore_backup(
         )
         if dry_run:
             return plan
-        _validate_restore_payload(plain, manifest, policy)
         _stage_and_publish(plain, target, policy=policy)
         _update_restore_state(target, board="pending", memory_index="pending", reconcile="pending")
         return plan
@@ -451,14 +450,6 @@ def _next_steps(components: tuple[dict[str, str], ...]) -> list[str]:
 def _reject_existing_target(target: Path) -> None:
     if target.exists():
         raise RestoreError(f"target data root already exists: {target}")
-
-
-def _validate_restore_payload(
-    plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
-) -> None:
-    findings = verify_restore_payload(plain_archive, manifest, policy)
-    if findings:
-        raise RestoreError(findings[0])
 
 
 def _unsafe_member(member: tarfile.TarInfo) -> bool:
