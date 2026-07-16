@@ -164,9 +164,16 @@ class KanboardClientTests(unittest.TestCase):
 
 class WriteKanboard(FakeKanboard):
     fail_comments = False
+    lose_comment_reply = False
     fail_metadata = False
     fail_move = False
     fail_update = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.comments: dict[int, list[dict[str, object]]] = {
+            int(task["id"]): [] for task in self.tasks
+        }
 
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
@@ -179,7 +186,14 @@ class WriteKanboard(FakeKanboard):
             self.calls.append((method, params))
             if self.fail_comments:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            self.comments[int(params["task_id"])].append(
+                {"date_creation": "1720000020", "comment": params["content"]}
+            )
+            if self.lose_comment_reply:
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
             return 1
+        if method == "getAllComments":
+            return self.comments[int(params["task_id"])]
         if method == "createTask":
             self.calls.append((method, params))
             task_id = max(int(task["id"]) for task in self.tasks) + 1
@@ -195,6 +209,7 @@ class WriteKanboard(FakeKanboard):
                 "date_modification": "1720000200",
             })
             self.metadata[task_id] = {}
+            self.comments[task_id] = []
             return task_id
         if method == "updateTask":
             self.calls.append((method, params))
@@ -209,8 +224,26 @@ class WriteKanboard(FakeKanboard):
             self.calls.append((method, params))
             if self.fail_move:
                 raise TaskError("backend_error", "Kanboard rejected the move", 1)
-            self.tasks[0]["column_id"] = params["column_id"]
-            self.tasks[0]["date_modification"] = "1720000100"
+            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
+            task_index = self.tasks.index(task)
+            column_id = params["column_id"]
+            swimlane_id = params["swimlane_id"]
+            self.tasks.remove(task)
+            siblings = sorted(
+                (
+                    candidate for candidate in self.tasks
+                    if candidate["column_id"] == column_id and candidate["swimlane_id"] == swimlane_id
+                ),
+                key=lambda candidate: int(candidate.get("position") or 0),
+            )
+            position = min(max(1, int(params["position"])), len(siblings) + 1)
+            task["column_id"] = column_id
+            task["swimlane_id"] = swimlane_id
+            siblings.insert(position - 1, task)
+            for index, candidate in enumerate(siblings, start=1):
+                candidate["position"] = index
+            self.tasks.insert(task_index, task)
+            task["date_modification"] = "1720000100"
             return True
         if method == "saveTaskMetadata":
             self.calls.append((method, params))
@@ -266,6 +299,59 @@ class TaskWriterTests(unittest.TestCase):
         writes = len([call for call in self.client.calls if call[0] == "createComment"])
         self.assertEqual(self.writer.audit.reconcile(), (1, 0))
         self.assertEqual(writes, len([call for call in self.client.calls if call[0] == "createComment"]))
+
+    def test_restore_comment_retry_after_lost_reply_does_not_duplicate_history(self) -> None:
+        self.client.lose_comment_reply = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.restore_comment(
+                reference="secretary-468", body="[report:done]\\nrestored", occurrence=0,
+                request_id="restore-comment-lost-reply",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(len(self.client.comments[12]), 1)
+
+        self.client.lose_comment_reply = False
+        self.writer.restore_comment(
+            reference="secretary-468", body="[report:done]\\nrestored", occurrence=0,
+            request_id="restore-comment-lost-reply",
+        )
+
+        self.assertEqual(len(self.client.comments[12]), 1)
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            self.assertNotIn("restore_body", events.read())
+
+    def test_restore_comment_retry_uses_digest_occurrence_not_history_index(self) -> None:
+        self.client.comments[12].append({"date_creation": "1720000020", "comment": "first"})
+        self.client.lose_comment_reply = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.restore_comment(
+                reference="secretary-468", body="second", occurrence=0,
+                request_id="restore-second-lost-reply",
+            )
+        self.client.lose_comment_reply = False
+        self.writer.restore_comment(
+            reference="secretary-468", body="second", occurrence=0,
+            request_id="restore-second-lost-reply",
+        )
+        self.assertEqual([comment["comment"] for comment in self.client.comments[12]], ["first", "second"])
+
+        self.client.lose_comment_reply = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.restore_comment(
+                reference="secretary-468", body="second", occurrence=1,
+                request_id="restore-duplicate-lost-reply",
+            )
+        self.client.lose_comment_reply = False
+        self.writer.restore_comment(
+            reference="secretary-468", body="second", occurrence=1,
+            request_id="restore-duplicate-lost-reply",
+        )
+        self.assertEqual(
+            [comment["comment"] for comment in self.client.comments[12]],
+            ["first", "second", "second"],
+        )
 
     def test_partial_move_failure_keeps_pending_until_reconcile(self) -> None:
         self.client.tasks[0]["column_id"] = 3

@@ -636,7 +636,7 @@ class TaskWriter:
                 values["base_branch"] = base_branch
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=values)
             try:
-                self._move_raw(task, "in_progress")
+                self._move_raw(task, "in_progress", swimlane_id=self._current_swimlane_id(task))
             except Exception as exc:
                 raise _CommittedWriteError() from exc
 
@@ -665,7 +665,7 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            self._move_raw(task, target)
+            self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
                 if target == "ready":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
@@ -678,43 +678,50 @@ class TaskWriter:
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
 
     def restore_card(
-        self, *, reference: str, metadata: dict[str, str], target: str, request_id: str | None = None
+        self,
+        *,
+        reference: str,
+        metadata: dict[str, str],
+        target: str,
+        position: int | None = None,
+        swimlane: str = "",
+        request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Apply an audited restore-only metadata and column update."""
-        if target not in _STATE_BY_COLUMN.values():
-            raise TaskError("validation", "restore target is invalid", 2)
+        from secretary.task_restore import restore_card
 
-        def mutation(task: dict[str, Any]) -> None:
-            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=metadata)
-            try:
-                if task["state"] != target:
-                    self._move_raw(task, target)
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
+        return restore_card(self, reference, metadata, target, position, swimlane, request_id)
 
-        return self._write(
-            "restored", "steward", "restore", reference, request_id,
-            {"target": target, "metadata_keys": sorted(metadata)}, mutation,
-        )
+    def restore_comment(
+        self, *, reference: str, body: str, occurrence: int, request_id: str | None = None
+    ) -> dict[str, Any]:
+        from secretary.task_restore import restore_comment
 
-    def _move_raw(self, task: dict[str, Any], target: str) -> None:
+        return restore_comment(self, reference, body, occurrence, request_id)
+
+    def _move_raw(
+        self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int
+    ) -> None:
         board_id, columns, _ = self.reader._board()
         column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
-        raw = self.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
-        if not isinstance(raw, dict):
-            raise TaskError("not_found", "task was not found", 2)
         ok = self.client.call(
             "moveTaskPosition",
             project_id=board_id,
             task_id=_task_number(task),
             column_id=column_id,
-            position=1,
-            swimlane_id=_positive_int(raw.get("swimlane_id")) or 0,
+            position=position,
+            swimlane_id=swimlane_id,
         )
         if not ok:
             raise TaskError("backend_error", "Kanboard rejected the write", 1)
+
+    def _current_swimlane_id(self, task: dict[str, Any]) -> int:
+        board_id, _, _ = self.reader._board()
+        raw = self.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
+        if not isinstance(raw, dict):
+            raise TaskError("not_found", "task was not found", 2)
+        return _positive_int(raw.get("swimlane_id")) or 0
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
@@ -789,6 +796,11 @@ class TaskWriter:
         if event.get("kind") == "restored":
             self._finish_pending_restore(event, payload)
             return
+        if event.get("kind") == "restored_comment":
+            from secretary.task_restore import finish_pending_restore_comment
+
+            finish_pending_restore_comment(self, event, payload)
+            return
         if event.get("kind") != "moved" or payload.get("to") != "ready":
             return
         task = self.reader.show(str(event["ref"]))
@@ -822,7 +834,7 @@ class TaskWriter:
         if not _matches_optional(payload.get("resolved_review_head"), task["routing"]["resolved_review_head"]):
             raise TaskError("backend_error", "pending claim review head remains incomplete", 1)
         if task["state"] == "ready":
-            self._move_raw(task, "in_progress")
+            self._move_raw(task, "in_progress", swimlane_id=self._current_swimlane_id(task))
         elif task["state"] != "in_progress":
             raise TaskError("backend_error", "pending claim no longer matches task state", 1)
         normalized = self.reader.show(ref)
@@ -830,18 +842,9 @@ class TaskWriter:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
     def _finish_pending_restore(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
-        """Finish a restore whose metadata committed before its column move failed."""
-        target = payload.get("target")
-        if target not in _STATE_BY_COLUMN.values():
-            raise TaskError("backend_error", "pending restore is missing its target state", 1)
-        ref = str(event.get("ref") or "")
-        if not ref:
-            raise TaskError("backend_error", "pending restore is missing its task ref", 1)
-        task = self.reader.show(ref)
-        if task["state"] != target:
-            self._move_raw(task, target)
-        if self.reader.show(ref)["state"] != target:
-            raise TaskError("backend_error", "pending restore cleanup remains incomplete", 1)
+        from secretary.task_restore import finish_pending_restore
+
+        finish_pending_restore(self, event, payload)
 
     def _finish_pending_create(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
         ref = str(event.get("ref") or "")

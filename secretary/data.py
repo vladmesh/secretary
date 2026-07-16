@@ -265,7 +265,10 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
             "base_branch": str(shown_card.get("base_branch") or list_card.get("base_branch") or ""),
         },
         "comments": [
-            {"ts": str(comment.get("ts", "")), "text": str(comment.get("text", ""))}
+            {
+                "ts": str(comment.get("ts", "")),
+                "text": str(comment.get("text", "")),
+            }
             for comment in comments
             if isinstance(comment, dict)
         ],

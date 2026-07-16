@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +19,7 @@ from secretary._fsutil import sha256_file
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
 from secretary.host import CollectResult, HostInventory, build_plan
 import secretary.restore_commands as restore_commands
+import secretary.restore as restore_module
 from secretary.restore import (
     RestoreError,
     bootstrap_empty,
@@ -63,7 +65,10 @@ class RestoreTests(unittest.TestCase):
                     "column": "Ready", "task_type": "code", "project": "secretary",
                     "claim": "worker", "blocked_by": "secretary-0",
                     "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
-                    "comments": [],
+                    "comments": [
+                        {"ts": "2024-07-03T09:47:00Z", "text": "[worker]\\nfirst"},
+                        {"ts": "2024-07-03T09:48:00Z", "text": "[report:done]\\nrestored"},
+                    ],
                 },
             )
             (data_dir / "board" / "cards.json").write_text(
@@ -80,6 +85,12 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
             self.assertEqual(client.metadata[12]["resolved_head"], "")
             self.assertEqual(client.metadata[12]["resolved_review_head"], "")
+            self.assertEqual(client.tasks[0]["position"], 1)
+            self.assertEqual(client.tasks[0]["swimlane_id"], 4)
+            self.assertEqual(
+                [call[1]["content"] for call in client.calls if call[0] == "createComment"],
+                ["[worker]\\nfirst", "[report:done]\\nrestored"],
+            )
 
     def test_reindex_and_restore_findings_are_derived_from_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -99,6 +110,94 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
+
+    def test_board_restore_orders_positions_within_each_column_and_swimlane(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            cards = []
+            for reference, position in (("secretary-c", 1), ("secretary-a", 2), ("secretary-b", 3)):
+                card = _restore_card()
+                card["reference"] = reference
+                card["title"] = reference
+                card["position"] = position
+                cards.append(card)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": cards}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 3)
+            restored = sorted(client.tasks, key=lambda task: int(task["position"]))
+            self.assertEqual(
+                [task["reference"] for task in restored],
+                ["secretary-c", "secretary-a", "secretary-b"],
+            )
+            self.assertEqual([task["position"] for task in restored], [1, 2, 3])
+
+    def test_board_restore_moves_empty_swimlane_to_default_lane(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card()
+            card["swimlane"] = ""
+            card["position"] = 1
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(client.tasks[0]["swimlane_id"], 0)
+            self.assertEqual(client.tasks[0]["position"], 1)
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
+            self.assertIn(
+                ("moveTaskPosition", {
+                    "project_id": 7, "task_id": 12, "column_id": 2,
+                    "position": 1, "swimlane_id": 0,
+                }),
+                client.calls,
+            )
+
+    def test_board_restore_serializes_concurrent_imports(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            entered, release = threading.Event(), threading.Event()
+            results: list[tuple[str, object]] = []
+            original = restore_module._create_restored_card
+
+            def paused_create(writer, card):
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+                original(writer, card)
+
+            def run_restore() -> None:
+                try:
+                    results.append(("ok", import_normalized_board(data_dir, client=client)))
+                except Exception as exc:
+                    results.append(("error", exc))
+
+            with mock.patch("secretary.restore._create_restored_card", side_effect=paused_create):
+                first = threading.Thread(target=run_restore)
+                first.start()
+                self.assertTrue(entered.wait(timeout=5))
+                second = threading.Thread(target=run_restore)
+                second.start()
+                release.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(sorted(results), [("ok", 1), ("ok", 1)])
+            self.assertEqual([task["reference"] for task in client.tasks], ["secretary-1"])
+            self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), 1)
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
     def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -525,11 +624,13 @@ class _EmptyWriteKanboard(WriteKanboard):
         super().__init__()
         self.tasks = []
         self.metadata = {}
+        self.next_task_id = 12
 
     def call(self, method: str, **params: object) -> object:
         if method == "createTask":
             self.calls.append((method, params))
-            task_id = 12
+            task_id = self.next_task_id
+            self.next_task_id += 1
             self.tasks.append(
                 {
                     "id": task_id, "reference": "", "title": params["title"],
@@ -539,6 +640,7 @@ class _EmptyWriteKanboard(WriteKanboard):
                 }
             )
             self.metadata[task_id] = {}
+            self.comments[task_id] = []
             return task_id
         return super().call(method, **params)
 

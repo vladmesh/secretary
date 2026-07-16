@@ -56,7 +56,10 @@ classified as `rebuild` and is not archived.
 After a successful data-plane restore, hand the remaining work to the following
 operations in order:
 
-1. Board restore imports the normalized export, including the core-only path.
+1. Board restore imports the normalized export, including the core-only path. It
+   restores card text, metadata, column, swimlane, position, and comment bodies
+   in their exported order. Kanboard assigns new comment timestamps and
+   `date_moved`, so neither timestamp is restored.
 2. Memory index rebuild derives the index from the restored journal.
 3. `secretary reconcile plan` and then its approved apply path restore managed
    host resources. Orca debug state is not applied as canonical state.

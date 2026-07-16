@@ -23,7 +23,7 @@ from secretary.backup_policy import (
 from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
-from secretary._fsutil import sha256_stream, write_text_atomic
+from secretary._fsutil import file_lock, sha256_stream, write_text_atomic
 from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 
 
@@ -57,34 +57,45 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
 def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
     """Populate an empty board from cards.json and prove parity on every retry."""
     data_dir = data_dir.expanduser().resolve()
-    try:
-        cards = _normalized_cards(data_dir)
-        client = client or KanboardClient()
-        reader = TaskReader(client)
-        writer = TaskWriter(client, data_dir=data_dir)
-        _, unresolved = writer.reconcile()
-        if unresolved:
-            raise RestoreError("board audit repair is required before restore")
-        existing = {card["ref"]: card for card in reader.list()}
-        unexpected = set(existing) - {card["reference"] for card in cards}
-        if unexpected:
-            raise RestoreError("board is not empty or does not match normalized restore data")
-        for card in cards:
-            current = existing.get(card["reference"])
-            if current is None:
-                _create_restored_card(writer, card)
-            target = _state_for_column(card["column"])
-            writer.restore_card(
-                reference=card["reference"], metadata=_restore_board_metadata(card), target=target or ""
-            )
-        actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
-        if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
-            _update_restore_state(data_dir, board="failed", board_parity="failed")
-            raise RestoreError("board parity check failed")
-    except TaskError as exc:
-        raise RestoreError(exc.message) from None
-    _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
-    return len(cards)
+    with file_lock(data_dir / "board" / ".restore.lock"):
+        try:
+            cards = _normalized_cards(data_dir)
+            client = client or KanboardClient()
+            reader = TaskReader(client)
+            writer = TaskWriter(client, data_dir=data_dir)
+            _, unresolved = writer.reconcile()
+            if unresolved:
+                raise RestoreError("board audit repair is required before restore")
+            existing = {card["ref"]: card for card in reader.list()}
+            unexpected = set(existing) - {card["reference"] for card in cards}
+            if unexpected:
+                raise RestoreError("board is not empty or does not match normalized restore data")
+            for card in sorted(cards, key=_restore_card_order):
+                current = existing.get(card["reference"])
+                if current is None:
+                    _create_restored_card(writer, card)
+                target = _state_for_column(card["column"])
+                writer.restore_card(
+                    reference=card["reference"], metadata=_restore_board_metadata(card), target=target or "",
+                    position=_restore_position(card), swimlane=str(card.get("swimlane") or ""),
+                    request_id=f"restore-card:{card['reference']}",
+                )
+                occurrences: dict[str, int] = {}
+                for index, comment in enumerate(_restore_comments(card)):
+                    occurrence = occurrences.get(comment, 0)
+                    occurrences[comment] = occurrence + 1
+                    writer.restore_comment(
+                        reference=card["reference"], body=comment, occurrence=occurrence,
+                        request_id=f"restore-comment:{card['reference']}:{index}",
+                    )
+            actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
+            if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
+                _update_restore_state(data_dir, board="failed", board_parity="failed")
+                raise RestoreError("board parity check failed")
+        except TaskError as exc:
+            raise RestoreError(exc.message) from None
+        _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
+        return len(cards)
 
 
 def rebuild_memory_index(
@@ -183,6 +194,11 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             raise RestoreError("normalized board export has invalid task data")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
+        if not isinstance(card.get("comments", []), list) or any(
+            not isinstance(comment, dict) or not isinstance(comment.get("text"), str)
+            for comment in card.get("comments", [])
+        ):
+            raise RestoreError("normalized board export has invalid comments")
     return sorted(cards, key=lambda card: str(card["reference"]))
 
 
@@ -203,6 +219,24 @@ def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
     for key, value in _restore_fields(card).items():
         result.setdefault(key, value)
     return result
+
+
+def _restore_comments(card: dict[str, Any]) -> list[str]:
+    return [str(comment["text"]) for comment in card.get("comments", [])]
+
+
+def _restore_position(card: dict[str, Any]) -> int | None:
+    position = card.get("position")
+    return position if isinstance(position, int) and position > 0 else None
+
+
+def _restore_card_order(card: dict[str, Any]) -> tuple[str, str, int, str]:
+    return (
+        str(card["column"]),
+        str(card.get("swimlane") or ""),
+        _restore_position(card) or 0,
+        str(card["reference"]),
+    )
 
 
 def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
@@ -233,6 +267,9 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
             "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
             "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
             "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
+            "position": _restore_position(card),
+            "swimlane": str(card.get("swimlane") or "") or None,
+            "comments": [{"body": body} for body in _restore_comments(card)],
     }
 
 
@@ -243,6 +280,9 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
         "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
         "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
         "workspace": card.get("workspace"),
+        "position": card.get("position"),
+        "swimlane": card.get("extensions", {}).get("kanboard", {}).get("swimlane"),
+        "comments": [{"body": str(comment.get("body") or "")} for comment in card.get("comments", [])],
     }
 
 
