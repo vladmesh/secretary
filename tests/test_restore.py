@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +19,7 @@ from secretary._fsutil import sha256_file
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
 from secretary.host import CollectResult, HostInventory, build_plan
 import secretary.restore_commands as restore_commands
+import secretary.restore as restore_module
 from secretary.restore import (
     RestoreError,
     bootstrap_empty,
@@ -156,6 +158,46 @@ class RestoreTests(unittest.TestCase):
                 }),
                 client.calls,
             )
+
+    def test_board_restore_serializes_concurrent_imports(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            entered, release = threading.Event(), threading.Event()
+            results: list[tuple[str, object]] = []
+            original = restore_module._create_restored_card
+
+            def paused_create(writer, card):
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+                original(writer, card)
+
+            def run_restore() -> None:
+                try:
+                    results.append(("ok", import_normalized_board(data_dir, client=client)))
+                except Exception as exc:
+                    results.append(("error", exc))
+
+            with mock.patch("secretary.restore._create_restored_card", side_effect=paused_create):
+                first = threading.Thread(target=run_restore)
+                first.start()
+                self.assertTrue(entered.wait(timeout=5))
+                second = threading.Thread(target=run_restore)
+                second.start()
+                release.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(sorted(results), [("ok", 1), ("ok", 1)])
+            self.assertEqual([task["reference"] for task in client.tasks], ["secretary-1"])
+            self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), 1)
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
     def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
