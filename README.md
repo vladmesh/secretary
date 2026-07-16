@@ -263,3 +263,7 @@ workspaces should not install live units.
   and `secretary-data` split, plus the purpose of each target command.
 - `docs/phase1-review.md` records the Phase 1 acceptance check and differences
   between the current skeleton and the design doc.
+- `docs/restore-contract.md` describes `bootstrap --empty`, `restore`, their
+  handoffs, and how to reproduce the restore chain locally.
+- `docs/phase8-review.md` maps the restore implementation onto the Phase 8
+  acceptance and records the remaining operator off-host run.
