@@ -1,6 +1,8 @@
 # Phase 8 review
 
-Date: 2026-07-16
+Date: 2026-07-17
+
+Status: closed by vladmesh after the operator off-host run.
 
 Phase 8 asks whether the appliance is portable, and answers it by restoring rather than by
 argument. This review maps the design acceptance in `control-panel/docs/design-secretary-appliance.md`
@@ -78,11 +80,24 @@ tooling the suite reports success while the four archive-level e2e tests do not 
 present on the VPS and is a hard product dependency that `doctor` already checks, so this is
 documented rather than fixed; a runner that must not skip should assert the binaries first.
 
-## Operator handoff: off-host restore
+## Operator off-host result
 
-Not performed here, and it is the only remaining item that closes Phase 8. It needs a throwaway
-VPS and the real age key from vladmesh's password manager, both explicitly out of scope for this
-card. It is a manual run for vladmesh, to be tracked as its own card.
+The operator run was performed on a separate VPS using a real encrypted archive and age identity.
+Archive transfer, checksum, decryption and isolated data/board restore were exercised without
+moving production ownership from the source host.
+
+The target had 1.9 GiB RAM. Loading the production embedding runtime for a live memory rebuild
+exhausted its resources. Switching to a smaller model was rejected because it would change search
+quality. On 2026-07-17 vladmesh accepted this as a test-host limitation and closed Phase 8 without
+repeating the run on a larger server. The automated restore suite remains the evidence for the
+rebuild contract; the operator run does not claim a green online doctor after a production-model
+rebuild.
+
+After the run, the archive and age identity, deploy credential, checkouts, restored data, target
+board, projects, units and other secretary test resources were removed from the target. No test
+dispatcher or parallel secretary installation remains active.
+
+The original operator sequence was:
 
 Sequence, using only a pulled archive and the key from the password manager:
 
@@ -100,11 +115,8 @@ secretary restore-reconcile --instance ~/secretary-instance
 secretary doctor --instance ~/secretary-instance
 ```
 
-It is accepted when a real archive and the real key produce exit 0 from `doctor` on a host that
-never held the source data root, with the restored card and fact counts matching the archive
-manifest and the memory journal history intact. Anything the automated chain cannot see belongs to
-that run: the key really being the one in the password manager, the instance remote being reachable
-from outside the VPS, and the archive being the one the local pull actually fetched.
+The unexecuted production-model rebuild and its dependent online doctor check are recorded as an
+accepted deviation, not carried into Phase 9 as a gate.
 
 ## Reproduction
 
