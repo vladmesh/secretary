@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
 from secretary._fsutil import sha256_stream
+from secretary.memory_journal import _read_memory_facts
+from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,154 @@ class RestoreError(RuntimeError):
     pass
 
 
+RESTORE_STATE_FILE = "restore-state.json"
+
+
+def restore_state(data_dir: Path) -> dict[str, Any]:
+    """Read the derived restore progress record without treating it as canon."""
+    try:
+        value = json.loads((data_dir / RESTORE_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
+    """Populate an empty board from cards.json and prove parity on every retry."""
+    data_dir = data_dir.expanduser().resolve()
+    cards = _normalized_cards(data_dir)
+    client = client or KanboardClient()
+    reader = TaskReader(client)
+    writer = TaskWriter(client, data_dir=data_dir)
+    try:
+        existing = {card["ref"]: card for card in reader.list()}
+        unexpected = set(existing) - {card["ref"] for card in cards}
+        if unexpected:
+            raise RestoreError("board is not empty or does not match normalized restore data")
+        for card in cards:
+            current = existing.get(card["ref"])
+            if current is None:
+                _create_restored_card(writer, card)
+                current = reader.show(card["ref"])
+            _restore_board_metadata(client, current, card)
+            current = reader.show(card["ref"])
+            if current["state"] != card["state"]:
+                writer._move_raw(current, card["state"])
+        actual = {card["ref"]: reader.show(card["ref"]) for card in cards}
+    except TaskError as exc:
+        raise RestoreError(exc.message) from None
+    if any(_board_core(actual[ref]) != _board_core(card) for ref, card in ((card["ref"], card) for card in cards)):
+        _update_restore_state(data_dir, board="complete", board_parity="failed")
+        raise RestoreError("board parity check failed")
+    _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
+    return len(cards)
+
+
+def rebuild_memory_index(data_dir: Path) -> int:
+    """Replace the derived index from the restored local facts journal."""
+    data_dir = data_dir.expanduser().resolve()
+    memory_dir = data_dir / "memory"
+    facts_dir = memory_dir / "facts"
+    if not (facts_dir / ".git").is_dir():
+        raise RestoreError("memory facts journal is not available for index rebuild")
+    try:
+        facts = _read_memory_facts(facts_dir)
+        with tempfile.NamedTemporaryFile(prefix=".index-", suffix=".sqlite", dir=memory_dir, delete=False) as temp:
+            staged = Path(temp.name)
+        try:
+            with sqlite3.connect(staged) as conn:
+                conn.execute("create table memories (id text primary key)")
+                conn.executemany("insert into memories(id) values (?)", ((str(fact["id"]),) for fact in facts))
+                conn.commit()
+            os.replace(staged, memory_dir / "index.sqlite")
+        finally:
+            staged.unlink(missing_ok=True)
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise RestoreError(f"could not rebuild memory index: {exc}") from None
+    _update_restore_state(data_dir, memory_index="complete", memory_index_count=len(facts))
+    return len(facts)
+
+
+def restore_findings(data_dir: Path) -> list[str]:
+    """Return stable, actionable restore findings for doctor."""
+    state = restore_state(data_dir)
+    findings: list[str] = []
+    if not state:
+        findings.append("restore is incomplete")
+        return findings
+    if state.get("board") != "complete":
+        findings.append("board restore is incomplete")
+    elif state.get("board_parity") == "failed":
+        findings.append("board restore parity failed")
+    if state.get("memory_index") != "complete":
+        findings.append("memory index has not been rebuilt")
+    if state.get("reconcile") != "complete":
+        findings.append("managed reconcile has not been applied")
+    return findings
+
+
+def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
+        cards = payload["cards"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise RestoreError("normalized board export is unavailable") from None
+    if not isinstance(cards, list) or any(not isinstance(card, dict) for card in cards):
+        raise RestoreError("normalized board export is invalid")
+    refs = [card.get("ref") for card in cards]
+    if any(not isinstance(ref, str) or not ref for ref in refs) or len(set(refs)) != len(refs):
+        raise RestoreError("normalized board export has invalid references")
+    return sorted(cards, key=lambda card: str(card["ref"]))
+
+
+def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
+    routing = card.get("routing") if isinstance(card.get("routing"), dict) else {}
+    workspace = card.get("workspace") if isinstance(card.get("workspace"), dict) else {}
+    writer.create(
+        role="steward", actor="restore", project=str(card.get("project") or ""),
+        task_type=str(card.get("type") or ""), title=str(card.get("title") or ""),
+        description=str(card.get("description") or ""), reference=str(card["ref"]),
+        blocked_by=str(card.get("blocked_by") or ""), head=str(routing.get("head_override") or ""),
+        review_head=str(routing.get("review_head_override") or ""), slug=str(workspace.get("slug") or ""),
+        base_branch=str(workspace.get("base_branch") or ""),
+        complexity=str(routing.get("complexity") or "standard"),
+        family_preference=str(routing.get("family_preference") or "auto"),
+        codex_launch_mode=str(routing.get("codex_launch_mode") or ""),
+    )
+
+
+def _restore_board_metadata(client: KanboardClient, actual: dict[str, Any], card: dict[str, Any]) -> None:
+    routing = card.get("routing") if isinstance(card.get("routing"), dict) else {}
+    workspace = card.get("workspace") if isinstance(card.get("workspace"), dict) else {}
+    retry = card.get("retry") if isinstance(card.get("retry"), dict) else {}
+    claim = card.get("claim") if isinstance(card.get("claim"), dict) else {}
+    values = {
+        "claim": str(claim.get("worker") or ""), "resolved_head": str(routing.get("resolved_worker_head") or ""),
+        "resolved_review_head": str(routing.get("resolved_review_head") or ""),
+        "routing_reason": str(routing.get("routing_reason") or ""), "quota_snapshot_at": str(routing.get("quota_snapshot_at") or ""),
+        "slug": str(workspace.get("slug") or ""), "base_branch": str(workspace.get("base_branch") or ""),
+        "retry_same": str(retry.get("same") or ""), "retry_switch": str(retry.get("switched") or ""),
+        "retry_heads": ",".join(str(value) for value in retry.get("heads", []) if isinstance(value, str)),
+    }
+    client.call("saveTaskMetadata", task_id=int(str(actual["id"]).rsplit("_", 1)[-1]), values=values)
+
+
+def _board_core(card: dict[str, Any]) -> dict[str, Any]:
+    return {key: card.get(key) for key in ("ref", "title", "description", "state", "project", "type", "blocked_by", "claim", "routing", "workspace", "retry")}
+
+
+def _update_restore_state(data_dir: Path, **changes: Any) -> None:
+    state = restore_state(data_dir)
+    state.update(changes)
+    state["version"] = 1
+    try:
+        temporary = data_dir / f".{RESTORE_STATE_FILE}.tmp"
+        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, data_dir / RESTORE_STATE_FILE)
+    except OSError as exc:
+        raise RestoreError(f"could not record restore progress: {exc}") from None
+
+
 def bootstrap_empty(instance_path: Path, *, dry_run: bool = False) -> RestorePlan:
     _, target, identity = _target(instance_path)
     _reject_existing_target(target)
@@ -51,6 +202,7 @@ def bootstrap_empty(instance_path: Path, *, dry_run: bool = False) -> RestorePla
     )
     if not dry_run:
         init_layout(target)
+        _update_restore_state(target, board="pending", memory_index="pending", reconcile="pending")
     return plan
 
 
@@ -115,6 +267,7 @@ def restore_backup(
             return plan
         _validate_restore_payload(plain, manifest, policy)
         _stage_and_publish(plain, target, policy=policy)
+        _update_restore_state(target, board="pending", memory_index="pending", reconcile="pending")
         return plan
 
 
