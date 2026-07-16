@@ -15,8 +15,9 @@ secretary bootstrap --empty --instance /srv/secretary-instance
 
 The dry run prints a JSON plan and creates nothing. The non-dry-run command
 creates the empty data layout, memory journal, and empty board/runs directories.
-It refuses any existing target data root. Removing or replacing an installation
-is an operator action outside this command.
+The configured `data_dir` must be absolute. It refuses any existing target data
+root. Removing or replacing an installation is an operator action outside this
+command.
 
 ## Restore
 
@@ -41,11 +42,15 @@ The restore extracts into a sibling staging directory and publishes the data roo
 only after extraction succeeds. A retry therefore either sees no target and can
 run again, or sees a published installation and refuses to overwrite it.
 
-The plan lists the backup policy components. Core restores contain normalized
-board data, the memory journal/export, and runs watermarks/cards/claims. Full
-restores add raw board data, transcripts, artifacts, and debug inventory. The
-memory journal's git metadata travels with the archive; `memory/index.sqlite`
-does not.
+The plan lists every component with an action. `restore` components are copied
+into the data root, `rebuild` components are derived after restore, and `exclude`
+components are deliberately not restored as canonical state. Core restores copy
+normalized board data, the memory journal/export, and runs
+watermarks/cards/claims. Full restores also copy raw board data, transcripts,
+and artifacts. Its Orca debug inventory is classified as `exclude` and stays
+outside the restored data root. The memory journal's git metadata is required;
+an older archive without it is rejected. `memory/index.sqlite` is classified as
+`rebuild` and is not archived.
 
 After a successful data-plane restore, hand the remaining work to the following
 operations in order:

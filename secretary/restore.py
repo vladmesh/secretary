@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from secretary.backup_policy import ARCHIVE_ROOT, BACKUP_KINDS, BACKUP_VERSION, policy_for
+from secretary.backup_policy import (
+    ARCHIVE_ROOT,
+    BACKUP_KINDS,
+    BACKUP_VERSION,
+    CORE_POLICY,
+    policy_for,
+    restore_plan_components,
+)
 from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
@@ -21,7 +28,7 @@ class RestorePlan:
     backup_kind: str
     backup_version: int
     data_dir: Path
-    components: tuple[str, ...]
+    components: tuple[dict[str, str], ...]
     instance_identity: dict[str, str]
 
 
@@ -29,14 +36,16 @@ class RestoreError(RuntimeError):
     pass
 
 
-def bootstrap_empty(
-    instance_path: Path, *, data_dir: Path | None = None, dry_run: bool = False
-) -> RestorePlan:
-    _, target, identity = _target(instance_path, data_dir)
+def bootstrap_empty(instance_path: Path, *, dry_run: bool = False) -> RestorePlan:
+    _, target, identity = _target(instance_path)
     _reject_existing_target(target)
     plan = RestorePlan(
-        archive=Path(), backup_kind="empty", backup_version=BACKUP_VERSION,
-        data_dir=target, components=("board", "memory", "runs"), instance_identity=identity,
+        archive=Path(),
+        backup_kind="empty",
+        backup_version=BACKUP_VERSION,
+        data_dir=target,
+        components=restore_plan_components(CORE_POLICY, empty=True),
+        instance_identity=identity,
     )
     if not dry_run:
         init_layout(target)
@@ -48,12 +57,11 @@ def restore_backup(
     instance_path: Path,
     *,
     age_identity: Path | None,
-    data_dir: Path | None = None,
     dry_run: bool = False,
     age_command: str = "age",
     decrypt=None,
 ) -> RestorePlan:
-    _, target, target_identity = _target(instance_path, data_dir)
+    _, target, target_identity = _target(instance_path)
     _reject_existing_target(target)
     archive = archive.expanduser()
     if not archive.is_file():
@@ -81,6 +89,8 @@ def restore_backup(
         if verified.code or verified.findings or not isinstance(verified.manifest, dict):
             findings = "; ".join(verified.findings) or "archive verification failed"
             raise RestoreError(findings)
+        if not _has_memory_journal(plain):
+            raise RestoreError("archive has no memory journal git metadata")
         manifest = verified.manifest
         archive_identity = _archive_identity(manifest)
         if archive_identity != target_identity:
@@ -92,8 +102,12 @@ def restore_backup(
         if policy is None:
             raise RestoreError("archive kind is not supported")
         plan = RestorePlan(
-            archive=archive, backup_kind=kind, backup_version=BACKUP_VERSION,
-            data_dir=target, components=policy.required_components, instance_identity=target_identity,
+            archive=archive,
+            backup_kind=kind,
+            backup_version=BACKUP_VERSION,
+            data_dir=target,
+            components=restore_plan_components(policy),
+            instance_identity=target_identity,
         )
         if dry_run:
             return plan
@@ -112,11 +126,11 @@ def plan_as_json(plan: RestorePlan, *, action: str, dry_run: bool) -> dict[str, 
         "data_dir": str(plan.data_dir),
         "components": list(plan.components),
         "instance_identity": plan.instance_identity,
-        "next_steps": ["board restore", "memory index rebuild", "reconcile"],
+        "next_steps": _next_steps(plan.components),
     }
 
 
-def _target(instance_path: Path, data_dir: Path | None) -> tuple[Path, Path, dict[str, str]]:
+def _target(instance_path: Path) -> tuple[Path, Path, dict[str, str]]:
     instance_file = instance_path.expanduser()
     if instance_file.is_dir():
         instance_file = instance_file / "instance.yaml"
@@ -130,12 +144,10 @@ def _target(instance_path: Path, data_dir: Path | None) -> tuple[Path, Path, dic
     if not isinstance(config, dict):
         raise RestoreError("invalid target instance")
     configured_dir = config.get("data_dir")
-    selected = data_dir if data_dir is not None else Path(str(configured_dir))
-    target = selected.expanduser().resolve()
-    if not target.is_absolute():
+    selected = Path(str(configured_dir)).expanduser()
+    if not selected.is_absolute():
         raise RestoreError("target data root must be absolute")
-    if data_dir is not None and target != Path(str(configured_dir)).expanduser().resolve():
-        raise RestoreError("target data root must match instance data_dir")
+    target = selected.resolve()
     return instance_file, target, _identity(config)
 
 
@@ -159,6 +171,24 @@ def _archive_identity(manifest: dict[str, Any]) -> dict[str, str]:
     return {"name": name, "instance_remote": remote}
 
 
+def _has_memory_journal(plain_archive: Path) -> bool:
+    required = f"{ARCHIVE_ROOT}/secretary-data/memory/facts/.git/HEAD"
+    try:
+        with tarfile.open(plain_archive, "r") as archive:
+            return archive.getmember(required).isfile()
+    except (KeyError, OSError, tarfile.TarError):
+        return False
+
+
+def _next_steps(components: tuple[dict[str, str], ...]) -> list[str]:
+    labels = {
+        "board_restore": "board restore",
+        "memory_index": "memory index rebuild",
+        "host_reconcile": "reconcile",
+    }
+    return [labels[component["name"]] for component in components if component["name"] in labels]
+
+
 def _reject_existing_target(target: Path) -> None:
     if target.exists():
         raise RestoreError(f"target data root already exists: {target}")
@@ -168,29 +198,31 @@ def _stage_and_publish(plain_archive: Path, target: Path) -> None:
     parent = target.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.restore-", dir=parent))
-        data_staging = staging / "data"
-        init_layout(data_staging)
-        shutil.rmtree(data_staging / "memory" / "facts")
-        with tarfile.open(plain_archive, "r") as archive:
-            prefix = f"{ARCHIVE_ROOT}/secretary-data/"
-            for member in archive.getmembers():
-                if member.name.startswith(prefix) and (member.isfile() or member.isdir()):
+        with tempfile.TemporaryDirectory(prefix=f".{target.name}.restore-", dir=parent) as temporary:
+            data_staging = Path(temporary) / "data"
+            init_layout(data_staging)
+            shutil.rmtree(data_staging / "memory" / "facts")
+            with tarfile.open(plain_archive, "r") as archive:
+                prefix = f"{ARCHIVE_ROOT}/secretary-data/"
+                for member in archive.getmembers():
+                    if not member.name.startswith(prefix):
+                        continue
                     relative = Path(member.name.removeprefix(prefix))
                     if relative.is_absolute() or ".." in relative.parts:
                         raise RestoreError(f"unsafe archive entry: {member.name}")
-                    if relative.parts and relative.parts[0] != "backups":
-                        destination = data_staging / relative
-                        if member.isdir():
-                            destination.mkdir(parents=True, exist_ok=True)
-                            continue
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        source = archive.extractfile(member)
-                        if source is None:
-                            raise RestoreError(f"could not read archive entry: {member.name}")
-                        with source, destination.open("wb") as output:
-                            shutil.copyfileobj(source, output)
-        os.replace(data_staging, target)
-        shutil.rmtree(staging, ignore_errors=True)
+                    if member.isdir():
+                        (data_staging / relative).mkdir(parents=True, exist_ok=True)
+                        continue
+                    if not member.isfile():
+                        raise RestoreError(f"unsupported archive entry type: {member.name}")
+                    destination = data_staging / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise RestoreError(f"could not read archive entry: {member.name}")
+                    with source, destination.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+            _reject_existing_target(target)
+            os.replace(data_staging, target)
     except (OSError, tarfile.TarError) as exc:
         raise RestoreError(f"restore staging failed: {exc}") from None
