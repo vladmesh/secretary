@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterator
 
 import fcntl
 
-from secretary.config import ConfigError, load_config
+from secretary.config import ConfigError, load_config, validate
 from secretary._fsutil import sha256_file
 from secretary.data import (
     DataExport,
@@ -539,9 +539,11 @@ def _load_data_dir(instance_file: Path) -> Path:
         instance = load_config(instance_file)
     except ConfigError as exc:
         raise RuntimeError(str(exc)) from None
-    if not isinstance(instance, dict) or not isinstance(instance.get("data_dir"), str):
-        raise RuntimeError("instance.yaml has no usable data_dir")
-    return Path(instance["data_dir"])
+    errors = validate(instance, "instance", instance_file.name)
+    if errors:
+        raise RuntimeError("invalid instance: " + "; ".join(map(str, errors)))
+    data_dir = instance["data_dir"]
+    return Path(data_dir)
 
 
 def _age_recipient(instance_file: Path) -> str | None:

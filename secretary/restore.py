@@ -364,7 +364,7 @@ def _target(instance_path: Path) -> tuple[Path, Path, dict[str, str]]:
         instance_file = instance_file / "instance.yaml"
     report = validate_instance(instance_file)
     if report.errors:
-        raise RestoreError("invalid target instance: " + "; ".join(report.errors))
+        raise RestoreError("invalid target instance: " + "; ".join(map(str, report.errors)))
     try:
         config = load_config(instance_file)
     except ConfigError as exc:

@@ -114,6 +114,38 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance, recipient="age1example")
 
+    def test_create_rejects_relative_instance_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            _write_instance(instance, Path("secretary-data"))
+
+            with self.assertRaisesRegex(RuntimeError, "data_dir: value must match pattern"):
+                create_backup(instance, recipient="age1example")
+
+        self.assertFalse((root / "secretary-data").exists())
+
+    def test_create_ignores_invalid_project_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            projects = instance / "projects"
+            projects.mkdir()
+            (projects / "broken.yaml").write_text("defualt_branch: main\n", encoding="utf-8")
+
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch(
+                    "secretary.backup.raw_kanboard_dump",
+                    side_effect=RuntimeError("snapshot reached"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "snapshot reached"):
+                    create_backup(instance, recipient="age1example")
+
     def test_create_rejects_claimed_workspace_when_board_role_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import file_lock, write_text_atomic
-from secretary.config import ConfigError, load_config, validate_instance
+from secretary.config import validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunch,
     HeadLaunchError,
@@ -63,13 +63,17 @@ from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, Ta
 
 
 def default_data_dir(instance_path: Path) -> Path:
-    try:
-        loaded = load_config(_instance_file(instance_path))
-    except ConfigError as exc:
-        raise DispatcherError("invalid_instance", str(exc), 2) from None
-    if not isinstance(loaded, dict) or not isinstance(loaded.get("data_dir"), str):
+    report = validate_instance(_instance_file(instance_path))
+    if not report.ok:
+        raise DispatcherError(
+            "invalid_instance",
+            "invalid instance: " + "; ".join(map(str, report.errors)),
+            2,
+        )
+    data_dir = report.instance.get("data_dir")
+    if not isinstance(data_dir, str):
         raise DispatcherError("invalid_instance", "instance data_dir is unavailable", 2)
-    return Path(loaded["data_dir"])
+    return Path(data_dir)
 
 
 def _instance_file(path: Path) -> Path:
