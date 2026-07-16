@@ -47,7 +47,8 @@ from secretary.memory_write import (
 from secretary.offsite import check_last_fetch
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
-from secretary.restore_commands import add_restore_subcommands
+from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
+from secretary.restore import RestoreError, _target, restore_findings
 from secretary.task_commands import add_task_subcommands
 
 
@@ -288,6 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
     memory_verify.add_argument("--data-dir")
     memory_verify.set_defaults(handler=run_memory_verify)
 
+    memory_reindex = memory_subcommands.add_parser(
+        "reindex", help="rebuild the derived memory index from the local journal"
+    )
+    memory_reindex.add_argument("--instance", required=True)
+    memory_reindex.set_defaults(handler=run_memory_reindex)
+
     memory_propose = memory_subcommands.add_parser("propose")
     add_memory_write_common(memory_propose)
     memory_propose.add_argument("--scope", required=True)
@@ -352,6 +359,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
     offsite_warnings, offsite_findings = print_offsite_status(instance_path)
     backup_warnings = print_backup_status(report.instance_path)
+    restore_problems = print_restore_status(report)
 
     host_incomplete = False
     collected_host: CollectResult | None = None
@@ -368,6 +376,9 @@ def run_doctor(args: argparse.Namespace) -> int:
     if dispatcher_findings:
         print("status: findings")
         return 1
+    if restore_problems:
+        print("status: findings")
+        return 1
     if offsite_findings:
         print("status: findings")
         return 1
@@ -376,6 +387,24 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
+
+
+def print_restore_status(report) -> list[str]:
+    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
+    if not isinstance(data_dir_value, str) or not data_dir_value:
+        return []
+    try:
+        _, data_dir, _ = _target(report.instance_path)
+    except RestoreError:
+        return []
+    if not (data_dir / "restore-state.json").is_file():
+        return []
+    findings = restore_findings(data_dir)
+    if findings:
+        print("restore findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return findings
 
 
 def run_project_add(args: argparse.Namespace) -> int:

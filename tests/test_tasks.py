@@ -279,6 +279,45 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.reconcile(), (1, 0))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
+    def test_restore_move_failure_keeps_pending_audit(self) -> None:
+        self.client.fail_move = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.restore_card(
+                reference="secretary-468", metadata={"claim": "restored"}, target="in_progress"
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+
+    def test_reconcile_finishes_pending_restore_before_auditing_success(self) -> None:
+        self.client.fail_move = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.restore_card(
+                reference="secretary-468", metadata={"claim": "restored"}, target="in_progress"
+            )
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "ready")
+        self.client.fail_move = False
+
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "in_progress")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_pending_create_repairs_orphaned_reference(self) -> None:
+        self.client.fail_update = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.create(
+                role="po", actor="operator", project="secretary", task_type="code",
+                title="Restore", reference="secretary-restore", request_id="restore-create",
+            )
+        self.assertEqual(self.client.tasks[-1]["reference"], "")
+        self.client.fail_update = False
+
+        result = self.writer.create(
+            role="po", actor="operator", project="secretary", task_type="code",
+            title="Restore", reference="secretary-restore", request_id="restore-create",
+        )
+        self.assertEqual(result["task"]["ref"], "secretary-restore")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
     def test_reconcile_completes_stale_ready_cleanup_before_closing_pending(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_metadata = True

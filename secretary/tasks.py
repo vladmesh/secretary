@@ -677,6 +677,26 @@ class TaskWriter:
                 raise _CommittedWriteError() from exc
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
 
+    def restore_card(
+        self, *, reference: str, metadata: dict[str, str], target: str, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Apply an audited restore-only metadata and column update."""
+        if target not in _STATE_BY_COLUMN.values():
+            raise TaskError("validation", "restore target is invalid", 2)
+
+        def mutation(task: dict[str, Any]) -> None:
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=metadata)
+            try:
+                if task["state"] != target:
+                    self._move_raw(task, target)
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+
+        return self._write(
+            "restored", "steward", "restore", reference, request_id,
+            {"target": target, "metadata_keys": sorted(metadata)}, mutation,
+        )
+
     def _move_raw(self, task: dict[str, Any], target: str) -> None:
         board_id, columns, _ = self.reader._board()
         column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
@@ -766,6 +786,9 @@ class TaskWriter:
         if event.get("kind") == "claimed":
             self._finish_pending_claim(event, payload)
             return
+        if event.get("kind") == "restored":
+            self._finish_pending_restore(event, payload)
+            return
         if event.get("kind") != "moved" or payload.get("to") != "ready":
             return
         task = self.reader.show(str(event["ref"]))
@@ -806,11 +829,36 @@ class TaskWriter:
         if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
+    def _finish_pending_restore(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Finish a restore whose metadata committed before its column move failed."""
+        target = payload.get("target")
+        if target not in _STATE_BY_COLUMN.values():
+            raise TaskError("backend_error", "pending restore is missing its target state", 1)
+        ref = str(event.get("ref") or "")
+        if not ref:
+            raise TaskError("backend_error", "pending restore is missing its task ref", 1)
+        task = self.reader.show(ref)
+        if task["state"] != target:
+            self._move_raw(task, target)
+        if self.reader.show(ref)["state"] != target:
+            raise TaskError("backend_error", "pending restore cleanup remains incomplete", 1)
+
     def _finish_pending_create(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
         ref = str(event.get("ref") or "")
         if not ref:
             raise TaskError("backend_error", "pending create is missing its task ref", 1)
-        task = self.reader.show(ref)
+        try:
+            task = self.reader.show(ref)
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            backend = event.get("backend")
+            task_id = _positive_int(backend.get("task_id")) if isinstance(backend, dict) else None
+            if task_id is None:
+                raise
+            if not self.client.call("updateTask", id=task_id, reference=ref):
+                raise TaskError("backend_error", "pending create reference remains incomplete", 1)
+            task = self.reader.show(ref)
         self.client.call(
             "saveTaskMetadata",
             task_id=_task_number(task),

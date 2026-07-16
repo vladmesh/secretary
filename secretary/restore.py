@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -21,7 +22,8 @@ from secretary.backup_policy import (
 from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
-from secretary._fsutil import sha256_stream
+from secretary._fsutil import sha256_stream, write_text_atomic
+from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,228 @@ class RestorePlan:
 
 class RestoreError(RuntimeError):
     pass
+
+
+RESTORE_STATE_FILE = "restore-state.json"
+MEMORY_REINDEX_TIMEOUT_SECONDS = 300
+
+
+def restore_state(data_dir: Path) -> dict[str, Any]:
+    """Read the derived restore progress record without treating it as canon."""
+    try:
+        value = json.loads((data_dir / RESTORE_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
+    """Populate an empty board from cards.json and prove parity on every retry."""
+    data_dir = data_dir.expanduser().resolve()
+    try:
+        cards = _normalized_cards(data_dir)
+        client = client or KanboardClient()
+        reader = TaskReader(client)
+        writer = TaskWriter(client, data_dir=data_dir)
+        _, unresolved = writer.reconcile()
+        if unresolved:
+            raise RestoreError("board audit repair is required before restore")
+        existing = {card["ref"]: card for card in reader.list()}
+        unexpected = set(existing) - {card["reference"] for card in cards}
+        if unexpected:
+            raise RestoreError("board is not empty or does not match normalized restore data")
+        for card in cards:
+            current = existing.get(card["reference"])
+            if current is None:
+                _create_restored_card(writer, card)
+            target = _state_for_column(card["column"])
+            writer.restore_card(
+                reference=card["reference"], metadata=_restore_board_metadata(card), target=target or ""
+            )
+        actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
+        if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
+            _update_restore_state(data_dir, board="failed", board_parity="failed")
+            raise RestoreError("board parity check failed")
+    except TaskError as exc:
+        raise RestoreError(exc.message) from None
+    _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
+    return len(cards)
+
+
+def rebuild_memory_index(
+    data_dir: Path, *, python: Path | None = None, script: Path | None = None, model: str | None = None,
+    dim: int | None = None, runner=None,
+) -> int:
+    """Ask memory-mcp to replace its derived index from restored canon."""
+    data_dir = data_dir.expanduser().resolve()
+    memory_dir = data_dir / "memory"
+    facts_dir = memory_dir / "facts"
+    if not (facts_dir / ".git").is_dir():
+        raise RestoreError("memory facts journal is not available for index rebuild")
+    try:
+        if runner is not None:
+            result = runner(facts_dir, memory_dir / "export.ndjson", memory_dir / "index.sqlite")
+            count = int(result["parity"]["indexed"])
+        else:
+            if python is None or script is None or not isinstance(model, str) or not model or not isinstance(dim, int):
+                raise RuntimeError("memory-mcp rebuild contract is not configured")
+            python = python.expanduser().absolute()
+            script = script.expanduser().resolve()
+            if not python.is_file() or not os.access(python, os.X_OK) or not script.is_file():
+                raise RuntimeError("memory-mcp rebuild argv contract is unavailable")
+            completed = subprocess.run(
+                [
+                    str(python), str(script), "--canon", str(facts_dir), "--export",
+                    str(memory_dir / "export.ndjson"), "--target-db",
+                    str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
+                ],
+                text=True, capture_output=True, check=False, timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
+            )
+            if completed.returncode:
+                raise RuntimeError(
+                    "memory-mcp reindex command failed: " + _reindex_error_detail(completed)
+                )
+            result = json.loads(completed.stdout)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise RuntimeError("memory-mcp reindex command reported failure")
+            count = int(result["parity"]["indexed"])
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        raise RestoreError(f"could not rebuild memory index: {exc}") from None
+    _update_restore_state(data_dir, memory_index="complete", memory_index_count=count)
+    return count
+
+
+def restore_findings(data_dir: Path) -> list[str]:
+    """Return stable, actionable restore findings for doctor."""
+    state = restore_state(data_dir)
+    findings: list[str] = []
+    if not state:
+        findings.append("restore is incomplete")
+        return findings
+    if state.get("board_parity") == "failed":
+        findings.append("board restore parity failed")
+    elif state.get("board") != "complete":
+        findings.append("board restore is incomplete")
+    if state.get("memory_index") != "complete":
+        findings.append("memory index has not been rebuilt")
+    if state.get("reconcile") != "complete":
+        findings.append("managed reconcile has not been applied")
+    return findings
+
+
+def _reindex_error_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    """Return the public failure reason from memory-mcp's JSON contract."""
+    try:
+        result = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return f"exit {completed.returncode}"
+    error = result.get("error") if isinstance(result, dict) else None
+    return error if isinstance(error, str) and error else f"exit {completed.returncode}"
+
+
+def mark_reconcile_applied(data_dir: Path) -> None:
+    """Mark the explicit live reconcile verification complete."""
+    if not (data_dir / RESTORE_STATE_FILE).is_file():
+        return
+    _update_restore_state(data_dir, reconcile="complete")
+
+
+def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
+        cards = payload["cards"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise RestoreError("normalized board export is unavailable") from None
+    if not isinstance(cards, list) or any(not isinstance(card, dict) for card in cards):
+        raise RestoreError("normalized board export is invalid")
+    refs = [card.get("reference") for card in cards]
+    if any(not isinstance(ref, str) or not ref for ref in refs) or len(set(refs)) != len(refs):
+        raise RestoreError("normalized board export has invalid references")
+    for card in cards:
+        if not isinstance(card.get("column"), str) or _state_for_column(card["column"]) is None:
+            raise RestoreError("normalized board export has an invalid column")
+        if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
+            raise RestoreError("normalized board export has invalid task data")
+        if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
+            raise RestoreError("normalized board export has invalid task text")
+    return sorted(cards, key=lambda card: str(card["reference"]))
+
+
+def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
+    fields = _restore_fields(card)
+    writer.create(
+        role="steward", actor="restore", project=fields["project"], task_type=fields["task_type"],
+        title=card["title"], description=card["description"], reference=card["reference"],
+        blocked_by=fields["blocked_by"], head=fields["head"], review_head=fields["review_head"],
+        slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
+        family_preference=fields["family_preference"], codex_launch_mode=fields["codex_launch_mode"],
+        request_id=f"restore-create:{card['reference']}",
+    )
+
+
+def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
+    result = {str(key): str(value) for key, value in card["metadata"].items()}
+    for key, value in _restore_fields(card).items():
+        result.setdefault(key, value)
+    return result
+
+
+def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
+    fields = card["fields"]
+    metadata = card["metadata"]
+    value = lambda name: str(metadata.get(name, fields.get(name, "")) or "")
+    return {
+        "project": value("project"), "task_type": value("task_type"), "blocked_by": value("blocked_by"),
+        "head": value("head"), "review_head": value("review_head"), "slug": value("slug"),
+        "base_branch": value("base_branch"),
+        "complexity": _enum_or_default(value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"),
+        "family_preference": _enum_or_default(value("family_preference"), {"auto", "claude", "codex"}, "auto"),
+        "codex_launch_mode": _enum_or_default(value("codex_launch_mode"), {"", "exec", "tui"}, ""),
+    }
+
+
+def _enum_or_default(value: str, allowed: set[str], default: str) -> str:
+    return value if value in allowed else default
+
+
+def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
+    fields = _restore_fields(card)
+    metadata = card["metadata"]
+    return {
+            "ref": card["reference"], "title": card["title"], "description": card["description"],
+            "state": _state_for_column(card["column"]), "project": fields["project"],
+            "type": fields["task_type"], "blocked_by": fields["blocked_by"] or None,
+            "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
+            "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
+            "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
+    }
+
+
+def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),
+        "state": card.get("state"), "project": card.get("project"), "type": card.get("type"),
+        "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
+        "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
+        "workspace": card.get("workspace"),
+    }
+
+
+def _state_for_column(column: str) -> str | None:
+    return {"Идеи": "ideas", "Ready": "ready", "In progress": "in_progress", "Validate": "validate", "Blocked": "blocked", "Done": "done"}.get(column)
+
+
+def _update_restore_state(data_dir: Path, **changes: Any) -> None:
+    state = restore_state(data_dir)
+    state.update(changes)
+    state["version"] = 1
+    try:
+        write_text_atomic(
+            data_dir / RESTORE_STATE_FILE,
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+    except RuntimeError as exc:
+        raise RestoreError(f"could not record restore progress: {exc}") from None
 
 
 def bootstrap_empty(instance_path: Path, *, dry_run: bool = False) -> RestorePlan:
@@ -115,6 +339,7 @@ def restore_backup(
             return plan
         _validate_restore_payload(plain, manifest, policy)
         _stage_and_publish(plain, target, policy=policy)
+        _update_restore_state(target, board="pending", memory_index="pending", reconcile="pending")
         return plan
 
 

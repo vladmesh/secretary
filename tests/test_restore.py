@@ -4,20 +4,228 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.cli import main
 from secretary.backup import create_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
-from secretary.data import DataExport, export_memory, init_layout
-from secretary.restore import RestoreError, bootstrap_empty, restore_backup
+from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
+from secretary.host import CollectResult, HostInventory, build_plan
+import secretary.restore_commands as restore_commands
+from secretary.restore import (
+    RestoreError,
+    bootstrap_empty,
+    import_normalized_board,
+    mark_reconcile_applied,
+    rebuild_memory_index,
+    restore_backup,
+    restore_findings,
+    restore_state,
+)
+from tests.test_tasks import WriteKanboard
 
 
 class RestoreTests(unittest.TestCase):
+    def test_empty_bootstrap_stays_outside_restore_doctor_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+            bootstrap_empty(instance)
+
+            self.assertFalse((data_dir / "restore-state.json").exists())
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+
+    def test_reconcile_marker_does_not_create_restore_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            mark_reconcile_applied(data_dir)
+            self.assertFalse((data_dir / "restore-state.json").exists())
+
+    def test_restored_board_uses_normalized_export_shape_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            exported = normalize_board_card(
+                {
+                    "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
+                    "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+                },
+                {
+                    "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
+                    "column": "Ready", "task_type": "code", "project": "secretary",
+                    "claim": "worker", "blocked_by": "secretary-0",
+                    "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
+                    "comments": [],
+                },
+            )
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [exported]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+
+            self.assertEqual(len(client.tasks), 1)
+            self.assertEqual(client.tasks[0]["reference"], "secretary-1")
+            self.assertEqual(client.metadata[12]["claim"], "worker")
+            self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
+            self.assertEqual(client.metadata[12]["resolved_head"], "")
+            self.assertEqual(client.metadata[12]["resolved_review_head"], "")
+
+    def test_reindex_and_restore_findings_are_derived_from_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            facts = data_dir / "memory" / "facts"
+            (facts / "global").mkdir()
+            (facts / "global" / "one.md").write_text("fact\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=facts, check=True)
+            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
+            (data_dir / "memory" / "index.sqlite").write_bytes(b"broken")
+
+            self.assertEqual(
+                rebuild_memory_index(
+                    data_dir, runner=lambda *_: {"parity": {"indexed": 1}}
+                ),
+                1,
+            )
+            self.assertIn("board restore is incomplete", restore_findings(data_dir))
+
+    def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            facts = data_dir / "memory" / "facts"
+            script = Path(tmpdir) / "reindex.py"
+            script.write_text("", encoding="utf-8")
+            script.chmod(0o755)
+            venv_python = Path(tmpdir) / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.symlink_to(sys.executable)
+            completed = subprocess.CompletedProcess([], 0, '{"ok":true,"parity":{"indexed":2}}', "")
+            with mock.patch("secretary.restore.subprocess.run", return_value=completed) as run:
+                self.assertEqual(
+                    rebuild_memory_index(data_dir, python=venv_python, script=script, model="test", dim=4),
+                    2,
+                )
+            self.assertEqual(run.call_args.args[0][0], str(venv_python.absolute()))
+            self.assertEqual(restore_state(data_dir)["memory_index_count"], 2)
+
+    def test_reindex_cli_reports_public_contract_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            script = Path(tmpdir) / "reindex.py"
+            script.write_text("", encoding="utf-8")
+            script.chmod(0o755)
+            completed = subprocess.CompletedProcess([], 1, '{"ok":false,"error":"canon unavailable"}', "")
+            with mock.patch("secretary.restore.subprocess.run", return_value=completed):
+                with self.assertRaisesRegex(RestoreError, "canon unavailable"):
+                    rebuild_memory_index(
+                        data_dir, python=Path(sys.executable), script=script, model="test", dim=4
+                    )
+
+    def test_reindex_timeout_is_a_restore_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            script = Path(tmpdir) / "reindex.py"
+            script.write_text("", encoding="utf-8")
+            script.chmod(0o755)
+            with mock.patch(
+                "secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)
+            ):
+                with self.assertRaisesRegex(RestoreError, "could not rebuild"):
+                    rebuild_memory_index(
+                        data_dir, python=Path(sys.executable), script=script, model="test", dim=4
+                    )
+
+    def test_restore_board_wraps_missing_backend_configuration(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ, {}, clear=True):
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RestoreError, "Kanboard runtime configuration"):
+                import_normalized_board(data_dir)
+
+    def test_board_restore_normalizes_legacy_routing_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card()
+            card["metadata"].update({"complexity": "legacy", "family_preference": "", "blocked_by": "secretary-0"})
+            card["fields"]["blocked_by"] = ""
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
+
+    def test_restore_handoff_reaches_green_doctor_only_after_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir, host=True)
+            bootstrap_empty(instance)
+            card = _restore_card()
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            facts = data_dir / "memory" / "facts"
+            (facts / "global").mkdir()
+            (facts / "global" / "one.md").write_text("fact\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=facts, check=True)
+            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
+
+            self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 1)
+            self.assertEqual(rebuild_memory_index(data_dir, runner=lambda *_: {"parity": {"indexed": 1}}), 1)
+
+            report = restore_commands.validate_instance(instance)
+            desired = build_plan(report.instance, report.bindings)
+            (data_dir / "host-managed.json").write_text(
+                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "units.txt").write_text(
+                "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
+            )
+            self.assertEqual(main([
+                "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
+            ]), 0)
+
+            inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+            source = mock.Mock()
+            source.collect.return_value = CollectResult(inventory=inventory)
+            with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
+                self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 0)
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+            self.assertEqual(restore_findings(data_dir), [])
+
+    def test_restore_reconcile_fails_closed_before_marking_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
+            bootstrap_empty(instance)
+
+            self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
+            self.assertEqual(restore_findings(data_dir), ["restore is incomplete"])
+
     def test_restore_validates_then_publishes_staged_core_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -266,20 +474,63 @@ class RestoreTests(unittest.TestCase):
                 )
 
 
+class _EmptyWriteKanboard(WriteKanboard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks = []
+        self.metadata = {}
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "createTask":
+            self.calls.append((method, params))
+            task_id = 12
+            self.tasks.append(
+                {
+                    "id": task_id, "reference": "", "title": params["title"],
+                    "description": params.get("description", ""), "column_id": params["column_id"],
+                    "position": 1, "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200", "date_modification": "1720000200",
+                }
+            )
+            self.metadata[task_id] = {}
+            return task_id
+        return super().call(method, **params)
+
+
 def _write_instance(root: Path, name: str) -> Path:
     return _write_instance_to(root / "instance", name, root / "secretary-data")
 
 
-def _write_instance_to(instance: Path, name: str, data_dir: Path) -> Path:
+def _write_instance_to(
+    instance: Path, name: str, data_dir: Path, *, host: bool = False, heads: bool = False,
+) -> Path:
     instance.mkdir()
-    (instance / "instance.yaml").write_text(
+    host_block = "host:\n  unit_prefix: secretary-\n" if host else ""
+    heads_block = "heads:\n  - role: worker\n    model: test-model\n" if heads else ""
+    text = (
         "version: 1\n"
         f"name: {name}\n"
         f"data_dir: {data_dir}\n"
-        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
-        encoding="utf-8",
+        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n"
+        + host_block
+        + heads_block
     )
+    (instance / "instance.yaml").write_text(text, encoding="utf-8")
     return instance
+
+
+def _restore_card() -> dict[str, object]:
+    return normalize_board_card(
+        {
+            "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
+            "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+        },
+        {
+            "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
+            "column": "Ready", "task_type": "code", "project": "secretary", "comments": [],
+            "metadata": {"complexity": "standard", "family_preference": "auto"},
+        },
+    )
 
 
 def _prepare_producer_data(data_dir: Path) -> None:
