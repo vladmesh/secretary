@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -22,6 +21,10 @@ from secretary.backup_policy import (
 from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
+from secretary._fsutil import sha256_stream
+
+
+DataAllowlist = tuple[frozenset[str], tuple[str, ...], frozenset[str]]
 
 
 @dataclass(frozen=True)
@@ -210,6 +213,7 @@ def _validate_restore_payload(
         raise RestoreError("versions manifest has invalid checksums")
     prefix = f"{ARCHIVE_ROOT}/"
     data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
+    allowlist = _data_allowlist(policy)
     try:
         with tarfile.open(plain_archive, "r") as archive:
             actual: set[str] = set()
@@ -218,24 +222,24 @@ def _validate_restore_payload(
                     continue
                 if not member.name.startswith(prefix) or _unsafe_member(member):
                     raise RestoreError(f"unsafe archive entry: {member.name}")
+                relative = member.name.removeprefix(prefix)
+                if member.name.startswith(data_prefix):
+                    data_relative = relative.removeprefix("secretary-data/")
+                    if not _allowed_data_path(data_relative, member.isdir(), allowlist):
+                        raise RestoreError(f"unexpected data component: {data_relative}")
                 if member.isdir():
                     continue
                 if not member.isfile():
                     raise RestoreError(f"unsupported archive entry type: {member.name}")
-                relative = member.name.removeprefix(prefix)
                 if relative == "versions.json":
                     continue
                 actual.add(relative)
                 source = archive.extractfile(member)
                 if source is None:
                     raise RestoreError(f"could not read archive entry: {member.name}")
-                digest = hashlib.sha256(source.read()).hexdigest()
+                digest = sha256_stream(source)
                 if checksums.get(relative) != digest:
                     raise RestoreError(f"checksum mismatch: {relative}")
-                if member.name.startswith(data_prefix):
-                    data_relative = relative.removeprefix("secretary-data/")
-                    if not _allowed_data_path(data_relative, policy):
-                        raise RestoreError(f"unexpected data component: {data_relative}")
             if actual != expected:
                 missing = sorted(expected - actual)
                 extra = sorted(actual - expected)
@@ -257,30 +261,37 @@ def _unsafe_member(member: tarfile.TarInfo) -> bool:
     )
 
 
-def _allowed_data_path(relative: str, policy: BackupPolicy) -> bool:
-    if relative == "data-manifest.json":
+def _data_allowlist(policy: BackupPolicy) -> DataAllowlist:
+    files = {"data-manifest.json"}
+    trees = {"memory/facts"}
+    for component in policy.components:
+        if component.restore_action != "restore":
+            continue
+        if component.requires_raw_board_data:
+            trees.add(component.path)
+        else:
+            files.update((component.path, *component.required_entries))
+    directories = {
+        parent.as_posix()
+        for path in (*files, *trees)
+        for parent in Path(path).parents
+        if parent != Path(".")
+    }
+    return frozenset(files), tuple(sorted(trees)), frozenset(directories)
+
+
+def _allowed_data_path(relative: str, is_directory: bool, allowlist: DataAllowlist) -> bool:
+    files, trees, directories = allowlist
+    if relative in trees or any(relative.startswith(f"{tree}/") for tree in trees):
         return True
-    allowed = [
-        path
-        for component in policy.components
-        if component.restore_action == "restore"
-        for path in (component.path, *component.required_entries)
-    ]
-    # The memory component's exported file is not its journal directory, but the
-    # journal is canonical state and is deliberately archived alongside it.
-    allowed.append("memory/facts")
-    allowed_paths = {Path(path) for path in allowed}
-    allowed_paths.update(
-        parent for path in tuple(allowed_paths) for parent in path.parents if parent != Path(".")
-    )
-    return any(
-        relative == path.as_posix() or relative.startswith(f"{path.as_posix()}/")
-        for path in allowed_paths
-    )
+    if is_directory:
+        return relative in directories
+    return relative in files
 
 
 def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolicy) -> None:
     parent = target.parent
+    allowlist = _data_allowlist(policy)
     try:
         parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=f".{target.name}.restore-", dir=parent) as temporary:
@@ -293,7 +304,9 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                     if not member.name.startswith(prefix):
                         continue
                     relative = Path(member.name.removeprefix(prefix))
-                    if _unsafe_member(member) or not _allowed_data_path(relative.as_posix(), policy):
+                    if _unsafe_member(member) or not _allowed_data_path(
+                        relative.as_posix(), member.isdir(), allowlist
+                    ):
                         raise RestoreError(f"unsafe archive entry: {member.name}")
                     if member.isdir():
                         (data_staging / relative).mkdir(parents=True, exist_ok=True)
@@ -309,5 +322,7 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                         shutil.copyfileobj(source, output)
             _reject_existing_target(target)
             os.replace(data_staging, target)
-    except (OSError, RuntimeError, tarfile.TarError) as exc:
+    except RestoreError:
+        raise
+    except (OSError, tarfile.TarError) as exc:
         raise RestoreError(f"restore staging failed: {exc}") from None

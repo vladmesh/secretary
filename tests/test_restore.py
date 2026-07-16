@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -11,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from secretary.backup_policy import ARCHIVE_ROOT
+from secretary._fsutil import sha256_file
 from secretary.restore import RestoreError, bootstrap_empty, restore_backup
 
 
@@ -145,6 +145,29 @@ class RestoreTests(unittest.TestCase):
                 )
             self.assertFalse((root / "secretary-data").exists())
 
+    def test_restore_rejects_unexpected_data_component_before_publishing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            extra = payload / "secretary-data" / "board" / "untrusted.json"
+            extra.write_text("{}", encoding="utf-8")
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            with self.assertRaisesRegex(RestoreError, "unexpected data component"):
+                restore_backup(
+                    archive,
+                    instance,
+                    age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+            self.assertFalse((root / "secretary-data").exists())
+
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -183,18 +206,13 @@ class RestoreTests(unittest.TestCase):
 
             data_dir = root / "secretary-data"
             manifest = json.loads((root / ARCHIVE_ROOT / "versions.json").read_text(encoding="utf-8"))
+            source_journal = root / ARCHIVE_ROOT / "secretary-data" / "memory" / "facts"
+            expected_history = _git_history(source_journal)
             cards = json.loads((data_dir / "board" / "cards.json").read_text())["cards"]
             self.assertEqual(len(cards), manifest["components"]["board"]["count"])
             facts = (data_dir / "memory" / "export.ndjson").read_text().splitlines()
             self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
-            result = subprocess.run(
-                ["git", "rev-list", "--count", "HEAD"],
-                cwd=data_dir / "memory" / "facts",
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-            self.assertEqual(result.stdout.strip(), "1")
+            self.assertEqual(_git_history(data_dir / "memory" / "facts"), expected_history)
 
 
 def _write_instance(root: Path, name: str) -> Path:
@@ -223,15 +241,21 @@ def _core_archive(root: Path, name: str) -> Path:
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=memory, check=True)
     subprocess.run(["git", "add", "."], cwd=memory, check=True)
     subprocess.run(["git", "commit", "-m", "seed"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
+    (memory / "second-fact.md").write_text("# second fact\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=memory, check=True)
+    subprocess.run(["git", "commit", "-m", "second fact"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
     runs.mkdir(parents=True)
     (payload / "instance").mkdir()
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
     (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
-    (board / "cards.json").write_text('{"cards": []}', encoding="utf-8")
-    (board / "cards.ndjson").write_text("", encoding="utf-8")
+    cards = [{"reference": "secretary-1", "column": "Ready"}]
+    (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
+    (board / "cards.ndjson").write_text(
+        "".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8"
+    )
     (board / "export.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "memory" / "export.ndjson").write_text(
-        '{"id":"fact"}\n', encoding="utf-8"
+        '{"id":"fact"}\n{"id":"second-fact"}\n', encoding="utf-8"
     )
     for filename in ("watermarks.json", "cards.json", "claims.json"):
         (runs / filename).write_text("{}", encoding="utf-8")
@@ -240,8 +264,8 @@ def _core_archive(root: Path, name: str) -> Path:
         "backup_kind": "core",
         "instance": {"identity": {"name": name, "instance_remote": "git@example.invalid:test/instance.git"}},
         "components": {
-            "board": {"path": "board/cards.json", "count": 0},
-            "memory": {"path": "memory/export.ndjson", "count": 1},
+            "board": {"path": "board/cards.json", "count": len(cards)},
+            "memory": {"path": "memory/export.ndjson", "count": 2},
             "runs_state": {
                 "path": "runs/watermarks.json",
                 "cards": "runs/cards.json",
@@ -297,7 +321,16 @@ def _write_checksums(payload: Path, manifest: dict[str, object]) -> None:
     checksums: dict[str, str] = {}
     for path in sorted(payload.rglob("*")):
         if path.is_file() and path.name != "versions.json":
-            checksums[path.relative_to(payload).as_posix()] = hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
+            checksums[path.relative_to(payload).as_posix()] = sha256_file(path)
     manifest["checksums"] = checksums
+
+
+def _git_history(journal: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "rev-list", "HEAD"],
+        cwd=journal,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.splitlines()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -17,6 +16,7 @@ from typing import Any, Callable, Iterator
 import fcntl
 
 from secretary.config import ConfigError, load_config
+from secretary._fsutil import sha256_file
 from secretary.data import (
     DataExport,
     export_all,
@@ -530,11 +530,7 @@ def _payload_checksums(payload: Path) -> dict[str, str]:
     for path in sorted(payload.rglob("*")):
         if not path.is_file() or path.is_symlink() or path.name == "versions.json":
             continue
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-        checksums[path.relative_to(payload).as_posix()] = digest.hexdigest()
+        checksums[path.relative_to(payload).as_posix()] = sha256_file(path)
     return checksums
 
 

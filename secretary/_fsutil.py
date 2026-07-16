@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import shutil
 import stat as stat_module
 import tempfile
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -278,3 +279,15 @@ def ensure_dir(path: Path, label: str) -> None:
 def cleanup_staging_dir(staging_dir: Path | None) -> None:
     if staging_dir is not None:
         shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def sha256_file(path: Path) -> str:
+    with path.open("rb") as source:
+        return sha256_stream(source)
+
+
+def sha256_stream(source: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
