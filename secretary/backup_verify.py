@@ -92,8 +92,10 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         if raw_kind not in BACKUP_KINDS:
             findings.append("unsupported backup kind")
         findings.extend(_verify_manifest_components(manifest, policy, members, names))
-        findings.extend(verify_restore_payload(path, manifest, policy))
-        findings.extend(_verify_memory_journal(path))
+        payload_findings = verify_restore_payload(path, manifest, policy)
+        findings.extend(payload_findings)
+        if not payload_findings:
+            findings.extend(_verify_memory_journal(path))
 
     if policy.kind == "core":
         findings.extend(_verify_core_archive(names, path, policy))
@@ -237,7 +239,10 @@ def verify_restore_payload(
                     path = Path(data_relative)
                     if (
                         should_skip_data_entry(path, policy=policy)
-                        and not is_memory_journal_git_runtime_entry(path)
+                        and (
+                            not is_memory_journal_git_runtime_entry(path)
+                            or path.parts[3:5] == ("objects", "info")
+                        )
                     ):
                         return [f"unexpected data component: {data_relative}"]
                 if member.isdir():

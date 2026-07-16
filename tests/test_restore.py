@@ -712,6 +712,48 @@ class RestoreTests(unittest.TestCase):
             self.assertFalse((restored_git / "config").exists())
             self.assertFalse((restored_git / "hooks").exists())
 
+    def test_verify_and_restore_reject_journal_object_alternates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            objects = payload / "secretary-data" / "memory" / "facts" / ".git" / "objects"
+            alternate_store = root / "alternate-objects"
+            shutil.copytree(objects, alternate_store)
+            shutil.rmtree(objects)
+            (objects / "info").mkdir(parents=True)
+            (objects / "info" / "alternates").write_text(
+                f"{alternate_store}\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            with mock.patch("secretary.backup_verify.subprocess.run") as git:
+                verified = verify_backup(
+                    archive,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+                with self.assertRaisesRegex(RestoreError, "unexpected data component"):
+                    restore_backup(
+                        archive,
+                        instance,
+                        age_identity=None,
+                        decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    )
+            git.assert_not_called()
+
+            self.assertEqual(verified.code, 1)
+            self.assertIn(
+                "unexpected data component: memory/facts/.git/objects/info/alternates",
+                verified.findings,
+            )
+            self.assertFalse((root / "secretary-data").exists())
+
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
