@@ -16,8 +16,11 @@ from secretary.backup_policy import (
     BackupPolicy,
     component_archive_name,
     is_memory_journal_git_entry,
+    is_memory_journal_git_runtime_entry,
     policy_for,
+    should_skip_data_entry,
 )
+from secretary._fsutil import sha256_stream
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,7 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         if raw_kind not in BACKUP_KINDS:
             findings.append("unsupported backup kind")
         findings.extend(_verify_manifest_components(manifest, policy, members, names))
+        findings.extend(verify_restore_payload(path, manifest, policy))
 
     if policy.kind == "core":
         findings.extend(_verify_core_archive(names, path, policy))
@@ -202,6 +206,71 @@ def _read_member_json(archive: tarfile.TarFile, name: str) -> Any:
     if member is None:
         return None
     return json.loads(member.read().decode("utf-8"))
+
+
+def verify_restore_payload(
+    plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
+) -> list[str]:
+    """Verify the checksum and extraction contract required by restore."""
+    checksums = manifest.get("checksums")
+    if not isinstance(checksums, dict) or not checksums:
+        return ["versions manifest has no checksums"]
+    expected = {
+        name for name, digest in checksums.items() if isinstance(name, str) and isinstance(digest, str)
+    }
+    if len(expected) != len(checksums) or any(len(digest) != 64 for digest in checksums.values()):
+        return ["versions manifest has invalid checksums"]
+    prefix = f"{ARCHIVE_ROOT}/"
+    data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
+    try:
+        with tarfile.open(plain_archive, "r") as archive:
+            actual: set[str] = set()
+            for member in archive.getmembers():
+                if member.name == ARCHIVE_ROOT and member.isdir():
+                    continue
+                if not member.name.startswith(prefix) or _unsafe_member(member):
+                    return [f"unsafe archive entry: {member.name}"]
+                relative = member.name.removeprefix(prefix)
+                if member.name.startswith(data_prefix):
+                    data_relative = relative.removeprefix("secretary-data/")
+                    path = Path(data_relative)
+                    if (
+                        should_skip_data_entry(path, policy=policy)
+                        and not is_memory_journal_git_runtime_entry(path)
+                    ):
+                        return [f"unexpected data component: {data_relative}"]
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    return [f"unsupported archive entry type: {member.name}"]
+                if relative == "versions.json":
+                    continue
+                actual.add(relative)
+                source = archive.extractfile(member)
+                if source is None:
+                    return [f"could not read archive entry: {member.name}"]
+                if checksums.get(relative) != sha256_stream(source):
+                    return [f"checksum mismatch: {relative}"]
+            if actual != expected:
+                missing = sorted(expected - actual)
+                extra = sorted(actual - expected)
+                detail = missing[0] if missing else extra[0]
+                return [f"checksum manifest does not match archive: {detail}"]
+    except (OSError, tarfile.TarError) as exc:
+        return [f"could not validate restore payload: {exc}"]
+    return []
+
+
+def _unsafe_member(member: tarfile.TarInfo) -> bool:
+    path = Path(member.name)
+    return (
+        path.is_absolute()
+        or ".." in path.parts
+        or member.issym()
+        or member.islnk()
+        or member.isdev()
+        or member.isfifo()
+    )
 
 
 def _is_forbidden_archive_entry(name: str) -> bool:

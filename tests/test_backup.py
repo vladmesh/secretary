@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.backup import check_backup_health, create_backup, create_backups, verify_backup
+from secretary._fsutil import sha256_file
 from secretary.data import DataExport
 
 
@@ -808,6 +809,14 @@ class BackupTests(unittest.TestCase):
             raw_data.mkdir(parents=True)
             (raw_data / "db.sqlite").write_bytes(b"sqlite")
             (raw_data.parent / "manifest.json").write_text("{}", encoding="utf-8")
+            manifest_path = payload / "versions.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["checksums"] = {
+                path.relative_to(payload).as_posix(): sha256_file(path)
+                for path in payload.rglob("*")
+                if path.is_file() and path.name != "versions.json"
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with tarfile.open(archive, "w") as tar:
                 tar.add(payload, arcname="secretary-backup")
 

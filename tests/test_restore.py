@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
-from secretary.backup import create_backup
+from secretary.backup import create_backup, verify_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
@@ -485,6 +485,28 @@ class RestoreTests(unittest.TestCase):
                     decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
             self.assertFalse((root / "secretary-data").exists())
+
+    def test_verify_rejects_archive_with_missing_memory_journal_object(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = _core_archive(root, "test")
+            damaged = root / "without-journal-object.tar"
+            with tarfile.open(archive, "r") as source, tarfile.open(damaged, "w") as destination:
+                for member in source.getmembers():
+                    if member.isfile() and ".git/objects/" in member.name:
+                        continue
+                    handle = source.extractfile(member) if member.isfile() else None
+                    destination.addfile(member, handle)
+
+            result = verify_backup(
+                damaged,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertTrue(
+            any("checksum manifest does not match archive" in finding for finding in result.findings)
+        )
 
     def test_full_restore_marks_debug_excluded_and_restores_data_components(self):
         with tempfile.TemporaryDirectory() as tmpdir:

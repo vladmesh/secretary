@@ -21,10 +21,10 @@ from secretary.backup_policy import (
     restore_plan_components,
     should_skip_data_entry,
 )
-from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
+from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar, verify_restore_payload
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
-from secretary._fsutil import file_lock, sha256_stream, write_text_atomic
+from secretary._fsutil import file_lock, write_text_atomic
 from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 
 
@@ -456,53 +456,9 @@ def _reject_existing_target(target: Path) -> None:
 def _validate_restore_payload(
     plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
 ) -> None:
-    checksums = manifest.get("checksums")
-    if not isinstance(checksums, dict) or not checksums:
-        raise RestoreError("versions manifest has no checksums")
-    expected = {
-        name for name, digest in checksums.items() if isinstance(name, str) and isinstance(digest, str)
-    }
-    if len(expected) != len(checksums) or any(len(digest) != 64 for digest in checksums.values()):
-        raise RestoreError("versions manifest has invalid checksums")
-    prefix = f"{ARCHIVE_ROOT}/"
-    data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
-    try:
-        with tarfile.open(plain_archive, "r") as archive:
-            actual: set[str] = set()
-            for member in archive.getmembers():
-                if member.name == ARCHIVE_ROOT and member.isdir():
-                    continue
-                if not member.name.startswith(prefix) or _unsafe_member(member):
-                    raise RestoreError(f"unsafe archive entry: {member.name}")
-                relative = member.name.removeprefix(prefix)
-                if member.name.startswith(data_prefix):
-                    data_relative = relative.removeprefix("secretary-data/")
-                    path = Path(data_relative)
-                    if (
-                        not _allowed_data_path(data_relative, policy)
-                        and not is_memory_journal_git_runtime_entry(path)
-                    ):
-                        raise RestoreError(f"unexpected data component: {data_relative}")
-                if member.isdir():
-                    continue
-                if not member.isfile():
-                    raise RestoreError(f"unsupported archive entry type: {member.name}")
-                if relative == "versions.json":
-                    continue
-                actual.add(relative)
-                source = archive.extractfile(member)
-                if source is None:
-                    raise RestoreError(f"could not read archive entry: {member.name}")
-                digest = sha256_stream(source)
-                if checksums.get(relative) != digest:
-                    raise RestoreError(f"checksum mismatch: {relative}")
-            if actual != expected:
-                missing = sorted(expected - actual)
-                extra = sorted(actual - expected)
-                detail = missing[0] if missing else extra[0]
-                raise RestoreError(f"checksum manifest does not match archive: {detail}")
-    except (OSError, tarfile.TarError) as exc:
-        raise RestoreError(f"could not validate restore payload: {exc}") from None
+    findings = verify_restore_payload(plain_archive, manifest, policy)
+    if findings:
+        raise RestoreError(findings[0])
 
 
 def _unsafe_member(member: tarfile.TarInfo) -> bool:
