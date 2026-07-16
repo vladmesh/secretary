@@ -677,6 +677,23 @@ class TaskWriter:
                 raise _CommittedWriteError() from exc
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
 
+    def restore_card(
+        self, *, reference: str, metadata: dict[str, str], target: str, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Apply an audited restore-only metadata and column update."""
+        if target not in _STATE_BY_COLUMN.values():
+            raise TaskError("validation", "restore target is invalid", 2)
+
+        def mutation(task: dict[str, Any]) -> None:
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=metadata)
+            if task["state"] != target:
+                self._move_raw(task, target)
+
+        return self._write(
+            "restored", "steward", "restore", reference, request_id,
+            {"target": target, "metadata_keys": sorted(metadata)}, mutation,
+        )
+
     def _move_raw(self, task: dict[str, Any], target: str) -> None:
         board_id, columns, _ = self.reader._board()
         column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)

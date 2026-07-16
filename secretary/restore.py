@@ -62,23 +62,23 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
     writer = TaskWriter(client, data_dir=data_dir)
     try:
         existing = {card["ref"]: card for card in reader.list()}
-        unexpected = set(existing) - {card["ref"] for card in cards}
+        unexpected = set(existing) - {card["reference"] for card in cards}
         if unexpected:
             raise RestoreError("board is not empty or does not match normalized restore data")
         for card in cards:
-            current = existing.get(card["ref"])
+            current = existing.get(card["reference"])
             if current is None:
                 _create_restored_card(writer, card)
-                current = reader.show(card["ref"])
-            _restore_board_metadata(client, current, card)
-            current = reader.show(card["ref"])
-            if current["state"] != card["state"]:
-                writer._move_raw(current, card["state"])
-        actual = {card["ref"]: reader.show(card["ref"]) for card in cards}
+                current = reader.show(card["reference"])
+            target = _state_for_column(card["column"])
+            writer.restore_card(
+                reference=card["reference"], metadata=_restore_board_metadata(card), target=target or ""
+            )
+        actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
     except TaskError as exc:
         raise RestoreError(exc.message) from None
-    if any(_board_core(actual[ref]) != _board_core(card) for ref, card in ((card["ref"], card) for card in cards)):
-        _update_restore_state(data_dir, board="complete", board_parity="failed")
+    if any(_board_core(actual[card["reference"]]) != _board_core(card) for card in cards):
+        _update_restore_state(data_dir, board="failed", board_parity="failed")
         raise RestoreError("board parity check failed")
     _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
     return len(cards)
@@ -127,6 +127,12 @@ def restore_findings(data_dir: Path) -> list[str]:
     return findings
 
 
+def mark_reconcile_status(data_dir: Path, *, applied: bool) -> None:
+    """Persist reconcile parity only for a restore that is already in progress."""
+    if (data_dir / RESTORE_STATE_FILE).is_file():
+        _update_restore_state(data_dir, reconcile="complete" if applied else "pending")
+
+
 def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
     try:
         payload = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
@@ -135,46 +141,69 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
         raise RestoreError("normalized board export is unavailable") from None
     if not isinstance(cards, list) or any(not isinstance(card, dict) for card in cards):
         raise RestoreError("normalized board export is invalid")
-    refs = [card.get("ref") for card in cards]
+    refs = [card.get("reference") for card in cards]
     if any(not isinstance(ref, str) or not ref for ref in refs) or len(set(refs)) != len(refs):
         raise RestoreError("normalized board export has invalid references")
-    return sorted(cards, key=lambda card: str(card["ref"]))
+    for card in cards:
+        if not isinstance(card.get("column"), str) or _state_for_column(card["column"]) is None:
+            raise RestoreError("normalized board export has an invalid column")
+        if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
+            raise RestoreError("normalized board export has invalid task data")
+    return sorted(cards, key=lambda card: str(card["reference"]))
 
 
 def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
-    routing = card.get("routing") if isinstance(card.get("routing"), dict) else {}
-    workspace = card.get("workspace") if isinstance(card.get("workspace"), dict) else {}
+    fields = card["fields"]
+    metadata = card["metadata"]
     writer.create(
-        role="steward", actor="restore", project=str(card.get("project") or ""),
-        task_type=str(card.get("type") or ""), title=str(card.get("title") or ""),
-        description=str(card.get("description") or ""), reference=str(card["ref"]),
-        blocked_by=str(card.get("blocked_by") or ""), head=str(routing.get("head_override") or ""),
-        review_head=str(routing.get("review_head_override") or ""), slug=str(workspace.get("slug") or ""),
-        base_branch=str(workspace.get("base_branch") or ""),
-        complexity=str(routing.get("complexity") or "standard"),
-        family_preference=str(routing.get("family_preference") or "auto"),
-        codex_launch_mode=str(routing.get("codex_launch_mode") or ""),
+        role="steward", actor="restore", project=str(fields.get("project") or ""),
+        task_type=str(fields.get("task_type") or ""), title=str(card.get("title") or ""),
+        description=str(card.get("description") or ""), reference=str(card["reference"]),
+        blocked_by=str(fields.get("blocked_by") or ""), head=str(fields.get("head") or ""),
+        review_head=str(fields.get("review_head") or ""), slug=str(fields.get("slug") or ""),
+        base_branch=str(fields.get("base_branch") or ""),
+        complexity=str(metadata.get("complexity") or "standard"),
+        family_preference=str(metadata.get("family_preference") or "auto"),
+        codex_launch_mode=str(metadata.get("codex_launch_mode") or ""),
     )
 
 
-def _restore_board_metadata(client: KanboardClient, actual: dict[str, Any], card: dict[str, Any]) -> None:
-    routing = card.get("routing") if isinstance(card.get("routing"), dict) else {}
-    workspace = card.get("workspace") if isinstance(card.get("workspace"), dict) else {}
-    retry = card.get("retry") if isinstance(card.get("retry"), dict) else {}
-    claim = card.get("claim") if isinstance(card.get("claim"), dict) else {}
+def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
+    fields = card["fields"]
+    metadata = card["metadata"]
     values = {
-        "claim": str(claim.get("worker") or ""), "resolved_head": str(routing.get("resolved_worker_head") or ""),
-        "resolved_review_head": str(routing.get("resolved_review_head") or ""),
-        "routing_reason": str(routing.get("routing_reason") or ""), "quota_snapshot_at": str(routing.get("quota_snapshot_at") or ""),
-        "slug": str(workspace.get("slug") or ""), "base_branch": str(workspace.get("base_branch") or ""),
-        "retry_same": str(retry.get("same") or ""), "retry_switch": str(retry.get("switched") or ""),
-        "retry_heads": ",".join(str(value) for value in retry.get("heads", []) if isinstance(value, str)),
+        **{str(key): str(value) for key, value in metadata.items()},
+        "claim": str(fields.get("claim") or ""),
+        "resolved_head": str(fields.get("effective_head") or ""),
+        "resolved_review_head": str(fields.get("effective_review_head") or ""),
+        "slug": str(fields.get("slug") or ""), "base_branch": str(fields.get("base_branch") or ""),
     }
-    client.call("saveTaskMetadata", task_id=int(str(actual["id"]).rsplit("_", 1)[-1]), values=values)
+    return values
 
 
 def _board_core(card: dict[str, Any]) -> dict[str, Any]:
-    return {key: card.get(key) for key in ("ref", "title", "description", "state", "project", "type", "blocked_by", "claim", "routing", "workspace", "retry")}
+    if "reference" in card:
+        fields = card["fields"]
+        metadata = card["metadata"]
+        return {
+            "ref": card["reference"], "title": card["title"], "description": card["description"],
+            "state": _state_for_column(card["column"]), "project": fields.get("project", ""),
+            "type": fields.get("task_type", ""), "blocked_by": fields.get("blocked_by") or None,
+            "claim": {"worker": fields.get("claim") or None, "claimed_at": None},
+            "routing": {"complexity": metadata.get("complexity", "standard"), "family_preference": metadata.get("family_preference", "auto"), "head": fields.get("head") or None, "review_head": fields.get("review_head") or None, "resolved_head": fields.get("effective_head") or None, "resolved_review_head": fields.get("effective_review_head") or None, "codex_launch_mode": metadata.get("codex_launch_mode") or None},
+            "workspace": {"slug": fields.get("slug") or None, "base_branch": fields.get("base_branch") or None},
+        }
+    return {
+        "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),
+        "state": card.get("state"), "project": card.get("project"), "type": card.get("type"),
+        "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
+        "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
+        "workspace": card.get("workspace"),
+    }
+
+
+def _state_for_column(column: str) -> str | None:
+    return {"Идеи": "ideas", "Ready": "ready", "In progress": "in_progress", "Validate": "validate", "Blocked": "blocked", "Done": "done"}.get(column)
 
 
 def _update_restore_state(data_dir: Path, **changes: Any) -> None:

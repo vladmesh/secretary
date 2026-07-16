@@ -36,11 +36,6 @@ def add_restore_subcommands(subparsers) -> None:
     board.add_argument("--instance", required=True)
     board.set_defaults(handler=run_restore_board)
 
-    reindex = subparsers.add_parser("memory-reindex", help="rebuild the derived memory index from its journal")
-    reindex.add_argument("--instance", required=True)
-    reindex.set_defaults(handler=run_memory_reindex)
-
-
 def run_bootstrap_empty(args: argparse.Namespace) -> int:
     try:
         plan = bootstrap_empty(Path(args.instance), dry_run=args.dry_run)

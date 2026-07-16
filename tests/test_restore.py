@@ -13,11 +13,63 @@ from unittest import mock
 from secretary.backup import create_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
-from secretary.data import DataExport, export_memory, init_layout
-from secretary.restore import RestoreError, bootstrap_empty, restore_backup
+from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
+from secretary.restore import (
+    RestoreError,
+    bootstrap_empty,
+    import_normalized_board,
+    rebuild_memory_index,
+    restore_backup,
+    restore_findings,
+)
+from tests.test_tasks import WriteKanboard
 
 
 class RestoreTests(unittest.TestCase):
+    def test_restored_board_uses_normalized_export_shape_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            exported = normalize_board_card(
+                {
+                    "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
+                    "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+                },
+                {
+                    "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
+                    "column": "Ready", "task_type": "code", "project": "secretary",
+                    "claim": "worker", "blocked_by": "secretary-0",
+                    "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard"},
+                    "comments": [],
+                },
+            )
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [exported]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+
+            self.assertEqual(len(client.tasks), 1)
+            self.assertEqual(client.tasks[0]["reference"], "secretary-1")
+            self.assertEqual(client.metadata[12]["claim"], "worker")
+            self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
+
+    def test_reindex_and_restore_findings_are_derived_from_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            facts = data_dir / "memory" / "facts"
+            (facts / "global").mkdir()
+            (facts / "global" / "one.md").write_text("fact\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=facts, check=True)
+            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
+            (data_dir / "memory" / "index.sqlite").write_bytes(b"broken")
+
+            self.assertEqual(rebuild_memory_index(data_dir), 1)
+            self.assertIn("board restore is incomplete", restore_findings(data_dir))
+
     def test_restore_validates_then_publishes_staged_core_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -264,6 +316,29 @@ class RestoreTests(unittest.TestCase):
                     _git_history(target_data / "memory" / "facts"),
                     _git_history(source_data / "memory" / "facts"),
                 )
+
+
+class _EmptyWriteKanboard(WriteKanboard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks = []
+        self.metadata = {}
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "createTask":
+            self.calls.append((method, params))
+            task_id = 12
+            self.tasks.append(
+                {
+                    "id": task_id, "reference": "", "title": params["title"],
+                    "description": params.get("description", ""), "column_id": params["column_id"],
+                    "position": 1, "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200", "date_modification": "1720000200",
+                }
+            )
+            self.metadata[task_id] = {}
+            return task_id
+        return super().call(method, **params)
 
 
 def _write_instance(root: Path, name: str) -> Path:
