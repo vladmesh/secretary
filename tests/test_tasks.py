@@ -164,6 +164,7 @@ class KanboardClientTests(unittest.TestCase):
 
 class WriteKanboard(FakeKanboard):
     fail_comments = False
+    lose_comment_reply = False
     fail_metadata = False
     fail_move = False
     fail_update = False
@@ -188,6 +189,8 @@ class WriteKanboard(FakeKanboard):
             self.comments[int(params["task_id"])].append(
                 {"date_creation": "1720000020", "comment": params["content"]}
             )
+            if self.lose_comment_reply:
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
             return 1
         if method == "getAllComments":
             return self.comments[int(params["task_id"])]
@@ -296,6 +299,28 @@ class TaskWriterTests(unittest.TestCase):
         writes = len([call for call in self.client.calls if call[0] == "createComment"])
         self.assertEqual(self.writer.audit.reconcile(), (1, 0))
         self.assertEqual(writes, len([call for call in self.client.calls if call[0] == "createComment"]))
+
+    def test_restore_comment_retry_after_lost_reply_does_not_duplicate_history(self) -> None:
+        self.client.lose_comment_reply = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.restore_comment(
+                reference="secretary-468", body="[report:done]\\nrestored", index=0,
+                request_id="restore-comment-lost-reply",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(len(self.client.comments[12]), 1)
+
+        self.client.lose_comment_reply = False
+        self.writer.restore_comment(
+            reference="secretary-468", body="[report:done]\\nrestored", index=0,
+            request_id="restore-comment-lost-reply",
+        )
+
+        self.assertEqual(len(self.client.comments[12]), 1)
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            self.assertNotIn("restore_body", events.read())
 
     def test_partial_move_failure_keeps_pending_until_reconcile(self) -> None:
         self.client.tasks[0]["column_id"] = 3
