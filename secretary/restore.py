@@ -378,7 +378,6 @@ def restore_backup(
         if dry_run:
             return plan
         _stage_and_publish(plain, target, policy=policy)
-        _update_restore_state(target, board="pending", memory_index="pending", reconcile="pending")
         return plan
 
 
@@ -499,6 +498,12 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                     with source, destination.open("wb") as output:
                         shutil.copyfileobj(source, output)
             _rebuild_memory_journal_index(data_staging / "memory" / "facts")
+            _update_restore_state(
+                data_staging,
+                board="pending",
+                memory_index="pending",
+                reconcile="pending",
+            )
             _reject_existing_target(target)
             os.replace(data_staging, target)
     except RestoreError:
