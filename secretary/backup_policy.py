@@ -13,6 +13,7 @@ BACKUP_VERSION = 1
 BACKUPS_MAX_BYTES = 512 * 1024 * 1024
 
 BackupKind = Literal["core", "full"]
+RestoreAction = Literal["restore", "exclude"]
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class ComponentPolicy:
     required_entries: tuple[str, ...] = ()
     required_fields: tuple[str, ...] = ()
     requires_raw_board_data: bool = False
+    restore_action: RestoreAction = "restore"
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,12 @@ RUNS_STATE = ComponentPolicy(
     required_fields=("cards", "claims"),
 )
 
+MEMORY = ComponentPolicy(
+    "memory",
+    "memory/export.ndjson",
+    source_export="memory",
+)
+
 CORE_POLICY = BackupPolicy(
     kind="core",
     components=(
@@ -69,7 +77,7 @@ CORE_POLICY = BackupPolicy(
             source_export="board",
             required_entries=("board/cards.ndjson", "board/export.json"),
         ),
-        ComponentPolicy("memory", "memory/export.ndjson", source_export="memory"),
+        MEMORY,
         RUNS_STATE,
     ),
     forbidden_entries=(
@@ -99,12 +107,16 @@ FULL_POLICY = BackupPolicy(
             source_export="board",
             required_entries=("board/cards.ndjson", "board/export.json"),
         ),
-        ComponentPolicy("memory", "memory/export.ndjson", source_export="memory"),
+        MEMORY,
         RUNS_STATE,
         ComponentPolicy("runs", "runs/runs.ndjson", source_export="runs"),
         ComponentPolicy("transcripts", "transcripts/inventory.json", source_export="transcripts"),
         ComponentPolicy("artifacts", "artifacts/inventory.json", source_export="artifacts"),
-        ComponentPolicy("debug_orca_state", "debug/orca-state/inventory.json"),
+        ComponentPolicy(
+            "debug_orca_state",
+            "debug/orca-state/inventory.json",
+            restore_action="exclude",
+        ),
     ),
     forbidden_entries=(),
     max_age=timedelta(hours=48),
@@ -130,6 +142,22 @@ def component_archive_name(path: str) -> str:
     if path.startswith("debug/"):
         return f"{ARCHIVE_ROOT}/{path}"
     return f"{ARCHIVE_ROOT}/secretary-data/{path}"
+
+
+def restore_plan_components(policy: BackupPolicy, *, empty: bool = False) -> tuple[dict[str, str], ...]:
+    components = tuple(
+        {
+            "name": component.name,
+            "action": "initialized" if empty and component.restore_action == "restore" else component.restore_action,
+        }
+        for component in policy.components
+    )
+    return (
+        *components,
+        {"name": "memory_index", "action": "rebuild"},
+        {"name": "board_restore", "action": "handoff"},
+        {"name": "host_reconcile", "action": "handoff"},
+    )
 
 
 def build_components_manifest(
@@ -170,7 +198,7 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if relative.parts[0] not in allowed_roots and relative.name != "data-manifest.json":
         return True
-    if any(part.startswith(".") for part in relative.parts):
+    if any(part.startswith(".") for part in relative.parts) and relative.parts[:2] != ("memory", "facts"):
         return True
     if policy.kind == "core":
         return _skip_core_data_entry(relative)

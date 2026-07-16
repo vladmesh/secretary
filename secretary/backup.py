@@ -290,6 +290,7 @@ def _build_versions_manifest(
         "git_commit": _git_commit(PRODUCT_REPO_ROOT),
         "instance": {
             "path": str(instance_file),
+            "identity": _instance_identity(instance_file),
         },
         "data_dir": str(data_dir),
         "components": build_components_manifest(
@@ -545,6 +546,19 @@ def _age_recipient(instance_file: Path) -> str | None:
         return None
     recipient = offsite.get("age_recipient")
     return recipient if isinstance(recipient, str) and recipient else None
+
+
+def _instance_identity(instance_file: Path) -> dict[str, str]:
+    try:
+        instance = load_config(instance_file)
+    except ConfigError as exc:
+        raise RuntimeError(str(exc)) from None
+    offsite = instance.get("offsite") if isinstance(instance, dict) else None
+    name = instance.get("name") if isinstance(instance, dict) else None
+    remote = offsite.get("instance_remote") if isinstance(offsite, dict) else None
+    if not isinstance(name, str) or not isinstance(remote, str):
+        raise RuntimeError("instance.yaml has no usable identity")
+    return {"name": name, "instance_remote": remote}
 
 
 def _instance_file(path: Path) -> Path:

@@ -149,12 +149,12 @@ overwritten by another source sync.
 `secretary backup verify` will check backup structure and version compatibility
 before restore or offsite retention decisions. It is planned after Phase 1.
 
-`secretary restore` will restore an installation from an archive plus the private
-instance repo, rebuild derived indexes, restore board data, and hand process
-state back to `reconcile`. In Phase 1 it is an explicit stub.
+`secretary restore` validates an archive and publishes its data plane into a new
+target from the private instance repo. Board import, index rebuild and host
+reconcile remain explicit handoffs; see `docs/restore-contract.md`.
 
-`secretary bootstrap --empty` will create a fresh installation target for restore
-or a new empty deployment. It is planned after Phase 1.
+`secretary bootstrap --empty` creates a fresh installation target for restore or
+a new empty deployment. It refuses to overwrite an existing target.
 
 `secretary upgrade` will update product code, check compatibility, run
 migrations, refresh generated state, and leave a restore path if migration

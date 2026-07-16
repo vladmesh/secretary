@@ -47,6 +47,7 @@ from secretary.memory_write import (
 from secretary.offsite import check_last_fetch
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
+from secretary.restore_commands import add_restore_subcommands
 from secretary.task_commands import add_task_subcommands
 
 
@@ -230,10 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     backup_verify.set_defaults(handler=run_backup_verify)
     backup.set_defaults(handler=not_implemented("backup"))
 
-    for name in ("restore",):
-        command = subparsers.add_parser(name)
-        command.add_argument("args", nargs="*")
-        command.set_defaults(handler=not_implemented(name))
+    add_restore_subcommands(subparsers)
 
     project = subparsers.add_parser("project")
     project_subcommands = project.add_subparsers(dest="project_command")
