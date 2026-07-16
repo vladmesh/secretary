@@ -8,9 +8,12 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from secretary.backup import create_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
+from secretary.data import DataExport, export_memory, init_layout
 from secretary.restore import RestoreError, bootstrap_empty, restore_backup
 
 
@@ -151,7 +154,7 @@ class RestoreTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            extra = payload / "secretary-data" / "board" / "untrusted.json"
+            extra = payload / "secretary-data" / "runs" / "untrusted.json"
             extra.write_text("{}", encoding="utf-8")
             manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
             _write_checksums(payload, manifest)
@@ -214,18 +217,105 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
             self.assertEqual(_git_history(data_dir / "memory" / "facts"), expected_history)
 
+    def test_create_backups_round_trip_through_restore(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_data = root / "source-data"
+            source_instance = _write_instance_to(root / "source-instance", "test", source_data)
+            _prepare_producer_data(source_data)
+
+            for kind in ("core", "full"):
+                target_data = root / f"target-{kind}-data"
+                target_instance = _write_instance_to(
+                    root / f"target-{kind}-instance", "test", target_data
+                )
+                with (
+                    mock.patch("secretary.backup._reject_claimed_worker_context"),
+                    mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                    mock.patch("secretary.backup._pipeline_action", return_value=None),
+                    mock.patch(
+                        "secretary.backup.raw_kanboard_dump",
+                        return_value=type("Dump", (), {"dump_dir": source_data / "board" / "kanboard-raw-test"})(),
+                    ),
+                    mock.patch(
+                        "secretary.backup.export_all",
+                        return_value=_producer_exports(source_data),
+                    ),
+                ):
+                    backup = create_backup(
+                        source_instance,
+                        recipient="age1example",
+                        backup_kind=kind,
+                        encrypt=lambda source, destination, _recipient: shutil.copy2(source, destination),
+                    )
+
+                restore_backup(
+                    backup.archive,
+                    target_instance,
+                    age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+                manifest = backup.manifest
+                cards = json.loads((target_data / "board" / "cards.json").read_text())["cards"]
+                facts = (target_data / "memory" / "export.ndjson").read_text().splitlines()
+                self.assertEqual(len(cards), manifest["components"]["board"]["count"])
+                self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
+                self.assertEqual(
+                    _git_history(target_data / "memory" / "facts"),
+                    _git_history(source_data / "memory" / "facts"),
+                )
+
 
 def _write_instance(root: Path, name: str) -> Path:
-    instance = root / "instance"
+    return _write_instance_to(root / "instance", name, root / "secretary-data")
+
+
+def _write_instance_to(instance: Path, name: str, data_dir: Path) -> Path:
     instance.mkdir()
     (instance / "instance.yaml").write_text(
         "version: 1\n"
         f"name: {name}\n"
-        f"data_dir: {root / 'secretary-data'}\n"
+        f"data_dir: {data_dir}\n"
         "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
         encoding="utf-8",
     )
     return instance
+
+
+def _prepare_producer_data(data_dir: Path) -> None:
+    init_layout(data_dir)
+    journal = data_dir / "memory" / "facts"
+    (journal / "fact.md").write_text("# fact\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=journal, check=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=journal, check=True, stdout=subprocess.DEVNULL)
+    export_memory(data_dir)
+    board = data_dir / "board"
+    cards = [{"reference": "secretary-1", "column": "Ready"}]
+    (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
+    (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
+    (board / "export.json").write_text("{}", encoding="utf-8")
+    raw = board / "kanboard-raw-test"
+    (raw / "data").mkdir(parents=True)
+    (raw / "manifest.json").write_text("{}", encoding="utf-8")
+    (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+    runs = data_dir / "runs"
+    for name in ("watermarks.json", "cards.json", "claims.json"):
+        (runs / name).write_text("{}", encoding="utf-8")
+    (runs / "runs.ndjson").write_text("", encoding="utf-8")
+    for component in ("transcripts", "artifacts"):
+        directory = data_dir / component
+        (directory / "inventory.json").write_text("{}", encoding="utf-8")
+    (data_dir / "artifacts" / "report.pdf").write_bytes(b"report")
+
+
+def _producer_exports(data_dir: Path) -> dict[str, DataExport]:
+    return {
+        "board": DataExport(data_dir / "board" / "cards.json", 1, "test"),
+        "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "test"),
+        "runs": DataExport(data_dir / "runs" / "runs.ndjson", 0, "test"),
+        "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 0, "test"),
+        "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
+    }
 
 
 def _core_archive(root: Path, name: str) -> Path:

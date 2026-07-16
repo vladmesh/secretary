@@ -13,18 +13,15 @@ from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
-    BackupPolicy,
     CORE_POLICY,
     policy_for,
     restore_plan_components,
+    should_skip_data_entry,
 )
 from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
 from secretary._fsutil import sha256_stream
-
-
-DataAllowlist = tuple[frozenset[str], tuple[str, ...], frozenset[str]]
 
 
 @dataclass(frozen=True)
@@ -200,9 +197,7 @@ def _reject_existing_target(target: Path) -> None:
         raise RestoreError(f"target data root already exists: {target}")
 
 
-def _validate_restore_payload(
-    plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
-) -> None:
+def _validate_restore_payload(plain_archive: Path, manifest: dict[str, Any], policy: Any) -> None:
     checksums = manifest.get("checksums")
     if not isinstance(checksums, dict) or not checksums:
         raise RestoreError("versions manifest has no checksums")
@@ -213,7 +208,6 @@ def _validate_restore_payload(
         raise RestoreError("versions manifest has invalid checksums")
     prefix = f"{ARCHIVE_ROOT}/"
     data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
-    allowlist = _data_allowlist(policy)
     try:
         with tarfile.open(plain_archive, "r") as archive:
             actual: set[str] = set()
@@ -225,7 +219,7 @@ def _validate_restore_payload(
                 relative = member.name.removeprefix(prefix)
                 if member.name.startswith(data_prefix):
                     data_relative = relative.removeprefix("secretary-data/")
-                    if not _allowed_data_path(data_relative, member.isdir(), allowlist):
+                    if not _allowed_data_path(data_relative, policy):
                         raise RestoreError(f"unexpected data component: {data_relative}")
                 if member.isdir():
                     continue
@@ -261,37 +255,12 @@ def _unsafe_member(member: tarfile.TarInfo) -> bool:
     )
 
 
-def _data_allowlist(policy: BackupPolicy) -> DataAllowlist:
-    files = {"data-manifest.json"}
-    trees = {"memory/facts"}
-    for component in policy.components:
-        if component.restore_action != "restore":
-            continue
-        if component.requires_raw_board_data:
-            trees.add(component.path)
-        else:
-            files.update((component.path, *component.required_entries))
-    directories = {
-        parent.as_posix()
-        for path in (*files, *trees)
-        for parent in Path(path).parents
-        if parent != Path(".")
-    }
-    return frozenset(files), tuple(sorted(trees)), frozenset(directories)
+def _allowed_data_path(relative: str, policy: Any) -> bool:
+    return not should_skip_data_entry(Path(relative), policy=policy)
 
 
-def _allowed_data_path(relative: str, is_directory: bool, allowlist: DataAllowlist) -> bool:
-    files, trees, directories = allowlist
-    if relative in trees or any(relative.startswith(f"{tree}/") for tree in trees):
-        return True
-    if is_directory:
-        return relative in directories
-    return relative in files
-
-
-def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolicy) -> None:
+def _stage_and_publish(plain_archive: Path, target: Path, *, policy: Any) -> None:
     parent = target.parent
-    allowlist = _data_allowlist(policy)
     try:
         parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=f".{target.name}.restore-", dir=parent) as temporary:
@@ -304,9 +273,7 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                     if not member.name.startswith(prefix):
                         continue
                     relative = Path(member.name.removeprefix(prefix))
-                    if _unsafe_member(member) or not _allowed_data_path(
-                        relative.as_posix(), member.isdir(), allowlist
-                    ):
+                    if _unsafe_member(member) or not _allowed_data_path(relative.as_posix(), policy):
                         raise RestoreError(f"unsafe archive entry: {member.name}")
                     if member.isdir():
                         (data_staging / relative).mkdir(parents=True, exist_ok=True)
