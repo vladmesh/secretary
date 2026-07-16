@@ -519,9 +519,24 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: Any) -> Non
                         raise RestoreError(f"could not read archive entry: {member.name}")
                     with source, destination.open("wb") as output:
                         shutil.copyfileobj(source, output)
+            _rebuild_memory_journal_index(data_staging / "memory" / "facts")
             _reject_existing_target(target)
             os.replace(data_staging, target)
     except RestoreError:
         raise
     except (OSError, tarfile.TarError) as exc:
         raise RestoreError(f"restore staging failed: {exc}") from None
+
+
+def _rebuild_memory_journal_index(facts_dir: Path) -> None:
+    try:
+        subprocess.run(
+            ["git", "reset", "-q"],
+            cwd=facts_dir,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RestoreError(f"could not rebuild memory journal index: {exc}") from None

@@ -408,6 +408,22 @@ class RestoreTests(unittest.TestCase):
             self.assertFalse((restored_git / "config").exists())
             self.assertFalse((restored_git / "modules").exists())
             self.assertEqual(len(_git_history(restored_git.parent)), 2)
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=restored_git.parent,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+            tracked = subprocess.run(
+                ["git", "ls-files"],
+                cwd=restored_git.parent,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(tracked.stdout.splitlines(), ["fact.md", "second-fact.md"])
 
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
