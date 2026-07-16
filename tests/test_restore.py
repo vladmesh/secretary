@@ -10,10 +10,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.cli import main
 from secretary.backup import create_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
+from secretary.host import CollectResult, HostInventory, build_plan
+import secretary.restore_commands as restore_commands
 from secretary.restore import (
     RestoreError,
     bootstrap_empty,
@@ -76,6 +79,58 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
+
+    def test_restore_handoff_reaches_green_doctor_only_after_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir, host=True)
+            bootstrap_empty(instance)
+            card = _restore_card()
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            facts = data_dir / "memory" / "facts"
+            (facts / "global").mkdir()
+            (facts / "global" / "one.md").write_text("fact\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=facts, check=True)
+            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
+
+            self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 1)
+            self.assertEqual(rebuild_memory_index(data_dir, runner=lambda *_: {"parity": {"indexed": 1}}), 1)
+
+            report = restore_commands.validate_instance(instance)
+            desired = build_plan(report.instance, report.bindings)
+            (data_dir / "host-managed.json").write_text(
+                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "units.txt").write_text(
+                "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
+            )
+            self.assertEqual(main([
+                "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
+            ]), 0)
+
+            inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+            source = mock.Mock()
+            source.collect.return_value = CollectResult(inventory=inventory)
+            with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
+                self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 0)
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+            self.assertEqual(restore_findings(data_dir), [])
+
+    def test_restore_reconcile_fails_closed_before_marking_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
+            bootstrap_empty(instance)
+
+            self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
+            self.assertIn("managed reconcile has not been applied", restore_findings(data_dir))
 
     def test_restore_validates_then_publishes_staged_core_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -352,16 +407,36 @@ def _write_instance(root: Path, name: str) -> Path:
     return _write_instance_to(root / "instance", name, root / "secretary-data")
 
 
-def _write_instance_to(instance: Path, name: str, data_dir: Path) -> Path:
+def _write_instance_to(
+    instance: Path, name: str, data_dir: Path, *, host: bool = False, heads: bool = False,
+) -> Path:
     instance.mkdir()
-    (instance / "instance.yaml").write_text(
+    host_block = "host:\n  unit_prefix: secretary-\n" if host else ""
+    heads_block = "heads:\n  - role: worker\n    model: test-model\n" if heads else ""
+    text = (
         "version: 1\n"
         f"name: {name}\n"
         f"data_dir: {data_dir}\n"
-        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
-        encoding="utf-8",
+        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n"
+        + host_block
+        + heads_block
     )
+    (instance / "instance.yaml").write_text(text, encoding="utf-8")
     return instance
+
+
+def _restore_card() -> dict[str, object]:
+    return normalize_board_card(
+        {
+            "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
+            "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+        },
+        {
+            "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
+            "column": "Ready", "task_type": "code", "project": "secretary", "comments": [],
+            "metadata": {"complexity": "standard", "family_preference": "auto"},
+        },
+    )
 
 
 def _prepare_producer_data(data_dir: Path) -> None:
