@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -83,6 +84,26 @@ class SchemaValidTests(unittest.TestCase):
 
 
 class SchemaInvalidTests(unittest.TestCase):
+    def test_instance_rejects_relative_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            instance.write_text(
+                "version: 1\n"
+                "name: example\n"
+                "data_dir: secretary-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            report = validate_instance(instance)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.path == "data_dir" and "pattern" in error.message for error in report.errors),
+            report.errors,
+        )
+
     def test_instance_missing_offsite_remote(self):
         data = copy.deepcopy(VALID_INSTANCE)
         del data["offsite"]["instance_remote"]

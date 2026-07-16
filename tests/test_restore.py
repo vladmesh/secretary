@@ -294,7 +294,7 @@ class RestoreTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(RestoreError, "must be absolute"):
+            with self.assertRaisesRegex(RestoreError, "must match pattern"):
                 bootstrap_empty(instance)
             self.assertFalse((root / "relative-data").exists())
 
