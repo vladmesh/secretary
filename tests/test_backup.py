@@ -114,6 +114,17 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance, recipient="age1example")
 
+    def test_create_rejects_relative_instance_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            _write_instance(instance, Path("secretary-data"))
+
+            with self.assertRaisesRegex(RuntimeError, "instance config is invalid"):
+                create_backup(instance, recipient="age1example")
+
+        self.assertFalse((root / "secretary-data").exists())
+
     def test_create_rejects_claimed_workspace_when_board_role_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

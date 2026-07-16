@@ -14,6 +14,7 @@ from secretary import role_env
 from secretary.dispatcher import (
     CommandHostRuntime,
     CutoverState,
+    DispatcherError,
     DispatcherRuntime,
     FileLegacyPauseProbe,
     HostError,
@@ -23,6 +24,7 @@ from secretary.dispatcher import (
     _legacy_worker_branch,
     _render_codex_command,
     _wrap_role_shell_command,
+    default_data_dir,
 )
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
@@ -183,6 +185,21 @@ class FakeLegacyPause:
 
 
 class DispatcherRuntimeTests(unittest.TestCase):
+    def test_default_data_dir_rejects_relative_instance_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            instance.write_text(
+                "version: 1\n"
+                "name: test\n"
+                "data_dir: secretary-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:test/instance.git\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(DispatcherError, "instance config is invalid"):
+                default_data_dir(instance)
+
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.tmpdir.name)
