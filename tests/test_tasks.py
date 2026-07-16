@@ -222,9 +222,24 @@ class WriteKanboard(FakeKanboard):
             if self.fail_move:
                 raise TaskError("backend_error", "Kanboard rejected the move", 1)
             task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
-            task["column_id"] = params["column_id"]
-            task["position"] = params["position"]
-            task["swimlane_id"] = params["swimlane_id"]
+            task_index = self.tasks.index(task)
+            column_id = params["column_id"]
+            swimlane_id = params["swimlane_id"]
+            self.tasks.remove(task)
+            siblings = sorted(
+                (
+                    candidate for candidate in self.tasks
+                    if candidate["column_id"] == column_id and candidate["swimlane_id"] == swimlane_id
+                ),
+                key=lambda candidate: int(candidate.get("position") or 0),
+            )
+            position = min(max(1, int(params["position"])), len(siblings) + 1)
+            task["column_id"] = column_id
+            task["swimlane_id"] = swimlane_id
+            siblings.insert(position - 1, task)
+            for index, candidate in enumerate(siblings, start=1):
+                candidate["position"] = index
+            self.tasks.insert(task_index, task)
             task["date_modification"] = "1720000100"
             return True
         if method == "saveTaskMetadata":

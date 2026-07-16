@@ -69,7 +69,7 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
         unexpected = set(existing) - {card["reference"] for card in cards}
         if unexpected:
             raise RestoreError("board is not empty or does not match normalized restore data")
-        for card in cards:
+        for card in sorted(cards, key=_restore_card_order):
             current = existing.get(card["reference"])
             if current is None:
                 _create_restored_card(writer, card)
@@ -224,6 +224,15 @@ def _restore_comments(card: dict[str, Any]) -> list[str]:
 def _restore_position(card: dict[str, Any]) -> int | None:
     position = card.get("position")
     return position if isinstance(position, int) and position > 0 else None
+
+
+def _restore_card_order(card: dict[str, Any]) -> tuple[str, str, int, str]:
+    return (
+        str(card["column"]),
+        str(card.get("swimlane") or ""),
+        _restore_position(card) or 0,
+        str(card["reference"]),
+    )
 
 
 def _restore_fields(card: dict[str, Any]) -> dict[str, str]:

@@ -636,7 +636,7 @@ class TaskWriter:
                 values["base_branch"] = base_branch
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=values)
             try:
-                self._move_raw(task, "in_progress")
+                self._move_raw(task, "in_progress", swimlane_id=self._current_swimlane_id(task))
             except Exception as exc:
                 raise _CommittedWriteError() from exc
 
@@ -665,7 +665,7 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            self._move_raw(task, target)
+            self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
                 if target == "ready":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
@@ -741,17 +741,12 @@ class TaskWriter:
             self._move_raw(task, target, position=position or 1, swimlane_id=swimlane_id)
 
     def _move_raw(
-        self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int | None = None
+        self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int
     ) -> None:
         board_id, columns, _ = self.reader._board()
         column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
-        if swimlane_id is None:
-            raw = self.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
-            if not isinstance(raw, dict):
-                raise TaskError("not_found", "task was not found", 2)
-            swimlane_id = _positive_int(raw.get("swimlane_id")) or 0
         ok = self.client.call(
             "moveTaskPosition",
             project_id=board_id,
@@ -762,6 +757,13 @@ class TaskWriter:
         )
         if not ok:
             raise TaskError("backend_error", "Kanboard rejected the write", 1)
+
+    def _current_swimlane_id(self, task: dict[str, Any]) -> int:
+        board_id, _, _ = self.reader._board()
+        raw = self.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
+        if not isinstance(raw, dict):
+            raise TaskError("not_found", "task was not found", 2)
+        return _positive_int(raw.get("swimlane_id")) or 0
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
@@ -869,7 +871,7 @@ class TaskWriter:
         if not _matches_optional(payload.get("resolved_review_head"), task["routing"]["resolved_review_head"]):
             raise TaskError("backend_error", "pending claim review head remains incomplete", 1)
         if task["state"] == "ready":
-            self._move_raw(task, "in_progress")
+            self._move_raw(task, "in_progress", swimlane_id=self._current_swimlane_id(task))
         elif task["state"] != "in_progress":
             raise TaskError("backend_error", "pending claim no longer matches task state", 1)
         normalized = self.reader.show(ref)
