@@ -108,13 +108,31 @@ class RestoreTests(unittest.TestCase):
             script = Path(tmpdir) / "reindex.py"
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
+            venv_python = Path(tmpdir) / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.symlink_to(sys.executable)
             completed = subprocess.CompletedProcess([], 0, '{"ok":true,"parity":{"indexed":2}}', "")
-            with mock.patch("secretary.restore.subprocess.run", return_value=completed):
+            with mock.patch("secretary.restore.subprocess.run", return_value=completed) as run:
                 self.assertEqual(
-                    rebuild_memory_index(data_dir, python=Path(sys.executable), script=script, model="test", dim=4),
+                    rebuild_memory_index(data_dir, python=venv_python, script=script, model="test", dim=4),
                     2,
                 )
+            self.assertEqual(run.call_args.args[0][0], str(venv_python.absolute()))
             self.assertEqual(restore_state(data_dir)["memory_index_count"], 2)
+
+    def test_reindex_cli_reports_public_contract_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            script = Path(tmpdir) / "reindex.py"
+            script.write_text("", encoding="utf-8")
+            script.chmod(0o755)
+            completed = subprocess.CompletedProcess([], 1, '{"ok":false,"error":"canon unavailable"}', "")
+            with mock.patch("secretary.restore.subprocess.run", return_value=completed):
+                with self.assertRaisesRegex(RestoreError, "canon unavailable"):
+                    rebuild_memory_index(
+                        data_dir, python=Path(sys.executable), script=script, model="test", dim=4
+                    )
 
     def test_reindex_timeout_is_a_restore_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:

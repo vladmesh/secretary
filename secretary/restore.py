@@ -61,7 +61,9 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
         client = client or KanboardClient()
         reader = TaskReader(client)
         writer = TaskWriter(client, data_dir=data_dir)
-        writer.reconcile()
+        _, unresolved = writer.reconcile()
+        if unresolved:
+            raise RestoreError("board audit repair is required before restore")
         existing = {card["ref"]: card for card in reader.list()}
         unexpected = set(existing) - {card["reference"] for card in cards}
         if unexpected:
@@ -101,7 +103,7 @@ def rebuild_memory_index(
         else:
             if python is None or script is None or not isinstance(model, str) or not model or not isinstance(dim, int):
                 raise RuntimeError("memory-mcp rebuild contract is not configured")
-            python = python.expanduser().resolve()
+            python = python.expanduser().absolute()
             script = script.expanduser().resolve()
             if not python.is_file() or not os.access(python, os.X_OK) or not script.is_file():
                 raise RuntimeError("memory-mcp rebuild argv contract is unavailable")
@@ -114,7 +116,9 @@ def rebuild_memory_index(
                 text=True, capture_output=True, check=False, timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
             )
             if completed.returncode:
-                raise RuntimeError("memory-mcp reindex command failed")
+                raise RuntimeError(
+                    "memory-mcp reindex command failed: " + _reindex_error_detail(completed)
+                )
             result = json.loads(completed.stdout)
             if not isinstance(result, dict) or result.get("ok") is not True:
                 raise RuntimeError("memory-mcp reindex command reported failure")
@@ -141,6 +145,16 @@ def restore_findings(data_dir: Path) -> list[str]:
     if state.get("reconcile") != "complete":
         findings.append("managed reconcile has not been applied")
     return findings
+
+
+def _reindex_error_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    """Return the public failure reason from memory-mcp's JSON contract."""
+    try:
+        result = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return f"exit {completed.returncode}"
+    error = result.get("error") if isinstance(result, dict) else None
+    return error if isinstance(error, str) and error else f"exit {completed.returncode}"
 
 
 def mark_reconcile_applied(data_dir: Path) -> None:
