@@ -14,6 +14,7 @@ from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
+    BackupPolicy,
     CORE_POLICY,
     is_memory_journal_git_runtime_entry,
     policy_for,
@@ -356,8 +357,6 @@ def restore_backup(
         if verified.code or verified.findings or not isinstance(verified.manifest, dict):
             findings = "; ".join(verified.findings) or "archive verification failed"
             raise RestoreError(findings)
-        if not _has_memory_journal(plain):
-            raise RestoreError("archive has no memory journal git metadata")
         manifest = verified.manifest
         archive_identity = _archive_identity(manifest)
         if archive_identity != target_identity:
@@ -440,15 +439,6 @@ def _archive_identity(manifest: dict[str, Any]) -> dict[str, str]:
     return {"name": name, "instance_remote": remote}
 
 
-def _has_memory_journal(plain_archive: Path) -> bool:
-    required = f"{ARCHIVE_ROOT}/secretary-data/memory/facts/.git/HEAD"
-    try:
-        with tarfile.open(plain_archive, "r") as archive:
-            return archive.getmember(required).isfile()
-    except (KeyError, OSError, tarfile.TarError):
-        return False
-
-
 def _next_steps(components: tuple[dict[str, str], ...]) -> list[str]:
     labels = {
         "board_restore": "board restore",
@@ -463,7 +453,9 @@ def _reject_existing_target(target: Path) -> None:
         raise RestoreError(f"target data root already exists: {target}")
 
 
-def _validate_restore_payload(plain_archive: Path, manifest: dict[str, Any], policy: Any) -> None:
+def _validate_restore_payload(
+    plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
+) -> None:
     checksums = manifest.get("checksums")
     if not isinstance(checksums, dict) or not checksums:
         raise RestoreError("versions manifest has no checksums")
@@ -525,11 +517,11 @@ def _unsafe_member(member: tarfile.TarInfo) -> bool:
     )
 
 
-def _allowed_data_path(relative: str, policy: Any) -> bool:
+def _allowed_data_path(relative: str, policy: BackupPolicy) -> bool:
     return not should_skip_data_entry(Path(relative), policy=policy)
 
 
-def _stage_and_publish(plain_archive: Path, target: Path, *, policy: Any) -> None:
+def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolicy) -> None:
     parent = target.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)

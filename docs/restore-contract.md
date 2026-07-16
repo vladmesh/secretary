@@ -15,6 +15,8 @@ secretary bootstrap --empty --instance /srv/secretary-instance
 
 The dry run prints a JSON plan and creates nothing. The non-dry-run command
 creates the empty data layout, memory journal, and empty board/runs directories.
+Its plan contains only initialized components: board import, memory-index rebuild,
+and host reconcile have no work to perform on an empty target.
 The configured `data_dir` must be absolute. It refuses any existing target data
 root. Removing or replacing an installation is an operator action outside this
 command.

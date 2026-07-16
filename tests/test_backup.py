@@ -800,6 +800,9 @@ class BackupTests(unittest.TestCase):
             archive = root / "legacy-full.tar.age"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
+            journal = payload / "secretary-data" / "memory" / "facts" / ".git"
+            journal.mkdir(parents=True)
+            (journal / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
             (payload / "secretary-data" / "runs" / "claims.json").unlink()
             raw_data = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data"
             raw_data.mkdir(parents=True)
@@ -838,6 +841,27 @@ class BackupTests(unittest.TestCase):
         )
         self.assertIn(
             "missing required archive entry: secretary-backup/secretary-data/board/export.json",
+            result.findings,
+        )
+
+    def test_verify_rejects_archive_without_memory_journal_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "core.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_core_payload(payload)
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertIn(
+            "missing required archive entry: "
+            "secretary-backup/secretary-data/memory/facts/.git/HEAD",
             result.findings,
         )
 

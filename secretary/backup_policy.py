@@ -66,6 +66,7 @@ MEMORY = ComponentPolicy(
     "memory",
     "memory/export.ndjson",
     source_export="memory",
+    required_entries=("memory/facts/.git/HEAD",),
 )
 
 CORE_POLICY = BackupPolicy(
@@ -152,6 +153,8 @@ def restore_plan_components(policy: BackupPolicy, *, empty: bool = False) -> tup
         }
         for component in policy.components
     )
+    if empty:
+        return components
     return (
         *components,
         {"name": "memory_index", "action": "rebuild"},

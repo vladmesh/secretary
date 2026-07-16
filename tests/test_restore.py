@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import shutil
 import subprocess
@@ -43,6 +44,23 @@ class RestoreTests(unittest.TestCase):
 
             self.assertFalse((data_dir / "restore-state.json").exists())
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+
+    def test_empty_bootstrap_plan_has_no_handoffs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+
+            plan = bootstrap_empty(instance, dry_run=True)
+
+        self.assertEqual(
+            plan.components,
+            (
+                {"name": "board", "action": "initialized"},
+                {"name": "memory", "action": "initialized"},
+                {"name": "runs_state", "action": "initialized"},
+            ),
+        )
 
     def test_reconcile_marker_does_not_create_restore_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -352,6 +370,57 @@ class RestoreTests(unittest.TestCase):
             self.assertTrue((data_dir / "board" / "cards.json").is_file())
             self.assertTrue((data_dir / "memory" / "facts").is_dir())
 
+    def test_restore_cli_publishes_and_returns_stable_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            output = io.StringIO()
+
+            def decrypting_restore(archive_arg, instance_arg, **kwargs):
+                return restore_backup(
+                    archive_arg,
+                    instance_arg,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    **kwargs,
+                )
+
+            with (
+                mock.patch("secretary.restore_commands.restore_backup", side_effect=decrypting_restore),
+                mock.patch("sys.stdout", output),
+            ):
+                code = main(["restore", str(archive), "--instance", str(instance)])
+
+            payload = json.loads(output.getvalue())
+            self.assertTrue((root / "secretary-data").is_dir())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            payload,
+            {
+                "action": "restore",
+                "archive": str(archive),
+                "backup_kind": "core",
+                "backup_version": 1,
+                "components": [
+                    {"name": "board", "action": "restore"},
+                    {"name": "memory", "action": "restore"},
+                    {"name": "runs_state", "action": "restore"},
+                    {"name": "memory_index", "action": "rebuild"},
+                    {"name": "board_restore", "action": "handoff"},
+                    {"name": "host_reconcile", "action": "handoff"},
+                ],
+                "data_dir": str(root / "secretary-data"),
+                "dry_run": False,
+                "instance_identity": {
+                    "instance_remote": "git@example.invalid:test/instance.git",
+                    "name": "test",
+                },
+                "next_steps": ["memory index rebuild", "board restore", "reconcile"],
+                "ok": True,
+            },
+        )
+
     def test_restore_rejects_identity_before_creating_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -410,7 +479,7 @@ class RestoreTests(unittest.TestCase):
                         handle = source.extractfile(member) if member.isfile() else None
                         destination.addfile(member, handle)
 
-            with self.assertRaisesRegex(RestoreError, "memory journal"):
+            with self.assertRaisesRegex(RestoreError, "memory/facts/.git/HEAD"):
                 restore_backup(
                     stripped, instance, age_identity=None,
                     decrypt=lambda source, destination: shutil.copy2(source, destination),
