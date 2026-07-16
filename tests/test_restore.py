@@ -379,6 +379,52 @@ class RestoreTests(unittest.TestCase):
                 )
             self.assertFalse((root / "secretary-data").exists())
 
+    def test_restore_discards_memory_journal_runtime_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            git_dir = payload / "secretary-data" / "memory" / "facts" / ".git"
+            (git_dir / "hooks").mkdir(parents=True)
+            (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
+            (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
+            (git_dir / "modules" / "nested").mkdir(parents=True)
+            (git_dir / "modules" / "nested" / "config").write_text("[core]\npager = bad\n", encoding="utf-8")
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            restore_backup(
+                archive,
+                instance,
+                age_identity=None,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+            restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
+            self.assertFalse((restored_git / "hooks").exists())
+            self.assertFalse((restored_git / "config").exists())
+            self.assertFalse((restored_git / "modules").exists())
+            self.assertEqual(len(_git_history(restored_git.parent)), 2)
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=restored_git.parent,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+            tracked = subprocess.run(
+                ["git", "ls-files"],
+                cwd=restored_git.parent,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(tracked.stdout.splitlines(), ["fact.md", "second-fact.md"])
+
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -585,6 +631,8 @@ def _core_archive(root: Path, name: str) -> Path:
     (memory / "second-fact.md").write_text("# second fact\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=memory, check=True)
     subprocess.run(["git", "commit", "-m", "second fact"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
+    shutil.rmtree(memory / ".git" / "hooks")
+    (memory / ".git" / "config").unlink()
     runs.mkdir(parents=True)
     (payload / "instance").mkdir()
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")

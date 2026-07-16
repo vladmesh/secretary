@@ -15,6 +15,7 @@ from secretary.backup_policy import (
     BACKUP_KINDS,
     BACKUP_VERSION,
     CORE_POLICY,
+    is_memory_journal_git_runtime_entry,
     policy_for,
     restore_plan_components,
     should_skip_data_entry,
@@ -444,7 +445,11 @@ def _validate_restore_payload(plain_archive: Path, manifest: dict[str, Any], pol
                 relative = member.name.removeprefix(prefix)
                 if member.name.startswith(data_prefix):
                     data_relative = relative.removeprefix("secretary-data/")
-                    if not _allowed_data_path(data_relative, policy):
+                    path = Path(data_relative)
+                    if (
+                        not _allowed_data_path(data_relative, policy)
+                        and not is_memory_journal_git_runtime_entry(path)
+                    ):
                         raise RestoreError(f"unexpected data component: {data_relative}")
                 if member.isdir():
                     continue
@@ -498,6 +503,8 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: Any) -> Non
                     if not member.name.startswith(prefix):
                         continue
                     relative = Path(member.name.removeprefix(prefix))
+                    if is_memory_journal_git_runtime_entry(relative):
+                        continue
                     if _unsafe_member(member) or not _allowed_data_path(relative.as_posix(), policy):
                         raise RestoreError(f"unsafe archive entry: {member.name}")
                     if member.isdir():
@@ -512,9 +519,24 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: Any) -> Non
                         raise RestoreError(f"could not read archive entry: {member.name}")
                     with source, destination.open("wb") as output:
                         shutil.copyfileobj(source, output)
+            _rebuild_memory_journal_index(data_staging / "memory" / "facts")
             _reject_existing_target(target)
             os.replace(data_staging, target)
     except RestoreError:
         raise
     except (OSError, tarfile.TarError) as exc:
         raise RestoreError(f"restore staging failed: {exc}") from None
+
+
+def _rebuild_memory_journal_index(facts_dir: Path) -> None:
+    try:
+        subprocess.run(
+            ["git", "reset", "-q"],
+            cwd=facts_dir,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RestoreError(f"could not rebuild memory journal index: {exc}") from None

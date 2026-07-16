@@ -48,9 +48,10 @@ components are deliberately not restored as canonical state. Core restores copy
 normalized board data, the memory journal/export, and runs
 watermarks/cards/claims. Full restores also copy raw board data, transcripts,
 and artifacts. Its Orca debug inventory is classified as `exclude` and stays
-outside the restored data root. The memory journal's git metadata is required;
-an older archive without it is rejected. `memory/index.sqlite` is classified as
-`rebuild` and is not archived.
+outside the restored data root. The memory journal's Git history metadata is
+required; an older archive without it is rejected. Restore rebuilds its Git
+index locally and discards Git runtime state. `memory/index.sqlite` is
+classified as `rebuild` and is not archived.
 
 After a successful data-plane restore, hand the remaining work to the following
 operations in order:

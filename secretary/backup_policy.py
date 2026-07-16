@@ -198,11 +198,27 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if relative.parts[0] not in allowed_roots and relative.name != "data-manifest.json":
         return True
+    if is_memory_journal_git_runtime_entry(relative):
+        return True
     if any(part.startswith(".") for part in relative.parts) and relative.parts[:2] != ("memory", "facts"):
         return True
     if policy.kind == "core":
         return _skip_core_data_entry(relative)
     return False
+
+
+def is_memory_journal_git_entry(relative: Path) -> bool:
+    return relative.parts[:3] == ("memory", "facts", ".git")
+
+
+def is_memory_journal_git_runtime_entry(relative: Path) -> bool:
+    if not is_memory_journal_git_entry(relative):
+        return False
+    git_path = relative.parts[3:]
+    return not (
+        git_path[:1] in {("objects",), ("refs",)}
+        or git_path in {("HEAD",), ("packed-refs",)}
+    )
 
 
 def _skip_core_data_entry(relative: Path) -> bool:

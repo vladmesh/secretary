@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -102,6 +103,64 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
             self.assertNotIn("secretary-backup/secretary-data/backups/old.tar.age", names)
             self.assertNotIn("secretary-backup/instance/.env", names)
+
+    def test_create_excludes_memory_journal_hooks_and_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            _write_export_surface(data_dir)
+            git_dir = data_dir / "memory" / "facts" / ".git"
+            subprocess.run(
+                ["git", "init", str(git_dir.parent)], check=True, stdout=subprocess.DEVNULL
+            )
+            (git_dir / "hooks").mkdir(exist_ok=True)
+            (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
+            (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
+            (git_dir / "modules" / "nested").mkdir(parents=True)
+            (git_dir / "modules" / "nested" / "config").write_text("[core]\npager = bad\n", encoding="utf-8")
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+            raw = data_dir / "board" / "kanboard-raw-test"
+            (raw / "data").mkdir(parents=True)
+            (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+            (raw / "manifest.json").write_text("{}", encoding="utf-8")
+            exports = {
+                "board": DataExport(data_dir / "board" / "cards.json", 1, "test"),
+                "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "test"),
+                "runs": DataExport(data_dir / "runs" / "runs.ndjson", 1, "test"),
+                "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 1, "test"),
+                "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
+            }
+
+            with mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}), \
+                 mock.patch("secretary.backup._pipeline_action", return_value=None), \
+                 mock.patch("secretary.backup.raw_kanboard_dump", return_value=SimpleNamespace(dump_dir=raw)), \
+                 mock.patch("secretary.backup.export_all", return_value=exports):
+                result = create_backup(
+                    instance,
+                    recipient="age1example",
+                    encrypt=lambda source, destination, _recipient: shutil.copy2(source, destination),
+                )
+
+            with tarfile.open(result.archive, "r") as archive:
+                names = set(archive.getnames())
+            self.assertIn("secretary-backup/secretary-data/memory/facts/.git/HEAD", names)
+            self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/config", names)
+            self.assertNotIn(
+                "secretary-backup/secretary-data/memory/facts/.git/hooks/post-checkout", names
+            )
+            self.assertNotIn(
+                "secretary-backup/secretary-data/memory/facts/.git/modules/nested/config", names
+            )
+            self.assertEqual(
+                verify_backup(
+                    result.archive,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                ).code,
+                0,
+            )
 
     def test_create_rejects_claimed_worker_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:
