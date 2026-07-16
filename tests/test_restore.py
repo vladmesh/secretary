@@ -530,6 +530,41 @@ class RestoreTests(unittest.TestCase):
             any("checksum manifest does not match archive" in finding for finding in result.findings)
         )
 
+    def test_verify_and_restore_reject_journal_without_resolvable_head(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            extracted = root / "extracted"
+            with tarfile.open(archive, "r") as source:
+                source.extractall(extracted, filter="data")
+            payload = extracted / ARCHIVE_ROOT
+            head = payload / "secretary-data" / "memory" / "facts" / ".git" / "HEAD"
+            head.write_text("ref: refs/heads/does-not-exist\n", encoding="utf-8")
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            damaged = root / "broken-head.tar"
+            with tarfile.open(damaged, "w") as destination:
+                destination.add(payload, arcname=ARCHIVE_ROOT)
+
+            verified = verify_backup(
+                damaged,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+            with self.assertRaisesRegex(RestoreError, "memory journal has no valid HEAD commit"):
+                restore_backup(
+                    damaged,
+                    instance,
+                    age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+
+            self.assertFalse((root / "secretary-data").exists())
+        self.assertEqual(verified.code, 1)
+        self.assertIn("memory journal has no valid HEAD commit", verified.findings)
+
     def test_full_restore_marks_debug_excluded_and_restores_data_components(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

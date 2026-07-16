@@ -93,6 +93,7 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
             findings.append("unsupported backup kind")
         findings.extend(_verify_manifest_components(manifest, policy, members, names))
         findings.extend(verify_restore_payload(path, manifest, policy))
+        findings.extend(_verify_memory_journal(path))
 
     if policy.kind == "core":
         findings.extend(_verify_core_archive(names, path, policy))
@@ -271,6 +272,68 @@ def _unsafe_member(member: tarfile.TarInfo) -> bool:
         or member.isdev()
         or member.isfifo()
     )
+
+
+def _verify_memory_journal(plain_archive: Path) -> list[str]:
+    prefix = f"{ARCHIVE_ROOT}/secretary-data/memory/facts/"
+    try:
+        with tempfile.TemporaryDirectory(prefix=".secretary-journal-") as temporary:
+            journal = Path(temporary) / "facts"
+            with tarfile.open(plain_archive, "r") as archive:
+                for member in archive.getmembers():
+                    if not member.name.startswith(prefix):
+                        continue
+                    relative = Path(member.name.removeprefix(prefix))
+                    if _unsafe_member(member):
+                        return [f"unsafe archive entry: {member.name}"]
+                    destination = journal / relative
+                    if member.isdir():
+                        destination.mkdir(parents=True, exist_ok=True)
+                        continue
+                    if not member.isfile():
+                        return [f"unsupported archive entry type: {member.name}"]
+                    source = archive.extractfile(member)
+                    if source is None:
+                        return [f"could not read archive entry: {member.name}"]
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with source, destination.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+            head = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+                cwd=journal,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            has_facts = any(
+                path.is_file() and ".git" not in path.parts for path in journal.rglob("*")
+            )
+            if head.returncode and has_facts:
+                return ["memory journal has no valid HEAD commit"]
+            if not head.returncode:
+                reset = subprocess.run(
+                    ["git", "reset", "-q"],
+                    cwd=journal,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if reset.returncode:
+                    return ["memory journal worktree cannot be reconstructed"]
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=journal,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if status.returncode:
+                return ["memory journal worktree cannot be checked"]
+            if status.stdout:
+                return ["memory journal worktree is not clean"]
+    except (OSError, tarfile.TarError) as exc:
+        return [f"could not verify memory journal: {exc}"]
+    return []
 
 
 def _is_forbidden_archive_entry(name: str) -> bool:

@@ -802,8 +802,9 @@ class BackupTests(unittest.TestCase):
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
             journal = payload / "secretary-data" / "memory" / "facts" / ".git"
-            journal.mkdir(parents=True)
-            (journal / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init", str(journal.parent)], check=True, stdout=subprocess.DEVNULL
+            )
             (payload / "secretary-data" / "runs" / "claims.json").unlink()
             raw_data = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data"
             raw_data.mkdir(parents=True)
