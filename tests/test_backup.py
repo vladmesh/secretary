@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.backup import check_backup_health, create_backup, create_backups, verify_backup
+from secretary._fsutil import sha256_file
 from secretary.data import DataExport
 
 
@@ -800,11 +801,23 @@ class BackupTests(unittest.TestCase):
             archive = root / "legacy-full.tar.age"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
+            journal = payload / "secretary-data" / "memory" / "facts" / ".git"
+            subprocess.run(
+                ["git", "init", str(journal.parent)], check=True, stdout=subprocess.DEVNULL
+            )
             (payload / "secretary-data" / "runs" / "claims.json").unlink()
             raw_data = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data"
             raw_data.mkdir(parents=True)
             (raw_data / "db.sqlite").write_bytes(b"sqlite")
             (raw_data.parent / "manifest.json").write_text("{}", encoding="utf-8")
+            manifest_path = payload / "versions.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["checksums"] = {
+                path.relative_to(payload).as_posix(): sha256_file(path)
+                for path in payload.rglob("*")
+                if path.is_file() and path.name != "versions.json"
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with tarfile.open(archive, "w") as tar:
                 tar.add(payload, arcname="secretary-backup")
 
@@ -838,6 +851,27 @@ class BackupTests(unittest.TestCase):
         )
         self.assertIn(
             "missing required archive entry: secretary-backup/secretary-data/board/export.json",
+            result.findings,
+        )
+
+    def test_verify_rejects_archive_without_memory_journal_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive = root / "core.tar.age"
+            payload = root / "payload" / "secretary-backup"
+            _write_core_payload(payload)
+            with tarfile.open(archive, "w") as tar:
+                tar.add(payload, arcname="secretary-backup")
+
+            result = verify_backup(
+                archive,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+        self.assertEqual(result.code, 1)
+        self.assertIn(
+            "missing required archive entry: "
+            "secretary-backup/secretary-data/memory/facts/.git/HEAD",
             result.findings,
         )
 

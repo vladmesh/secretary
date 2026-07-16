@@ -66,6 +66,7 @@ MEMORY = ComponentPolicy(
     "memory",
     "memory/export.ndjson",
     source_export="memory",
+    required_entries=("memory/facts/.git/HEAD",),
 )
 
 CORE_POLICY = BackupPolicy(
@@ -152,6 +153,8 @@ def restore_plan_components(policy: BackupPolicy, *, empty: bool = False) -> tup
         }
         for component in policy.components
     )
+    if empty:
+        return components
     return (
         *components,
         {"name": "memory_index", "action": "rebuild"},
@@ -215,8 +218,10 @@ def is_memory_journal_git_runtime_entry(relative: Path) -> bool:
     if not is_memory_journal_git_entry(relative):
         return False
     git_path = relative.parts[3:]
+    if git_path[:1] == ("objects",):
+        return git_path[:2] == ("objects", "info") and len(git_path) > 2
     return not (
-        git_path[:1] in {("objects",), ("refs",)}
+        git_path[:1] == ("refs",)
         or git_path in {("HEAD",), ("packed-refs",)}
     )
 
