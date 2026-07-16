@@ -55,6 +55,8 @@ required; an older archive without it is rejected. Restore rebuilds its Git
 index locally and discards Git runtime state. `memory/index.sqlite` is
 classified as `rebuild` and is not archived.
 
+## Handoffs
+
 After a successful data-plane restore, hand the remaining work to the following
 operations in order:
 
@@ -67,3 +69,39 @@ operations in order:
    host resources. Orca debug state is not applied as canonical state.
 
 Run `secretary doctor` after those handoffs.
+
+```bash
+secretary restore-board --instance /srv/secretary-instance
+secretary memory reindex --instance /srv/secretary-instance
+secretary reconcile plan --instance /srv/secretary-instance
+secretary restore-reconcile --instance /srv/secretary-instance
+secretary doctor --instance /srv/secretary-instance
+```
+
+`restore-board` needs the live Kanboard runtime environment. `memory reindex`
+reads `host.memory_reindex_python`, `host.memory_reindex_script`,
+`host.memory_model` and `host.memory_dim` from the instance config. Until every
+handoff completes, `doctor` reports the restore findings and exits 1.
+
+## Reproducing the restore chain
+
+The whole chain runs offline against fixtures. It produces a real age-encrypted
+archive, deletes the producer data root, and restores from the archive alone:
+
+```bash
+python3 -m unittest tests.test_restore_e2e
+python3 -m unittest
+```
+
+The archive-level tests need `age` and `age-keygen` on PATH and skip without
+them. `scripts/check_memory_mcp_restore_e2e.py` is a separate cross-repository
+gate for the memory-mcp side of the rebuild:
+
+```bash
+MEMORY_MCP_REPO=/home/dev/memory-mcp \
+  MEMORY_MCP_TEST_PYTHON=/home/dev/memory-mcp/.venv/bin/python \
+  python3 scripts/check_memory_mcp_restore_e2e.py
+```
+
+`docs/phase8-review.md` maps this coverage onto the Phase 8 acceptance and
+records the operator off-host run that automation cannot make.

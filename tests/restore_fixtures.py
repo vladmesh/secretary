@@ -44,9 +44,12 @@ def _write_instance(root: Path, name: str) -> Path:
 
 def _write_instance_to(
     instance: Path, name: str, data_dir: Path, *, host: bool = False, heads: bool = False,
+    reindex: dict[str, object] | None = None,
 ) -> Path:
     instance.mkdir()
-    host_block = "host:\n  unit_prefix: secretary-\n" if host else ""
+    host_block = "host:\n  unit_prefix: secretary-\n" if host or reindex else ""
+    for key, value in (reindex or {}).items():
+        host_block += f"  {key}: {value}\n"
     heads_block = "heads:\n  - role: worker\n    model: test-model\n" if heads else ""
     text = (
         "version: 1\n"
@@ -60,15 +63,20 @@ def _write_instance_to(
     return instance
 
 
-def _restore_card() -> dict[str, object]:
+def _restore_card(
+    *, task_id: int = 12, reference: str = "secretary-1", title: str = "Restore",
+    description: str = "body", column: str = "Ready", swimlane: str = "Secretary",
+    position: int = 1, comments: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
     return normalize_board_card(
         {
-            "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
-            "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+            "id": task_id, "reference": reference, "title": title, "column": column,
+            "swimlane": swimlane, "position": position, "task_type": "code", "project": "secretary",
         },
         {
-            "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
-            "column": "Ready", "task_type": "code", "project": "secretary", "comments": [],
+            "id": task_id, "reference": reference, "title": title, "description": description,
+            "column": column, "task_type": "code", "project": "secretary",
+            "comments": comments or [],
             "metadata": {"complexity": "standard", "family_preference": "auto"},
         },
     )
@@ -100,13 +108,15 @@ def _prepare_producer_data(data_dir: Path) -> None:
     (data_dir / "artifacts" / "report.pdf").write_bytes(b"report")
 
 
-def _producer_exports(data_dir: Path) -> dict[str, DataExport]:
+def _producer_exports(
+    data_dir: Path, *, board: int = 1, memory: int = 1, artifacts: int = 1, source: str = "test",
+) -> dict[str, DataExport]:
     return {
-        "board": DataExport(data_dir / "board" / "cards.json", 1, "test"),
-        "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "test"),
-        "runs": DataExport(data_dir / "runs" / "runs.ndjson", 0, "test"),
-        "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 0, "test"),
-        "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
+        "board": DataExport(data_dir / "board" / "cards.json", board, source),
+        "memory": DataExport(data_dir / "memory" / "export.ndjson", memory, source),
+        "runs": DataExport(data_dir / "runs" / "runs.ndjson", 0, source),
+        "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 0, source),
+        "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", artifacts, source),
     }
 
 
