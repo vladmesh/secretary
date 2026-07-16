@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -178,9 +179,10 @@ def create_backups(
                         payload / "secretary-data" / "board"
                     )
                     manifest["components"]["board"]["count"] = core_board_count
-                _write_json(payload / "versions.json", manifest)
                 if kind == "full":
                     _write_orca_debug_snapshot(payload / "debug" / "orca-state")
+                manifest["checksums"] = _payload_checksums(payload)
+                _write_json(payload / "versions.json", manifest)
 
                 plain_archive = staging / f"{kind}.tar"
                 _write_tar(plain_archive, payload)
@@ -520,6 +522,20 @@ def _encrypt_with_age(source: Path, destination: Path, recipient: str, *, age_co
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _payload_checksums(payload: Path) -> dict[str, str]:
+    """Return checksums for every regular payload file except its manifest."""
+    checksums: dict[str, str] = {}
+    for path in sorted(payload.rglob("*")):
+        if not path.is_file() or path.is_symlink() or path.name == "versions.json":
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        checksums[path.relative_to(payload).as_posix()] = digest.hexdigest()
+    return checksums
 
 
 def _load_data_dir(instance_file: Path) -> Path:

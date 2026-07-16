@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
+    BackupPolicy,
     CORE_POLICY,
     policy_for,
     restore_plan_components,
@@ -111,7 +113,8 @@ def restore_backup(
         )
         if dry_run:
             return plan
-        _stage_and_publish(plain, target)
+        _validate_restore_payload(plain, manifest, policy)
+        _stage_and_publish(plain, target, policy=policy)
         return plan
 
 
@@ -194,7 +197,89 @@ def _reject_existing_target(target: Path) -> None:
         raise RestoreError(f"target data root already exists: {target}")
 
 
-def _stage_and_publish(plain_archive: Path, target: Path) -> None:
+def _validate_restore_payload(
+    plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
+) -> None:
+    checksums = manifest.get("checksums")
+    if not isinstance(checksums, dict) or not checksums:
+        raise RestoreError("versions manifest has no checksums")
+    expected = {
+        name for name, digest in checksums.items() if isinstance(name, str) and isinstance(digest, str)
+    }
+    if len(expected) != len(checksums) or any(len(digest) != 64 for digest in checksums.values()):
+        raise RestoreError("versions manifest has invalid checksums")
+    prefix = f"{ARCHIVE_ROOT}/"
+    data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
+    try:
+        with tarfile.open(plain_archive, "r") as archive:
+            actual: set[str] = set()
+            for member in archive.getmembers():
+                if member.name == ARCHIVE_ROOT and member.isdir():
+                    continue
+                if not member.name.startswith(prefix) or _unsafe_member(member):
+                    raise RestoreError(f"unsafe archive entry: {member.name}")
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise RestoreError(f"unsupported archive entry type: {member.name}")
+                relative = member.name.removeprefix(prefix)
+                if relative == "versions.json":
+                    continue
+                actual.add(relative)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise RestoreError(f"could not read archive entry: {member.name}")
+                digest = hashlib.sha256(source.read()).hexdigest()
+                if checksums.get(relative) != digest:
+                    raise RestoreError(f"checksum mismatch: {relative}")
+                if member.name.startswith(data_prefix):
+                    data_relative = relative.removeprefix("secretary-data/")
+                    if not _allowed_data_path(data_relative, policy):
+                        raise RestoreError(f"unexpected data component: {data_relative}")
+            if actual != expected:
+                missing = sorted(expected - actual)
+                extra = sorted(actual - expected)
+                detail = missing[0] if missing else extra[0]
+                raise RestoreError(f"checksum manifest does not match archive: {detail}")
+    except (OSError, tarfile.TarError) as exc:
+        raise RestoreError(f"could not validate restore payload: {exc}") from None
+
+
+def _unsafe_member(member: tarfile.TarInfo) -> bool:
+    path = Path(member.name)
+    return (
+        path.is_absolute()
+        or ".." in path.parts
+        or member.issym()
+        or member.islnk()
+        or member.isdev()
+        or member.isfifo()
+    )
+
+
+def _allowed_data_path(relative: str, policy: BackupPolicy) -> bool:
+    if relative == "data-manifest.json":
+        return True
+    allowed = [
+        path
+        for component in policy.components
+        if component.restore_action == "restore"
+        for path in (component.path, *component.required_entries)
+    ]
+    # The memory component's exported file is not its journal directory, but the
+    # journal is canonical state and is deliberately archived alongside it.
+    allowed.append("memory/facts")
+    allowed_paths = {Path(path) for path in allowed}
+    allowed_paths.update(
+        parent for path in tuple(allowed_paths) for parent in path.parents if parent != Path(".")
+    )
+    return any(
+        relative == path.as_posix() or relative.startswith(f"{path.as_posix()}/")
+        for path in allowed_paths
+    )
+
+
+def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolicy) -> None:
     parent = target.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +293,7 @@ def _stage_and_publish(plain_archive: Path, target: Path) -> None:
                     if not member.name.startswith(prefix):
                         continue
                     relative = Path(member.name.removeprefix(prefix))
-                    if relative.is_absolute() or ".." in relative.parts:
+                    if _unsafe_member(member) or not _allowed_data_path(relative.as_posix(), policy):
                         raise RestoreError(f"unsafe archive entry: {member.name}")
                     if member.isdir():
                         (data_staging / relative).mkdir(parents=True, exist_ok=True)
@@ -224,5 +309,5 @@ def _stage_and_publish(plain_archive: Path, target: Path) -> None:
                         shutil.copyfileobj(source, output)
             _reject_existing_target(target)
             os.replace(data_staging, target)
-    except (OSError, tarfile.TarError) as exc:
+    except (OSError, RuntimeError, tarfile.TarError) as exc:
         raise RestoreError(f"restore staging failed: {exc}") from None

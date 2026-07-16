@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -123,6 +126,76 @@ class RestoreTests(unittest.TestCase):
             self.assertTrue((data_dir / "artifacts" / "inventory.json").is_file())
             self.assertFalse((data_dir / "debug").exists())
 
+    def test_restore_rejects_checksum_mismatch_without_publishing_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            (payload / "secretary-data" / "board" / "cards.json").write_text('{"cards": ["changed"]}', encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            with self.assertRaisesRegex(RestoreError, "checksum mismatch"):
+                restore_backup(
+                    archive,
+                    instance,
+                    age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+            self.assertFalse((root / "secretary-data").exists())
+
+    def test_restore_publish_failure_leaves_target_unpublished(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            from unittest import mock
+            real_replace = os.replace
+
+            def fail_publish(source, destination):
+                if Path(destination) == root / "secretary-data":
+                    raise OSError("disk error")
+                return real_replace(source, destination)
+
+            with mock.patch("secretary.restore.os.replace", side_effect=fail_publish):
+                with self.assertRaisesRegex(RestoreError, "restore staging failed"):
+                    restore_backup(
+                        archive,
+                        instance,
+                        age_identity=None,
+                        decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    )
+            self.assertFalse((root / "secretary-data").exists())
+
+    def test_restore_preserves_memory_history_and_manifest_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+
+            restore_backup(
+                archive,
+                instance,
+                age_identity=None,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+            data_dir = root / "secretary-data"
+            manifest = json.loads((root / ARCHIVE_ROOT / "versions.json").read_text(encoding="utf-8"))
+            cards = json.loads((data_dir / "board" / "cards.json").read_text())["cards"]
+            self.assertEqual(len(cards), manifest["components"]["board"]["count"])
+            facts = (data_dir / "memory" / "export.ndjson").read_text().splitlines()
+            self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
+            result = subprocess.run(
+                ["git", "rev-list", "--count", "HEAD"],
+                cwd=data_dir / "memory" / "facts",
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(result.stdout.strip(), "1")
+
 
 def _write_instance(root: Path, name: str) -> Path:
     instance = root / "instance"
@@ -144,8 +217,12 @@ def _core_archive(root: Path, name: str) -> Path:
     runs = payload / "secretary-data" / "runs"
     board.mkdir(parents=True)
     memory.mkdir(parents=True)
-    (memory / ".git").mkdir()
-    (memory / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (memory / "fact.md").write_text("# fact\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=memory, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=memory, check=True)
+    subprocess.run(["git", "add", "."], cwd=memory, check=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
     runs.mkdir(parents=True)
     (payload / "instance").mkdir()
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
@@ -153,23 +230,27 @@ def _core_archive(root: Path, name: str) -> Path:
     (board / "cards.json").write_text('{"cards": []}', encoding="utf-8")
     (board / "cards.ndjson").write_text("", encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "memory" / "export.ndjson").write_text("", encoding="utf-8")
+    (payload / "secretary-data" / "memory" / "export.ndjson").write_text(
+        '{"id":"fact"}\n', encoding="utf-8"
+    )
     for filename in ("watermarks.json", "cards.json", "claims.json"):
         (runs / filename).write_text("{}", encoding="utf-8")
-    (payload / "versions.json").write_text(json.dumps({
+    manifest = {
         "version": 1,
         "backup_kind": "core",
         "instance": {"identity": {"name": name, "instance_remote": "git@example.invalid:test/instance.git"}},
         "components": {
-            "board": {"path": "board/cards.json"},
-            "memory": {"path": "memory/export.ndjson"},
+            "board": {"path": "board/cards.json", "count": 0},
+            "memory": {"path": "memory/export.ndjson", "count": 1},
             "runs_state": {
                 "path": "runs/watermarks.json",
                 "cards": "runs/cards.json",
                 "claims": "runs/claims.json",
             },
         },
-    }), encoding="utf-8")
+    }
+    _write_checksums(payload, manifest)
+    (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
     archive = root / "backup.tar"
     with tarfile.open(archive, "w") as bundle:
         bundle.add(payload, arcname=ARCHIVE_ROOT)
@@ -204,8 +285,19 @@ def _full_archive(root: Path, name: str) -> Path:
         "artifacts": {"path": "artifacts/inventory.json"},
         "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
     }
+    _write_checksums(payload, manifest)
     (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
     archive = root / "full.tar"
     with tarfile.open(archive, "w") as bundle:
         bundle.add(payload, arcname=ARCHIVE_ROOT)
     return archive
+
+
+def _write_checksums(payload: Path, manifest: dict[str, object]) -> None:
+    checksums: dict[str, str] = {}
+    for path in sorted(payload.rglob("*")):
+        if path.is_file() and path.name != "versions.json":
+            checksums[path.relative_to(payload).as_posix()] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+    manifest["checksums"] = checksums
