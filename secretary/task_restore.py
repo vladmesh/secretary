@@ -87,6 +87,10 @@ def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str
     if (
         normalized["state"] != target
         or (position is not None and normalized["position"] != position)
+        or (
+            not swimlane
+            and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") is not None
+        )
         or (swimlane and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") != swimlane)
     ):
         raise TaskError("backend_error", "pending restore cleanup remains incomplete", 1)
@@ -123,13 +127,13 @@ def _restore_placement(
     raw = writer.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
     if not isinstance(raw, dict):
         raise TaskError("not_found", "task was not found", 2)
-    swimlane_id = _positive_int(raw.get("swimlane_id")) or 0
+    swimlane_id = 0
     if swimlane:
         swimlane_id = next((identifier for identifier, name in swimlanes.items() if name == swimlane), 0)
         if not swimlane_id:
             raise TaskError("backend_error", "restored swimlane is unavailable", 1)
     raw_position = _nonnegative_int(raw.get("position"))
     if task["state"] != target or (position is not None and raw_position != position) or (
-        swimlane and _positive_int(raw.get("swimlane_id")) != swimlane_id
+        _positive_int(raw.get("swimlane_id")) != swimlane_id
     ):
         writer._move_raw(task, target, position=position or 1, swimlane_id=swimlane_id)

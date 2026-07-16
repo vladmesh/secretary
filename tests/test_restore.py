@@ -133,6 +133,30 @@ class RestoreTests(unittest.TestCase):
             )
             self.assertEqual([task["position"] for task in restored], [1, 2, 3])
 
+    def test_board_restore_moves_empty_swimlane_to_default_lane(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card()
+            card["swimlane"] = ""
+            card["position"] = 1
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(client.tasks[0]["swimlane_id"], 0)
+            self.assertEqual(client.tasks[0]["position"], 1)
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
+            self.assertIn(
+                ("moveTaskPosition", {
+                    "project_id": 7, "task_id": 12, "column_id": 2,
+                    "position": 1, "swimlane_id": 0,
+                }),
+                client.calls,
+            )
+
     def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
