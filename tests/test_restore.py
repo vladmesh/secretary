@@ -379,6 +379,31 @@ class RestoreTests(unittest.TestCase):
                 )
             self.assertFalse((root / "secretary-data").exists())
 
+    def test_restore_rejects_memory_journal_hook_and_config_before_publishing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            git_dir = payload / "secretary-data" / "memory" / "facts" / ".git"
+            (git_dir / "hooks").mkdir(parents=True)
+            (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
+            (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            with self.assertRaisesRegex(RestoreError, "forbidden archive entry"):
+                restore_backup(
+                    archive,
+                    instance,
+                    age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+            self.assertFalse((root / "secretary-data").exists())
+
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -585,6 +610,8 @@ def _core_archive(root: Path, name: str) -> Path:
     (memory / "second-fact.md").write_text("# second fact\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=memory, check=True)
     subprocess.run(["git", "commit", "-m", "second fact"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
+    shutil.rmtree(memory / ".git" / "hooks")
+    (memory / ".git" / "config").unlink()
     runs.mkdir(parents=True)
     (payload / "instance").mkdir()
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")

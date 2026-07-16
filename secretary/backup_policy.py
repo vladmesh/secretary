@@ -198,6 +198,10 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if relative.parts[0] not in allowed_roots and relative.name != "data-manifest.json":
         return True
+    if relative.parts[:4] == ("memory", "facts", ".git", "hooks"):
+        return True
+    if relative.parts == ("memory", "facts", ".git", "config"):
+        return True
     if any(part.startswith(".") for part in relative.parts) and relative.parts[:2] != ("memory", "facts"):
         return True
     if policy.kind == "core":
