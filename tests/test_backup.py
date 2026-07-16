@@ -118,6 +118,8 @@ class BackupTests(unittest.TestCase):
             (git_dir / "hooks").mkdir(exist_ok=True)
             (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
             (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
+            (git_dir / "modules" / "nested").mkdir(parents=True)
+            (git_dir / "modules" / "nested" / "config").write_text("[core]\npager = bad\n", encoding="utf-8")
             (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
             raw = data_dir / "board" / "kanboard-raw-test"
@@ -148,6 +150,9 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/config", names)
             self.assertNotIn(
                 "secretary-backup/secretary-data/memory/facts/.git/hooks/post-checkout", names
+            )
+            self.assertNotIn(
+                "secretary-backup/secretary-data/memory/facts/.git/modules/nested/config", names
             )
             self.assertEqual(
                 verify_backup(

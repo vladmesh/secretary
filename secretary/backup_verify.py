@@ -15,6 +15,7 @@ from secretary.backup_policy import (
     BACKUP_VERSION,
     BackupPolicy,
     component_archive_name,
+    is_memory_journal_git_entry,
     policy_for,
 )
 
@@ -205,27 +206,9 @@ def _read_member_json(archive: tarfile.TarFile, name: str) -> Any:
 
 def _is_forbidden_archive_entry(name: str) -> bool:
     parts = Path(name).parts
-    memory_journal_git = parts[:5] == (ARCHIVE_ROOT, "secretary-data", "memory", "facts", ".git")
-    memory_journal_hook = parts[:6] == (
-        ARCHIVE_ROOT,
-        "secretary-data",
-        "memory",
-        "facts",
-        ".git",
-        "hooks",
-    )
-    memory_journal_config = parts == (
-        ARCHIVE_ROOT,
-        "secretary-data",
-        "memory",
-        "facts",
-        ".git",
-        "config",
-    )
+    data_relative = Path(*parts[2:]) if parts[:2] == (ARCHIVE_ROOT, "secretary-data") else Path()
     return (
-        (".git" in parts and not memory_journal_git)
-        or memory_journal_hook
-        or memory_journal_config
+        (".git" in parts and not is_memory_journal_git_entry(data_relative))
         or any(part.startswith(".env") for part in parts)
         or "index.sqlite" in parts
         or "backups" in parts

@@ -379,7 +379,7 @@ class RestoreTests(unittest.TestCase):
                 )
             self.assertFalse((root / "secretary-data").exists())
 
-    def test_restore_rejects_memory_journal_hook_and_config_before_publishing(self):
+    def test_restore_discards_memory_journal_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = _write_instance(root, "test")
@@ -389,20 +389,25 @@ class RestoreTests(unittest.TestCase):
             (git_dir / "hooks").mkdir(parents=True)
             (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
             (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
+            (git_dir / "modules" / "nested").mkdir(parents=True)
+            (git_dir / "modules" / "nested" / "config").write_text("[core]\npager = bad\n", encoding="utf-8")
             manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
             _write_checksums(payload, manifest)
             (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
             with tarfile.open(archive, "w") as bundle:
                 bundle.add(payload, arcname=ARCHIVE_ROOT)
 
-            with self.assertRaisesRegex(RestoreError, "forbidden archive entry"):
-                restore_backup(
-                    archive,
-                    instance,
-                    age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
-                )
-            self.assertFalse((root / "secretary-data").exists())
+            restore_backup(
+                archive,
+                instance,
+                age_identity=None,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+            restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
+            self.assertFalse((restored_git / "hooks").exists())
+            self.assertFalse((restored_git / "config").exists())
+            self.assertFalse((restored_git / "modules").exists())
+            self.assertEqual(len(_git_history(restored_git.parent)), 2)
 
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:

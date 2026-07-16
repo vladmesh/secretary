@@ -15,6 +15,7 @@ from secretary.backup_policy import (
     BACKUP_KINDS,
     BACKUP_VERSION,
     CORE_POLICY,
+    is_memory_journal_git_runtime_entry,
     policy_for,
     restore_plan_components,
     should_skip_data_entry,
@@ -444,7 +445,11 @@ def _validate_restore_payload(plain_archive: Path, manifest: dict[str, Any], pol
                 relative = member.name.removeprefix(prefix)
                 if member.name.startswith(data_prefix):
                     data_relative = relative.removeprefix("secretary-data/")
-                    if not _allowed_data_path(data_relative, policy):
+                    path = Path(data_relative)
+                    if (
+                        not _allowed_data_path(data_relative, policy)
+                        and not is_memory_journal_git_runtime_entry(path)
+                    ):
                         raise RestoreError(f"unexpected data component: {data_relative}")
                 if member.isdir():
                     continue
@@ -498,6 +503,8 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: Any) -> Non
                     if not member.name.startswith(prefix):
                         continue
                     relative = Path(member.name.removeprefix(prefix))
+                    if is_memory_journal_git_runtime_entry(relative):
+                        continue
                     if _unsafe_member(member) or not _allowed_data_path(relative.as_posix(), policy):
                         raise RestoreError(f"unsafe archive entry: {member.name}")
                     if member.isdir():
