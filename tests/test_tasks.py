@@ -288,6 +288,19 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
 
+    def test_reconcile_finishes_pending_restore_before_auditing_success(self) -> None:
+        self.client.fail_move = True
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.restore_card(
+                reference="secretary-468", metadata={"claim": "restored"}, target="in_progress"
+            )
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "ready")
+        self.client.fail_move = False
+
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "in_progress")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
     def test_pending_create_repairs_orphaned_reference(self) -> None:
         self.client.fail_update = True
         with self.assertRaisesRegex(TaskError, "audit repair"):

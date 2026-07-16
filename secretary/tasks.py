@@ -786,6 +786,9 @@ class TaskWriter:
         if event.get("kind") == "claimed":
             self._finish_pending_claim(event, payload)
             return
+        if event.get("kind") == "restored":
+            self._finish_pending_restore(event, payload)
+            return
         if event.get("kind") != "moved" or payload.get("to") != "ready":
             return
         task = self.reader.show(str(event["ref"]))
@@ -825,6 +828,20 @@ class TaskWriter:
         normalized = self.reader.show(ref)
         if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
+
+    def _finish_pending_restore(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Finish a restore whose metadata committed before its column move failed."""
+        target = payload.get("target")
+        if target not in _STATE_BY_COLUMN.values():
+            raise TaskError("backend_error", "pending restore is missing its target state", 1)
+        ref = str(event.get("ref") or "")
+        if not ref:
+            raise TaskError("backend_error", "pending restore is missing its task ref", 1)
+        task = self.reader.show(ref)
+        if task["state"] != target:
+            self._move_raw(task, target)
+        if self.reader.show(ref)["state"] != target:
+            raise TaskError("backend_error", "pending restore cleanup remains incomplete", 1)
 
     def _finish_pending_create(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
         ref = str(event.get("ref") or "")
