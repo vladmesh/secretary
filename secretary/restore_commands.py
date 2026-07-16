@@ -100,7 +100,11 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
     if collected.errors:
         _print_json({"ok": False, "action": "restore-reconcile", "error": "host inventory unavailable"})
         return 2
-    data_dir = Path(report.instance["data_dir"])
+    try:
+        _, data_dir, _ = _target(Path(args.instance))
+    except RestoreError as exc:
+        _print_json({"ok": False, "action": "restore-reconcile", "error": str(exc)})
+        return 2
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
     changes = plan_changes(build_plan(report.instance, report.bindings), collected.inventory, load_managed_manifest(data_dir / "host-managed.json"), prefix)
     if not changes or any(change.action != "unchanged" for change in changes):
@@ -117,8 +121,18 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
 
 def run_memory_reindex(args: argparse.Namespace) -> int:
     try:
-        _, data_dir, _ = _target(Path(args.instance))
-        count = rebuild_memory_index(data_dir)
+        instance_path, data_dir, _ = _target(Path(args.instance))
+        report = validate_instance(instance_path)
+        host = report.host if isinstance(report.host, dict) else {}
+        executable = host.get("memory_reindex_executable")
+        model = host.get("memory_model")
+        dim = host.get("memory_dim")
+        count = rebuild_memory_index(
+            data_dir,
+            executable=Path(executable) if isinstance(executable, str) else None,
+            model=model if isinstance(model, str) else None,
+            dim=dim if isinstance(dim, int) else None,
+        )
     except RestoreError as exc:
         _print_json({"ok": False, "action": "memory-reindex", "error": str(exc)})
         return 2

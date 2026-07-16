@@ -48,7 +48,7 @@ from secretary.offsite import check_last_fetch
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
-from secretary.restore import restore_findings
+from secretary.restore import RestoreError, _target, restore_findings
 from secretary.task_commands import add_task_subcommands
 
 
@@ -393,7 +393,10 @@ def print_restore_status(report) -> list[str]:
     data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
     if not isinstance(data_dir_value, str) or not data_dir_value:
         return []
-    data_dir = Path(data_dir_value).expanduser()
+    try:
+        _, data_dir, _ = _target(report.instance_path)
+    except RestoreError:
+        return []
     if not (data_dir / "restore-state.json").is_file():
         return []
     findings = restore_findings(data_dir)

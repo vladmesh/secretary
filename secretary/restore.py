@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sqlite3
+import subprocess
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -23,7 +23,6 @@ from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
 from secretary._fsutil import sha256_stream, write_text_atomic
-from secretary.memory_journal import _read_memory_facts
 from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 
 
@@ -84,29 +83,50 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
     return len(cards)
 
 
-def rebuild_memory_index(data_dir: Path) -> int:
-    """Replace the derived index from the restored local facts journal."""
+def rebuild_memory_index(
+    data_dir: Path, *, executable: Path | None = None, model: str | None = None,
+    dim: int | None = None, runner=None,
+) -> int:
+    """Ask memory-mcp to replace its derived index from restored canon."""
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     facts_dir = memory_dir / "facts"
     if not (facts_dir / ".git").is_dir():
         raise RestoreError("memory facts journal is not available for index rebuild")
     try:
-        facts = _read_memory_facts(facts_dir)
-        with tempfile.NamedTemporaryFile(prefix=".index-", suffix=".sqlite", dir=memory_dir, delete=False) as temp:
-            staged = Path(temp.name)
-        try:
-            with sqlite3.connect(staged) as conn:
-                conn.execute("create table memories (id text primary key)")
-                conn.executemany("insert into memories(id) values (?)", ((str(fact["id"]),) for fact in facts))
-                conn.commit()
-            os.replace(staged, memory_dir / "index.sqlite")
-        finally:
-            staged.unlink(missing_ok=True)
-    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        if runner is not None:
+            result = runner(facts_dir, memory_dir / "export.ndjson", memory_dir / "index.sqlite")
+            count = int(result["parity"]["indexed"])
+        else:
+            if executable is None or not isinstance(model, str) or not model or not isinstance(dim, int):
+                raise RuntimeError("memory-mcp rebuild contract is not configured")
+            executable = executable.expanduser().resolve()
+            if not executable.is_file() or not os.access(executable, os.X_OK):
+                raise RuntimeError("memory-mcp rebuild executable is unavailable")
+            completed = subprocess.run(
+                [
+                    str(executable), "--canon", str(facts_dir), "--export",
+                    str(memory_dir / "export.ndjson"), "--target-db",
+                    str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
+                ],
+                text=True, capture_output=True, check=False,
+            )
+            if completed.returncode:
+                raise RuntimeError("memory-mcp reindex command failed")
+            count = _memory_index_count(memory_dir / "index.sqlite")
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         raise RestoreError(f"could not rebuild memory index: {exc}") from None
-    _update_restore_state(data_dir, memory_index="complete", memory_index_count=len(facts))
-    return len(facts)
+    _update_restore_state(data_dir, memory_index="complete", memory_index_count=count)
+    return count
+
+
+def _memory_index_count(path: Path) -> int:
+    """Use memory-mcp's published parity output when a CLI rebuild succeeds."""
+    # The production CLI owns the schema; this count is only restore progress metadata.
+    import sqlite3
+
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        return int(connection.execute("select count(*) from memories").fetchone()[0])
 
 
 def restore_findings(data_dir: Path) -> list[str]:

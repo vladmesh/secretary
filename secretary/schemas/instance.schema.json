@@ -101,6 +101,21 @@
           "type": "array",
           "items": {"type": "string", "minLength": 1},
           "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
+        },
+        "memory_reindex_executable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute memory-mcp reindex.py executable used only for offline restore rebuilds."
+        },
+        "memory_model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "memory-mcp embedding model for the restored index."
+        },
+        "memory_dim": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Embedding dimension paired with host.memory_model."
         }
       },
       "if": {"properties": {"units": {"type": "array", "minItems": 1}}, "required": ["units"]},
