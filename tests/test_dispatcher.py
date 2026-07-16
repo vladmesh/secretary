@@ -197,7 +197,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(DispatcherError, "instance config is invalid"):
+            with self.assertRaisesRegex(DispatcherError, "data_dir: value must match pattern"):
                 default_data_dir(instance)
 
     def setUp(self) -> None:

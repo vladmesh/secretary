@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterator
 
 import fcntl
 
-from secretary.config import ConfigError, load_config, validate_instance
+from secretary.config import ConfigError, load_config, validate
 from secretary._fsutil import sha256_file
 from secretary.data import (
     DataExport,
@@ -535,12 +535,14 @@ def _payload_checksums(payload: Path) -> dict[str, str]:
 
 
 def _load_data_dir(instance_file: Path) -> Path:
-    report = validate_instance(instance_file)
-    if not report.ok:
-        raise RuntimeError("instance config is invalid")
-    data_dir = report.instance.get("data_dir")
-    if not isinstance(data_dir, str):
-        raise RuntimeError("instance.yaml has no usable data_dir")
+    try:
+        instance = load_config(instance_file)
+    except ConfigError as exc:
+        raise RuntimeError(str(exc)) from None
+    errors = validate(instance, "instance", instance_file.name)
+    if errors:
+        raise RuntimeError("invalid instance: " + "; ".join(map(str, errors)))
+    data_dir = instance["data_dir"]
     return Path(data_dir)
 
 

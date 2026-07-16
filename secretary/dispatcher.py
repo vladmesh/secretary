@@ -65,7 +65,11 @@ from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, Ta
 def default_data_dir(instance_path: Path) -> Path:
     report = validate_instance(_instance_file(instance_path))
     if not report.ok:
-        raise DispatcherError("invalid_instance", "instance config is invalid", 2)
+        raise DispatcherError(
+            "invalid_instance",
+            "invalid instance: " + "; ".join(map(str, report.errors)),
+            2,
+        )
     data_dir = report.instance.get("data_dir")
     if not isinstance(data_dir, str):
         raise DispatcherError("invalid_instance", "instance data_dir is unavailable", 2)
