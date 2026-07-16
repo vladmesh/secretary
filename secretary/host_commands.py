@@ -18,7 +18,6 @@ from secretary.host import (
     plan_changes,
     plan_input_errors,
 )
-from secretary.restore import mark_reconcile_status
 
 
 def run_reconcile_plan(args) -> int:
@@ -52,7 +51,6 @@ def run_reconcile_plan(args) -> int:
     )
     for change in changes:
         print(f"{change.action} {change.logical_id} {change.kind} {change.name}")
-    mark_reconcile_status(Path(report.instance["data_dir"]), applied=all(change.action == "unchanged" for change in changes))
     return 1 if any(change.action == "conflict" for change in changes) else 0
 
 

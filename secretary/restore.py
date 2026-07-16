@@ -22,7 +22,7 @@ from secretary.backup_policy import (
 from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
-from secretary._fsutil import sha256_stream
+from secretary._fsutil import sha256_stream, write_text_atomic
 from secretary.memory_journal import _read_memory_facts
 from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 
@@ -116,10 +116,10 @@ def restore_findings(data_dir: Path) -> list[str]:
     if not state:
         findings.append("restore is incomplete")
         return findings
-    if state.get("board") != "complete":
-        findings.append("board restore is incomplete")
-    elif state.get("board_parity") == "failed":
+    if state.get("board_parity") == "failed":
         findings.append("board restore parity failed")
+    elif state.get("board") != "complete":
+        findings.append("board restore is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
     if state.get("reconcile") != "complete":
@@ -127,10 +127,9 @@ def restore_findings(data_dir: Path) -> list[str]:
     return findings
 
 
-def mark_reconcile_status(data_dir: Path, *, applied: bool) -> None:
-    """Persist reconcile parity only for a restore that is already in progress."""
-    if (data_dir / RESTORE_STATE_FILE).is_file():
-        _update_restore_state(data_dir, reconcile="complete" if applied else "pending")
+def mark_reconcile_applied(data_dir: Path) -> None:
+    """Mark the explicit live reconcile verification complete."""
+    _update_restore_state(data_dir, reconcile="complete")
 
 
 def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
@@ -211,10 +210,11 @@ def _update_restore_state(data_dir: Path, **changes: Any) -> None:
     state.update(changes)
     state["version"] = 1
     try:
-        temporary = data_dir / f".{RESTORE_STATE_FILE}.tmp"
-        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, data_dir / RESTORE_STATE_FILE)
-    except OSError as exc:
+        write_text_atomic(
+            data_dir / RESTORE_STATE_FILE,
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+        )
+    except RuntimeError as exc:
         raise RestoreError(f"could not record restore progress: {exc}") from None
 
 
