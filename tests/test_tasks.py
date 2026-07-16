@@ -168,6 +168,12 @@ class WriteKanboard(FakeKanboard):
     fail_move = False
     fail_update = False
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.comments: dict[int, list[dict[str, object]]] = {
+            int(task["id"]): [] for task in self.tasks
+        }
+
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
             return [
@@ -179,7 +185,12 @@ class WriteKanboard(FakeKanboard):
             self.calls.append((method, params))
             if self.fail_comments:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            self.comments[int(params["task_id"])].append(
+                {"date_creation": "1720000020", "comment": params["content"]}
+            )
             return 1
+        if method == "getAllComments":
+            return self.comments[int(params["task_id"])]
         if method == "createTask":
             self.calls.append((method, params))
             task_id = max(int(task["id"]) for task in self.tasks) + 1
@@ -195,6 +206,7 @@ class WriteKanboard(FakeKanboard):
                 "date_modification": "1720000200",
             })
             self.metadata[task_id] = {}
+            self.comments[task_id] = []
             return task_id
         if method == "updateTask":
             self.calls.append((method, params))
@@ -209,8 +221,11 @@ class WriteKanboard(FakeKanboard):
             self.calls.append((method, params))
             if self.fail_move:
                 raise TaskError("backend_error", "Kanboard rejected the move", 1)
-            self.tasks[0]["column_id"] = params["column_id"]
-            self.tasks[0]["date_modification"] = "1720000100"
+            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
+            task["column_id"] = params["column_id"]
+            task["position"] = params["position"]
+            task["swimlane_id"] = params["swimlane_id"]
+            task["date_modification"] = "1720000100"
             return True
         if method == "saveTaskMetadata":
             self.calls.append((method, params))

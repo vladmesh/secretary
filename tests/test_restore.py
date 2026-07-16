@@ -56,14 +56,17 @@ class RestoreTests(unittest.TestCase):
             exported = normalize_board_card(
                 {
                     "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
-                    "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+                    "swimlane": "Secretary", "position": 2, "task_type": "code", "project": "secretary",
                 },
                 {
                     "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
                     "column": "Ready", "task_type": "code", "project": "secretary",
                     "claim": "worker", "blocked_by": "secretary-0",
                     "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
-                    "comments": [],
+                    "comments": [
+                        {"ts": "2024-07-03T09:47:00Z", "text": "[worker]\\nfirst"},
+                        {"ts": "2024-07-03T09:48:00Z", "text": "[report:done]\\nrestored"},
+                    ],
                 },
             )
             (data_dir / "board" / "cards.json").write_text(
@@ -80,6 +83,12 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
             self.assertEqual(client.metadata[12]["resolved_head"], "")
             self.assertEqual(client.metadata[12]["resolved_review_head"], "")
+            self.assertEqual(client.tasks[0]["position"], 2)
+            self.assertEqual(client.tasks[0]["swimlane_id"], 4)
+            self.assertEqual(
+                [call[1]["content"] for call in client.calls if call[0] == "createComment"],
+                ["[worker]\\nfirst", "[report:done]\\nrestored"],
+            )
 
     def test_reindex_and_restore_findings_are_derived_from_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -539,6 +548,7 @@ class _EmptyWriteKanboard(WriteKanboard):
                 }
             )
             self.metadata[task_id] = {}
+            self.comments[task_id] = []
             return task_id
         return super().call(method, **params)
 

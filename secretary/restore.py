@@ -75,8 +75,15 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
                 _create_restored_card(writer, card)
             target = _state_for_column(card["column"])
             writer.restore_card(
-                reference=card["reference"], metadata=_restore_board_metadata(card), target=target or ""
+                reference=card["reference"], metadata=_restore_board_metadata(card), target=target or "",
+                position=_restore_position(card), swimlane=str(card.get("swimlane") or ""),
+                request_id=f"restore-card:{card['reference']}",
             )
+            for index, comment in enumerate(_restore_comments(card)):
+                writer.restore_comment(
+                    reference=card["reference"], body=comment,
+                    request_id=f"restore-comment:{card['reference']}:{index}",
+                )
         actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
         if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
             _update_restore_state(data_dir, board="failed", board_parity="failed")
@@ -183,6 +190,11 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             raise RestoreError("normalized board export has invalid task data")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
+        if not isinstance(card.get("comments", []), list) or any(
+            not isinstance(comment, dict) or not isinstance(comment.get("text"), str)
+            for comment in card.get("comments", [])
+        ):
+            raise RestoreError("normalized board export has invalid comments")
     return sorted(cards, key=lambda card: str(card["reference"]))
 
 
@@ -203,6 +215,15 @@ def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
     for key, value in _restore_fields(card).items():
         result.setdefault(key, value)
     return result
+
+
+def _restore_comments(card: dict[str, Any]) -> list[str]:
+    return [str(comment["text"]) for comment in card.get("comments", [])]
+
+
+def _restore_position(card: dict[str, Any]) -> int | None:
+    position = card.get("position")
+    return position if isinstance(position, int) and position > 0 else None
 
 
 def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
@@ -233,6 +254,9 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
             "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
             "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
             "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
+            "position": _restore_position(card),
+            "swimlane": str(card.get("swimlane") or "") or None,
+            "comments": [{"body": body} for body in _restore_comments(card)],
     }
 
 
@@ -243,6 +267,9 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
         "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
         "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
         "workspace": card.get("workspace"),
+        "position": card.get("position"),
+        "swimlane": card.get("extensions", {}).get("kanboard", {}).get("swimlane"),
+        "comments": [{"body": str(comment.get("body") or "")} for comment in card.get("comments", [])],
     }
 
 
