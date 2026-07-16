@@ -168,16 +168,8 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
 
 
 def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
-    fields = card["fields"]
     metadata = card["metadata"]
-    values = {
-        **{str(key): str(value) for key, value in metadata.items()},
-        "claim": str(fields.get("claim") or ""),
-        "resolved_head": str(fields.get("effective_head") or ""),
-        "resolved_review_head": str(fields.get("effective_review_head") or ""),
-        "slug": str(fields.get("slug") or ""), "base_branch": str(fields.get("base_branch") or ""),
-    }
-    return values
+    return {str(key): str(value) for key, value in metadata.items()}
 
 
 def _board_core(card: dict[str, Any]) -> dict[str, Any]:
@@ -188,9 +180,9 @@ def _board_core(card: dict[str, Any]) -> dict[str, Any]:
             "ref": card["reference"], "title": card["title"], "description": card["description"],
             "state": _state_for_column(card["column"]), "project": fields.get("project", ""),
             "type": fields.get("task_type", ""), "blocked_by": fields.get("blocked_by") or None,
-            "claim": {"worker": fields.get("claim") or None, "claimed_at": None},
-            "routing": {"complexity": metadata.get("complexity", "standard"), "family_preference": metadata.get("family_preference", "auto"), "head": fields.get("head") or None, "review_head": fields.get("review_head") or None, "resolved_head": fields.get("effective_head") or None, "resolved_review_head": fields.get("effective_review_head") or None, "codex_launch_mode": metadata.get("codex_launch_mode") or None},
-            "workspace": {"slug": fields.get("slug") or None, "base_branch": fields.get("base_branch") or None},
+            "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
+            "routing": {"complexity": metadata.get("complexity", "standard"), "family_preference": metadata.get("family_preference", "auto"), "head": metadata.get("head") or None, "review_head": metadata.get("review_head") or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": metadata.get("codex_launch_mode") or None},
+            "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
         }
     return {
         "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),

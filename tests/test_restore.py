@@ -39,7 +39,7 @@ class RestoreTests(unittest.TestCase):
                     "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
                     "column": "Ready", "task_type": "code", "project": "secretary",
                     "claim": "worker", "blocked_by": "secretary-0",
-                    "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard"},
+                    "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
                     "comments": [],
                 },
             )
@@ -55,6 +55,8 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.tasks[0]["reference"], "secretary-1")
             self.assertEqual(client.metadata[12]["claim"], "worker")
             self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
+            self.assertEqual(client.metadata[12]["resolved_head"], "")
+            self.assertEqual(client.metadata[12]["resolved_review_head"], "")
 
     def test_reindex_and_restore_findings_are_derived_from_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:

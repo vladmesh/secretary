@@ -17,7 +17,14 @@ from secretary.restore import (
     rebuild_memory_index,
     restore_backup,
 )
-from secretary.host import LiveHostSource, build_expectations, build_plan, load_managed_manifest, plan_changes
+from secretary.host import (
+    LiveHostSource,
+    build_expectations,
+    build_plan,
+    load_managed_manifest,
+    plan_changes,
+    plan_input_errors,
+)
 from secretary.config import validate_instance
 
 
@@ -84,6 +91,9 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
     report = validate_instance(Path(args.instance))
     if not report.ok:
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid instance config"})
+        return 2
+    if plan_input_errors(report.instance, report.bindings):
+        _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid desired state"})
         return 2
     expected = build_expectations(report.bindings, report.host)
     collected = LiveHostSource().collect(expected)
