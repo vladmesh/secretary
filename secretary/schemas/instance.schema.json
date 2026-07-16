@@ -102,10 +102,15 @@
           "items": {"type": "string", "minLength": 1},
           "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
         },
-        "memory_reindex_executable": {
+        "memory_reindex_python": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute memory-mcp reindex.py executable used only for offline restore rebuilds."
+          "description": "Absolute Python executable for the offline memory-mcp rebuild."
+        },
+        "memory_reindex_script": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute memory-mcp reindex.py path used only for offline restore rebuilds."
         },
         "memory_model": {
           "type": "string",

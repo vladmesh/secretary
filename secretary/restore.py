@@ -84,7 +84,7 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
 
 
 def rebuild_memory_index(
-    data_dir: Path, *, executable: Path | None = None, model: str | None = None,
+    data_dir: Path, *, python: Path | None = None, script: Path | None = None, model: str | None = None,
     dim: int | None = None, runner=None,
 ) -> int:
     """Ask memory-mcp to replace its derived index from restored canon."""
@@ -98,14 +98,15 @@ def rebuild_memory_index(
             result = runner(facts_dir, memory_dir / "export.ndjson", memory_dir / "index.sqlite")
             count = int(result["parity"]["indexed"])
         else:
-            if executable is None or not isinstance(model, str) or not model or not isinstance(dim, int):
+            if python is None or script is None or not isinstance(model, str) or not model or not isinstance(dim, int):
                 raise RuntimeError("memory-mcp rebuild contract is not configured")
-            executable = executable.expanduser().resolve()
-            if not executable.is_file() or not os.access(executable, os.X_OK):
-                raise RuntimeError("memory-mcp rebuild executable is unavailable")
+            python = python.expanduser().resolve()
+            script = script.expanduser().resolve()
+            if not python.is_file() or not os.access(python, os.X_OK) or not script.is_file():
+                raise RuntimeError("memory-mcp rebuild argv contract is unavailable")
             completed = subprocess.run(
                 [
-                    str(executable), "--canon", str(facts_dir), "--export",
+                    str(python), str(script), "--canon", str(facts_dir), "--export",
                     str(memory_dir / "export.ndjson"), "--target-db",
                     str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
                 ],

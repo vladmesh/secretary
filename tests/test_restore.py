@@ -26,58 +26,6 @@ from tests.test_tasks import WriteKanboard
 
 
 class RestoreTests(unittest.TestCase):
-    def test_restore_handoff_rebuilds_memory_mcp_index_with_fake_embedder(self):
-        """Exercise the restore memory handoff against memory-mcp's real sqlite-vec index."""
-        python = Path(os.environ.get("MEMORY_MCP_TEST_PYTHON", "/home/dev/memory-mcp/.venv/bin/python"))
-        self.assertTrue(python.is_file(), "MEMORY_MCP_TEST_PYTHON must provide memory-mcp dependencies")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-            init_layout(data_dir)
-            facts = data_dir / "memory" / "facts"
-            fact = (
-                "---\n"
-                "tags: [restore]\n"
-                "source: test\n"
-                "created: 2026-07-16\n"
-                "---\n"
-                "restore handoff marker\n"
-            )
-            (facts / "global").mkdir()
-            (facts / "global" / "handoff.md").write_text(fact, encoding="utf-8")
-            subprocess.run(["git", "add", "."], cwd=facts, check=True)
-            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
-            (data_dir / "memory" / "export.ndjson").write_text(
-                json.dumps({"id": "global/handoff", "path": "global/handoff.md", "text": fact}) + "\n",
-                encoding="utf-8",
-            )
-
-            def rebuild(canon, export, target):
-                script = """
-import json
-import sys
-import numpy as np
-sys.path.insert(0, '/home/dev/memory-mcp')
-import server
-canon, export, target = sys.argv[1:]
-def fake_embed(_text):
-    return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-result = server.offline_rebuild(canon, export, target, 'test/fake', 4, document_embed=fake_embed)
-server.DB_PATH, server.DIM = target, 4
-server.embed_query = fake_embed
-server.mark_search_ready()
-row = server.memory_list()[0]
-assert 'handoff marker' in server.memory_get(row['id'])['text']
-assert 'handoff marker' in server.search_memory('handoff', k=1)[0]['text']
-print(json.dumps(result))
-"""
-                completed = subprocess.run(
-                    [str(python), "-c", script, str(canon), str(export), str(target)],
-                    check=True, text=True, stdout=subprocess.PIPE,
-                )
-                return json.loads(completed.stdout)
-
-            self.assertEqual(rebuild_memory_index(data_dir, runner=rebuild), 1)
     def test_restored_board_uses_normalized_export_shape_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"

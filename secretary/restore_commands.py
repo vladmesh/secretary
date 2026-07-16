@@ -124,12 +124,14 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
         instance_path, data_dir, _ = _target(Path(args.instance))
         report = validate_instance(instance_path)
         host = report.host if isinstance(report.host, dict) else {}
-        executable = host.get("memory_reindex_executable")
+        python = host.get("memory_reindex_python")
+        script = host.get("memory_reindex_script")
         model = host.get("memory_model")
         dim = host.get("memory_dim")
         count = rebuild_memory_index(
             data_dir,
-            executable=Path(executable) if isinstance(executable, str) else None,
+            python=Path(python) if isinstance(python, str) else None,
+            script=Path(script) if isinstance(script, str) else None,
             model=model if isinstance(model, str) else None,
             dim=dim if isinstance(dim, int) else None,
         )
