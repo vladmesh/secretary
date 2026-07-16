@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import json
+import shutil
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+
+from secretary.backup_policy import ARCHIVE_ROOT
+from secretary.restore import RestoreError, restore_backup
+
+
+class RestoreTests(unittest.TestCase):
+    def test_restore_validates_then_publishes_staged_core_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+
+            plan = restore_backup(
+                archive, instance, age_identity=None,
+                decrypt=lambda source, destination: shutil.copy2(source, destination),
+            )
+
+            data_dir = root / "secretary-data"
+            self.assertEqual(plan.backup_kind, "core")
+            self.assertTrue((data_dir / "board" / "cards.json").is_file())
+            self.assertTrue((data_dir / "memory" / "facts").is_dir())
+
+    def test_restore_rejects_identity_before_creating_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "target")
+            archive = _core_archive(root, "source")
+
+            with self.assertRaisesRegex(RestoreError, "identity"):
+                restore_backup(
+                    archive, instance, age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+
+            self.assertFalse((root / "secretary-data").exists())
+
+    def test_restore_never_overwrites_existing_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            data_dir = root / "secretary-data"
+            data_dir.mkdir()
+            (data_dir / "keep").write_text("keep", encoding="utf-8")
+
+            with self.assertRaisesRegex(RestoreError, "already exists"):
+                restore_backup(
+                    archive, instance, age_identity=None,
+                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                )
+            self.assertEqual((data_dir / "keep").read_text(encoding="utf-8"), "keep")
+
+
+def _write_instance(root: Path, name: str) -> Path:
+    instance = root / "instance"
+    instance.mkdir()
+    (instance / "instance.yaml").write_text(
+        "version: 1\n"
+        f"name: {name}\n"
+        f"data_dir: {root / 'secretary-data'}\n"
+        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
+        encoding="utf-8",
+    )
+    return instance
+
+
+def _core_archive(root: Path, name: str) -> Path:
+    payload = root / ARCHIVE_ROOT
+    board = payload / "secretary-data" / "board"
+    memory = payload / "secretary-data" / "memory" / "facts"
+    runs = payload / "secretary-data" / "runs"
+    board.mkdir(parents=True)
+    memory.mkdir(parents=True)
+    runs.mkdir(parents=True)
+    (payload / "instance").mkdir()
+    (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+    (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+    (board / "cards.json").write_text('{"cards": []}', encoding="utf-8")
+    (board / "cards.ndjson").write_text("", encoding="utf-8")
+    (board / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "memory" / "export.ndjson").write_text("", encoding="utf-8")
+    for filename in ("watermarks.json", "cards.json", "claims.json"):
+        (runs / filename).write_text("{}", encoding="utf-8")
+    (payload / "versions.json").write_text(json.dumps({
+        "version": 1,
+        "backup_kind": "core",
+        "instance": {"identity": {"name": name, "instance_remote": "git@example.invalid:test/instance.git"}},
+        "components": {
+            "board": {"path": "board/cards.json"},
+            "memory": {"path": "memory/export.ndjson"},
+            "runs_state": {
+                "path": "runs/watermarks.json",
+                "cards": "runs/cards.json",
+                "claims": "runs/claims.json",
+            },
+        },
+    }), encoding="utf-8")
+    archive = root / "backup.tar"
+    with tarfile.open(archive, "w") as bundle:
+        bundle.add(payload, arcname=ARCHIVE_ROOT)
+    return archive

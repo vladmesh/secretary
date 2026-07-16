@@ -1072,16 +1072,59 @@ class CliTests(unittest.TestCase):
         self.assertIn("cannot decode config as UTF-8", output)
         self.assertNotIn("Traceback", output)
 
-    def test_target_command_stubs_are_explicit(self):
+    def test_remaining_target_command_stubs_are_explicit(self):
         for command in (
             ["reconcile"],
             ["backup"],
-            ["restore"],
         ):
             with self.subTest(command=command):
                 code, output = self.run_cli(command)
                 self.assertEqual(code, 1)
                 self.assertIn("not implemented", output)
+
+    def test_bootstrap_empty_returns_machine_readable_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance"
+            data_dir = Path(tmpdir) / "secretary-data"
+            instance.mkdir()
+            (instance / "instance.yaml").write_text(
+                "version: 1\nname: test\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
+                encoding="utf-8",
+            )
+            code, output = self.run_cli(
+                ["bootstrap", "--empty", "--dry-run", "--instance", str(instance)]
+            )
+
+        self.assertEqual(code, 0, output)
+        payload = json.loads(output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "bootstrap")
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(data_dir.exists())
+
+    def test_restore_reports_preflight_error_as_json_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            instance.mkdir()
+            (instance / "instance.yaml").write_text(
+                "version: 1\nname: test\n"
+                f"data_dir: {root / 'secretary-data'}\n"
+                "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
+                encoding="utf-8",
+            )
+            archive = root / "missing.tar.age"
+            code, output = self.run_cli(
+                ["restore", str(archive), "--instance", str(instance), "--dry-run"]
+            )
+
+        self.assertEqual(code, 2, output)
+        payload = json.loads(output)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["action"], "restore")
+        self.assertIn("archive not found", payload["error"])
 
 
 if __name__ == "__main__":
