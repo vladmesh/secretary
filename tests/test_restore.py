@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -21,14 +22,33 @@ from secretary.restore import (
     RestoreError,
     bootstrap_empty,
     import_normalized_board,
+    mark_reconcile_applied,
     rebuild_memory_index,
     restore_backup,
     restore_findings,
+    restore_state,
 )
 from tests.test_tasks import WriteKanboard
 
 
 class RestoreTests(unittest.TestCase):
+    def test_empty_bootstrap_stays_outside_restore_doctor_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+            bootstrap_empty(instance)
+
+            self.assertFalse((data_dir / "restore-state.json").exists())
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+
+    def test_reconcile_marker_does_not_create_restore_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            mark_reconcile_applied(data_dir)
+            self.assertFalse((data_dir / "restore-state.json").exists())
+
     def test_restored_board_uses_normalized_export_shape_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -80,6 +100,62 @@ class RestoreTests(unittest.TestCase):
             )
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
 
+    def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            facts = data_dir / "memory" / "facts"
+            script = Path(tmpdir) / "reindex.py"
+            script.write_text("", encoding="utf-8")
+            script.chmod(0o755)
+            completed = subprocess.CompletedProcess([], 0, '{"ok":true,"parity":{"indexed":2}}', "")
+            with mock.patch("secretary.restore.subprocess.run", return_value=completed):
+                self.assertEqual(
+                    rebuild_memory_index(data_dir, python=Path(sys.executable), script=script, model="test", dim=4),
+                    2,
+                )
+            self.assertEqual(restore_state(data_dir)["memory_index_count"], 2)
+
+    def test_reindex_timeout_is_a_restore_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            script = Path(tmpdir) / "reindex.py"
+            script.write_text("", encoding="utf-8")
+            script.chmod(0o755)
+            with mock.patch(
+                "secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)
+            ):
+                with self.assertRaisesRegex(RestoreError, "could not rebuild"):
+                    rebuild_memory_index(
+                        data_dir, python=Path(sys.executable), script=script, model="test", dim=4
+                    )
+
+    def test_restore_board_wraps_missing_backend_configuration(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ, {}, clear=True):
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RestoreError, "Kanboard runtime configuration"):
+                import_normalized_board(data_dir)
+
+    def test_board_restore_normalizes_legacy_routing_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card()
+            card["metadata"].update({"complexity": "legacy", "family_preference": "", "blocked_by": "secretary-0"})
+            card["fields"]["blocked_by"] = ""
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(client.metadata[12]["blocked_by"], "secretary-0")
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
+
     def test_restore_handoff_reaches_green_doctor_only_after_reconcile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -130,7 +206,7 @@ class RestoreTests(unittest.TestCase):
             bootstrap_empty(instance)
 
             self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
-            self.assertIn("managed reconcile has not been applied", restore_findings(data_dir))
+            self.assertEqual(restore_findings(data_dir), ["restore is incomplete"])
 
     def test_restore_validates_then_publishes_staged_core_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -686,8 +686,11 @@ class TaskWriter:
 
         def mutation(task: dict[str, Any]) -> None:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=metadata)
-            if task["state"] != target:
-                self._move_raw(task, target)
+            try:
+                if task["state"] != target:
+                    self._move_raw(task, target)
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
 
         return self._write(
             "restored", "steward", "restore", reference, request_id,
@@ -827,7 +830,18 @@ class TaskWriter:
         ref = str(event.get("ref") or "")
         if not ref:
             raise TaskError("backend_error", "pending create is missing its task ref", 1)
-        task = self.reader.show(ref)
+        try:
+            task = self.reader.show(ref)
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            backend = event.get("backend")
+            task_id = _positive_int(backend.get("task_id")) if isinstance(backend, dict) else None
+            if task_id is None:
+                raise
+            if not self.client.call("updateTask", id=task_id, reference=ref):
+                raise TaskError("backend_error", "pending create reference remains incomplete", 1)
+            task = self.reader.show(ref)
         self.client.call(
             "saveTaskMetadata",
             task_id=_task_number(task),

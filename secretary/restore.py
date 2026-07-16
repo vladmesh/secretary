@@ -41,6 +41,7 @@ class RestoreError(RuntimeError):
 
 
 RESTORE_STATE_FILE = "restore-state.json"
+MEMORY_REINDEX_TIMEOUT_SECONDS = 300
 
 
 def restore_state(data_dir: Path) -> dict[str, Any]:
@@ -55,11 +56,12 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
 def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
     """Populate an empty board from cards.json and prove parity on every retry."""
     data_dir = data_dir.expanduser().resolve()
-    cards = _normalized_cards(data_dir)
-    client = client or KanboardClient()
-    reader = TaskReader(client)
-    writer = TaskWriter(client, data_dir=data_dir)
     try:
+        cards = _normalized_cards(data_dir)
+        client = client or KanboardClient()
+        reader = TaskReader(client)
+        writer = TaskWriter(client, data_dir=data_dir)
+        writer.reconcile()
         existing = {card["ref"]: card for card in reader.list()}
         unexpected = set(existing) - {card["reference"] for card in cards}
         if unexpected:
@@ -68,17 +70,16 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
             current = existing.get(card["reference"])
             if current is None:
                 _create_restored_card(writer, card)
-                current = reader.show(card["reference"])
             target = _state_for_column(card["column"])
             writer.restore_card(
                 reference=card["reference"], metadata=_restore_board_metadata(card), target=target or ""
             )
         actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
+        if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
+            _update_restore_state(data_dir, board="failed", board_parity="failed")
+            raise RestoreError("board parity check failed")
     except TaskError as exc:
         raise RestoreError(exc.message) from None
-    if any(_board_core(actual[card["reference"]]) != _board_core(card) for card in cards):
-        _update_restore_state(data_dir, board="failed", board_parity="failed")
-        raise RestoreError("board parity check failed")
     _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
     return len(cards)
 
@@ -110,24 +111,18 @@ def rebuild_memory_index(
                     str(memory_dir / "export.ndjson"), "--target-db",
                     str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
                 ],
-                text=True, capture_output=True, check=False,
+                text=True, capture_output=True, check=False, timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
             )
             if completed.returncode:
                 raise RuntimeError("memory-mcp reindex command failed")
-            count = _memory_index_count(memory_dir / "index.sqlite")
-    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            result = json.loads(completed.stdout)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise RuntimeError("memory-mcp reindex command reported failure")
+            count = int(result["parity"]["indexed"])
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         raise RestoreError(f"could not rebuild memory index: {exc}") from None
     _update_restore_state(data_dir, memory_index="complete", memory_index_count=count)
     return count
-
-
-def _memory_index_count(path: Path) -> int:
-    """Use memory-mcp's published parity output when a CLI rebuild succeeds."""
-    # The production CLI owns the schema; this count is only restore progress metadata.
-    import sqlite3
-
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-        return int(connection.execute("select count(*) from memories").fetchone()[0])
 
 
 def restore_findings(data_dir: Path) -> list[str]:
@@ -150,6 +145,8 @@ def restore_findings(data_dir: Path) -> list[str]:
 
 def mark_reconcile_applied(data_dir: Path) -> None:
     """Mark the explicit live reconcile verification complete."""
+    if not (data_dir / RESTORE_STATE_FILE).is_file():
+        return
     _update_restore_state(data_dir, reconcile="complete")
 
 
@@ -169,42 +166,62 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             raise RestoreError("normalized board export has an invalid column")
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
+        if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
+            raise RestoreError("normalized board export has invalid task text")
     return sorted(cards, key=lambda card: str(card["reference"]))
 
 
 def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
-    fields = card["fields"]
-    metadata = card["metadata"]
+    fields = _restore_fields(card)
     writer.create(
-        role="steward", actor="restore", project=str(fields.get("project") or ""),
-        task_type=str(fields.get("task_type") or ""), title=str(card.get("title") or ""),
-        description=str(card.get("description") or ""), reference=str(card["reference"]),
-        blocked_by=str(fields.get("blocked_by") or ""), head=str(fields.get("head") or ""),
-        review_head=str(fields.get("review_head") or ""), slug=str(fields.get("slug") or ""),
-        base_branch=str(fields.get("base_branch") or ""),
-        complexity=str(metadata.get("complexity") or "standard"),
-        family_preference=str(metadata.get("family_preference") or "auto"),
-        codex_launch_mode=str(metadata.get("codex_launch_mode") or ""),
+        role="steward", actor="restore", project=fields["project"], task_type=fields["task_type"],
+        title=card["title"], description=card["description"], reference=card["reference"],
+        blocked_by=fields["blocked_by"], head=fields["head"], review_head=fields["review_head"],
+        slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
+        family_preference=fields["family_preference"], codex_launch_mode=fields["codex_launch_mode"],
+        request_id=f"restore-create:{card['reference']}",
     )
 
 
 def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
+    result = {str(key): str(value) for key, value in card["metadata"].items()}
+    for key, value in _restore_fields(card).items():
+        result.setdefault(key, value)
+    return result
+
+
+def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
+    fields = card["fields"]
     metadata = card["metadata"]
-    return {str(key): str(value) for key, value in metadata.items()}
+    value = lambda name: str(metadata.get(name, fields.get(name, "")) or "")
+    return {
+        "project": value("project"), "task_type": value("task_type"), "blocked_by": value("blocked_by"),
+        "head": value("head"), "review_head": value("review_head"), "slug": value("slug"),
+        "base_branch": value("base_branch"),
+        "complexity": _enum_or_default(value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"),
+        "family_preference": _enum_or_default(value("family_preference"), {"auto", "claude", "codex"}, "auto"),
+        "codex_launch_mode": _enum_or_default(value("codex_launch_mode"), {"", "exec", "tui"}, ""),
+    }
 
 
-def _board_core(card: dict[str, Any]) -> dict[str, Any]:
-    if "reference" in card:
-        fields = card["fields"]
-        metadata = card["metadata"]
-        return {
+def _enum_or_default(value: str, allowed: set[str], default: str) -> str:
+    return value if value in allowed else default
+
+
+def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
+    fields = _restore_fields(card)
+    metadata = card["metadata"]
+    return {
             "ref": card["reference"], "title": card["title"], "description": card["description"],
-            "state": _state_for_column(card["column"]), "project": fields.get("project", ""),
-            "type": fields.get("task_type", ""), "blocked_by": fields.get("blocked_by") or None,
+            "state": _state_for_column(card["column"]), "project": fields["project"],
+            "type": fields["task_type"], "blocked_by": fields["blocked_by"] or None,
             "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
-            "routing": {"complexity": metadata.get("complexity", "standard"), "family_preference": metadata.get("family_preference", "auto"), "head": metadata.get("head") or None, "review_head": metadata.get("review_head") or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": metadata.get("codex_launch_mode") or None},
+            "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
             "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
-        }
+    }
+
+
+def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
     return {
         "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),
         "state": card.get("state"), "project": card.get("project"), "type": card.get("type"),
@@ -244,7 +261,6 @@ def bootstrap_empty(instance_path: Path, *, dry_run: bool = False) -> RestorePla
     )
     if not dry_run:
         init_layout(target)
-        _update_restore_state(target, board="pending", memory_index="pending", reconcile="pending")
     return plan
 
 
