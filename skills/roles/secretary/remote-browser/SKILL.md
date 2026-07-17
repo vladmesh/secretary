@@ -129,4 +129,4 @@ secure») даже при чистом UA — палит CDP. Логин вну�
 окружения (`vladmesh-local`), чтобы не плодить дублей под разными именами, и не даёт забыть
 smoke-проверку при подключении. Источник — `remote-browser.sh` в этой же папке скилла,
 симлинкнута в `~/bin`. Если симлинк потерян: `ln -sf
-~/control-panel/.claude/skills/remote-browser/remote-browser.sh ~/bin/remote-browser`.
+~/secretary/skills/roles/secretary/remote-browser/remote-browser.sh ~/bin/remote-browser`.

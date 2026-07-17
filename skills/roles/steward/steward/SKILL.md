@@ -165,18 +165,18 @@ watermark: сигнальный `advance` его не трогает, и нао�
   `create --project triggered-agents --type code --title "Дрейф systemd-юнита(ов): <агент(ы)>"
   --column Идеи --description <файл с diff-ами>`.
 - **Дрейф ролевых скиллов между головами** (секретарь/куратор/ретро/стюард должны получать
-  скиллы из `~/control-panel/skills/roles`, а не из разрозненных каталогов оболочек):
+  скиллы из `~/secretary/skills/roles`, а не из разрозненных каталогов оболочек):
   ```
   python3 -m triggered_agents steward role-skills --json
   ```
-  Сверяет `~/control-panel/skills/manifest.toml` с копиями в Claude, Codex и Hermes. `ok: false`
+  Сверяет `~/secretary/skills/manifest.toml` с копиями в Claude, Codex и Hermes. `ok: false`
   → проверь `missing`, `drift`, `source_missing`. Если это чисто потерянная копия из канона,
   можно синхронизировать:
   ```
-  python3 /home/dev/control-panel/scripts/role_skills.py sync
+  python3 /home/dev/secretary/scripts/role_skills.py sync
   ```
   Если нужен новый скилл или меняется смысл ролевого скилла другой роли — не правь сам, заведи
-  карточку. Единый источник правды: `control-panel/skills/roles`; ручное размазывание по
+  карточку. Единый источник правды: `secretary/skills/roles`; ручное размазывание по
   `~/.claude`, `~/.codex*`, `~/.hermes` не допускается.
 - Всё остальное, что покажется странным при вдумчивом просмотре — обход намеренно без
   фиксированного списка, в этом и смысл: пять детекторов уже покрыты сигнальным прогоном.

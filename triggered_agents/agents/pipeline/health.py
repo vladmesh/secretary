@@ -332,8 +332,16 @@ def next_retry_head(current: str, tried: set[str], statuses: dict[str, str],
 # shell command" — heads.toml's `probe` field is the single source of what each resource runs);
 # these are just what that field's command, for these ids, happens to invoke.
 _OPENROUTER_ENV_FILE = Path(os.environ.get("TA_OPENROUTER_ENV_FILE",
-                                          str(Path.home() / "projects" / "project_inspect" / ".env")))
-_OPENROUTER_ENV_KEY = "open_router_key"
+                                          str(Path.home() / ".hermes" / ".env")))
+# Which assignment inside _OPENROUTER_ENV_FILE carries the key. The canonical hermes .env writes
+# OPENROUTER_API_KEY; the old decommissioned-repo .env used open_router_key. Accept both so the
+# probe resolves against the live hermes file without a per-host tweak; TA_OPENROUTER_ENV_KEY pins
+# a single explicit name when a host names it something else.
+_OPENROUTER_ENV_KEYS = (
+    (os.environ["TA_OPENROUTER_ENV_KEY"],)
+    if os.environ.get("TA_OPENROUTER_ENV_KEY")
+    else ("OPENROUTER_API_KEY", "open_router_key")
+)
 
 
 def _read_openrouter_key() -> str | None:
@@ -349,7 +357,7 @@ def _read_openrouter_key() -> str | None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
-        if key.strip() == _OPENROUTER_ENV_KEY:
+        if key.strip() in _OPENROUTER_ENV_KEYS:
             return val.strip().strip('"').strip("'") or None
     return None
 

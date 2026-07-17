@@ -20,7 +20,7 @@ account = "claude-subscription"
 probe = "python3 -m triggered_agents pipeline probe --resource claude-sub"
 
 [resources.openrouter]
-# Pay-per-token OpenRouter credit (key: project_inspect/.env open_router_key). Since 2026-07-04
+# Pay-per-token OpenRouter credit (key: ~/.hermes/.env open_router_key). Since 2026-07-04
 # only the steward's last-resort hermes profile draws from it — product tasks are Claude-only, so
 # this is spent when the whole claude-sub resource is red and the watcher still has to wake.
 # Probe: one real 1-token chat completion against gemini-flash (health.probe_openrouter) — red on

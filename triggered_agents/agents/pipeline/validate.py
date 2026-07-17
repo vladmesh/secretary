@@ -93,13 +93,6 @@ _PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CONTRIB_BRANCH_RE = re.compile(r"(?im)^\s*branch\s*:\s*(\S+)\s*$")
 _CONTRIB_HEAD_RE = re.compile(r"(?im)^\s*head\s*:\s*([0-9a-fA-F]{7,40})\s*$")
 
-# Post-merge provision apply (triggered-agents-256): only the triggered-agents repo itself has
-# these paths, so a squash diff touching any of them means the live systemd artifacts are now
-# stale against what's on the board's own main. See _apply_provision_after_merge below.
-_PROVISION_PY_PATH = "deploy/provision.py"
-_GATE_SCRIPT_PATH = "deploy/ta-gate.sh"
-_AUTOMATION_TOML_RE = re.compile(r"^triggered_agents/agents/([^/]+)/automation\.toml$")
-
 
 def _pr_url(view: dict) -> str | None:
     """PR link from a card's comments (the last one wins). `view` is an ops.show_card result."""
@@ -352,7 +345,6 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
         if ws:
             worker.teardown(ws)             # stop its terminals, remove the worktree
         STATE.log_run("validate", reference=ref, to="Done", pr=pr)
-        _apply_provision_after_merge(ref, card.get("project") or "", pr)
         return True
     if status.get("state", "").upper() == "CLOSED":
         # Closed without a merge (a human closed it, or gh considers it stale) — the mechanical/
@@ -447,59 +439,6 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
         return _review_gate(ref, pr, card, records, view, stand_cfg is not None,
                             watchdog_seconds, save_cards, statuses, refresh_worker_task) or changed
     return _ci_pending_watchdog(ref, rec, records, pr, status["rollup"]) or changed
-
-
-def _provision_apply_plan(files: list[str]) -> list[str] | None:
-    """Which agents (if any) a merged PR's changed files call for re-provisioning. None -> nothing
-    relevant changed, skip entirely. [] -> a global provision artifact changed, so EVERY agent with
-    automation needs re-provisioning. Deliberately not "no agents": it mirrors deploy/provision.py's
-    own convention that an empty argv means every agent. A non-empty list names only the agents
-    whose own automation.toml was touched (deduped, sorted for a deterministic runs.jsonl log and a
-    deterministic `provision.py <agents>` argv)."""
-    if _PROVISION_PY_PATH in files or _GATE_SCRIPT_PATH in files:
-        return []
-    agents = sorted({m.group(1) for f in files if (m := _AUTOMATION_TOML_RE.match(f))})
-    return agents or None
-
-
-def _apply_provision_after_merge(ref: str, project: str, pr: str) -> None:
-    """Post-merge provision apply (triggered-agents-256): once a card lands on Done because gh
-    reports its PR merged, check whether the squash diff touched deploy/provision.py,
-    deploy/ta-gate.sh or an agent's automation.toml and, if so, re-run deploy/provision.py for the
-    affected agent(s) right away. Without this the live ta-* systemd artifacts stay on the pre-merge
-    version until a human notices or
-    the steward's own deep-sweep drift check (triggered_agents/agents/steward/drift.py) catches up
-    on its own daily schedule, exactly the "code merged, host not caught up, no signal" gap that
-    motivated this card (the env_file/deep-sweep-timer fixes of 2026-07-04 both had to be applied
-    to the host by hand after their PRs merged).
-
-    Only meaningful for the triggered-agents project itself — no other project's repo has these
-    paths — so a card from any other project returns immediately without even calling gh. One-shot
-    by construction: called exactly once, right after the card's own transition to Done above,
-    never retried on a later tick even if it fails here (a missed apply is exactly what the
-    deep-sweep drift check exists to catch as the second, slower-but-certain net). Any failure in
-    here — gh down, the canonical checkout can't fetch, deploy/provision.py itself errors — is a
-    warn/error line in runs.jsonl (the class steward's own `log` signal picks up), never a card
-    comment or a move: the merge already happened, the card has nothing further to report."""
-    if project != "triggered-agents":
-        return
-    try:
-        files = worker.pr_files(pr)
-        if files is None:
-            STATE.log_run("postmerge-apply", reference=ref, result="gh-unavailable", level="warn", pr=pr)
-            return
-        agents = _provision_apply_plan(files)
-        if agents is None:
-            return
-        result = worker.apply_provision(agents)
-        STATE.log_run("postmerge-apply", reference=ref,
-                      result="ok" if result["ok"] else "error",
-                      level="info" if result["ok"] else "error",
-                      agents=(agents or "all"), pr=pr,
-                      log=worker.scrub_secrets(result["log"])[-4000:])
-    except Exception as e:  # noqa: BLE001 — the merge already happened, this must never escape
-        STATE.log_run("postmerge-apply", reference=ref, result="error", level="error", pr=pr,
-                      error=worker.scrub_secrets(str(e)))
 
 
 def _validate_contrib_card(ref: str, card: dict, rec: dict | None, records: dict, view: dict,

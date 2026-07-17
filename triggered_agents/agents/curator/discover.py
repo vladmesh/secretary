@@ -54,7 +54,7 @@ EXCLUDE_CWDS = [
 
 
 def _cwd_from_claude_dir(dirname: str) -> str:
-    # "-home-dev-control-panel" -> "/home/dev/control-panel". Lossy (dirs with real
+    # "-home-dev-secretary" -> "/home/dev/secretary". Lossy (dirs with real
     # dashes collide); only a fallback when the file carries no cwd field.
     return "/" + dirname.lstrip("-").replace("-", "/")
 

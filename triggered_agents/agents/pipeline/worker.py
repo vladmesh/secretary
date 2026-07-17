@@ -6,9 +6,12 @@ run the provisioner (setup+smoke), drop the one-time TASK.md, launch the worker 
 activity, tear the workspace down. Split out so the dispatcher's decisions stay unit-testable on a
 fake board while these host calls are stubbed. No Kanboard here, no LLM.
 
-Provisioning runs the SAME script `orca.yaml scripts.setup` points at
-(`control-panel/pipeline/provision.py`), just invoked directly so we capture its exit code and log
-and can move the card to Blocked before a head is spawned. Orca still owns worktree creation.
+Provisioning (setup+smoke) is an optional external script named by `TA_PROVISION_SCRIPT`, invoked
+directly so we capture its exit code and log and can move the card to Blocked before a head is
+spawned. No script configured means no setup/smoke step — the worker launches straight into its
+worktree (the central provisioner that used to live in the decommissioned control-panel repo has no
+replacement wired here yet; auto-provisioning is a roadmap item, see secretary Phase 6). Orca still
+owns worktree creation.
 """
 from __future__ import annotations
 
@@ -28,8 +31,15 @@ ORCA = os.environ.get("ORCA_BIN") or shutil.which("orca") or str(Path.home() / "
 GH = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
 PROJECTS_DIR = Path(os.environ.get("TA_PROJECTS_DIR", str(Path.home() / "projects")))
 CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
-CONTROL_PANEL = Path(os.environ.get("TA_CONTROL_PANEL", str(Path.home() / "control-panel")))
-PROVISION = CONTROL_PANEL / "pipeline" / "provision.py"
+# Optional external setup+smoke provisioner. Unset (the default now that control-panel is
+# decommissioned) means no setup/smoke step at all — see provision(). Set it to a real script path
+# to reinstate a provisioner without touching this module.
+_PROVISION_SCRIPT = os.environ.get("TA_PROVISION_SCRIPT")
+PROVISION = Path(_PROVISION_SCRIPT) if _PROVISION_SCRIPT else None
+# Optional central manifest directory for projects that don't commit a workspace.toml (see
+# _load_manifest). Unset means local-lookup-only; the old decommissioned-repo default is gone.
+_MANIFEST_DIR = os.environ.get("TA_MANIFEST_DIR")
+MANIFEST_DIR = Path(_MANIFEST_DIR) if _MANIFEST_DIR else None
 # Every workspace teardown lives under here — the guard in teardown() refuses anything outside it,
 # and the same STATE (state/pipeline/) is where dispatcher.py logs, so a sudo-fallback trip shows
 # up in the one runs.jsonl the pipeline already watches.
@@ -121,8 +131,8 @@ def _git_ok(cwd: str | Path, args: list[str], timeout: float = ORCA_TIMEOUT_S) -
 
 
 def project_root(project: str) -> Path:
-    """Корень репо проекта: ~/projects/<name>, иначе ~/<name> (там живут control-panel,
-    triggered-agents и прочая инфраструктура секретаря)."""
+    """Корень репо проекта: ~/projects/<name>, иначе ~/<name> (там живут secretary,
+    secretary-instance и прочая инфраструктура секретаря)."""
     p = PROJECTS_DIR / project
     if p.is_dir():
         return p
@@ -132,18 +142,18 @@ def project_root(project: str) -> Path:
 
 def _load_manifest(project: str) -> dict:
     """workspace.toml лукап цепочкой: сначала в самом репо проекта (project_root), иначе
-    центральный манифест контриб-проектов control-panel/pipeline/manifests/<project>.toml —
-    контриб-форк не коммитит workspace.toml в свой репо (agent-kanban-232), декларация живёт в
-    control-panel вместо этого. Ни там, ни там — пустой манифест, вызывающий откатывается на
-    дефолты (base_branch main, не contrib). Зеркало той же цепочки в provision.py
-    (control-panel), кроме финала: там отсутствие манифеста в обоих местах — FAIL, здесь —
-    безопасные дефолты (это read_base_branch/is_contrib, не провижининг)."""
+    центральный манифест <MANIFEST_DIR>/<project>.toml для контриб-проектов, которые не коммитят
+    workspace.toml в свой репо (agent-kanban-232). MANIFEST_DIR настраивается через TA_MANIFEST_DIR
+    и по умолчанию не задан (старый дефолт ушёл вместе с decommissioned-репо), тогда
+    работает только локальный лукап. Ни там, ни там — пустой манифест, вызывающий откатывается на
+    дефолты (base_branch main, не contrib; это read_base_branch/is_contrib, не провижининг)."""
     local = project_root(project) / "workspace.toml"
     if local.is_file():
         return tomllib.loads(local.read_text(encoding="utf-8"))
-    central = CONTROL_PANEL / "pipeline" / "manifests" / f"{project}.toml"
-    if central.is_file():
-        return tomllib.loads(central.read_text(encoding="utf-8"))
+    if MANIFEST_DIR is not None:
+        central = MANIFEST_DIR / f"{project}.toml"
+        if central.is_file():
+            return tomllib.loads(central.read_text(encoding="utf-8"))
     return {}
 
 
@@ -341,10 +351,18 @@ def remote_head_sha(project: str, branch: str) -> str | None:
 
 
 def provision(workspace: str) -> tuple[bool, str]:
-    """Run the workspace provisioner (setup+smoke). Return (ok, combined log)."""
+    """Task-protocol preflight, then the optional setup+smoke provisioner. Return (ok, combined log).
+
+    The provisioner is whatever `TA_PROVISION_SCRIPT` names (PROVISION). Unset — the default now
+    that the control-panel provisioner is gone — means there is no setup/smoke step: preflight is
+    the only gate and the worker launches straight into its worktree. A configured-but-missing
+    script is a real misconfiguration and fails the bring-up, not a silent skip."""
     protocol_ok, protocol_log = task_protocol.preflight()
     if not protocol_ok:
         return False, protocol_log
+    if PROVISION is None:
+        STATE.log_run("provision", workspace=workspace, result="skipped-no-provisioner")
+        return True, protocol_log + "\nno provisioner configured (TA_PROVISION_SCRIPT unset); setup/smoke skipped"
     if not PROVISION.is_file():
         return False, f"provisioner missing: {PROVISION}"
     env = dict(os.environ, ORCA_WORKTREE_PATH=workspace)
@@ -857,85 +875,6 @@ def merge_pr(pr_url: str) -> dict:
     if p.returncode == 0:
         return {"ok": True, "error": None}
     return {"ok": False, "error": (p.stderr or p.stdout).strip() or f"gh exit {p.returncode}"}
-
-
-def pr_files(pr_url: str) -> list[str] | None:
-    """Paths changed by a PR (its cumulative diff — the same set a squash merge lands as one
-    commit), via gh — same None-on-trouble contract as poll_pr/pr_branch/pr_base_branch. gh still
-    answers `pr view --json files` for a PR gh itself reports merged/closed, so this needs no
-    local git fetch/diff against the merge commit (validate._apply_provision_after_merge calls it
-    right after gh has already reported the PR merged)."""
-    data = _gh_json(["pr", "view", pr_url, "--json", "files"])
-    if not isinstance(data, dict):
-        return None
-    return [f.get("path") for f in (data.get("files") or []) if f.get("path")]
-
-
-# --- Post-merge provision apply (triggered-agents-256) ----------------------------------------
-# deploy/provision.py refuses to run from anywhere but the canonical checkout (~/triggered-agents,
-# see its own CANONICAL_ROOT guard, triggered-agents-257) — the dispatcher runs from ITS OWN named
-# worktree instead (a sibling under the same workspaces root, never that checkout), so applying a
-# freshly-merged provision.py/automation.toml can't just run the copy sitting in the dispatcher's
-# own cwd. Nothing ever commits to the canonical checkout, so fetching+hard-resetting it to
-# origin/main right before every apply is safe and mirrors the same discipline deploy/provision.py
-# already applies to every per-agent worktree (ensure_worktree) — without this the checkout stays
-# on whatever commit a human last happened to `git pull`, and the freshly-merged logic/spec would
-# never actually run.
-TRIGGERED_AGENTS_CANONICAL_ROOT = Path(os.environ.get("TA_CANONICAL_ROOT") or Path.home() / "triggered-agents")
-_DEPLOY_PROVISION = TRIGGERED_AGENTS_CANONICAL_ROOT / "deploy" / "provision.py"
-PROVISION_APPLY_TIMEOUT_S = int(os.environ.get("TA_PROVISION_APPLY_TIMEOUT_S", "300"))
-
-
-def apply_provision(agents: list[str]) -> dict:
-    """Fast-forward the canonical triggered-agents checkout to origin/main, then run its
-    deploy/provision.py for `agents` (empty list -> every agent with a spec, mirroring
-    deploy/provision.py's own argv-empty convention). Returns {"ok": bool, "log": str} — every
-    step's combined stdout+stderr, one after another, untruncated (the caller scrubs/tails before
-    logging it). Never raises: a failed fetch/reset/provision run all fold into a non-ok result —
-    this is a one-shot post-merge action with no retry (validate._apply_provision_after_merge).
-
-    A named agent (a non-empty `agents`, i.e. only that agent's own automation.toml changed) is
-    filtered against the FRESH post-reset tree before the provision.py call: a merge that DELETES
-    an agent's automation.toml (decommissioning it — the exact ta-board precedent this card was
-    written around) still names that agent in the diff, but running `provision.py <agent>` for a
-    spec that no longer exists is a guaranteed SystemExit — a false 'apply failed' signal on every
-    single decommission merge, not a real failure. An agent whose spec is simply gone this way is
-    silently nothing-to-provision here (noted in the log, not an error) — tearing down its now-
-    orphaned live unit is the drift check's "extra" case (steward/drift.py), a deliberate human
-    step, not an automatic one. The empty-list ("all") case is untouched: deploy/provision.py's
-    own argv-empty path already computes its agent list fresh from the same post-reset tree, so a
-    removed agent is naturally absent from it with no filtering needed here."""
-    root = str(TRIGGERED_AGENTS_CANONICAL_ROOT)
-    log_parts = []
-    for step in (["git", "-C", root, "fetch", "--quiet", "origin", "main"],
-                 ["git", "-C", root, "reset", "--hard", "origin/main"]):
-        try:
-            p = subprocess.run(step, capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log_parts.append(f"$ {' '.join(step)}\n{e}")
-            return {"ok": False, "log": "\n".join(log_parts)}
-        log_parts.append(f"$ {' '.join(step)}\n{p.stdout}{p.stderr}")
-        if p.returncode != 0:
-            return {"ok": False, "log": "\n".join(log_parts)}
-    if agents:
-        specs_dir = TRIGGERED_AGENTS_CANONICAL_ROOT / "triggered_agents" / "agents"
-        existing = sorted(a for a in agents if (specs_dir / a / "automation.toml").is_file())
-        missing = sorted(set(agents) - set(existing))
-        if missing:
-            log_parts.append(
-                f"no automation.toml on origin/main for: {', '.join(missing)} (decommissioned in "
-                f"this merge, or never existed) — nothing to provision for them, skipped")
-        if not existing:
-            return {"ok": True, "log": "\n".join(log_parts)}
-        agents = existing
-    cmd = ["python3", str(_DEPLOY_PROVISION), *agents]
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=PROVISION_APPLY_TIMEOUT_S)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log_parts.append(f"$ {' '.join(cmd)}\n{e}")
-        return {"ok": False, "log": "\n".join(log_parts)}
-    log_parts.append(f"$ {' '.join(cmd)}\n{p.stdout}{p.stderr}")
-    return {"ok": p.returncode == 0, "log": "\n".join(log_parts)}
 
 
 # --- Stand deploy + e2e (Validate layer 2) ----------------------------------------------------

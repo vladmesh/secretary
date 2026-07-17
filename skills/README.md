@@ -13,13 +13,13 @@
 Проверка:
 
 ```bash
-python3 /home/dev/control-panel/scripts/role_skills.py audit --json
+python3 /home/dev/secretary/scripts/role_skills.py audit --json
 ```
 
 Синхронизация:
 
 ```bash
-python3 /home/dev/control-panel/scripts/role_skills.py sync
+python3 /home/dev/secretary/scripts/role_skills.py sync
 ```
 
 Список ролей, навыков и целевых директорий задаёт `skills/manifest.toml`. Если скилл нужен роли,

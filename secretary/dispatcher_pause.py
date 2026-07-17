@@ -107,8 +107,6 @@ def _legacy_pause_candidates() -> list[Path]:
         paths.append(Path(ta_state) / "pipeline" / "pause.json")
     workspaces_root = Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
     paths.append(workspaces_root / "triggered-agents" / "pipeline" / "state" / "pipeline" / "pause.json")
-    paths.append(Path.home() / "triggered-agents" / "state" / "pipeline" / "pause.json")
-    paths.append(Path("/home/dev/triggered-agents/state/pipeline/pause.json"))
     return _dedupe_paths(paths)
 
 
