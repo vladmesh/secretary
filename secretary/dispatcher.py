@@ -143,15 +143,18 @@ class InstanceCatalog:
         workspace: str,
         role: str,
         codex_mode: str | None = None,
+        launch_prompt: str | None = None,
     ) -> HeadLaunch:
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
             self.prepare_head_workspace(head, workspace)
             if adapter == "claude":
-                launch = HeadLaunch(_render_claude_command(profile, prompt_file))
+                launch = HeadLaunch(_render_claude_command(profile, prompt_file, launch_prompt=launch_prompt))
             else:
-                launch = _render_codex_launch(profile, prompt_file, workspace=workspace, mode=codex_mode)
+                launch = _render_codex_launch(
+                    profile, prompt_file, workspace=workspace, mode=codex_mode, launch_prompt=launch_prompt
+                )
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
         return HeadLaunch(
@@ -201,7 +204,7 @@ class CommandHostRuntime:
         workspace = self._create_workspace(project, worker_id, base)
         self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
         self._run_setup(project, workspace)
-        self._write_prompt(Path(workspace) / "TASK.md", self._worker_prompt(task, base, attempt_id))
+        self._write_prompt(Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id))
         handle = self._launch(
             workspace,
             f"{task['ref']} worker",
@@ -210,6 +213,7 @@ class CommandHostRuntime:
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
+            launch_prompt=self._worker_launch_prompt(),
         )
         return {"workspace": workspace, "handle": handle, "base_branch": base}
 
@@ -223,7 +227,7 @@ class CommandHostRuntime:
         base = self.catalog.default_branch(
             task["project"], task.get("workspace", {}).get("base_branch")
         )
-        self._write_prompt(workspace / "TASK.md", self._worker_prompt(task, base, record.attempt_id, record.review_baseline))
+        self._write_prompt(workspace / "TASK.md", self._worker_task_doc(task, base, record.attempt_id, record.review_baseline))
         return self._launch(
             str(workspace),
             f"{task['ref']} worker rework",
@@ -232,6 +236,7 @@ class CommandHostRuntime:
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
+            launch_prompt=self._worker_launch_prompt(),
         )
 
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> str:
@@ -357,6 +362,7 @@ class CommandHostRuntime:
         role: str,
         env_name: str,
         codex_mode: str | None = None,
+        launch_prompt: str | None = None,
     ) -> str:
         if self.mode == "noop":
             return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
@@ -371,6 +377,7 @@ class CommandHostRuntime:
                 workspace=workspace,
                 role=role,
                 codex_mode=codex_mode,
+                launch_prompt=launch_prompt,
             )
             command = launch.command
         result = self._run_json([
@@ -386,7 +393,9 @@ class CommandHostRuntime:
             raise HostError("orca did not return a terminal handle")
         if launch and launch.prompt_after_start:
             try:
-                _deliver_tui_prompt(handle, workspace, prompt_file, run_json=self._run_json)
+                _deliver_tui_prompt(
+                    handle, workspace, prompt_file, run_json=self._run_json, prompt_text=launch_prompt
+                )
             except TuiDeliveryError as exc:
                 _close_tui_terminal(handle, run_json=self._run_json)
                 raise HostError(str(exc)) from None
@@ -403,7 +412,16 @@ class CommandHostRuntime:
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
 
-    def _worker_prompt(self, task: dict[str, Any], base: str, attempt_id: str, review_round: int = 0) -> str:
+    def _worker_launch_prompt(self) -> str:
+        """Short pointer delivered to the worker head at launch. The full spec lives in TASK.md
+        (written next to the workspace root); duplicating it into the launch prompt would ship
+        the whole task twice. The head opens TASK.md itself and reports with the command there."""
+        return (
+            "The full task is in TASK.md at the workspace root. Read it first and follow it. "
+            "Report done or blocked with the command given in TASK.md. Do not commit TASK.md."
+        )
+
+    def _worker_task_doc(self, task: dict[str, Any], base: str, attempt_id: str, review_round: int = 0) -> str:
         branch = _legacy_worker_branch(task["ref"])
         # review_round keeps the report request-id distinct per rework round: a rework
         # reuses the same attempt_id, so without it the second done-report collides with

@@ -38,6 +38,28 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertIn("Read TASK.md", host.calls[send_i][host.calls[send_i].index("--text") + 1])
         self.assertEqual(host.catalog.modes, ["tui"])
 
+    def test_tui_launch_delivers_short_pointer_not_task_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "TASK.md").write_text("full spec body that must not be delivered\n", encoding="utf-8")
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
+
+            host._launch(
+                str(workspace),
+                "title",
+                "codex",
+                "TASK.md",
+                role="worker",
+                env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                codex_mode="tui",
+                launch_prompt="The full task is in TASK.md. Read it first.",
+            )
+
+        send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
+        delivered = host.calls[send_i][host.calls[send_i].index("--text") + 1]
+        self.assertEqual(delivered, "The full task is in TASK.md. Read it first.")
+        self.assertNotIn("full spec body", delivered)
+
     def test_tui_delivery_resends_enter_when_prompt_stays_in_composer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -160,6 +182,7 @@ class TuiCatalog:
         workspace: str,
         role: str,
         codex_mode: str | None = None,
+        launch_prompt: str | None = None,
     ) -> HeadLaunch:
         self.modes.append(codex_mode)
         return HeadLaunch(

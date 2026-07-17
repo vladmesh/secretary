@@ -58,12 +58,17 @@ def ensure_claude_workspace_ready(
         _save_claude_config(config_path, data)
 
 
-def render_claude_command(profile: dict[str, Any], prompt_file: str) -> str:
+def render_claude_command(
+    profile: dict[str, Any],
+    prompt_file: str,
+    *,
+    launch_prompt: str | None = None,
+) -> str:
     args = ["claude", "--dangerously-skip-permissions"]
     model = profile.get("model")
     if model:
         args += ["--model", str(model)]
-    return f"{shlex.join(args)} {_prompt_substitution(prompt_file)}"
+    return f"{shlex.join(args)} {_delivered_prompt(prompt_file, launch_prompt)}"
 
 
 def render_codex_command(
@@ -72,8 +77,11 @@ def render_codex_command(
     *,
     workspace: str,
     mode: str | None = None,
+    launch_prompt: str | None = None,
 ) -> str:
-    return render_codex_launch(profile, prompt_file, workspace=workspace, mode=mode).command
+    return render_codex_launch(
+        profile, prompt_file, workspace=workspace, mode=mode, launch_prompt=launch_prompt
+    ).command
 
 
 def render_codex_launch(
@@ -82,20 +90,31 @@ def render_codex_launch(
     *,
     workspace: str,
     mode: str | None = None,
+    launch_prompt: str | None = None,
 ) -> HeadLaunch:
     launch_mode = _codex_launch_mode(profile, mode)
     if launch_mode == "tui":
+        # The TUI carries no prompt on its command line; the caller delivers launch_prompt
+        # (or the prompt_file contents) through `orca terminal send` once the TUI is idle.
         return HeadLaunch(_render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True)
-    return HeadLaunch(_render_codex_exec_command(profile, prompt_file, workspace=workspace))
+    return HeadLaunch(
+        _render_codex_exec_command(profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt)
+    )
 
 
-def _render_codex_exec_command(profile: dict[str, Any], prompt_file: str, *, workspace: str) -> str:
+def _render_codex_exec_command(
+    profile: dict[str, Any],
+    prompt_file: str,
+    *,
+    workspace: str,
+    launch_prompt: str | None = None,
+) -> str:
     args = _codex_base_args(profile)
     args.insert(1, "exec")
     args.append("--skip-git-repo-check")
     for path in _codex_trust_paths(workspace):
         args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
-    return f"CODEX_HOME={shlex.quote(_codex_home(profile))} {shlex.join(args)} {_prompt_substitution(prompt_file)}"
+    return f"CODEX_HOME={shlex.quote(_codex_home(profile))} {shlex.join(args)} {_delivered_prompt(prompt_file, launch_prompt)}"
 
 
 def _render_codex_tui_command(profile: dict[str, Any], *, workspace: str) -> str:
@@ -219,6 +238,15 @@ def wrap_role_shell_command(role: str, command: str) -> str:
         f"PYTHONPATH={py_path} python3 -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
     )
+
+
+def _delivered_prompt(prompt_file: str, launch_prompt: str | None) -> str:
+    """The prompt argument handed to a head on its command line. A launch_prompt is a short
+    literal pointer (task body lives in prompt_file, which the head opens itself); without it
+    the whole prompt_file is piped in as the prompt, the reviewer's REVIEW.md path."""
+    if launch_prompt is not None:
+        return shlex.quote(launch_prompt)
+    return _prompt_substitution(prompt_file)
 
 
 def _prompt_substitution(prompt_file: str) -> str:

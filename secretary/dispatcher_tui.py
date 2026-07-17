@@ -35,11 +35,15 @@ def deliver_tui_prompt(
     *,
     run_json: RunJson,
     session_root: Path | None = None,
+    prompt_text: str | None = None,
 ) -> None:
-    try:
-        prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
+    if prompt_text is not None:
+        prompt = prompt_text
+    else:
+        try:
+            prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
     run_json([
         "orca", "terminal", "wait",
         "--terminal", handle,

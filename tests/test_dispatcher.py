@@ -1150,6 +1150,22 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn('"$(cat TASK.md)"', command)
         self.assertNotIn('codex "$(cat TASK.md)"', command)
 
+    def test_codex_exec_launch_prompt_replaces_cat_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+
+            command = _render_codex_command(
+                {"adapter": "codex", "model": "gpt-5.5", "codex_home": "/tmp/codex-home"},
+                "TASK.md",
+                workspace=str(workspace),
+                launch_prompt="read TASK.md first",
+            )
+
+        self.assertIn("codex exec", command)
+        self.assertNotIn('"$(cat TASK.md)"', command)
+        self.assertIn("'read TASK.md first'", command)
+
     def test_codex_tui_command_omits_exec_and_prompt_substitution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -1321,6 +1337,33 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(branch, _legacy_worker_branch("secretary-510-pilot"))
         self.assertEqual(host.launched, [("codex", "TASK.md")])
 
+    def test_launch_prompt_is_short_pointer_and_full_spec_stays_in_task_doc(self) -> None:
+        spec = "Implement the frobnicator and wire it into the widget renderer."
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "title": "Pilot",
+                "description": spec,
+                "workspace": {"base_branch": "main"},
+            }
+
+            result = host.prepare_worker(task, "secretary-510-pilot-pilot", "codex")
+            task_doc = (Path(result["workspace"]) / "TASK.md").read_text(encoding="utf-8")
+
+        delivered = host.launch_prompts[-1]
+        # The head is launched with a short pointer, not the task body: the full spec is only
+        # ever handed over through TASK.md, never duplicated into the delivered launch prompt.
+        self.assertIsNotNone(delivered)
+        self.assertIn("TASK.md", delivered)
+        self.assertNotIn(spec, delivered)
+        self.assertLess(len(delivered), len(task_doc))
+        # TASK.md keeps the full spec and the exact per-round report command (Bug-2 fix).
+        self.assertIn(spec, task_doc)
+        self.assertIn("--kind done", task_doc)
+        self.assertIn("--request-id ", task_doc)
+
     def test_report_request_id_is_distinct_per_review_round(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             host = GitBranchHost(Path(tmp))
@@ -1330,8 +1373,8 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "description": "body",
                 "workspace": {"base_branch": "main"},
             }
-            first = host._worker_prompt(task, "main", "attempt-1", 0)
-            rework = host._worker_prompt(task, "main", "attempt-1", 2)
+            first = host._worker_task_doc(task, "main", "attempt-1", 0)
+            rework = host._worker_task_doc(task, "main", "attempt-1", 2)
 
         def rid(text: str) -> str:
             start = text.index("--request-id ") + len("--request-id ")
@@ -1415,6 +1458,7 @@ class GitBranchHost(CommandHostRuntime):
         super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.root = root
         self.launched: list[tuple[str, str]] = []
+        self.launch_prompts: list[str | None] = []
 
     def _create_workspace(self, project: str, worker_id: str, base: str) -> str:
         workspace = self.root / worker_id
@@ -1440,8 +1484,10 @@ class GitBranchHost(CommandHostRuntime):
         role: str,
         env_name: str,
         codex_mode: str | None = None,
+        launch_prompt: str | None = None,
     ) -> str:
         self.launched.append((head, prompt_file))
+        self.launch_prompts.append(launch_prompt)
         return f"test:{head}"
 
 
