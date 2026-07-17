@@ -1,6 +1,6 @@
 # Live cutover journal
 
-Updated: 2026-07-17 05:04 Europe/Vilnius
+Updated: 2026-07-17 05:07 Europe/Vilnius
 
 Status: preparation started. Production ownership has not changed.
 
@@ -128,12 +128,25 @@ Result:
 
 ### 5. Pilot the product dispatcher
 
-Status: pending.
+Status: in progress.
 
 - Select one explicit pilot card.
 - Put the legacy dispatcher into a human hard freeze with no auto-resume.
 - Run product preflight and the full worker-to-reviewer pilot lifecycle.
 - Roll back on any ownership, claim, terminal, board audit or review-state divergence.
+
+Current checkpoint:
+
+- created exact pilot card `secretary-621`, "Guard incremental memory bootstrap semantics";
+- legacy pipeline is in manual freeze owned by `secretary-cutover`, with auto-resume ineligible and
+  no stopped heads;
+- the completed historical `secretary-513` pilot state was explicitly rolled back without
+  committing production ownership;
+- new attempt `attempt-20260717T020548Z-855b2902bba5` is in `new_pilot` phase;
+- product dispatcher claimed `secretary-621` as worker `secretary-621-memory-bootstrap-guard` in
+  `/home/dev/orca/workspaces/secretary/secretary-621-memory-bootstrap-guard`;
+- last observe: card `in_progress`, old owner paused, no divergences. Worker/reviewer completion is
+  not yet proven.
 
 ### 6. Commit production ownership
 
@@ -163,3 +176,5 @@ Status: pending.
   Orca registrations explicitly adopted. Live owners unchanged.
 - 2026-07-17 05:04: step 4 completed. Memory and backup owners switched to product units; real MCP,
   memory parity and systemd backup smoke are green.
+- 2026-07-17 05:07: step 5 started. `secretary-621` claimed by fresh product pilot attempt; observe
+  is clean and legacy remains frozen.
