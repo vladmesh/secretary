@@ -149,6 +149,10 @@ class FakeHost:
         self.reviews.append(task["ref"])
         return f"review:{task['ref']}"
 
+    def restart_worker(self, task: dict, record) -> str:
+        self.prepared.append(task["ref"])
+        return f"rework:{task['ref']}"
+
     def review_running(self, task: dict, record) -> bool:
         return task["ref"] in self.reviews
 
@@ -846,6 +850,47 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(neighbor["state"], "ready")
         self.assertIsNone(neighbor["claim"]["worker"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_red_review_relaunches_worker_for_rework(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="first report",
+            request_id="worker-done-first",
+        )
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix the hermetic test",
+            request_id="review-red",
+        )
+
+        relaunched = self.runtime.tick(self.selector)
+
+        self.assertEqual(relaunched["action"], "rework-started")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="rework report",
+            request_id="worker-done-rework",
+        )
+        advanced = self.runtime.tick(self.selector)
+
+        self.assertEqual(advanced["to"], "validate")
 
     def test_rollback_after_claim_preserves_board_state_and_claim(self) -> None:
         self.start_pilot()

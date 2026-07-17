@@ -214,6 +214,27 @@ class CommandHostRuntime:
         )
         return {"workspace": workspace, "handle": handle, "base_branch": base}
 
+    def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+        """Launch rework in the existing workspace without recreating its branch."""
+        workspace = Path(record.workspace)
+        if self.mode == "noop":
+            workspace.mkdir(parents=True, exist_ok=True)
+        elif not workspace.is_dir():
+            raise HostError("rework workspace is missing")
+        base = self.catalog.default_branch(
+            task["project"], task.get("workspace", {}).get("base_branch")
+        )
+        self._write_prompt(workspace / "TASK.md", self._worker_prompt(task, base, record.attempt_id))
+        return self._launch(
+            str(workspace),
+            f"{task['ref']} worker rework",
+            record.head,
+            "TASK.md",
+            role="worker",
+            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            codex_mode=task.get("routing", {}).get("codex_launch_mode"),
+        )
+
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         if not record.workspace:
             raise HostError("review workspace is unavailable")
@@ -671,7 +692,7 @@ class DispatcherRuntime:
         if task["state"] == "in_progress":
             return self._advance_worker(task, records, payload, attempt_id)
         if task["state"] == "validate":
-            return self._advance_review(task, records, attempt_id)
+            return self._advance_review(task, records, payload, attempt_id)
         records.pop(ref, None)
         return {
             "status": "ok",
@@ -855,6 +876,7 @@ class DispatcherRuntime:
         self,
         task: dict[str, Any],
         records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
@@ -877,6 +899,7 @@ class DispatcherRuntime:
             records.pop(ref, None)
             return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
         if marker == "review:red":
+            self.host.stop(record)
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -891,8 +914,38 @@ class DispatcherRuntime:
                 ),
             )
             record.comment_baseline = len(task.get("comments") or [])
+            moved = self.reader.show(ref)
+            try:
+                record.handle = self.host.restart_worker(moved, record)
+            except HostError as exc:
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=f"dispatcher rework bring-up failed: {scrub_host_output(str(exc))}",
+                    request_id=_attempt_request_id(
+                        record.attempt_id or attempt_id, "rework-blocked", ref
+                    ),
+                )
+                records.pop(ref, None)
+                self._save_records(payload, records)
+                return {
+                    "status": "blocked",
+                    "step": "review",
+                    "pilot_ref": ref,
+                    "reason": "rework bring-up failed",
+                }
             record.state = "claimed"
-            return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "in_progress"}
+            records[ref] = record
+            self._save_records(payload, records)
+            return {
+                "status": "ok",
+                "step": "review",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": "rework-started",
+            }
         if record.state == "review_starting":
             return _recover_review_launch(self, task, records, record, attempt_id)
         if record.state != "reviewing":
