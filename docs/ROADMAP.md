@@ -1,51 +1,202 @@
 # Roadmap
 
-Это outcome-level план, не копия доски. Карточки остаются единственным исполняемым источником
-работы; при подготовке изменения читать доску через её protocol.
+Roadmap описывает последовательность продуктовых состояний, а не очередь карточек. Единственный
+активный backlog проекта находится на Pipeline board и читается через `secretary task`. Переход
+карточки в Ready означает включение в выбранный спринт.
 
-Разрыв между текущим appliance и разворачиваемым внешним продуктом описан отдельно в
-[Product gaps](PRODUCT-GAPS.md). Этот roadmap фиксирует направления работы, а gap-анализ задаёт
-productization acceptance gate и приоритеты P0–P2.
+## Текущий baseline
 
-## 1. Завершить controlled cutover
+На рабочем VPS `secretary` уже владеет production dispatcher, memory service, фоновой
+автоматизацией и backup runtime. Task lifecycle, worker/reviewer loop, memory journal, onboarding,
+host planning и archive restore доказаны кодом и эксплуатацией. Off-host restore дошёл до загрузки
+production embedding model; target с 1.9 GiB RAM оказался недостаточным.
 
-Сделать `secretary` и `secretary-instance` единственными operational repositories только после
-свежего backup, зелёных doctor/memory/backup checks, одного pilot-card и rollback window. Убрать
-legacy runtime dependencies, writers и host owners после подтверждённого результата, а не в ходе
-install или test. Provenance: `secretary-602`, `secretary-613`.
+Продукт пока нельзя развернуть с нуля одной поддержанной командой. Instance, host resources,
+Kanboard, Orca, credentials, units и расписания всё ещё требуют ручных переходов. Текущая
+переносимость доказана как набор компонентов, но не оформлена в пользовательский delivery flow.
 
-## 2. Укрепить data и recovery boundary
+## Milestone 1. Автоматическая новая установка
 
-Довести parity raw Kanboard dump и normalized export, безопасную публикацию memory index,
-manifest/model/dimension verification и исключение конкурирующих index writers. Отдельно
-проверить path/config loading, Git environment isolation и data-entry outcomes. Provenance:
-`secretary-535`, `574`, `578`, `584`, `605`, `609`, `610`, `613`; `memory-mcp-323`,
-`587`–`593`.
+### Outcome
 
-## 3. Укрепить agent и pipeline runtime до decommission
+Одна bootstrap-команда устанавливает appliance на поддерживаемый чистый VPS. Installer создаёт
+выбранного dedicated OS user, private instance repository и локальный data plane, ставит Kanboard,
+Orca, memory service, dispatcher, фоновые роли и расписания. Ни одна голова не устанавливается
+автоматически.
 
-Снизить blast radius credentials, закрыть self-kill и force-push классы, сделать паузу,
-watchdog, review retries, health probes, terminal cleanup и recovery наблюдаемыми и
-идемпотентными. Сохранять один owner на automation и не превращать feedback в auto-fix.
-Provenance: `triggered-agents-246`, `263`, `270`, `286`, `288`, `331`, `340`, `341`, `360`,
-`375`, `401`, `405`, `411`, `458`, `463`, `484`, `491`, `546`.
+### Пользовательский путь
 
-## 4. Свести документацию и delivery roles
+```text
+install secretary
+  -> choose installation user and private remote
+  -> fill credentials/.env
+  -> apply
+  -> status
+```
 
-Перенести только действующие contracts в product/instance docs, а project-specific history
-оставить в её репозиториях. Проверить sync role skills, memory availability в heads, актуальные
-model profiles и non-interactive bring-up. Provenance: `triggered-agents-421`, `424`, `453`,
-`498`, `565`, `616`; `control-panel-351`; `panelmem-kb-617`.
+### Acceptance gate
 
-## Planned: routing models
+- Поддержанный Ubuntu/Debian host не содержит заранее подготовленных `/home/dev`, checkout'ов,
+  board или Orca state.
+- Все host paths и resource names выводятся из instance и обнаруженного host context.
+- Bundled Kanboard, Orca, memory, dispatcher, curator, steward, retro и schedules поднимаются без
+  ручного копирования units и редактирования generated files.
+- Повторный apply идемпотентен, а существующий installation user вызывает явный adopt/recover gate.
+- Установка без голов является валидным и наблюдаемым состоянием.
 
-Automatic family selection и quota-driven routing не входят в текущий protocol. Пока карточка
-несёт явный head/review-head, а runtime применяет instance profiles и их fallback. Позже можно
-добавить нормализованную complexity, family preference, quota telemetry, объяснимое resolution и
-эскалацию после failed review. Это будущая работа, а не описание текущего поведения.
+### Decision gates
 
-## Отложено
+- Точный package/install transport и поддерживаемая версия Orca.
+- Минимальные CPU, RAM и disk requirements для production memory profile.
 
-Не строить automatic subscription balancing, container secret broker, broad multi-instance lease
-или asynchronous stand-run без измеримого operational need. Security isolation и secrets policy
-сначала проходят отдельный design review.
+## Milestone 2. Git-backed recovery
+
+### Outcome
+
+Приватный instance repository становится автоматическим durable checkpoint конфигурации и
+нормализованного состояния. Основной recovery path не требует отдельного S3 bucket или backup
+host. Archive backup остаётся переходной страховкой до достижения parity, а не вторым
+равноправным контрактом.
+
+### Пользовательский путь
+
+```text
+install secretary
+  -> recover from private remote
+  -> fill credentials/.env
+  -> rebuild derived state
+  -> status
+```
+
+### Acceptance gate
+
+- Checkpoint содержит instance config, persona, project/head registry, policies, board export,
+  memory facts и необходимый run/audit state.
+- Vector index, терминалы, worktrees, generated units и host-local caches не считаются каноном.
+- Snapshot проходит validation до commit и push; remote divergence и push failure остаются
+  fail-closed и видны в status вместе с checkpoint lag.
+- Потеря исходного VPS не мешает восстановить доску, память и operational configuration из remote.
+- После подтверждённой parity основной UX и документация больше не требуют archive bundle/offsite
+  transport.
+
+### Decision gates
+
+- Допустимый recovery point objective и checkpoint cadence.
+- Нужен ли позднее optional cold archive для raw transcripts и artifacts.
+
+## Milestone 3. Подключение голов и explainable routing
+
+### Outcome
+
+Пользователь добавляет головы после bootstrap. Система обнаруживает установленный CLI или предлагает
+установку, проводит внешний auth flow, проверяет capabilities и создаёт runnable profiles.
+Маршрутизация выбирает голову и account без участия нейронной модели.
+
+### Пользовательский путь
+
+```text
+secretary head add
+  -> discover or install runtime
+  -> authenticate account
+  -> create account pool and profile
+  -> probe
+```
+
+### Acceptance gate
+
+- Модель различает agent runtime, account, account pool и head profile; runtime не приравнивается к
+  model provider.
+- Карточка выбирает `light`, `standard` или `deep`, но может явно задать model или head.
+- Router сначала применяет overrides и hard availability constraints, затем учитывает мощность,
+  quota/reset state и предпочтение другого model family для review.
+- Account со статусом `unknown` доступен оптимистично; quota/auth/transient failures переводят его
+  в объяснимое circuit-breaker состояние.
+- Каждый run хранит resolved runtime, model, account и decision trace.
+
+### Decision gates
+
+- Источники quota telemetry для каждого runtime.
+- Политики автоматической ротации accounts после накопления эксплуатационных данных.
+
+## Milestone 4. Ежедневный control plane
+
+### Outcome
+
+Оператор управляет проектами, настройками и runtime через единый продуктовый интерфейс, не собирая
+низкоуровневые команды вручную. CLI остаётся первым интерфейсом; board и live terminal view
+покрывают работу и наблюдение.
+
+### Пользовательский путь
+
+```text
+add project
+  -> scan
+  -> propose adapter
+  -> provision
+  -> gate
+  -> smoke card
+```
+
+### Acceptance gate
+
+- Верхнеуровневый project workflow сворачивает текущие add/provision/gate стадии в resumable flow.
+- `secretary status` объединяет services, schedules, heads, quota state, projects, cards, memory и
+  checkpoint freshness; `doctor` остаётся строгой проверкой инвариантов.
+- Install, start, stop, logs, upgrade и uninstall доступны через product CLI.
+- Schedules и их единственный owner задаются централизованно и применяются идемпотентно.
+- Настройки меняются через валидируемые операции, даже пока каноном остаются файлы instance repo.
+
+### Decision gates
+
+- Когда нужен отдельный web control plane.
+- Когда Git-backed config стоит заменить control-plane database.
+
+## Milestone 5. Протокольные runtime boundaries
+
+### Outcome
+
+Зависимости от Kanboard, Orca и конкретных CLI локализованы за проверяемыми контрактами. Это не
+публичный plugin API, а возможность заменить backend без переписывания task и agent lifecycle.
+
+### Acceptance gate
+
+- Board adapter реализует normalized task model, transitions, audit, export и import contract.
+- Session protocol создаёт и перечисляет durable sessions, запускает process, стримит output,
+  принимает input, сообщает exit state, завершает process tree и reconciles orphaned state.
+- Head adapters реализуют discover/install/probe/launch/delivery/observe без смешивания с task
+  routing.
+- У каждого контракта есть backend-independent contract suite.
+- Отказ Orca UI не разрушает task state и recovery semantics.
+
+### Decision gates
+
+- Оставить Orca, перейти на существующую альтернативу, поддерживать fork или строить минимальный
+  собственный session backend.
+- Появилась ли реальная потребность во втором board backend и публичном extension API.
+
+## Milestone 6. Публичный open-source release
+
+### Outcome
+
+Новый пользователь может установить поддержанный release, пройти основной путь и понять границы
+без знания внутренней истории проекта.
+
+### Acceptance gate
+
+- Есть versioned package, release notes, compatibility matrix, schema/data migrations и rollback.
+- Clean-VM E2E проходит install, head onboarding, project add, worker/reviewer task, Git checkpoint
+  и recovery на втором target.
+- Документированы trusted single-user security boundary, credential scopes и agent host access.
+- Лицензия, contribution path, issue templates и минимальные deployment requirements опубликованы.
+- Пример не содержит private paths, accounts, projects или исторических repositories автора.
+
+### Decision gates
+
+- Какие telemetry можно собирать локально и только opt-in.
+- Как результаты продукта связываются с публичным профилем и консалтингом.
+
+## Поздние направления
+
+После основного delivery path можно добавлять Telegram и голос как новые entry channels, remote
+control plane для телефона, richer model-quality metrics и дополнительные deployment profiles.
+Командная работа, мультитенантный SaaS и собственная модель биллинга не входят в текущий roadmap.

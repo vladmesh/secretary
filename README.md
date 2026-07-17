@@ -1,18 +1,27 @@
 # secretary
 
-Product repository for the portable secretary appliance. It contains the CLI, schemas, task and
-memory protocols, dispatcher runtime, restore logic and generic skills. The private installation
-configuration is in `secretary-instance`; mutable state is in `secretary-data`.
+Portable personal appliance for running multiple AI agent heads across many projects from a remote
+VPS. The repository contains the CLI, task and memory protocols, dispatcher runtime, restore logic,
+schemas and generic skills.
 
-The product is currently prepared side-by-side. Installing or testing it does not switch the live
-board, dispatcher, services or timers.
+The current production installation runs from this product repository. Private installation
+configuration lives in `secretary-instance`; mutable runtime state lives in `secretary-data`.
+Productization now focuses on turning the proven setup into an automated install and recovery path.
 
 ## Documentation
 
+- [Vision](docs/VISION.md)
+- [Roadmap](docs/ROADMAP.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Protocols](docs/PROTOCOLS.md)
 - [Operations](docs/OPERATIONS.md)
-- [Roadmap](docs/ROADMAP.md)
 
-Install the CLI with `python3 -m pip install .`; the memory runtime is available with
-`python3 -m pip install '.[memory]'`.
+The Pipeline board is the only active backlog. Read project cards through the product protocol:
+
+```bash
+python3 -m secretary task list --project secretary
+```
+
+Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available
+with `python3 -m pip install '.[memory]'`. A supported clean-host installer is tracked in the
+Roadmap.
