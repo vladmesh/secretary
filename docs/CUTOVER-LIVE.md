@@ -161,6 +161,17 @@ Live finding:
 - production ownership has not been committed. The attempt must be rolled back, the rework launch
   fixed and covered by a test, then a fresh pilot must complete before step 5 can be marked done.
 
+Rework checkpoint:
+
+- fixed the dispatcher RED path so it stops the reviewer and relaunches a worker in the existing
+  workspace; added a focused regression test and ran the full 411-test suite;
+- fixed the pilot test on `pipeline/secretary-621`, verified it with a clean `HOME`, merged current
+  `main` into the branch and pushed it without rewriting history;
+- a first fresh attempt exposed a stale Orca-worktree collision and was rolled back without
+  committing ownership; both stale pilot worktrees were removed;
+- fresh attempt `attempt-20260717T022301Z-779138c5d504` now owns the card and recreated the expected
+  workspace. Last observe reports `in_progress`, legacy frozen and no divergences.
+
 ### 6. Commit production ownership
 
 Status: pending.
@@ -193,3 +204,6 @@ Status: pending.
   is clean and legacy remains frozen.
 - 2026-07-17 05:14: pilot exercised worker and reviewer paths, then found a rework relaunch bug after
   RED. Production commit stopped; fix and fresh pilot required.
+- 2026-07-17 05:23: dispatcher rework relaunch fixed and tested; pilot branch made hermetic. Stale
+  worktrees from the failed restart were removed. Fresh attempt `attempt-20260717T022301Z-779138c5d504`
+  is active with clean ownership observation.
