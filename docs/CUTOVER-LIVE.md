@@ -226,7 +226,7 @@ Result:
 
 ### 7. Rollback window and decommission
 
-Status: in progress.
+Status: completed except for the current terminal lifetime.
 
 - Keep legacy checkouts disabled but present for a short observation window.
 - Remove legacy services, timers and nonessential Orca registrations only after the checks remain
@@ -243,6 +243,19 @@ Current checkpoint:
 - removed the temporary `secretary-621` pilot worktree. Orca now has only this current control-panel
   terminal open;
 - the completed codegen megatest process and terminal were already absent at inspection time.
+
+Result:
+
+- removed all legacy `ta-*` unit files and the disabled `memory-mcp.service`; daemon ownership stays
+  with `secretary-memory.service`;
+- added explicit `decommission-old` state in `2144293`, so doctor distinguishes an absent legacy
+  owner from a missing freeze fence. Full suite is green at 414 tests;
+- recorded the live decommission fence and doctor returned status ok;
+- removed and purged `triggered-agents`, `memory-mcp` and `panelmem-kb`, freeing about 293 MiB. Orca
+  pruned their stale registrations after the paths disappeared;
+- `/home/dev/control-panel` is removed by the final command after this checkpoint is pushed. Its
+  current terminal may remain visible until this Codex session ends, but no legacy runtime owns
+  services, timers, memory, backups or task dispatch.
 
 ## Checkpoint log
 
@@ -280,3 +293,6 @@ Current checkpoint:
 - 2026-07-17 05:57: legacy `ta-*` timers disabled, idle shells closed and pilot worktree removed.
   Only the current control-panel terminal remains open. Permanent new secretary automation
   worktrees remain registered but idle.
+- 2026-07-17 06:01: legacy decommission recorded, doctor green, old unit files removed and legacy
+  memory/agent repositories purged. Final control-panel deletion scheduled immediately after this
+  pushed checkpoint.
