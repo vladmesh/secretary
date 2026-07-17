@@ -173,7 +173,15 @@ def build_parser() -> argparse.ArgumentParser:
     export_runs_command.add_argument("--data-dir")
     export_runs_command.add_argument(
         "--state-dir",
-        default="/home/dev/orca/workspaces/triggered-agents/pipeline/state",
+        default=str(
+            Path.home()
+            / "orca"
+            / "workspaces"
+            / "secretary"
+            / "pipeline"
+            / "state"
+            / "pipeline"
+        ),
     )
     export_runs_command.set_defaults(handler=run_export_runs)
 

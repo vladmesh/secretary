@@ -1376,6 +1376,18 @@ class ExportTests(unittest.TestCase):
         transcripts.assert_called_once_with(data_dir, copy=True)
         artifacts.assert_called_once_with(data_dir)
 
+    def test_default_pipeline_state_uses_secretary_workspace(self):
+        self.assertEqual(
+            data_module.PIPELINE_STATE_DIR,
+            Path.home()
+            / "orca"
+            / "workspaces"
+            / "secretary"
+            / "pipeline"
+            / "state"
+            / "pipeline",
+        )
+
 
 def subprocess_completed(stdout: str):
     return mock.Mock(stdout=stdout, stderr="", returncode=0)

@@ -526,6 +526,21 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["legacy_decommissioned"])
         self.assertEqual(payload["legacy_decommissioned_by"], "operator")
 
+    def test_production_tick_accepts_recorded_legacy_decommission_without_pause_file(self) -> None:
+        self.commit_cutover()
+        cutover = self.runtime.state.load()
+        cutover["legacy_decommissioned"] = True
+        self.runtime.state.save(cutover)
+        self.legacy_pause.set(
+            sufficient=False,
+            reason="legacy freeze pause file is missing",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["step"], "production-tick")
+
     def test_production_validate_recovery_with_review_intent_restarts_missing_reviewer(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 4

@@ -2,14 +2,10 @@
 
 ## Текущее состояние
 
-Code absorption подтверждён side-by-side. Product включает memory runtime, compatibility runtime,
-automation helpers и generic skills; instance владеет persona и memory settings. Это не cutover:
-живые `memory-mcp.service`, `ta-*`, production dispatcher и доска продолжают работать в legacy
-контуре.
-
-Нельзя выводить обратное из наличия package, systemd templates или успешного теста. Установка
-новых units, остановка старых owners, изменение board state и удаление checkout'ов требуют
-отдельной операторской процедуры.
+Live cutover завершён 2026-07-17. `secretary` владеет production dispatcher, memory daemon и
+backup runtime; `secretary-instance` хранит installation config, `secretary-data` хранит mutable
+данные. Legacy checkouts и units удалены. Подробный журнал и recovery checkpoints находятся в
+[CUTOVER-LIVE.md](CUTOVER-LIVE.md).
 
 ## Установка и проверка кода
 

@@ -199,10 +199,13 @@ def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[st
             "reason": "production cutover is not committed",
             "cutover_phase": cutover.get("phase", "new"),
         }
-    legacy_guard = runtime._legacy_pause_guard("production-guard")
-    if legacy_guard is not None:
-        legacy_guard["reason"] = "old dispatcher hard freeze is not confirmed: " + str(legacy_guard.get("reason") or "")
-        return legacy_guard
+    if not cutover.get("legacy_decommissioned"):
+        legacy_guard = runtime._legacy_pause_guard("production-guard")
+        if legacy_guard is not None:
+            legacy_guard["reason"] = "old dispatcher hard freeze is not confirmed: " + str(
+                legacy_guard.get("reason") or ""
+            )
+            return legacy_guard
     owner = str(payload.get("owner") or "")
     if owner and owner != runtime.owner:
         return {

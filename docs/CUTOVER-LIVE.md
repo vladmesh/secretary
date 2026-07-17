@@ -1,8 +1,8 @@
 # Live cutover journal
 
-Updated: 2026-07-17 05:14 Europe/Vilnius
+Updated: 2026-07-17 11:46 Europe/Vilnius
 
-Status: preparation started. Production ownership has not changed.
+Status: completed. Production ownership and all live runtime owners belong to `secretary`.
 
 ## Goal
 
@@ -226,7 +226,7 @@ Result:
 
 ### 7. Rollback window and decommission
 
-Status: completed except for the current terminal lifetime.
+Status: completed.
 
 - Keep legacy checkouts disabled but present for a short observation window.
 - Remove legacy services, timers and nonessential Orca registrations only after the checks remain
@@ -256,6 +256,19 @@ Result:
 - `/home/dev/control-panel` is removed by the final command after this checkpoint is pushed. Its
   current terminal may remain visible until this Codex session ends, but no legacy runtime owns
   services, timers, memory, backups or task dispatch.
+
+Post-decommission verification:
+
+- fixed the production guard to accept the durable `legacy_decommissioned` fence instead of
+  requiring a pause file from an absent legacy checkout;
+- changed backup and runs-export defaults to the canonical product pipeline state at
+  `/home/dev/orca/workspaces/secretary/pipeline/state/pipeline`;
+- full product suite passes with 417 tests;
+- repeated production dispatcher timer ticks return `status: ok` with owner
+  `secretary-production`;
+- a real systemd backup run created core/full archives
+  `secretary-backup-{core,full}-20260717T084506Z.tar.age` and exited successfully;
+- strict archive verification, pipeline pause-status, live doctor and memory parity are green.
 
 ## Checkpoint log
 
@@ -296,3 +309,7 @@ Result:
 - 2026-07-17 06:01: legacy decommission recorded, doctor green, old unit files removed and legacy
   memory/agent repositories purged. Final control-panel deletion scheduled immediately after this
   pushed checkpoint.
+- 2026-07-17 11:46: fixed both post-decommission legacy-path regressions. Full suite is green at
+  417 tests; dispatcher timer ticks and the real systemd backup service are successful. New core
+  and full archives were created and strict-verified, pipeline is unpaused, doctor and memory
+  verification are green. Cutover complete.
