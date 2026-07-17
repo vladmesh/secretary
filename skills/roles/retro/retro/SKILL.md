@@ -57,7 +57,6 @@ python3 -m triggered_agents retro harvest
 Перед формулировкой предложений подгрузи текущие карточки:
 
 ```
-set -a && . ~/secretary-instance/runtime.env && set +a
 python3 -m triggered_agents pipeline list --column "Идеи"
 python3 -m triggered_agents pipeline list --column "Ready"
 ```
@@ -70,11 +69,10 @@ python3 -m triggered_agents pipeline list --column "Ready"
 
 Если фейлов нет — так и напиши в вывод, ничего не создавай, иди на шаг 5.
 
-Иначе на каждый фейл — своя карточка в `Идеи` на доске Pipeline, через board-CLI (креды сорсишь
-сам, Orca их не прокидывает LLM-головам):
+Иначе на каждый фейл — своя карточка в `Идеи` на доске Pipeline, через board-CLI (board-креды уже
+проинжекчены role_env, отдельно сорсить не надо):
 
 ```
-set -a && . ~/secretary-instance/runtime.env && set +a
 python3 -m triggered_agents pipeline --role retro idea \
   --project <проект, чей скилл/инфра чинится> \
   --title "retro: <короткий фейл-паттерн>" \
