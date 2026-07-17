@@ -171,8 +171,19 @@ Rework checkpoint:
   committing ownership; both stale pilot worktrees were removed;
 - fresh attempt `attempt-20260717T022301Z-779138c5d504` now owns the card and recreated the expected
   workspace. Worker reported focused 3/3 and full 412/412 tests green. The dispatcher consumed the
-  report, moved the card to Validate and launched the independent reviewer. Legacy remains frozen
-  and the last ownership observation has no divergences.
+  report, moved the card to Validate and launched the independent reviewer. Reviewer returned GREEN
+  with no findings and the dispatcher moved the card to Done. Legacy remains frozen and the last
+  ownership observation has no divergences.
+
+Second pilot finding:
+
+- the worker protocol left the reviewed diff uncommitted, but the dispatcher still accepted GREEN
+  and moved the card to Done. This is a pipeline correctness bug: Done did not imply a durable Git
+  result;
+- the exact reviewed diff was committed manually and cherry-picked to `main` as `18628f3`; focused
+  3/3 and full 412/412 tests passed again on `main`;
+- production ownership remains uncommitted. Add a dispatcher Git durability gate and regression
+  test before continuing the cutover.
 
 ### 6. Commit production ownership
 
@@ -212,3 +223,6 @@ Status: pending.
 - 2026-07-17 05:37: fresh worker reported 3 focused and 412 full tests green. Product dispatcher
   moved `secretary-621` to Validate and launched the independent reviewer; production ownership is
   still uncommitted.
+- 2026-07-17 05:44: reviewer returned GREEN and the pilot reached Done, exposing that the dispatcher
+  accepted an uncommitted reviewed diff. The diff was preserved on `main` as `18628f3` and all 412
+  tests passed again. Production commit remains stopped pending a Git durability gate.
