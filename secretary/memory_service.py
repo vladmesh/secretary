@@ -770,7 +770,7 @@ def memory_search(query: str, k: int = 5, scope: str = "", caller: str = "") -> 
     """Semantic search over shared memory. Returns up to k closest entries with scores.
 
     scope: optional filter, "global", "project:<dir>" or bare project dir name
-    (e.g. "orca", "triggered-agents"). Search your own project's scope first,
+    (e.g. "orca", "secretary"). Search your own project's scope first,
     then retry without scope. k is clamped to 10. caller: your role (worker/reviewer/
     steward/secretary/curator), telemetry only, always pass it."""
     # Кап выдачи (решение vladmesh 2026-07-11): скоры у ранжировщика лежат в узкой полке

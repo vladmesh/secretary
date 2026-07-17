@@ -102,7 +102,7 @@ def stand_branch(project: str) -> str:
 # память») -----------------------------------------------------------------------------------
 # Shared between worker's TASK.md and reviewer's REVIEW.md so the wording/order/caller contract
 # stays one source of truth; the steward skill (static markdown, no per-card project) mirrors it
-# by hand with scope="project:triggered-agents".
+# by hand with scope="project:secretary".
 
 
 def memory_block(role: str, project: str) -> str:

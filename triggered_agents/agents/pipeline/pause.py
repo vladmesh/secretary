@@ -87,7 +87,7 @@ def _candidate_pause_files() -> list[Path]:
     paths.add(_checkout_root() / "state" / "pipeline" / "pause.json")
 
     workspaces_root = Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
-    agents_root = workspaces_root / "triggered-agents"
+    agents_root = workspaces_root / "secretary"
     if agents_root.is_dir():
         paths.update(agents_root.glob("*/state/pipeline/pause.json"))
     return sorted(paths, key=lambda p: str(p))

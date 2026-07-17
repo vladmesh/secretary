@@ -188,7 +188,7 @@ def _worker_id(card: dict) -> str:
 
 def _ff_agent_worktrees() -> None:
     """Fast-forward every triggered-agent's own worktree (curator/pipeline/retro/steward/...) to
-    origin/main — the manual step this replaces ("push to triggered-agents, then go ff every
+    origin/main — the manual step this replaces ("push to secretary, then go ff every
     agent worktree by hand or the automations keep running stale code"). Runs on every precheck,
     independent of board state, so a quiet board (the common case) never leaves it undone: this
     is the one hook that fires on every timer tick regardless of what precheck returns.
@@ -202,7 +202,7 @@ def _ff_agent_worktrees() -> None:
     missing manifest, a gone worktree, a hung git) is logged and swallowed, never allowed to turn
     into a precheck error."""
     try:
-        base = worker.read_base_branch("triggered-agents")
+        base = worker.read_base_branch(os.environ.get("SECRETARY_META_PROJECT", "secretary"))
         worktrees = worker.list_agent_worktrees()
     except Exception as e:  # noqa: BLE001 — must never break precheck's own board check
         STATE.log_run("ff-agents", result="error", level="warn", error=worker.scrub_secrets(str(e)))

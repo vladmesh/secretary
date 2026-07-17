@@ -16,9 +16,8 @@ _variant_service_unit) instead of reimplementing the rendering: two independentl
 renderers of the same unit text would drift from EACH OTHER as much as from the host, defeating
 the whole point of this check. Reads specs from THIS process's own checkout (the steward's named
 worktree, kept current by the pipeline dispatcher's every-tick fast-forward,
-worker._ff_agent_worktrees) rather than the canonical ~/triggered-agents checkout, which nothing
-keeps up to date between provision runs and would otherwise make every comparison stale by
-definition.
+worker._ff_agent_worktrees) rather than a central checkout that nothing keeps up to date between
+provision runs and would otherwise make every comparison stale by definition.
 """
 from __future__ import annotations
 

@@ -255,7 +255,7 @@ def _launch_cmd(agent: str, variant: str | None = None,
 
 
 def _steward_report_card(agent: str, variant: str | None) -> str | None:
-    """Create the steward's own wake-up report card (project triggered-agents, non-code type,
+    """Create the steward's own wake-up report card (project secretary, non-code type,
     straight into In progress, already claimed by itself — see pipeline.ops.create_report_card)
     right before a dispatch actually reaches the head. None for every agent but steward
     (triggered-agents-255): the rest keep their existing dispatch untouched.
@@ -326,7 +326,8 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str,
         from ..agents.steward import signals as steward_signals
 
         threshold = steward_signals.STALE_HOURS * 3600
-        for card in pipeline_ops.list_cards(column="In progress", project="triggered-agents"):
+        meta_project = os.environ.get("SECRETARY_META_PROJECT", "secretary")
+        for card in pipeline_ops.list_cards(column="In progress", project=meta_project):
             moved = card.get("date_moved")
             if card.get("steward_report") != "1" or not moved or now - moved >= threshold:
                 continue

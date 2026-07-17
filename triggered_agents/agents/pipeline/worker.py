@@ -188,7 +188,7 @@ def ci_expected(project: str) -> bool:
 # creates it, pinned to origin/main at provision time). Agents never commit to this repo, so from
 # then on the worktree only needs to move forward with origin — the dispatcher's precheck does
 # that on every tick instead of a human doing it by hand after every push.
-AGENTS_ROOT = WORKSPACES_ROOT / "triggered-agents"
+AGENTS_ROOT = WORKSPACES_ROOT / "secretary"
 _AGENTS_SPEC_DIR = Path(__file__).resolve().parents[2] / "agents"
 
 

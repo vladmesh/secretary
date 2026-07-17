@@ -54,7 +54,12 @@ class OpenRouterKeyTests(unittest.TestCase):
 class PauseCandidateTests(unittest.TestCase):
     def test_live_pause_candidates_drop_removed_checkout(self):
         dead = Path.home() / "triggered-agents" / "state" / "pipeline" / "pause.json"
-        with mock.patch.dict(os.environ, {}, clear=False):
+        # Pin the checkout root to a neutral path: the real worktree can itself sit under a
+        # directory whose name contains "triggered-agents" (a task branch), which would otherwise
+        # false-match the substring guard below without any dead path actually being scanned.
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(pause, "_checkout_root", return_value=Path(tmp)), \
+             mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TA_STATE", None)
             candidates = pause._candidate_pause_files()
         self.assertNotIn(dead, candidates)
@@ -74,6 +79,33 @@ class PauseCandidateTests(unittest.TestCase):
         self.assertNotIn(abs_dead, candidates)
         self.assertFalse(any(str(p).endswith("triggered-agents/state/pipeline/pause.json")
                              for p in candidates))
+
+    def test_live_pause_candidates_scan_secretary_agent_worktrees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
+            live.parent.mkdir(parents=True)
+            live.write_text("{}", encoding="utf-8")
+            dead_root = root / "triggered-agents"
+            with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root)}, clear=False):
+                os.environ.pop("TA_STATE", None)
+                candidates = pause._candidate_pause_files()
+        self.assertIn(live, candidates)
+        self.assertFalse(any(dead_root in p.parents for p in candidates))
+
+    def test_legacy_pause_candidates_point_at_secretary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dead_root = root / "triggered-agents"
+            clear = ("SECRETARY_LEGACY_PAUSE_FILE", "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
+                     "TA_PIPELINE_STATE_DIR", "TA_STATE")
+            with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root)}, clear=False):
+                for name in clear:
+                    os.environ.pop(name, None)
+                candidates = dispatcher_pause._legacy_pause_candidates()
+        expected = root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
+        self.assertIn(expected, candidates)
+        self.assertFalse(any(dead_root in p.parents for p in candidates))
 
 
 class ProvisionTests(unittest.TestCase):

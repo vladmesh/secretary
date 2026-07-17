@@ -177,11 +177,11 @@ For CLI-only workers you drive yourself (the user need not see them), background
 To see what a worker is doing without disturbing it (no keys sent, no lifecycle mail), use one of two read-only channels:
 
 - Terminal buffer: `orca terminal read --terminal <handle> [--cursor <n>] [--limit <n>] [--json]` returns a bounded `tail` plus `nextCursor` for incremental reads (pass the previous `nextCursor` to get only new output). Get the handle from `orca terminal list --worktree <selector> --json`. This is the raw rendered screen: fine for a bare shell, but for an agent TUI (Claude/Codex) it is mostly box-drawing chrome, not the transcript.
-- Session transcript (better for Claude workers): a headless Claude worker appends a structured JSONL you can tail. Path is `~/.claude/projects/-<cwd>/<uuid>.jsonl`, where `<cwd>` is the worker's working directory with every `/` replaced by `-` and a leading `-` (e.g. `/home/dev/orca/workspaces/triggered-agents/board` -> `-home-dev-orca-workspaces-triggered-agents-board`). The newest `*.jsonl` is the live session. Each line is a turn: assistant lines carry `text` and `tool_use` blocks (tool name + input), user lines carry `tool_result`. Tailing it shows exactly which tools and subagents the worker is driving in real time, including its own fan-out.
+- Session transcript (better for Claude workers): a headless Claude worker appends a structured JSONL you can tail. Path is `~/.claude/projects/-<cwd>/<uuid>.jsonl`, where `<cwd>` is the worker's working directory with every `/` replaced by `-` and a leading `-` (e.g. `/home/dev/orca/workspaces/secretary/curator` -> `-home-dev-orca-workspaces-secretary-curator`). The newest `*.jsonl` is the live session. Each line is a turn: assistant lines carry `text` and `tool_use` blocks (tool name + input), user lines carry `tool_result`. Tailing it shows exactly which tools and subagents the worker is driving in real time, including its own fan-out.
 
 Both are read-only and safe during a run. Never write to the JSONL or send keys to a worker's terminal just to check on it. Re-read the tail to poll; do not block on `tail -f` in a foreground shell.
 
-For automation-launched heads whose terminal tab is not materialized in your client (headless serve; triggered-agents like `board`/`curator`), the on-disk JSONL is the reliable channel. Subagents the worker spawns write their own transcript under the worker's `tasks/<id>.output`.
+For automation-launched heads whose terminal tab is not materialized in your client (headless serve; runtime agents like `curator`/`steward`), the on-disk JSONL is the reliable channel. Subagents the worker spawns write their own transcript under the worker's `tasks/<id>.output`.
 
 Compact JSONL reader (arg = worker cwd):
 

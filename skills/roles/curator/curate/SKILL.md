@@ -1,6 +1,6 @@
 ---
 name: curate
-description: Процедура куратора памяти — из свежих транскриптов вытащить durable-факты, дедупнуть, записать в канон panelmem-kb. Запускается автоматизацией Orca (Claude/Sonnet) в воркспейсе ~/orca/workspaces/triggered-agents. Куратор — первый плагин рантайма triggered-agents.
+description: Процедура куратора памяти — из свежих транскриптов вытащить durable-факты, дедупнуть, записать в канон panelmem-kb. Запускается автоматизацией Orca (Claude/Sonnet) в воркспейсе ~/orca/workspaces/secretary/curator. Куратор — первый плагин рантайма секретаря.
 ---
 
 # Куратор памяти
@@ -72,8 +72,8 @@ watermark. «Нет новых ходов» → работы нет, выход�
 
 Scope — по системе-хозяину факта:
 - `project:<dir>` — проект из `~/projects` (dir = имя папки) ИЛИ системный репо:
-  `triggered-agents`, `control-panel`, `memory-mcp`, `orca`. Факт про пайплайн задач —
-  `project:triggered-agents`, про Orca — `project:orca`, и так далее.
+  `secretary`, `orca`. Факт про пайплайн задач (доска/рантайм/куратор/секретарь) —
+  `project:secretary`, про Orca — `project:orca`, и так далее.
 - `global` — только действительно кросс-системное: юзер, VPS, конвенции, воронка.
   Если у факта есть очевидный репо-хозяин — он НЕ global.
 
@@ -158,8 +158,8 @@ python3 -m triggered_agents curator advance
 
 - **Не задавай уточняющих вопросов.** Это headless-прогон без человека рядом — вопрос повесит
   сессию. Действуй по лучшему суждению; сомнительный факт лучше пропусти, чем спрашивать.
-- Себя не харвестишь: воркстри triggered-agents (`~/orca/workspaces/triggered-agents/*`) исключены
-  из discovery по cwd — и для транскриптов, и для личной памяти по проектам (проверь `sessions`).
+- Себя не харвестишь: воркстри агентов рантайма (`~/orca/workspaces/secretary/{curator,pipeline,retro,steward}`)
+  исключены из discovery по cwd — и для транскриптов, и для личной памяти по проектам (проверь `sessions`).
   Исключение по cwd не действует на глобальную память Hermes (`~/.hermes/memories/*.md`) — у неё
   нет cwd; если туда попадёт заметка из прогона пайплайна, отбраковывай её обычной планкой durable,
   а не считай багом discovery.
