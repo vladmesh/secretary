@@ -190,7 +190,7 @@ Second pilot finding:
 
 ### 6. Commit production ownership
 
-Status: in progress.
+Status: completed.
 
 - Commit cutover only after the pilot is green.
 - Enable the product production dispatcher/timer and verify exactly one owner.
@@ -213,6 +213,16 @@ Production unit finding:
   occurred;
 - fixed the packaged unit and desired-host runtime to use one-shot `production-tick` in `62431ac`.
   Host tests and the full 413-test suite pass. Reinstall the corrected unit before continuing.
+
+Result:
+
+- corrected production service and timer are installed, enabled and active. A manual service start
+  completed in about five seconds with `production-tick` status ok; the timer is waiting;
+- production unit ownership is recorded in `host-managed.json`; live doctor reports status ok;
+- memory parity is 233 journal/export/index facts with a clean journal;
+- latest core and full archives pass strict verification;
+- board write/read smoke succeeded by appending and reading a dispatcher comment on `secretary-621`;
+- legacy dispatcher remains frozen. It can now be removed instead of resumed.
 
 ### 7. Rollback window and decommission
 
@@ -254,3 +264,6 @@ Status: pending.
 - 2026-07-17 05:53: first production timer smoke exposed a persistent-loop/oneshot mismatch. New
   timer was disabled and service stopped; corrected to `production-tick` in `62431ac`, 413 tests
   green. No legacy or task owner was resumed.
+- 2026-07-17 05:56: corrected production timer active and waiting; doctor, memory parity, strict
+  core/full backup verification and board write/read smoke are green. Step 6 complete; legacy can
+  be decommissioned without resume.
