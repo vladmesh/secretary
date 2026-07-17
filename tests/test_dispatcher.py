@@ -124,6 +124,7 @@ class FakeHost:
         self.prepared: list[str] = []
         self.reviews: list[str] = []
         self.stopped: list[str] = []
+        self.torn_down: list[str] = []
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
         self.fail_result_reason = ""
@@ -169,6 +170,10 @@ class FakeHost:
 
     def stop(self, record) -> None:
         self.stopped.append(record.worker)
+
+    def teardown(self, record) -> None:
+        self.stop(record)
+        self.torn_down.append(record.worker)
 
 
 class FakeLegacyPause:
@@ -892,6 +897,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(neighbor["state"], "ready")
         self.assertIsNone(neighbor["claim"]["worker"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+        self.assertEqual(self.host.torn_down, self.host.stopped)
+        self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
     def test_red_review_relaunches_worker_for_rework(self) -> None:
         self.start_pilot()
@@ -921,6 +928,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
         self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.torn_down, [], "rework must reuse the workspace, not tear it down")
 
         self.writer.report(
             role="worker",
@@ -1309,6 +1317,29 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertEqual(branch, _legacy_worker_branch("secretary-510-pilot"))
         self.assertEqual(host.launched, [("codex", "TASK.md")])
+
+    def test_report_request_id_is_distinct_per_review_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "description": "body",
+                "workspace": {"base_branch": "main"},
+            }
+            first = host._worker_prompt(task, "main", "attempt-1", 0)
+            rework = host._worker_prompt(task, "main", "attempt-1", 2)
+
+        def rid(text: str) -> str:
+            start = text.index("--request-id ") + len("--request-id ")
+            return text[start:].split()[0]
+
+        # Same attempt, different review round: the report request-id must differ, or the
+        # rework done-report is idempotently deduped against the pre-review one and the
+        # dispatcher waits for a report that never lands.
+        self.assertNotEqual(rid(first), rid(rework))
+        self.assertTrue(rid(first).endswith("-0"))
+        self.assertTrue(rid(rework).endswith("-2"))
 
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")

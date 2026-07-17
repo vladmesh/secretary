@@ -224,7 +224,7 @@ class CommandHostRuntime:
         base = self.catalog.default_branch(
             task["project"], task.get("workspace", {}).get("base_branch")
         )
-        self._write_prompt(workspace / "TASK.md", self._worker_prompt(task, base, record.attempt_id))
+        self._write_prompt(workspace / "TASK.md", self._worker_prompt(task, base, record.attempt_id, record.review_baseline))
         return self._launch(
             str(workspace),
             f"{task['ref']} worker rework",
@@ -291,6 +291,19 @@ class CommandHostRuntime:
             return
         try:
             self._run_json(["orca", "terminal", "stop", "--worktree", f"path:{record.workspace}", "--json"])
+        except HostError:
+            pass
+
+    def teardown(self, record: DispatcherRecord) -> None:
+        """Done-path cleanup after a green merge: stop the worktree's terminals (killing
+        the worker and reviewer heads plus their child shells and subagents via the PTY
+        tree) and remove the worktree from Orca and git. Never used on rework, which
+        reuses the workspace."""
+        if self.mode == "noop" or not record.workspace:
+            return
+        self.stop(record)
+        try:
+            self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"])
         except HostError:
             pass
 
@@ -386,9 +399,12 @@ class CommandHostRuntime:
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
 
-    def _worker_prompt(self, task: dict[str, Any], base: str, attempt_id: str) -> str:
+    def _worker_prompt(self, task: dict[str, Any], base: str, attempt_id: str, review_round: int = 0) -> str:
         branch = _legacy_worker_branch(task["ref"])
-        request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"])
+        # review_round keeps the report request-id distinct per rework round: a rework
+        # reuses the same attempt_id, so without it the second done-report collides with
+        # the first and is idempotently deduped, leaving the dispatcher waiting forever.
+        request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
         return "\n".join([
             f"# Task {task['ref']}",
             "",
@@ -949,7 +965,7 @@ class DispatcherRuntime:
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
             self.host.complete_green(task, record)
-            self.host.stop(record)
+            self.host.teardown(record)
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
