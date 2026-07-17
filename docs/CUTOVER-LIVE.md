@@ -1,6 +1,6 @@
 # Live cutover journal
 
-Updated: 2026-07-17 04:49 Europe/Vilnius
+Updated: 2026-07-17 04:51 Europe/Vilnius
 
 Status: preparation started. Production ownership has not changed.
 
@@ -54,11 +54,15 @@ terminal or after this session has ended.
 
 ### 1. Publish recoverable documentation and code
 
-Status: in progress.
+Status: completed.
 
 - Push `secretary` and `secretary-instance` commits without rewriting history.
 - Confirm both remotes contain this journal and the consolidated documentation.
 - Do not mix the divergent codegen checkout into the cutover.
+
+Result: `secretary` through `b4dad69` and `secretary-instance` through `c2ab05b` are published on
+their `origin/main` branches. Both local branches match their remotes. The codegen checkout was not
+changed or pushed during this step.
 
 ### 2. Capture a cutover backup
 
@@ -117,3 +121,4 @@ Status: pending.
 ## Checkpoint log
 
 - 2026-07-17 04:49: journal created. No live owner or service changed.
+- 2026-07-17 04:51: step 1 completed. Product, instance and this recovery journal pushed to GitHub.
