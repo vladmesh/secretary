@@ -600,6 +600,7 @@ class DispatcherRuntime:
             "phase": payload.get("phase", "new"),
             "new_owner": payload.get("new_owner"),
             "old_owner_paused": bool(payload.get("old_owner_paused")),
+            "legacy_decommissioned": bool(payload.get("legacy_decommissioned")),
             "task": None if task is None else {
                 "state": task["state"],
                 "claim": task["claim"],
@@ -643,6 +644,29 @@ class DispatcherRuntime:
             payload["cutover_committed_by"] = actor
             self.state.save(payload)
         return {"status": "ok", "step": "commit-cutover", "pilot_ref": selector.reference, "phase": "cutover_committed"}
+
+    def decommission_old(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
+        with file_lock(self.state.tick_lock):
+            payload = self.state.load()
+            guard = self._pilot_guard(payload, selector)
+            if guard is not None:
+                return guard
+            if payload.get("phase") != "cutover_committed":
+                return {"status": "blocked", "step": "decommission-old", "reason": "cutover is not committed"}
+            production = self.production_state.load()
+            if production.get("phase") != "production" or not production.get("owner"):
+                return {"status": "blocked", "step": "decommission-old", "reason": "production owner is not active"}
+            payload["legacy_decommissioned"] = True
+            payload["legacy_decommissioned_at"] = now_rfc3339()
+            payload["legacy_decommissioned_by"] = actor
+            self.state.save(payload)
+        return {
+            "status": "ok",
+            "step": "decommission-old",
+            "pilot_ref": selector.reference,
+            "phase": "cutover_committed",
+            "legacy_decommissioned": True,
+        }
 
     def rollback(self, selector: PilotSelector, *, actor: str, reason: str) -> dict[str, Any]:
         with file_lock(self.state.tick_lock):

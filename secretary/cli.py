@@ -499,10 +499,14 @@ def print_dispatcher_status(
     print(f"  production owner: {production_owner or '(none)'}")
 
     if cutover_committed and inspect_live:
-        legacy_pause = FileLegacyPauseProbe().snapshot()
-        print(f"  legacy freeze: {'confirmed' if legacy_pause.sufficient else 'not confirmed'}")
-        if production_owner and not legacy_pause.sufficient:
-            findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
+        legacy_decommissioned = bool(pilot.get("legacy_decommissioned"))
+        if legacy_decommissioned:
+            print("  legacy dispatcher: decommissioned")
+        else:
+            legacy_pause = FileLegacyPauseProbe().snapshot()
+            print(f"  legacy freeze: {'confirmed' if legacy_pause.sufficient else 'not confirmed'}")
+            if production_owner and not legacy_pause.sufficient:
+                findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
         if not production_owner:
             findings.append("production owner fence is missing after cutover")
         findings.extend(_production_host_findings(report, data_dir, collected_host))

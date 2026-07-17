@@ -504,6 +504,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("singleton lock", result["reason"])
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
 
+    def test_decommission_old_requires_active_production_owner_and_records_fence(self) -> None:
+        self.commit_cutover()
+
+        blocked = self.runtime.decommission_old(self.selector, actor="operator")
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "production owner is not active")
+
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "secretary-production",
+            "records": {},
+        })
+        result = self.runtime.decommission_old(self.selector, actor="operator")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["legacy_decommissioned"])
+        payload = self.runtime.state.load()
+        self.assertTrue(payload["legacy_decommissioned"])
+        self.assertEqual(payload["legacy_decommissioned_by"], "operator")
+
     def test_production_validate_recovery_with_review_intent_restarts_missing_reviewer(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 4

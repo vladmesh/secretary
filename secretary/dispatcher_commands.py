@@ -28,6 +28,7 @@ def add_dispatcher_subcommands(subparsers) -> None:
         ("tick", run_dispatcher_tick),
         ("observe", run_dispatcher_observe),
         ("commit-cutover", run_dispatcher_commit_cutover),
+        ("decommission-old", run_dispatcher_decommission_old),
         ("rollback", run_dispatcher_rollback),
     ):
         command = commands.add_parser(name)
@@ -103,6 +104,10 @@ def run_dispatcher_observe(args: argparse.Namespace) -> int:
 
 def run_dispatcher_commit_cutover(args: argparse.Namespace) -> int:
     return _run(args, lambda runtime, selector: runtime.commit_cutover(selector, actor=args.actor))
+
+
+def run_dispatcher_decommission_old(args: argparse.Namespace) -> int:
+    return _run(args, lambda runtime, selector: runtime.decommission_old(selector, actor=args.actor))
 
 
 def run_dispatcher_rollback(args: argparse.Namespace) -> int:
