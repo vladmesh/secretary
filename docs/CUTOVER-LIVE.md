@@ -1,6 +1,6 @@
 # Live cutover journal
 
-Updated: 2026-07-17 04:51 Europe/Vilnius
+Updated: 2026-07-17 04:54 Europe/Vilnius
 
 Status: preparation started. Production ownership has not changed.
 
@@ -66,11 +66,17 @@ changed or pushed during this step.
 
 ### 2. Capture a cutover backup
 
-Status: pending.
+Status: completed.
 
 - Create fresh core and full encrypted archives using the current live contour.
 - Strict-verify both with the configured age identity.
 - Record exact archive names here.
+
+Result: backup create completed and released the pipeline pause. `pipeline pause-status` is false
+and no cards are in `In progress`. Strict verification passed for:
+
+- `secretary-backup-core-20260717T015035Z.tar.age`
+- `secretary-backup-full-20260717T015035Z.tar.age`
 
 ### 3. Prepare new runtime without changing owners
 
@@ -122,3 +128,5 @@ Status: pending.
 
 - 2026-07-17 04:49: journal created. No live owner or service changed.
 - 2026-07-17 04:51: step 1 completed. Product, instance and this recovery journal pushed to GitHub.
+- 2026-07-17 04:54: step 2 completed. Fresh core/full archives created and strict-verified; pipeline
+  resumed with no in-progress cards.
