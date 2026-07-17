@@ -1,6 +1,6 @@
 # Live cutover journal
 
-Updated: 2026-07-17 04:54 Europe/Vilnius
+Updated: 2026-07-17 04:58 Europe/Vilnius
 
 Status: preparation started. Production ownership has not changed.
 
@@ -80,12 +80,26 @@ and no cards are in `In progress`. Strict verification passed for:
 
 ### 3. Prepare new runtime without changing owners
 
-Status: pending.
+Status: completed.
 
 - Verify `/home/dev/secretary/.venv` and the memory extra.
 - Render and inspect the product systemd units against `secretary-instance/runtime.env`.
 - Resolve ownership conflicts explicitly. Never adopt a resource by name alone.
 - Keep old services running during preparation.
+
+Result:
+
+- `/home/dev/secretary/.venv` imports both product and compatibility packages.
+- `/home/dev/secretary-instance/runtime.env` was materialized from the current live env with mode
+  `0600`; it is ignored by Git through `secretary-instance/.gitignore`.
+- all product service/timer assets passed `systemd-analyze verify`.
+- existing Orca registrations for `secretary` and `secretary-instance` were explicitly matched by
+  name and normalized repo path and recorded in `secretary-data/host-managed.json`.
+- remaining reconcile conflicts are intentionally not adopted: legacy `control-panel` and
+  `triggered-agents`, unrelated existing `public_profile` and `vladmesh`, and the old backup units.
+  The old backup units must be replaced during step 4; legacy registrations are removed only in
+  step 7. Production dispatcher units remain planned creates.
+- old memory and backup owners remained active during this step.
 
 ### 4. Switch memory and backup owners
 
@@ -130,3 +144,5 @@ Status: pending.
 - 2026-07-17 04:51: step 1 completed. Product, instance and this recovery journal pushed to GitHub.
 - 2026-07-17 04:54: step 2 completed. Fresh core/full archives created and strict-verified; pipeline
   resumed with no in-progress cards.
+- 2026-07-17 04:58: step 3 completed. Runtime env materialized, units verified, and the two product
+  Orca registrations explicitly adopted. Live owners unchanged.
