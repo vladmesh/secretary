@@ -278,7 +278,7 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(by_id["systemd:dispatcher:production.service"].name, "secretary-dispatcher-production.service")
         self.assertEqual(by_id["systemd:dispatcher:production.timer"].name, "secretary-dispatcher-production.timer")
         self.assertEqual(service["managed_by"], "secretary")
-        self.assertIn("production-run", service["runtime"])
+        self.assertIn("production-tick", service["runtime"])
         self.assertIn("KANBOARD_API_TOKEN", service["env"])
         self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 
