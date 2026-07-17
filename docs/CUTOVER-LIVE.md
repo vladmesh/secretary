@@ -226,13 +226,23 @@ Result:
 
 ### 7. Rollback window and decommission
 
-Status: pending.
+Status: in progress.
 
 - Keep legacy checkouts disabled but present for a short observation window.
 - Remove legacy services, timers and nonessential Orca registrations only after the checks remain
   green.
 - Preserve `/home/dev/control-panel` until this Codex session has moved or ended.
 - Delete legacy checkouts last, then rerun doctor and backup verification.
+
+Current checkpoint:
+
+- disabled the last enabled legacy timers `ta-pipeline.timer` and `ta-retro.timer`; all ten `ta-*`
+  unit files are now disabled/static and no legacy service is running;
+- closed idle secretary curator/retro/steward shells but kept their permanent worktrees for future
+  product automations;
+- removed the temporary `secretary-621` pilot worktree. Orca now has only this current control-panel
+  terminal open;
+- the completed codegen megatest process and terminal were already absent at inspection time.
 
 ## Checkpoint log
 
@@ -267,3 +277,6 @@ Status: pending.
 - 2026-07-17 05:56: corrected production timer active and waiting; doctor, memory parity, strict
   core/full backup verification and board write/read smoke are green. Step 6 complete; legacy can
   be decommissioned without resume.
+- 2026-07-17 05:57: legacy `ta-*` timers disabled, idle shells closed and pilot worktree removed.
+  Only the current control-panel terminal remains open. Permanent new secretary automation
+  worktrees remain registered but idle.
