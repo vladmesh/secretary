@@ -128,7 +128,7 @@ Result:
 
 ### 5. Pilot the product dispatcher
 
-Status: in progress.
+Status: completed.
 
 - Select one explicit pilot card.
 - Put the legacy dispatcher into a human hard freeze with no auto-resume.
@@ -190,11 +190,20 @@ Second pilot finding:
 
 ### 6. Commit production ownership
 
-Status: pending.
+Status: in progress.
 
 - Commit cutover only after the pilot is green.
 - Enable the product production dispatcher/timer and verify exactly one owner.
 - Run live doctor, memory verify, backup smoke and board read/write smoke.
+
+Current checkpoint:
+
+- committed dispatcher ownership after the pilot reached Done and both discovered pipeline bugs
+  were fixed and covered by tests;
+- state phase is `cutover_committed`, records are empty, legacy remains frozen and observe reports no
+  divergences;
+- production dispatcher units are not installed yet. If this session stops here, install them from
+  the product packaging before unfreezing or deleting any legacy runtime.
 
 ### 7. Rollback window and decommission
 
@@ -231,3 +240,5 @@ Status: pending.
   tests passed again. Production commit remains stopped pending a Git durability gate.
 - 2026-07-17 05:47: Git durability gate added as `b7686bc`; dirty done reports now block before
   review. Full suite is green at 413 tests. Pilot findings are resolved in product code.
+- 2026-07-17 05:51: logical dispatcher ownership committed. State is `cutover_committed`, records are
+  empty and observe is clean. Legacy remains frozen until product production units pass live checks.
