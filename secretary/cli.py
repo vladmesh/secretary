@@ -49,6 +49,7 @@ from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.restore import RestoreError, _target, restore_findings
+from secretary.session import run_shell
 from secretary.task_commands import add_task_subcommands
 
 
@@ -277,6 +278,35 @@ def build_parser() -> argparse.ArgumentParser:
     project.set_defaults(handler=not_implemented("project"))
 
     add_task_subcommands(subparsers)
+
+    shell = subparsers.add_parser(
+        "shell",
+        help="launch an interactive secretary head with the full runtime env",
+    )
+    shell.add_argument(
+        "--head",
+        "-H",
+        default=None,
+        help="head profile or adapter (claude/codex/hermes or any heads.toml profile id); "
+        "default claude-default",
+    )
+    shell.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace dir for codex directory trust (default: current dir)",
+    )
+    shell.add_argument(
+        "--env-file",
+        default=None,
+        help="runtime env file to load (default: instance runtime.env)",
+    )
+    shell.add_argument(
+        "--print",
+        dest="print_command",
+        action="store_true",
+        help="print the resolved launch command and exit without starting the head",
+    )
+    shell.set_defaults(handler=run_shell)
 
     memory = subparsers.add_parser("memory", help="manage the memory journal")
     memory_subcommands = memory.add_subparsers(dest="memory_command")

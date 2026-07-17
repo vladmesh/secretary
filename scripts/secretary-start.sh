@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pinned Orca entry point for the interactive secretary. Boots a chosen head with the full
+# installation runtime env, so board access and every other credential are present regardless of
+# which head runs. This is the trusted operator tool, not a scoped pipeline role.
+#
+# Usage: secretary-start.sh [head]
+#   secretary-start.sh              # claude-default
+#   secretary-start.sh claude       # claude-default
+#   secretary-start.sh codex        # codex TUI
+#   secretary-start.sh hermes       # hermes REPL
+#   secretary-start.sh claude-opus  # any heads.toml profile id
+#
+# No login shell: export the per-user binary dirs explicitly like the automation gate, so `claude`
+# and `codex` from ~/.local/bin resolve even when Orca launches this with a bare PATH.
+set -u
+export PATH="/home/dev/.local/bin:/home/dev/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-/home/dev/secretary}${PYTHONPATH:+:$PYTHONPATH}"
+
+head="${1:-}"
+exec python3 -m secretary shell ${head:+--head "$head"}
