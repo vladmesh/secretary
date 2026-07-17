@@ -96,7 +96,7 @@ def _production_dispatcher_units(prefix: str) -> list[PlannedResource]:
                 "component": "dispatcher-production",
                 "managed_by": "secretary",
                 "runtime": "python3 -m secretary dispatcher production-tick --instance $SECRETARY_INSTANCE",
-                "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER,SECRETARY_DISPATCHER_MERGE_COMMAND",
+                "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER",
             },
         ),
         _resource(

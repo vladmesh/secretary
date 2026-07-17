@@ -117,6 +117,9 @@ class FakeCatalog:
     def review_head(self, task: dict) -> str:
         return "codex-reviewer"
 
+    def binding(self, project: str) -> dict:
+        return {"repo": f"/home/dev/{project}"}
+
 
 class FakeHost:
     def __init__(self, root: Path) -> None:
@@ -1341,6 +1344,27 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(rid(first).endswith("-0"))
         self.assertTrue(rid(rework).endswith("-2"))
 
+    def test_complete_green_publishes_branch_and_fast_forwards_checkout(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp))
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            host.complete_green({"ref": "secretary-510-pilot", "project": "secretary"}, record)
+        cmds = [" ".join(run) for run in host.runs]
+        self.assertTrue(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
+        self.assertTrue(any(c.endswith("git -C /home/dev/secretary merge --ff-only origin/main") for c in cmds), cmds)
+
+    def test_complete_green_respects_automerge_off_kill_switch(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp))
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_AUTOMERGE": "off"}):
+                host.complete_green({"ref": "secretary-510-pilot", "project": "secretary"}, record)
+        self.assertEqual(host.runs, [])
+
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
@@ -1375,6 +1399,16 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
+
+class _RecordingMergeHost(CommandHostRuntime):
+    def __init__(self, root: Path) -> None:
+        super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.runs: list[list[str]] = []
+
+    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+        self.runs.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
 
 class GitBranchHost(CommandHostRuntime):
     def __init__(self, root: Path) -> None:

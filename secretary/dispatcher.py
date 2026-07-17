@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -277,14 +276,19 @@ class CommandHostRuntime:
         return str(root / str(task.get("project") or "") / worker)
 
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
-        command = os.environ.get("SECRETARY_DISPATCHER_MERGE_COMMAND", "").strip()
-        if not command or self.mode == "noop":
+        if self.mode == "noop" or not record.workspace:
             return
-        rendered = command.format(
-            ref=shlex.quote(task["ref"]),
-            workspace=shlex.quote(record.workspace),
-        )
-        self._run_shell(rendered, Path(record.workspace), "merge command")
+        if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
+            return
+        branch = _legacy_worker_branch(task["ref"])
+        repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
+        # Publish the reviewed branch as main (a non-fast-forward push is rejected, never
+        # force-landed), then fast-forward the project's own checkout. The dispatcher runs
+        # from the secretary checkout, so this is how a merged self-modification reaches the
+        # next oneshot tick; other projects just stay current for the next worktree base.
+        self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
+        self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
+        self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
 
     def stop(self, record: DispatcherRecord) -> None:
         if self.mode == "noop" or not record.workspace:
