@@ -26,6 +26,7 @@ from secretary.dispatcher import (
     _wrap_role_shell_command,
     default_data_dir,
 )
+from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
@@ -132,6 +133,10 @@ class FakeHost:
         self.fail_prepare_reason = ""
         self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
+        # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
+        self.gate_results: list[GateResult] = []
+        self.gate_calls: list[str] = []
+        self.gate_error: Exception | None = None
 
     def prepare_worker(
         self,
@@ -164,6 +169,14 @@ class FakeHost:
     def verify_worker_result(self, task: dict, record) -> None:
         if self.fail_result_reason:
             raise HostError(self.fail_result_reason)
+
+    def gate_check(self, task: dict, record) -> GateResult:
+        self.gate_calls.append(task["ref"])
+        if self.gate_error is not None:
+            raise self.gate_error
+        if self.gate_results:
+            return self.gate_results.pop(0)
+        return GateResult("green", "gate green")
 
     def restore_workspace(self, task: dict, worker: str) -> str:
         return str(self.root / worker)
@@ -903,6 +916,132 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.torn_down, self.host.stopped)
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
+    def _run_worker_to_validate(self, request_id: str = "worker-done") -> None:
+        """Claim, drive the worker to report:done, and advance the card into validate."""
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id=request_id,
+        )
+        advanced = self.runtime.tick(self.selector)
+        self.assertEqual(advanced["to"], "validate")
+
+    def test_gate_green_advances_to_review(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("green", "local validation passed")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "review-started")
+        self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_gate_red_bounces_card_to_worker(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "in_progress")
+        self.assertIn("Механический гейт валидации красный", task["comments"][-1]["body"])
+        self.assertEqual(self.host.reviews, [])
+        # worker prepared once at claim, once on the gate-red relaunch
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+
+    def test_gate_red_scrubs_secrets_in_bounce_comment(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [
+            GateResult("red", "local validation failed", "API_TOKEN=super-secret-value boom")
+        ]
+        self._run_worker_to_validate()
+
+        self.runtime.tick(self.selector)
+
+        body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("API_TOKEN=<redacted>", body)
+        self.assertNotIn("super-secret-value", body)
+
+    def test_gate_pending_waits_without_review(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("pending", "CI pending")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-pending")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.reviews, [])
+
+    def test_gate_pending_then_green_advances_to_review(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("pending", "CI pending"), GateResult("green", "CI green")]
+        self._run_worker_to_validate()
+
+        self.runtime.tick(self.selector)
+        advanced = self.runtime.tick(self.selector)
+
+        self.assertEqual(advanced["action"], "review-started")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_gate_infra_failure_blocks_card(self) -> None:
+        self.start_pilot()
+        self.host.gate_error = HostError("gate workspace is missing")
+        self._run_worker_to_validate()
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.reviews, [])
+
+    def test_merge_blocked_when_gate_not_green(self) -> None:
+        self.start_pilot()
+        # pre-review gate green, then the merge re-check goes red (CI broke after review started).
+        self.host.gate_results = [GateResult("green", "green"), GateResult("red", "CI red", "boom")]
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)  # gate green -> review started
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="green",
+            request_id="review-green",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "merge-gate-red-rework")
+        self.assertEqual(self.host.completed, [], "a non-green gate must never merge")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_merge_proceeds_when_gate_green(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("green", "green"), GateResult("green", "green")]
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)  # gate green -> review started
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="green",
+            request_id="review-green",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
     def test_red_review_relaunches_worker_for_rework(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)
@@ -1519,3 +1658,132 @@ def git(cwd: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+class GateCatalog:
+    def __init__(self, adapter: dict) -> None:
+        self._adapter = adapter
+
+    def adapter(self, project: str) -> dict:
+        return self._adapter
+
+    def default_branch(self, project: str, override: str | None) -> str:
+        return override or "main"
+
+    def binding(self, project: str) -> dict:
+        return {"repo": f"/home/dev/{project}"}
+
+
+class GateHost(CommandHostRuntime):
+    def __init__(self, root: Path, adapter: dict) -> None:
+        super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
+
+
+def _build_gated_workspace(root: Path, base: str, branch: str) -> Path:
+    """A worker workspace on `branch` with an `origin` remote carrying `base`, one work commit
+    ahead — the shape gate_check's base-freshness recovery and local gate run against."""
+    bare = root / "origin.git"
+    bare.mkdir()
+    git(bare, "init", "--bare", "--initial-branch", base)
+    ws = root / "ws"
+    ws.mkdir()
+    git(ws, "init", "--initial-branch", base)
+    git(ws, "config", "user.name", "Test User")
+    git(ws, "config", "user.email", "test@example.invalid")
+    (ws / "README.md").write_text("seed\n", encoding="utf-8")
+    git(ws, "add", "README.md")
+    git(ws, "commit", "-m", "seed")
+    git(ws, "remote", "add", "origin", str(bare))
+    git(ws, "push", "origin", base)
+    git(ws, "checkout", "-b", branch)
+    (ws / "work.txt").write_text("work\n", encoding="utf-8")
+    git(ws, "add", "work.txt")
+    git(ws, "commit", "-m", "work")
+    return ws
+
+
+class DispatcherGateTests(unittest.TestCase):
+    def _record(self, workspace: Path):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(workspace=str(workspace))
+
+    def _task(self) -> dict:
+        return {"ref": "secretary-633", "project": "secretary", "workspace": {"base_branch": "main"}}
+
+    def test_ci_none_skips_gate_without_touching_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GateHost(Path(tmp), {"validation": {"ci": "none", "missing": ["tests"]}})
+            record = self._record(Path(tmp) / "absent")
+            result = host.gate_check(self._task(), record)
+        self.assertEqual(result.status, "green")
+
+    def test_local_gate_green_on_zero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "test -f work.txt"}})
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+
+    def test_local_gate_red_on_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "echo boom >&2; exit 1"}})
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("boom", result.log)
+
+    def test_base_freshness_recovers_behind_branch_before_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            # advance origin/main ahead of the branch on a different file (no conflict)
+            git(ws, "checkout", "main")
+            (ws / "base.txt").write_text("base\n", encoding="utf-8")
+            git(ws, "add", "base.txt")
+            git(ws, "commit", "-m", "base moves")
+            git(ws, "push", "origin", "main")
+            git(ws, "checkout", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "test -f base.txt"}})
+            result = host.gate_check(self._task(), self._record(ws))
+            # recovery merged origin/main in, so the base file is present and the tree is a FF of main
+            self.assertEqual(result.status, "green")
+            self.assertEqual(git(ws, "rev-list", "--count", "HEAD..origin/main"), "0")
+
+    def test_base_freshness_conflict_is_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            git(ws, "checkout", "pipeline/secretary-633")
+            (ws / "README.md").write_text("branch edit\n", encoding="utf-8")
+            git(ws, "add", "README.md")
+            git(ws, "commit", "-m", "branch edits readme")
+            git(ws, "checkout", "main")
+            (ws / "README.md").write_text("base edit\n", encoding="utf-8")
+            git(ws, "add", "README.md")
+            git(ws, "commit", "-m", "base edits readme")
+            git(ws, "push", "origin", "main")
+            git(ws, "checkout", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("fell behind base", result.summary)
+
+    def test_github_rollup_classification(self) -> None:
+        from secretary.dispatcher_gate import _rollup
+
+        self.assertEqual(_rollup([])[0], "NONE")
+        self.assertEqual(_rollup([{"status": "COMPLETED", "conclusion": "SUCCESS"}])[0], "SUCCESS")
+        self.assertEqual(
+            _rollup([
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "IN_PROGRESS"},
+            ])[0],
+            "PENDING",
+        )
+        rollup, failed = _rollup([
+            {"status": "COMPLETED", "conclusion": "FAILURE", "name": "tests"},
+        ])
+        self.assertEqual(rollup, "FAILURE")
+        self.assertEqual(failed["name"], "tests")
+        # a legacy commit status still counts
+        self.assertEqual(_rollup([{"state": "success"}])[0], "SUCCESS")
+        self.assertEqual(_rollup([{"state": "failure"}])[0], "FAILURE")

@@ -33,11 +33,19 @@ class DispatcherRecord:
     review_baseline: int
     state: str
     claimed_at: float
+    # Mechanical validation gate (secretary-633): "" until the gate is green for the current code
+    # state, then "green". Reset to "" on every fresh entry to validate so a reworked card re-runs
+    # the gate instead of coasting on a stale pass. gate_pending_since stamps when a github CI
+    # rollup first went non-terminal, driving the pending watchdog.
+    gate_state: str = ""
+    gate_pending_since: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
             "claimed_at": self.claimed_at,
             "comment_baseline": self.comment_baseline,
+            "gate_pending_since": self.gate_pending_since,
+            "gate_state": self.gate_state,
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
@@ -61,6 +69,8 @@ class DispatcherRecord:
             review_baseline=int(payload.get("review_baseline") or 0),
             state=str(payload.get("state") or "claimed"),
             claimed_at=float(payload.get("claimed_at") or time.time()),
+            gate_state=str(payload.get("gate_state") or ""),
+            gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
         )
 
 

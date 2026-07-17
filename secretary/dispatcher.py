@@ -30,6 +30,11 @@ from secretary.dispatcher_helpers import (
     _worker_id,
     scrub_host_output,
 )
+from secretary.dispatcher_gate import (
+    GATE_PENDING_STALL_SECONDS,
+    GateResult,
+    gate_check as _gate_check,
+)
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
 from secretary.dispatcher_production import (
     ProductionState,
@@ -261,6 +266,9 @@ class CommandHostRuntime:
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
 
+    def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
+        return _gate_check(self, task, record)
+
     def verify_worker_result(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         if self.mode == "noop":
             return
@@ -477,6 +485,15 @@ class CommandHostRuntime:
             text = (completed.stderr or completed.stdout or "").strip()
             raise HostError(f"{label} failed: {_tail(text)}")
         return completed
+
+    def run_capture(self, args: list[str], label: str, *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        """Like _run but returns the CompletedProcess regardless of exit status (the gate reads a
+        non-zero code as a red verdict, not a host failure). Still raises HostError when the process
+        can't run at all."""
+        try:
+            return subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=900)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HostError(f"{label} failed: {exc}") from None
 
 
 class DispatcherRuntime:
@@ -943,6 +960,9 @@ class DispatcherRuntime:
                 }
             record.review_baseline = len(task.get("comments") or [])
             record.state = "validate"
+            # Fresh code state: the mechanical gate must re-run before this report reaches review.
+            record.gate_state = ""
+            record.gate_pending_since = 0.0
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -986,18 +1006,7 @@ class DispatcherRuntime:
             records[ref] = record
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
-            self.host.complete_green(task, record)
-            self.host.teardown(record)
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                target="done",
-                reason="review:green",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
-            )
-            records.pop(ref, None)
-            return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+            return self._finish_green(task, record, records, payload, attempt_id)
         if marker == "review:red":
             self.host.stop(record)
             self.writer.move(
@@ -1014,6 +1023,8 @@ class DispatcherRuntime:
                 ),
             )
             record.comment_baseline = len(task.get("comments") or [])
+            record.gate_state = ""
+            record.gate_pending_since = 0.0
             moved = self.reader.show(ref)
             try:
                 record.handle = self.host.restart_worker(moved, record)
@@ -1046,6 +1057,13 @@ class DispatcherRuntime:
                 "attempt_id": attempt_id,
                 "action": "rework-started",
             }
+        # Mechanical gate (secretary-633): a fresh report clears the cheap CI/local gate before the
+        # expensive reviewer is spawned. A review already in flight (state review_starting/reviewing)
+        # cleared the gate when it launched, so re-running it here would be wasted host I/O.
+        if record.state not in ("review_starting", "reviewing") and record.gate_state != "green":
+            gated = self._run_gate(task, record, records, payload, attempt_id)
+            if gated is not None:
+                return gated
         if record.state == "review_starting":
             return _recover_review_launch(self, task, records, record, attempt_id)
         if record.state != "reviewing":
@@ -1070,6 +1088,176 @@ class DispatcherRuntime:
             "action": "waiting-review-verdict",
         }
 
+    def _run_gate(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Run the mechanical gate before the reviewer. Returns None (gate green: fall through to
+        review this same tick) or a tick outcome (red bounced the card to the worker, pending is
+        waiting on CI, or the gate infra failed and the card is Blocked)."""
+        ref = task["ref"]
+        try:
+            result = self.host.gate_check(task, record)
+        except HostError as exc:
+            self.host.stop(record)
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"validation gate failed: {scrub_host_output(str(exc))}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-blocked", ref),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {"status": "blocked", "step": "gate", "pilot_ref": ref, "reason": "validation gate failed"}
+        if result.status == "green":
+            record.gate_state = "green"
+            record.gate_pending_since = 0.0
+            self._save_records(payload, records)
+            return None
+        if result.status == "pending":
+            return self._gate_pending(task, record, records, payload, attempt_id, result)
+        return self._gate_red_to_worker(task, record, records, payload, attempt_id, result, phase="gate")
+
+    def _gate_red_to_worker(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        result: GateResult,
+        *,
+        phase: str,
+    ) -> dict[str, Any]:
+        """A red mechanical gate sends the card back to the worker (In progress) with a scrubbed
+        comment, mirroring the review-red rework path. `phase` distinguishes the pre-review gate
+        from the pre-merge re-check in the request-id and the log line."""
+        ref = task["ref"]
+        detail = scrub_host_output(result.summary)
+        log = scrub_host_output(result.log).strip()
+        body = f"Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
+        if log:
+            body += f"\nХвост:\n```\n{log}\n```"
+        self.host.stop(record)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="in_progress",
+            reason=body,
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{phase}-red", ref, str(len(task.get("comments") or []))
+            ),
+        )
+        record.comment_baseline = len(self.reader.show(ref)["comments"])
+        record.gate_state = ""
+        record.gate_pending_since = 0.0
+        moved = self.reader.show(ref)
+        try:
+            record.handle = self.host.restart_worker(moved, record)
+        except HostError as exc:
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"dispatcher rework bring-up failed: {scrub_host_output(str(exc))}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{phase}-red-blocked", ref),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {"status": "blocked", "step": "gate", "pilot_ref": ref, "reason": "rework bring-up failed"}
+        record.state = "claimed"
+        records[ref] = record
+        self._save_records(payload, records)
+        return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
+
+    def _gate_pending(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        result: GateResult,
+    ) -> dict[str, Any]:
+        """CI is non-terminal (a check still running, or none posted yet). Wait, tracking how long
+        the rollup has sat non-terminal; past GATE_PENDING_STALL_SECONDS escalate once to Blocked so
+        a required check nothing ever posts does not leave the card unwatched forever."""
+        ref = task["ref"]
+        now = time.time()
+        if not record.gate_pending_since:
+            record.gate_pending_since = now
+            self._save_records(payload, records)
+            return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
+        if now - record.gate_pending_since <= GATE_PENDING_STALL_SECONDS:
+            return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
+        self.host.stop(record)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=(
+                f"Механический гейт: {scrub_host_output(result.summary)} — CI висит без "
+                f"терминального результата дольше порога ({GATE_PENDING_STALL_SECONDS}s). "
+                f"Карточка в Blocked до vladmesh."
+            ),
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-pending-stall", ref),
+        )
+        records.pop(ref, None)
+        self._save_records(payload, records)
+        return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+
+    def _finish_green(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """Green review verdict. Re-run the mechanical gate right before merging so a non-green
+        CI/local gate never lands: green merges, red bounces back to the worker, pending waits."""
+        ref = task["ref"]
+        try:
+            result = self.host.gate_check(task, record)
+        except HostError as exc:
+            self.host.stop(record)
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"merge gate failed: {scrub_host_output(str(exc))}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "merge-gate-blocked", ref),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "merge gate failed"}
+        if result.status == "pending":
+            return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
+        if result.status != "green":
+            return self._gate_red_to_worker(task, record, records, payload, attempt_id, result, phase="merge-gate")
+        self.host.complete_green(task, record)
+        self.host.teardown(record)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="done",
+            reason="review:green",
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
+        )
+        records.pop(ref, None)
+        return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         state = self.production_state if payload.get("mode") == "production" else self.state
         state.put_records(payload, records)
@@ -1079,7 +1267,8 @@ class DispatcherRuntime:
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
         review_baseline = _review_adoption_baseline(task)
-        state = "review_starting" if self._review_launch_recorded(task, review_baseline) else "adopted"
+        launched = self._review_launch_recorded(task, review_baseline)
+        state = "review_starting" if launched else "adopted"
         return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
@@ -1091,6 +1280,9 @@ class DispatcherRuntime:
             review_baseline=review_baseline,
             state=state,
             claimed_at=time.time(),
+            # A reviewer only launches once the gate is green, so an adopted card already in review
+            # inherits a passed gate rather than re-running it before the recovery path.
+            gate_state="green" if launched else "",
         )
 
     def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:
