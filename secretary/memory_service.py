@@ -685,7 +685,7 @@ def parity_gate() -> dict:
 
 
 def bootstrap_index() -> int | None:
-    """Warm the embedder and rebuild. Keep a previous index usable if rebuild fails."""
+    """Warm the embedder and reconcile the index incrementally."""
     mark_search_not_ready()
     embedder()
     try:
@@ -696,17 +696,23 @@ def bootstrap_index() -> int | None:
         status, detail = index_compatibility(DB_PATH, MODEL, DIM) if has_index else ("missing", None)
         if has_index and status in {"compatible", "legacy"}:
             mark_search_ready(e)
-            print(f"memory-mcp: rebuild failed, keeping previous index: {e}", flush=True)
+            print(
+                f"memory-mcp: incremental reconciliation failed, keeping previous index: {e}",
+                flush=True,
+            )
             return None
         error = RuntimeError(detail) if detail else e
         mark_search_not_ready(error)
-        print(f"memory-mcp: rebuild failed, no compatible index available: {error}", flush=True)
+        print(
+            f"memory-mcp: incremental reconciliation failed, no compatible index available: {error}",
+            flush=True,
+        )
         return None
     status, detail = index_compatibility(DB_PATH, MODEL, DIM)
     if status != "compatible":
-        error = detail or "rebuilt index has no metadata"
+        error = detail or "incrementally reconciled index has no metadata"
         mark_search_not_ready(RuntimeError(error))
-        print(f"memory-mcp: rebuilt index is incompatible: {error}", flush=True)
+        print(f"memory-mcp: incrementally reconciled index is incompatible: {error}", flush=True)
         return None
     mark_search_ready()
     return n

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import numpy as np
@@ -23,6 +24,8 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         self.calls = []
 
     def tearDown(self):
+        if memory_service is not None:
+            memory_service.mark_search_not_ready()
         self.temp.cleanup()
 
     def embed(self, text):
@@ -91,6 +94,41 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "forced embedding failure"):
             self.update()
         self.assertEqual(self.rows(), before)
+
+    def test_bootstrap_reconciles_compatible_index_without_full_rebuild(self):
+        self.write_export([("global/a", "alpha")])
+        self.update()
+        self.calls.clear()
+
+        with (
+            mock.patch.object(memory_service, "CANON", self.canon),
+            mock.patch.object(memory_service, "CANON_EXPORT", self.export),
+            mock.patch.object(memory_service, "DB_PATH", str(self.db)),
+            mock.patch.object(memory_service, "MODEL", "test-model"),
+            mock.patch.object(memory_service, "DIM", 4),
+            mock.patch.object(memory_service, "embedder") as warm_embedder,
+            mock.patch.object(memory_service, "embed_doc", side_effect=self.embed),
+            mock.patch.object(
+                memory_service, "update_index", wraps=memory_service.update_index
+            ) as update_index,
+            mock.patch.object(
+                memory_service,
+                "rebuild_index",
+                side_effect=AssertionError("bootstrap_index must not call rebuild_index"),
+            ) as rebuild_index,
+            mock.patch.object(
+                memory_service,
+                "offline_rebuild",
+                side_effect=AssertionError("compatible bootstrap must not rebuild"),
+            ),
+        ):
+            indexed = memory_service.bootstrap_index()
+
+        self.assertEqual(indexed, 1)
+        warm_embedder.assert_called_once_with()
+        update_index.assert_called_once_with()
+        rebuild_index.assert_not_called()
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":
