@@ -282,6 +282,16 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn("KANBOARD_API_TOKEN", service["env"])
         self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 
+    def test_production_dispatcher_unit_sets_path_for_orca_lookup(self):
+        unit_path = REPO_ROOT / "packaging" / "systemd" / "secretary-dispatcher-production.service"
+        lines = unit_path.read_text(encoding="utf-8").splitlines()
+        path_lines = [line for line in lines if line.startswith("Environment=PATH=")]
+        self.assertEqual(len(path_lines), 1)
+        path_value = path_lines[0].split("=", 2)[2]
+        self.assertIn("/home/dev/.local/bin", path_value.split(":"))
+        for standard_dir in ("/usr/local/bin", "/usr/bin", "/bin"):
+            self.assertIn(standard_dir, path_value.split(":"))
+
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
 
