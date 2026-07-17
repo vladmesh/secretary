@@ -182,8 +182,11 @@ Second pilot finding:
   result;
 - the exact reviewed diff was committed manually and cherry-picked to `main` as `18628f3`; focused
   3/3 and full 412/412 tests passed again on `main`;
-- production ownership remains uncommitted. Add a dispatcher Git durability gate and regression
-  test before continuing the cutover.
+- fixed the contract in `b7686bc`: worker prompts now require a commit, and the dispatcher checks
+  `git status --porcelain` before accepting `report:done`. A dirty or missing workspace is moved to
+  Blocked before review instead of reaching Validate or Done;
+- added the dirty-result regression test; focused lifecycle tests and the full 413-test suite pass.
+  Production ownership remains uncommitted pending the final cutover checks.
 
 ### 6. Commit production ownership
 
@@ -226,3 +229,5 @@ Status: pending.
 - 2026-07-17 05:44: reviewer returned GREEN and the pilot reached Done, exposing that the dispatcher
   accepted an uncommitted reviewed diff. The diff was preserved on `main` as `18628f3` and all 412
   tests passed again. Production commit remains stopped pending a Git durability gate.
+- 2026-07-17 05:47: Git durability gate added as `b7686bc`; dirty done reports now block before
+  review. Full suite is green at 413 tests. Pilot findings are resolved in product code.
