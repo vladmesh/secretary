@@ -1,0 +1,25 @@
+# Portable automation spec for the pipeline dispatcher.
+#
+# Unlike the other agents, the dispatcher is deterministic — no LLM head. `dispatch` routes to
+# runtime code (agents/pipeline/dispatcher.tick), not the singleton claude terminal driver, so
+# there is no `skill`/`provider`: deploy/provision.py sets up only the systemd timer (the real
+# clock) and skips the vestigial Orca automation for a skill-less agent.
+
+name = "pipeline"
+dispatcher = true          # deterministic tick; no claude head, no Orca automation
+# Skip the tick when nothing is Ready and nothing is in flight. Gated in the systemd unit.
+precheck = "python3 -m triggered_agents pipeline precheck"
+
+[systemd]
+# The real scheduler on this headless box. Unit name is derived as ta-pipeline. The dispatcher
+# tick is cheap after precheck, so a tight cadence (every 3 min) keeps latency low.
+calendar = "*:0/3:00 *:1/3:30"
+randomized_delay_sec = 20
+# Kanboard-креды для precheck и тика загружает ta-gate через role-scoped runtime env.
+
+[health]
+# Freshness budget for health.py's runs.jsonl check: named cadences ("hourly"/"daily") get a
+# built-in default there, but this agent's calendar is a raw 3-min OnCalendar expression, not one
+# of those names. 900s is 5x the tick period — enough slack for jitter/an occasional slow tick
+# without hiding a dead precheck for long.
+max_age_s = 900

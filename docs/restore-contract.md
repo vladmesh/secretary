@@ -98,8 +98,7 @@ them. `scripts/check_memory_mcp_restore_e2e.py` is a separate cross-repository
 gate for the memory-mcp side of the rebuild:
 
 ```bash
-MEMORY_MCP_REPO=/home/dev/memory-mcp \
-  MEMORY_MCP_TEST_PYTHON=/home/dev/memory-mcp/.venv/bin/python \
+SECRETARY_MEMORY_TEST_PYTHON=/path/to/secretary-memory-venv/bin/python \
   python3 scripts/check_memory_mcp_restore_e2e.py
 ```
 

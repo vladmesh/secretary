@@ -126,8 +126,8 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
         host = report.host if isinstance(report.host, dict) else {}
         python = host.get("memory_reindex_python")
         script = host.get("memory_reindex_script")
-        model = host.get("memory_model")
-        dim = host.get("memory_dim")
+        model = host.get("memory_model", "intfloat/multilingual-e5-large")
+        dim = host.get("memory_dim", 1024)
         count = rebuild_memory_index(
             data_dir,
             python=Path(python) if isinstance(python, str) else None,

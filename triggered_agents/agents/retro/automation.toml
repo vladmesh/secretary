@@ -1,0 +1,26 @@
+# Portable automation spec for the retro triggered-agent.
+#
+# Canon for HOW the retro agent is scheduled and dispatched. Host bindings Orca generates
+# (workspace path, repo/automation UUIDs) are NOT here — deploy/provision.py resolves them on
+# the host and applies this spec idempotently (match Orca automation by `name`, edit in place
+# so the automation id — and thus the systemd unit — stays stable).
+
+name = "retro"            # Orca automation name; the match key across re-provisions
+skill = "/retro"          # automation prompt = skill invocation (skill lives in .claude/skills/retro)
+provider = "claude"
+reuse_session = true
+head = "codex-retro"
+# Skip the run when no session has new turns since the watermark. Gated in the systemd unit,
+# not Orca's field (manual `automations run` ignores --precheck; see provision.py).
+precheck = "python3 -m triggered_agents retro precheck"
+
+[trigger]
+# Orca's own rrule does not tick in headless `orca serve`; kept for correctness but the real
+# clock is the systemd timer below.
+orca = "daily"
+
+[systemd]
+# The actual scheduler on this headless box. Unit name is derived as ta-<name>. Retro is a
+# slow reflective pass, so daily (not hourly like curator/board).
+calendar = "daily"
+randomized_delay_sec = 300   # jitter so the daily retro pass never races another sweep at midnight

@@ -1,0 +1,97 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+try:
+    import numpy as np
+    from secretary import memory_service
+except ImportError:  # The base install deliberately excludes the heavy memory extra.
+    np = None
+    memory_service = None
+
+
+@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
+class IncrementalMemoryIndexTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.canon = self.root / "facts"
+        self.canon.mkdir()
+        self.export = self.root / "export.ndjson"
+        self.db = self.root / "index.sqlite"
+        self.calls = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def embed(self, text):
+        self.calls.append(text)
+        if text == "explode":
+            raise RuntimeError("forced embedding failure")
+        raw = sum(text.encode("utf-8")) or 1
+        return np.asarray([raw % 11, raw % 13, raw % 17, raw % 19], dtype=np.float32)
+
+    def write_export(self, facts):
+        with self.export.open("w", encoding="utf-8") as handle:
+            for fact_id, text in facts:
+                raw = "---\nsource: test\ncreated: 2026-07-17\n---\n" + text + "\n"
+                handle.write(json.dumps({
+                    "id": fact_id, "path": f"{fact_id}.md", "text": raw,
+                }) + "\n")
+
+    def rows(self):
+        conn = memory_service.db(self.db)
+        try:
+            return {
+                fact_id: (rowid, text)
+                for rowid, fact_id, text in conn.execute(
+                    "SELECT id, fact_id, text FROM memories ORDER BY fact_id"
+                )
+            }
+        finally:
+            conn.close()
+
+    def update(self):
+        return memory_service.incremental_update(
+            self.canon, self.export, self.db, "test-model", 4,
+            document_embed=self.embed, allow_empty=True,
+        )
+
+    def test_add_update_delete_reuses_unchanged_embedding(self):
+        self.write_export([("global/a", "alpha"), ("global/b", "bravo")])
+        first = self.update()
+        self.assertEqual(first["mode"], "rebuild")
+        before = self.rows()
+        self.calls.clear()
+
+        self.write_export([("global/a", "alpha"), ("global/b", "bravo changed"), ("global/c", "charlie")])
+        second = self.update()
+        middle = self.rows()
+        self.assertEqual(
+            {key: second[key] for key in ("added", "updated", "deleted", "reused")},
+            {"added": 1, "updated": 1, "deleted": 0, "reused": 1},
+        )
+        self.assertCountEqual(self.calls, ["bravo changed", "charlie"])
+        self.assertEqual(before["global/a"][0], middle["global/a"][0])
+
+        self.calls.clear()
+        self.write_export([("global/a", "alpha"), ("global/c", "charlie")])
+        third = self.update()
+        self.assertEqual(third["deleted"], 1)
+        self.assertEqual(third["reused"], 2)
+        self.assertEqual(self.calls, [])
+        self.assertNotIn("global/b", self.rows())
+
+    def test_embedding_failure_preserves_index(self):
+        self.write_export([("global/a", "alpha")])
+        self.update()
+        before = self.rows()
+        self.write_export([("global/a", "explode")])
+        with self.assertRaisesRegex(RuntimeError, "forced embedding failure"):
+            self.update()
+        self.assertEqual(self.rows(), before)
+
+
+if __name__ == "__main__":
+    unittest.main()

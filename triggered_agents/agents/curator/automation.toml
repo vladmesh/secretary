@@ -1,0 +1,39 @@
+# Portable automation spec for the curator triggered-agent.
+#
+# This is the canon for HOW the agent is scheduled and dispatched. Host bindings that Orca
+# generates (workspace path, repo/setup/automation UUIDs) are NOT here — deploy/provision.py
+# resolves them on the host and applies this spec idempotently (match Orca automation by
+# `name`, edit in place so the automation id — and thus the systemd unit — stays stable).
+
+name = "curator"          # Orca automation name; the match key across re-provisions
+skill = "/curate"         # automation prompt = skill invocation (skill lives in .claude/skills/curate)
+provider = "claude"
+# --fresh-session on the Orca automation itself, so even a manual diagnostic
+# `orca automations run` never lands in a warm session carrying a prior tick's transcript.
+reuse_session = false
+# runtime/dispatch.py's singleton driver never `/clear`-reuses a warm terminal for this agent:
+# every tick that finds its terminal idle (or stuck past the watchdog) tears the whole workspace
+# down and starts a brand new `claude` process instead (triggered-agents-445). See dispatch.py's
+# module docstring and its "idle: an ephemeral agent..." branch.
+ephemeral = true
+head = "codex-curator"
+# Skip the run when no session has new turns since the watermark. Gated in the systemd unit,
+# not Orca's field (manual `automations run` ignores --precheck; see provision.py).
+precheck = "python3 -m triggered_agents curator precheck"
+
+[trigger]
+# Orca's own rrule does not tick in headless `orca serve`; kept for correctness but the real
+# clock is the systemd timer below.
+orca = "hourly"
+# ta-curator.timer is the sole schedule owner (triggered-agents-444): a non-headless orca (its
+# rrule DOES tick there) or a manual re-enable in the GUI must not be able to fire /curate a
+# second time alongside the timer. deploy/provision.py reads this and passes --disabled on every
+# create/edit; `orca automations run <id>` (manual diagnostic run) is unaffected — it dispatches
+# on demand regardless of this flag.
+enabled = false
+
+[systemd]
+# The actual scheduler on this headless box. Unit name is derived as ta-<name>.
+calendar = "hourly"
+randomized_delay_sec = 90   # jitter so the sweep never lands exactly on :00 with the rest of the hourly crowd
+legacy_unit = "curator-sweep"  # one-time: remove the pre-provisioning hand-written unit of this name

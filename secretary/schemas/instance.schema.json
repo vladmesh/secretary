@@ -106,17 +106,17 @@
         "memory_reindex_python": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute Python executable for the offline memory-mcp rebuild."
+          "description": "Deprecated compatibility path for an external memory rebuild Python."
         },
         "memory_reindex_script": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute memory-mcp reindex.py path used only for offline restore rebuilds."
+          "description": "Deprecated compatibility path for an external reindex script."
         },
         "memory_model": {
           "type": "string",
           "minLength": 1,
-          "description": "memory-mcp embedding model for the restored index."
+          "description": "Embedding model for the secretary-owned memory index."
         },
         "memory_dim": {
           "type": "integer",

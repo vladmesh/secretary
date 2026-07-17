@@ -1,0 +1,51 @@
+[roles.secretary]
+skills = [
+  "spec-card",
+  "grilling",
+  "grill-me",
+  "thermo-nuclear-code-quality-review",
+  "orchestration",
+  "computer-use",
+  "remote-browser",
+  "google-session-transfer",
+  "colab-run",
+]
+
+[roles.curator]
+skills = ["curate"]
+
+[roles.retro]
+skills = ["retro"]
+
+[roles.steward]
+skills = ["steward"]
+
+[targets.claude-secretary-global]
+shell = "claude"
+root = "/home/dev/.claude/skills"
+roles = ["secretary"]
+
+[targets.codex-orca-secretary]
+shell = "codex"
+root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
+roles = ["secretary"]
+
+[targets.hermes-secretary]
+shell = "hermes"
+root = "/home/dev/.hermes/skills/secretary"
+roles = ["secretary"]
+
+[targets.claude-triggered-agents]
+shell = "claude"
+root = "/home/dev/triggered-agents/.claude/skills"
+roles = ["curator", "retro", "steward"]
+
+[targets.codex-triggered-agents]
+shell = "codex"
+root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
+roles = ["curator", "retro", "steward"]
+
+[targets.hermes-triggered-agents]
+shell = "hermes"
+root = "/home/dev/.hermes/skills/triggered-agents"
+roles = ["curator", "retro", "steward"]

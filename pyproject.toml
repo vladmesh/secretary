@@ -13,11 +13,26 @@ dependencies = [
     "jsonschema>=4.10",
 ]
 
+[project.optional-dependencies]
+memory = [
+    "mcp==1.28.1",
+    "fastembed==0.8.0",
+    "sqlite-vec==0.1.9",
+    "numpy==2.4.6",
+]
+
 [project.scripts]
 secretary = "secretary.cli:main"
+secretary-memory-mcp = "secretary.memory_service:main"
+secretary-memory-reindex = "secretary.memory_reindex:main"
+triggered-agents = "triggered_agents.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["secretary*"]
+include = ["secretary*", "triggered_agents*"]
 
 [tool.setuptools.package-data]
 "secretary.schemas" = ["*.json"]
+"triggered_agents.agents.curator" = ["*.toml"]
+"triggered_agents.agents.pipeline" = ["*.toml"]
+"triggered_agents.agents.retro" = ["*.toml"]
+"triggered_agents.agents.steward" = ["*.toml"]

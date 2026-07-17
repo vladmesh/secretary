@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Required cross-repository gate for secretary's memory restore handoff.
+"""Required in-repository gate for secretary's memory restore handoff.
 
-Run with ``MEMORY_MCP_REPO=/path/to/memory-mcp`` and
-``MEMORY_MCP_TEST_PYTHON=/path/to/python``. The selected Python must provide
-memory-mcp's sqlite-vec dependencies. A missing checkout or environment is a
-failure: this gate must never silently skip the integration contract.
+Run with ``SECRETARY_MEMORY_TEST_PYTHON=/path/to/python``. The selected Python
+must provide the ``secretary[memory]`` dependencies. A missing environment is a
+failure; no external memory-mcp checkout is used.
 """
 
 from __future__ import annotations
@@ -88,18 +87,17 @@ class _BoardFixture:
 
 
 def main() -> int:
-    repo = Path(os.environ.get("MEMORY_MCP_REPO", "/home/dev/memory-mcp")).expanduser().resolve()
-    python = Path(os.environ.get("MEMORY_MCP_TEST_PYTHON", "")).expanduser()
-    if not python.is_file() or not (repo / "server.py").is_file():
-        print("memory-mcp restore e2e: checkout or test Python is unavailable", file=sys.stderr)
+    python = Path(os.environ.get("SECRETARY_MEMORY_TEST_PYTHON", "")).expanduser()
+    if not python.is_file():
+        print("secretary memory restore e2e: test Python is unavailable", file=sys.stderr)
         return 2
     if Path(sys.executable).absolute() != python.absolute():
         os.execv(str(python), [str(python), str(Path(__file__).resolve())])
 
-    sys.path[:0] = [str(ROOT), str(repo)]
+    sys.path.insert(0, str(ROOT))
     try:
         import numpy as np
-        import server
+        from secretary import memory_service as server
         from secretary.cli import main as secretary_main
         from secretary.config import validate_instance
         from secretary.data import export_memory, normalize_board_card
@@ -113,7 +111,7 @@ def main() -> int:
         )
         import secretary.restore_commands as restore_commands
     except ImportError as error:
-        print(f"memory-mcp restore e2e: dependency unavailable: {error}", file=sys.stderr)
+        print(f"secretary memory restore e2e: dependency unavailable: {error}", file=sys.stderr)
         return 2
 
     def fake_embed(text: str) -> np.ndarray:
@@ -220,7 +218,7 @@ def main() -> int:
         if secretary_main(["doctor", "--offline", "--instance", str(instance)]) != 0:
             raise AssertionError("doctor did not report the completed restore as healthy")
 
-    print("memory-mcp restore e2e: ok")
+    print("secretary memory restore e2e: ok")
     return 0
 
 

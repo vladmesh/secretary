@@ -2,8 +2,25 @@
 
 Product repository for the portable secretary appliance.
 
-Phase 7 adds a read-only host plan and inventory. It still does not apply host
-changes, own live board data, secrets, transcripts, or instance-specific paths.
+Phase 9 consolidates product code here. The repository now contains the dispatcher,
+task and memory protocols, the memory MCP/index runtime, deterministic automation
+helpers and generic role skills. Instance-specific persona and policy live in the
+private `secretary-instance` repository; mutable state stays in `secretary-data`.
+
+The code is prepared side-by-side. Installing it does not stop or replace the live
+legacy board, dispatcher, memory service, units or timers. Cutover is a separate
+operator action.
+
+Install the lightweight CLI or the full memory runtime:
+
+```bash
+python3 -m pip install .
+python3 -m pip install '.[memory]'
+```
+
+The memory extra exposes `secretary-memory-mcp` and `secretary-memory-reindex`.
+`triggered-agents` remains as a compatibility command, but its implementation is
+packaged by this repository and does not require a `~/triggered-agents` checkout.
 
 ## Config schemas
 

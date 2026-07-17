@@ -99,11 +99,19 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
         return len(cards)
 
 
+DEFAULT_MEMORY_MODEL = "intfloat/multilingual-e5-large"
+DEFAULT_MEMORY_DIM = 1024
+
+
 def rebuild_memory_index(
     data_dir: Path, *, python: Path | None = None, script: Path | None = None, model: str | None = None,
     dim: int | None = None, runner=None,
 ) -> int:
-    """Ask memory-mcp to replace its derived index from restored canon."""
+    """Replace the derived index from restored canon.
+
+    The in-package implementation is the default. ``python`` and ``script`` keep
+    the old memory-mcp argv contract available during the side-by-side window.
+    """
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     facts_dir = memory_dir / "facts"
@@ -113,13 +121,13 @@ def rebuild_memory_index(
         if runner is not None:
             result = runner(facts_dir, memory_dir / "export.ndjson", memory_dir / "index.sqlite")
             count = int(result["parity"]["indexed"])
-        else:
+        elif python is not None or script is not None:
             if python is None or script is None or not isinstance(model, str) or not model or not isinstance(dim, int):
-                raise RuntimeError("memory-mcp rebuild contract is not configured")
+                raise RuntimeError("external memory rebuild contract is not configured")
             python = python.expanduser().absolute()
             script = script.expanduser().resolve()
             if not python.is_file() or not os.access(python, os.X_OK) or not script.is_file():
-                raise RuntimeError("memory-mcp rebuild argv contract is unavailable")
+                raise RuntimeError("external memory rebuild argv contract is unavailable")
             completed = subprocess.run(
                 [
                     str(python), str(script), "--canon", str(facts_dir), "--export",
@@ -130,11 +138,22 @@ def rebuild_memory_index(
             )
             if completed.returncode:
                 raise RuntimeError(
-                    "memory-mcp reindex command failed: " + _reindex_error_detail(completed)
+                    "memory reindex command failed: " + _reindex_error_detail(completed)
                 )
             result = json.loads(completed.stdout)
             if not isinstance(result, dict) or result.get("ok") is not True:
-                raise RuntimeError("memory-mcp reindex command reported failure")
+                raise RuntimeError("memory reindex command reported failure")
+            count = int(result["parity"]["indexed"])
+        else:
+            from .memory_reindex import rebuild
+
+            result = rebuild(
+                facts_dir,
+                memory_dir / "export.ndjson",
+                memory_dir / "index.sqlite",
+                model or DEFAULT_MEMORY_MODEL,
+                dim or DEFAULT_MEMORY_DIM,
+            )
             count = int(result["parity"]["indexed"])
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         raise RestoreError(f"could not rebuild memory index: {exc}") from None
