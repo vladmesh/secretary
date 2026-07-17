@@ -170,7 +170,9 @@ Rework checkpoint:
 - a first fresh attempt exposed a stale Orca-worktree collision and was rolled back without
   committing ownership; both stale pilot worktrees were removed;
 - fresh attempt `attempt-20260717T022301Z-779138c5d504` now owns the card and recreated the expected
-  workspace. Last observe reports `in_progress`, legacy frozen and no divergences.
+  workspace. Worker reported focused 3/3 and full 412/412 tests green. The dispatcher consumed the
+  report, moved the card to Validate and launched the independent reviewer. Legacy remains frozen
+  and the last ownership observation has no divergences.
 
 ### 6. Commit production ownership
 
@@ -207,3 +209,6 @@ Status: pending.
 - 2026-07-17 05:23: dispatcher rework relaunch fixed and tested; pilot branch made hermetic. Stale
   worktrees from the failed restart were removed. Fresh attempt `attempt-20260717T022301Z-779138c5d504`
   is active with clean ownership observation.
+- 2026-07-17 05:37: fresh worker reported 3 focused and 412 full tests green. Product dispatcher
+  moved `secretary-621` to Validate and launched the independent reviewer; production ownership is
+  still uncommitted.
