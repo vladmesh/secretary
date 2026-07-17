@@ -38,11 +38,11 @@ CODEX_SESSIONS = Path(os.environ.get(
     str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home" / "sessions"),
 ))
 
-# cwd prefixes whose sessions we never harvest — the triggered-agents' own runs, so no
+# cwd prefixes whose sessions we never harvest — the runtime's own runs, so no
 # triggered-agent (curator included) harvests itself or its siblings:
-#   ~/curator                              legacy pre-rename base checkout
-#   ~/triggered-agents                     current base checkout (dev/provision cwd)
-#   ~/orca/workspaces/triggered-agents     per-agent Orca worktrees (curator/, pipeline/, …)
+#   ~/curator                          legacy pre-rename base checkout
+#   ~/secretary                        current base checkout (dev/provision cwd)
+#   ~/orca/workspaces/secretary        per-agent Orca worktrees (curator/, pipeline/, …)
 _DEFAULT_EXCLUDE = ":".join([
     str(Path.home() / "curator"),
     str(Path.home() / "secretary"),

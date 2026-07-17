@@ -1,6 +1,6 @@
 ---
 name: curate
-description: Процедура куратора памяти — из свежих транскриптов вытащить durable-факты, дедупнуть, записать в канон panelmem-kb. Запускается автоматизацией Orca (Claude/Sonnet) в воркспейсе ~/triggered-agents. Куратор — первый плагин рантайма triggered-agents.
+description: Процедура куратора памяти — из свежих транскриптов вытащить durable-факты, дедупнуть, записать в канон panelmem-kb. Запускается автоматизацией Orca (Claude/Sonnet) в воркспейсе ~/orca/workspaces/triggered-agents. Куратор — первый плагин рантайма triggered-agents.
 ---
 
 # Куратор памяти

@@ -1,6 +1,6 @@
 ---
 name: retro
-description: Процедура ретро-агента — пройти по свежим транскриптам голов и memory-mcp search-log, найти конкретные фейлы (ответ по факту из panelmem без memory_search и с ошибкой, повтор известной ошибки, зацикливание, пустая сессия) и оформить ПРЕДЛОЖЕНИЯ карточками в колонку Идеи на доске Pipeline. Сам ничего не внедряет, в Ready карточки не двигает. Третий плагин рантайма triggered-agents, запускается автоматизацией Orca daily в воркспейсе ~/triggered-agents.
+description: Процедура ретро-агента — пройти по свежим транскриптам голов и memory-mcp search-log, найти конкретные фейлы (ответ по факту из panelmem без memory_search и с ошибкой, повтор известной ошибки, зацикливание, пустая сессия) и оформить ПРЕДЛОЖЕНИЯ карточками в колонку Идеи на доске Pipeline. Сам ничего не внедряет, в Ready карточки не двигает. Третий плагин рантайма triggered-agents, запускается автоматизацией Orca daily в воркспейсе ~/orca/workspaces/triggered-agents.
 ---
 
 # Retro — петля обратной связи
@@ -57,7 +57,7 @@ python3 -m triggered_agents retro harvest
 Перед формулировкой предложений подгрузи текущие карточки:
 
 ```
-set -a && . ~/control-panel/.env && set +a
+set -a && . ~/secretary-instance/runtime.env && set +a
 python3 -m triggered_agents pipeline list --column "Идеи"
 python3 -m triggered_agents pipeline list --column "Ready"
 ```
@@ -74,7 +74,7 @@ python3 -m triggered_agents pipeline list --column "Ready"
 сам, Orca их не прокидывает LLM-головам):
 
 ```
-set -a && . ~/control-panel/.env && set +a
+set -a && . ~/secretary-instance/runtime.env && set +a
 python3 -m triggered_agents pipeline --role retro idea \
   --project <проект, чей скилл/инфра чинится> \
   --title "retro: <короткий фейл-паттерн>" \
