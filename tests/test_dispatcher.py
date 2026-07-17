@@ -1212,6 +1212,24 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("codex exec", launch.command)
         self.assertIn('"$(cat TASK.md)"', launch.command)
 
+    def test_binding_resolves_underscore_swimlane_to_hyphen_id(self) -> None:
+        catalog = object.__new__(InstanceCatalog)
+        catalog.bindings = {  # type: ignore[attr-defined]
+            "codegen-orchestrator": {
+                "id": "codegen-orchestrator",
+                "repo": "/home/dev/projects/codegen_orchestrator",
+                "enabled": True,
+            }
+        }
+
+        binding = catalog.binding("codegen_orchestrator")  # type: ignore[attr-defined]
+        self.assertEqual(binding["id"], "codegen-orchestrator")
+        self.assertIs(binding, catalog.binding("codegen-orchestrator"))  # type: ignore[attr-defined]
+
+        with self.assertRaises(HostError) as ctx:
+            catalog.binding("missing_project")  # type: ignore[attr-defined]
+        self.assertIn("not enabled", str(ctx.exception))
+
     def test_claude_command_prepares_workspace_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".claude.json"

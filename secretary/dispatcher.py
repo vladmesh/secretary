@@ -95,7 +95,7 @@ class InstanceCatalog:
         self._heads = self._load_optional_yaml(self.instance_dir / "heads" / "heads.yaml")
 
     def binding(self, project: str) -> dict[str, Any]:
-        binding = self.bindings.get(project)
+        binding = self.bindings.get(project) or self.bindings.get(project.replace("_", "-"))
         if not binding:
             raise HostError(f"project {project!r} is not enabled in the instance")
         repo = binding.get("repo")
