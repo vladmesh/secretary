@@ -205,6 +205,15 @@ Current checkpoint:
 - production dispatcher units are not installed yet. If this session stops here, install them from
   the product packaging before unfreezing or deleting any legacy runtime.
 
+Production unit finding:
+
+- the first installed timer service used `production-run`, an intentionally persistent loop, from
+  a oneshot timer. Its first tick completed cleanly but the process could not exit;
+- disabled the timer and stopped only the new service. Legacy stayed frozen and no duplicate claim
+  occurred;
+- fixed the packaged unit and desired-host runtime to use one-shot `production-tick` in `62431ac`.
+  Host tests and the full 413-test suite pass. Reinstall the corrected unit before continuing.
+
 ### 7. Rollback window and decommission
 
 Status: pending.
@@ -242,3 +251,6 @@ Status: pending.
   review. Full suite is green at 413 tests. Pilot findings are resolved in product code.
 - 2026-07-17 05:51: logical dispatcher ownership committed. State is `cutover_committed`, records are
   empty and observe is clean. Legacy remains frozen until product production units pass live checks.
+- 2026-07-17 05:53: first production timer smoke exposed a persistent-loop/oneshot mismatch. New
+  timer was disabled and service stopped; corrected to `production-tick` in `62431ac`, 413 tests
+  green. No legacy or task owner was resumed.
