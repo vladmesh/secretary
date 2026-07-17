@@ -3,6 +3,10 @@
 Это outcome-level план, не копия доски. Карточки остаются единственным исполняемым источником
 работы; при подготовке изменения читать доску через её protocol.
 
+Разрыв между текущим appliance и разворачиваемым внешним продуктом описан отдельно в
+[Product gaps](PRODUCT-GAPS.md). Этот roadmap фиксирует направления работы, а gap-анализ задаёт
+productization acceptance gate и приоритеты P0–P2.
+
 ## 1. Завершить controlled cutover
 
 Сделать `secretary` и `secretary-instance` единственными operational repositories только после
