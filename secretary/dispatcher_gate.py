@@ -5,7 +5,9 @@ Ported from triggered_agents/agents/pipeline/validate.py (layer 1). A project de
 gate runs through its adapter's `validation.ci`:
 
   local  — run `validation.command` in the worker workspace; exit 0 is green, non-zero is red.
-  github — publish the worker branch and poll GitHub CI for its head sha; SUCCESS is green,
+  github — publish the worker branch, ensure an open PR into the project's base branch (so the
+           typical `on: [push:main, pull_request]` workflow actually fires — a bare feature-branch
+           push triggers nothing), then poll GitHub CI for the branch head sha; SUCCESS is green,
            FAILURE is red, PENDING/NONE is pending (a check still running, or none posted yet —
            «CI не стартовал», deliberately not confused with «CI красный»).
   none   — no mechanical gate; the card goes straight to review (unchanged pre-633 behaviour).
@@ -75,9 +77,16 @@ def gate_check(host, task: dict, record) -> GateResult:
 
 
 def _validation(host, task: dict) -> dict:
-    adapter = host.catalog.adapter(task["project"])
+    adapter_fn = getattr(host.catalog, "adapter", None)
+    adapter = adapter_fn(task["project"]) if callable(adapter_fn) else None
     validation = adapter.get("validation") if isinstance(adapter, dict) else None
     return validation if isinstance(validation, dict) else {}
+
+
+def validation_ci(host, task: dict) -> str:
+    """The project's declared mechanical-gate mode: "local" | "github" | "none". Read by the
+    dispatcher's merge step to pick a github PR merge over the local fast-forward."""
+    return _validation(host, task).get("ci") or "none"
 
 
 def _recover_base(host, workspace: str, base: str) -> str:
@@ -113,6 +122,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
 def _github_gate(host, task: dict, workspace: str, base: str) -> GateResult:
     branch = _legacy_worker_branch(task["ref"])
     host._run(["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch")
+    _ensure_pr(host, workspace, task, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
     rollup, failed = _poll_ci(host, repo, sha)
@@ -136,6 +146,46 @@ def _name_with_owner(host, workspace: str) -> str:
     if completed.returncode != 0 or not name:
         raise HostError("gate could not resolve the repository name")
     return name
+
+
+def _ensure_pr(host, workspace: str, task: dict, branch: str, base: str) -> None:
+    """Ensure an open PR from the worker branch into `base` exists so the project's
+    `pull_request` CI runs (a bare feature-branch push fires nothing on the typical
+    `on: [push:main, pull_request]` workflow). Idempotent: an already-open PR is reused, and a
+    concurrent tick or gh refusing to duplicate a PR is tolerated as long as one is open."""
+    if _open_pr_number(host, workspace, branch) is not None:
+        return
+    title = f"{task['ref']}: {branch}"
+    body = (
+        f"Автоматический PR ветки воркера `{branch}` для задачи {task['ref']}. "
+        f"Открыт github-CI-гейтом секретаря, чтобы прогнать pull_request-CI."
+    )
+    created = host.run_capture(
+        ["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body],
+        "gate pr create",
+        cwd=Path(workspace),
+    )
+    if created.returncode == 0 or _open_pr_number(host, workspace, branch) is not None:
+        return
+    text = (created.stderr or created.stdout or "").strip()
+    raise HostError(f"gate could not open a PR for {branch!r}: {_tail(text)}")
+
+
+def _open_pr_number(host, workspace: str, branch: str) -> int | None:
+    """Number of the open PR whose head is `branch`, or None when none is open. `gh pr list`
+    exits 0 with empty output when nothing matches, so no-PR is not confused with a gh failure."""
+    completed = host.run_capture(
+        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number", "-q", ".[0].number"],
+        "gate pr list",
+        cwd=Path(workspace),
+    )
+    if completed.returncode != 0:
+        return None
+    text = (completed.stdout or "").strip()
+    try:
+        return int(text) if text else None
+    except ValueError:
+        return None
 
 
 def _poll_ci(host, repo: str, sha: str) -> tuple[str, dict | None]:

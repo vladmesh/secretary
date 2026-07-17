@@ -109,8 +109,14 @@ class FakeKanboard:
 
 
 class FakeCatalog:
+    def __init__(self, adapter: dict | None = None) -> None:
+        self._adapter = adapter or {}
+
     def default_branch(self, project: str, override: str | None) -> str:
         return override or "main"
+
+    def adapter(self, project: str) -> dict:
+        return self._adapter
 
     def worker_head(self, task: dict) -> str:
         return "codex"
@@ -1565,6 +1571,19 @@ class DispatcherLauncherTests(unittest.TestCase):
                 host.complete_green({"ref": "secretary-510-pilot", "project": "secretary"}, record)
         self.assertEqual(host.runs, [])
 
+    def test_complete_green_merges_github_project_through_pr(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            host.complete_green({"ref": "secretary-510-pilot", "project": "codegen_orchestrator"}, record)
+        cmds = [" ".join(run) for run in host.runs]
+        self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds), cmds)
+        # never a local force-land of the branch onto main for a PR-merged project
+        self.assertFalse(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
+        self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
+
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
@@ -1601,8 +1620,8 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", env)
 
 class _RecordingMergeHost(CommandHostRuntime):
-    def __init__(self, root: Path) -> None:
-        super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
+    def __init__(self, root: Path, adapter: dict | None = None) -> None:
+        super().__init__(FakeCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self.runs: list[list[str]] = []
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
@@ -1677,6 +1696,49 @@ class GateCatalog:
 class GateHost(CommandHostRuntime):
     def __init__(self, root: Path, adapter: dict) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
+
+
+class GithubGateHost(CommandHostRuntime):
+    """Runs the real gate over a real git workspace but fakes every `gh` shell-out: repo view,
+    the PR list/create idempotency probes, and the check-runs/status CI poll."""
+
+    def __init__(self, root: Path, adapter: dict, *, pr_open: bool, check_runs: list, statuses: list | None = None) -> None:
+        super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
+        self._pr_open = pr_open
+        self._check_runs = check_runs
+        self._statuses = statuses or []
+        self.gh: list[list[str]] = []
+
+    def _fake_gh(self, args):
+        self.gh.append(list(args))
+
+        def done(out=""):
+            return subprocess.CompletedProcess(args, 0, out, "")
+
+        if args[1:3] == ["repo", "view"]:
+            return done("vladmesh/sample\n")
+        if args[1:3] == ["pr", "list"]:
+            return done("42\n" if self._pr_open else "\n")
+        if args[1:3] == ["pr", "create"]:
+            self._pr_open = True
+            return done("https://github.com/vladmesh/sample/pull/42\n")
+        if args[1] == "api":
+            path = args[2]
+            if path.endswith("/check-runs"):
+                return done(json.dumps(self._check_runs))
+            if path.endswith("/status"):
+                return done(json.dumps(self._statuses))
+        return done("[]")
+
+    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+        if args[:1] == ["gh"]:
+            return self._fake_gh(args)
+        return super().run_capture(args, label, cwd=cwd)
+
+    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+        if args[:1] == ["gh"]:
+            return self._fake_gh(args)
+        return super()._run(args, label, cwd=cwd)
 
 
 def _build_gated_workspace(root: Path, base: str, branch: str) -> Path:
@@ -1766,6 +1828,59 @@ class DispatcherGateTests(unittest.TestCase):
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
         self.assertIn("fell behind base", result.summary)
+
+    def _github_adapter(self) -> dict:
+        return {"validation": {"ci": "github"}}
+
+    def _pr_calls(self, host: "GithubGateHost", verb: str) -> list:
+        return [c for c in host.gh if c[1:3] == ["pr", verb]]
+
+    def test_github_gate_opens_pr_when_absent_then_green(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(len(self._pr_calls(host, "create")), 1)
+        create = self._pr_calls(host, "create")[0]
+        self.assertIn("--base", create)
+        self.assertIn("main", create)
+        self.assertIn("pipeline/secretary-633", create)
+
+    def test_github_gate_reuses_existing_open_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(self._pr_calls(host, "create"), [], "an open PR must not be duplicated")
+
+    def test_github_gate_red_on_failed_pr_ci(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "FAILURE", "name": "tests"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("tests", result.summary)
+
+    def test_github_gate_pending_while_pr_ci_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "IN_PROGRESS"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "pending")
 
     def test_github_rollup_classification(self) -> None:
         from secretary.dispatcher_gate import _rollup

@@ -34,6 +34,7 @@ from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
     GateResult,
     gate_check as _gate_check,
+    validation_ci as _validation_ci,
 )
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
 from secretary.dispatcher_production import (
@@ -294,6 +295,10 @@ class CommandHostRuntime:
         if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
             return
         branch = _legacy_worker_branch(task["ref"])
+        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        if _validation_ci(self, task) == "github":
+            self._merge_github_pr(task, record, branch, base)
+            return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         # Publish the reviewed branch as main (a non-fast-forward push is rejected, never
         # force-landed), then fast-forward the project's own checkout. The dispatcher runs
@@ -302,6 +307,17 @@ class CommandHostRuntime:
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
+
+    def _merge_github_pr(self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str) -> None:
+        """Land a github-CI project through its PR. gh honours branch protection and refuses to
+        merge while required checks are unsatisfied, so a non-green CI never lands even though the
+        dispatcher has already re-run the gate on this same tick. Then fast-forward the project's
+        own checkout (from the worker workspace's origin) so the next worktree bases on the merged
+        tree, matching the local-merge path."""
+        self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
+        repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
+        self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+        self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
 
     def stop(self, record: DispatcherRecord) -> None:
         if self.mode == "noop" or not record.workspace:
