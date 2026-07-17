@@ -1,6 +1,6 @@
 # Live cutover journal
 
-Updated: 2026-07-17 05:07 Europe/Vilnius
+Updated: 2026-07-17 05:14 Europe/Vilnius
 
 Status: preparation started. Production ownership has not changed.
 
@@ -148,6 +148,19 @@ Current checkpoint:
 - last observe: card `in_progress`, old owner paused, no divergences. Worker/reviewer completion is
   not yet proven.
 
+Live finding:
+
+- worker completed the change and reported 411 green tests, including unskipped memory tests;
+- product dispatcher moved the card to Validate and launched an independent reviewer;
+- reviewer returned RED for a non-hermetic readiness assertion, and the dispatcher moved the card
+  back to `In progress`;
+- the rework lifecycle then stalled: `_advance_review` stored the record as `claimed`, while the
+  original worker process had exited. Subsequent ticks return `waiting-worker-report` without
+  launching a replacement worker. This is a product dispatcher bug, not a card implementation
+  failure.
+- production ownership has not been committed. The attempt must be rolled back, the rework launch
+  fixed and covered by a test, then a fresh pilot must complete before step 5 can be marked done.
+
 ### 6. Commit production ownership
 
 Status: pending.
@@ -178,3 +191,5 @@ Status: pending.
   memory parity and systemd backup smoke are green.
 - 2026-07-17 05:07: step 5 started. `secretary-621` claimed by fresh product pilot attempt; observe
   is clean and legacy remains frozen.
+- 2026-07-17 05:14: pilot exercised worker and reviewer paths, then found a rework relaunch bug after
+  RED. Production commit stopped; fix and fresh pilot required.
