@@ -35,17 +35,27 @@ shell = "hermes"
 root = "/home/dev/.hermes/skills/secretary"
 roles = ["secretary"]
 
-[targets.claude-triggered-agents]
+[targets.claude-secretary-curator]
 shell = "claude"
-root = "/home/dev/triggered-agents/.claude/skills"
-roles = ["curator", "retro", "steward"]
+root = "/home/dev/orca/workspaces/secretary/curator/.claude/skills"
+roles = ["curator"]
 
-[targets.codex-triggered-agents]
+[targets.claude-secretary-retro]
+shell = "claude"
+root = "/home/dev/orca/workspaces/secretary/retro/.claude/skills"
+roles = ["retro"]
+
+[targets.claude-secretary-steward]
+shell = "claude"
+root = "/home/dev/orca/workspaces/secretary/steward/.claude/skills"
+roles = ["steward"]
+
+[targets.codex-secretary-roles]
 shell = "codex"
 root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
 roles = ["curator", "retro", "steward"]
 
-[targets.hermes-triggered-agents]
+[targets.hermes-secretary-roles]
 shell = "hermes"
-root = "/home/dev/.hermes/skills/triggered-agents"
+root = "/home/dev/.hermes/skills/secretary-roles"
 roles = ["curator", "retro", "steward"]
