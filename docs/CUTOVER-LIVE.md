@@ -1,6 +1,6 @@
 # Live cutover journal
 
-Updated: 2026-07-17 04:58 Europe/Vilnius
+Updated: 2026-07-17 05:04 Europe/Vilnius
 
 Status: preparation started. Production ownership has not changed.
 
@@ -103,13 +103,28 @@ Result:
 
 ### 4. Switch memory and backup owners
 
-Status: pending.
+Status: completed.
 
 - Stop the old memory owner, install/start the product memory unit, then run a real memory search
   and parity verification.
 - Replace the installed backup unit so it no longer references `control-panel/.env`; keep the timer
   schedule and verify the rendered command.
 - On failure, stop the new unit and restart the old unit before continuing.
+
+Result:
+
+- installed and enabled `secretary-memory.service`; disabled and stopped `memory-mcp.service`.
+- the new memory daemon reached ready state on `127.0.0.1:8077/mcp`; a real MCP `memory_search`
+  succeeded and `memory verify` reports 233 journal/export/index facts with a clean journal.
+- startup took about six minutes and peaked near 1.9 GiB RSS while loading the local embedding
+  model. The current bootstrap uses `update_index()`: unchanged fact embeddings are reused; the
+  delay was model loading, not a forced full fact rebuild.
+- replaced the installed `secretary-backup.service` and timer with product assets. The service now
+  reads `/home/dev/secretary-instance/runtime.env` and executes the product venv, with no
+  `control-panel` path.
+- a manual systemd backup smoke exited successfully and created core/full archives
+  `secretary-backup-{core,full}-20260717T020228Z.tar.age`.
+- old memory checkout remains present for rollback, but owns no enabled or active service.
 
 ### 5. Pilot the product dispatcher
 
@@ -146,3 +161,5 @@ Status: pending.
   resumed with no in-progress cards.
 - 2026-07-17 04:58: step 3 completed. Runtime env materialized, units verified, and the two product
   Orca registrations explicitly adopted. Live owners unchanged.
+- 2026-07-17 05:04: step 4 completed. Memory and backup owners switched to product units; real MCP,
+  memory parity and systemd backup smoke are green.
