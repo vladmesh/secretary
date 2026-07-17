@@ -126,6 +126,7 @@ class FakeHost:
         self.stopped: list[str] = []
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
+        self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
 
     def prepare_worker(
@@ -155,6 +156,10 @@ class FakeHost:
 
     def review_running(self, task: dict, record) -> bool:
         return task["ref"] in self.reviews
+
+    def verify_worker_result(self, task: dict, record) -> None:
+        if self.fail_result_reason:
+            raise HostError(self.fail_result_reason)
 
     def restore_workspace(self, task: dict, worker: str) -> str:
         return str(self.root / worker)
@@ -891,6 +896,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         advanced = self.runtime.tick(self.selector)
 
         self.assertEqual(advanced["to"], "validate")
+
+    def test_done_report_with_uncommitted_result_blocks_before_review(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.fail_result_reason = "worker reported done with uncommitted changes"
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="tests pass",
+            request_id="worker-done-dirty",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "worker result is not durable")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertIn("uncommitted changes", task["comments"][-1]["body"])
+        self.assertEqual(self.host.reviews, [])
 
     def test_rollback_after_claim_preserves_board_state_and_claim(self) -> None:
         self.start_pilot()

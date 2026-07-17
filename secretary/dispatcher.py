@@ -257,6 +257,19 @@ class CommandHostRuntime:
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
 
+    def verify_worker_result(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        if self.mode == "noop":
+            return
+        workspace = Path(record.workspace)
+        if not workspace.is_dir():
+            raise HostError("worker workspace is missing")
+        completed = self._run(
+            ["git", "-C", str(workspace), "status", "--porcelain"],
+            "git status",
+        )
+        if completed.stdout.strip():
+            raise HostError("worker reported done with uncommitted changes")
+
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / "workspaces" / worker)
@@ -380,6 +393,9 @@ class CommandHostRuntime:
             f"# Task {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
+            "",
+            "Commit the completed result on the worker branch before reporting done.",
+            "The dispatcher rejects a done report while the workspace has uncommitted changes.",
             "",
             "Report through the secretary task protocol only:",
             f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file <file>',
@@ -841,6 +857,28 @@ class DispatcherRuntime:
             return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
         if marker == "report:done":
+            try:
+                self.host.verify_worker_result(task, record)
+            except HostError as exc:
+                self.host.stop(record)
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=f"worker result is not durable: {scrub_host_output(str(exc))}",
+                    request_id=_attempt_request_id(
+                        record.attempt_id or attempt_id, "worker-result-blocked", ref
+                    ),
+                )
+                records.pop(ref, None)
+                return {
+                    "status": "blocked",
+                    "step": "advance",
+                    "pilot_ref": ref,
+                    "attempt_id": attempt_id,
+                    "reason": "worker result is not durable",
+                }
             record.review_baseline = len(task.get("comments") or [])
             record.state = "validate"
             self.writer.move(
