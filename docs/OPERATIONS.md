@@ -80,6 +80,26 @@ Restore публикует data root только после успешной п
 memory reindex и host reconcile являются отдельными handoff стадиями. До их завершения `doctor`
 сохраняет findings. Vector index является derived state и не входит в backup canon.
 
+## Авто-мёрж зелёных карточек
+
+Когда ревьюер ставит `review:green`, production dispatcher сам доводит карточку до `done`, без
+ручного мёржа:
+
+1. Push worker-ветки в `origin/main` fast-forward-only (`git push origin BRANCH:main`). Если main
+   разошёлся, push отклоняется — dispatcher не форсит и не подчищает конфликт сам.
+2. Fast-forward локального чекаута соответствующего проекта на новый `origin/main`. Для проекта
+   `secretary` это self-deploy: production dispatcher мёржит и сразу подтягивает изменения в
+   собственный checkout, из которого работает.
+3. Teardown воркспейса: dispatcher останавливает терминалы worktree (worker, ревьюер и их
+   дочерние процессы) и удаляет worktree через `orca worktree rm`.
+
+Teardown выполняется только на этом Done-пути. При `review:red` (rework) воркспейс и его ветка
+остаются нетронутыми, чтобы worker мог продолжить в том же worktree.
+
+Kill-switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` отключает push и fast-forward шаги (`Host.complete_green`)
+целиком — карточка всё равно уходит в `done`, но branch остаётся неслитым и требует ручного мёржа.
+Дефолт — `on` (авто-мёрж включён).
+
 ## Units
 
 Актуальные templates и их назначение находятся в
