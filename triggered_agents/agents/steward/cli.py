@@ -19,8 +19,8 @@ signal, so the systemd gate can skip the run at zero LLM cost; `status` shows th
 
 Second, unconditional mode (triggered-agents-254): `deep-sweep-since`/`deep-sweep-advance` keep
 a separate watermark — just a timestamp, not a per-kind dedup like signals.py's — for the daily
-whole-system audit that runs with no precheck gate at all (deploy/provision.py's second
-ta-steward-deep-sweep timer). Kept independent on purpose: the signal gate must not swallow an
+whole-system audit that runs with no precheck gate at all (the second
+secretary-steward-deep-sweep timer). Kept independent on purpose: the signal gate must not swallow an
 anomaly the daily sweep hasn't looked at yet, and vice versa.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import drift, signals
+from . import signals
 from ..pipeline import worker as pipeline_worker
 from ...runtime.state import PRECHECK_SKIP
 
@@ -124,21 +124,6 @@ def cmd_deep_sweep_since() -> int:
     return 0
 
 
-def cmd_drift(as_json: bool) -> int:
-    """Deep-sweep-only helper (triggered-agents-256): live ta-* systemd units vs. the render of
-    the CURRENT automation.toml specs (deploy/provision.py's own builders, see drift.py) — a
-    dedicated safety net for whatever the post-merge provision apply missed or hasn't run for yet.
-    Never gates a systemd unit the way `precheck` does (no timer calls this): it's read by the
-    deep-sweep skill section only, always exits 0 — `in_sync` in the payload is the signal, not
-    the process exit code."""
-    result = drift.check()
-    if as_json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(drift.render_markdown(result))
-    return 0
-
-
 def _render_role_skills_markdown(result: dict) -> str:
     if "error" in result:
         return f"role skills: error\n\n{result['error']}"
@@ -210,8 +195,6 @@ def main(argv=None) -> int:
         return cmd_deep_sweep_since()
     if cmd == "deep-sweep-advance":
         return cmd_deep_sweep_advance()
-    if cmd == "drift":
-        return cmd_drift("--json" in argv)
     if cmd == "role-skills":
         return cmd_role_skills("--json" in argv)
     print(__doc__)
