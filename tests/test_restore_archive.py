@@ -94,7 +94,7 @@ class RestoreArchiveTests(unittest.TestCase):
             archive = _core_archive(root, "test")
             output = io.StringIO()
 
-            def decrypting_restore(archive_arg, instance_arg, **kwargs):
+            def restoring_archive(archive_arg, instance_arg, **kwargs):
                 return restore_backup(
                     archive_arg,
                     instance_arg,
@@ -102,7 +102,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 )
 
             with (
-                mock.patch("secretary.restore_commands.restore_backup", side_effect=decrypting_restore),
+                mock.patch("secretary.restore_commands.restore_backup", side_effect=restoring_archive),
                 mock.patch("sys.stdout", output),
             ):
                 code = main(["restore", str(archive), "--instance", str(instance)])

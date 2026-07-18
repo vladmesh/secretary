@@ -17,15 +17,16 @@ secretary-data            изменяемые board, memory, runs, transcripts 
 
 Product repository не хранит bindings реальных проектов, credentials, карточки или host-local
 state. Instance содержит persona, project bindings, adapters, policies и head profiles. Секреты
-живут только в host `runtime.env`, который не входит в git или checkpoint. Структурированный
-реестр проектов живёт только в `secretary-instance/projects/`.
+живут только в host `runtime.env` с правами `0600`; файл gitignored в instance repo и не входит в
+git checkpoint или archive payload. Структурированный реестр проектов живёт только в
+`secretary-instance/projects/`.
 
 `secretary-data` хранит mutable runtime state. Memory facts внутри него ведутся Git-журналом;
 остальные компоненты экспортируются в нормализованном виде. SQLite/vector index, worktrees,
 терминалы и generated host resources считаются производными.
 
-Целевой Git-backed recovery checkpoint описан в [Roadmap](ROADMAP.md). Пока он не реализован,
-instance repo и archive/data restore остаются раздельными действующими контурами.
+Git-backed recovery checkpoint описан в [Recovery](RECOVERY.md). Archive/data restore остаётся
+переходной страховкой до parity и не является вторым источником secret state.
 
 ## Runtime flow
 
@@ -70,8 +71,8 @@ Embedding model загружается локально. В production-пров�
 - `doctor` читает config, data и host inventory, но не меняет host.
 - `reconcile plan` строит desired state. Имя или prefix не дают ownership без managed manifest или
   secretary-owned marker.
-- Secrets принадлежат instance/runtime environment и не попадают в product docs, facts, exports или
-  diagnostics.
+- Secrets принадлежат host `runtime.env`; в instance git, facts, exports, checkpoint, archives и
+  diagnostics они не попадают.
 - Task audit и pending writes fail-closed: незавершённая board mutation блокирует согласованный
   export и recovery checkpoint.
 

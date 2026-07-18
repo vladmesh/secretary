@@ -24,6 +24,17 @@ python3 -m unittest
 Для проверки действующей установки использовать `doctor`, `reconcile plan`, `memory verify` и
 `backup verify` по контракту из [Protocols](PROTOCOLS.md).
 
+## Runtime secrets
+
+Секреты установки живут только в host `runtime.env` рядом с `instance.yaml`. Файл должен быть
+`0600`, находится в `.gitignore` instance-репозитория и не входит в checkpoint или archive
+payload. `secretary shell` получает весь файл для trusted operator-сессии, dispatcher-launched
+worker/reviewer получают только allowlisted board credentials и non-secret runtime switches через
+`secretary.role_env`.
+
+Instance config не содержит secret materialization inputs. `reconcile` строит host plan из
+bindings/config и не расшифровывает secret store.
+
 ### Контракт тест-дублей диспетчера
 
 `tests/test_dispatcher_contracts.py` держит `FakeHost`/`FakeCatalog`/`FakeKanboard` в контракте с
@@ -64,16 +75,18 @@ python3 -m secretary backup verify ARCHIVE.tar [--strict]
 scripts/pull-backups-offsite.sh SSH_TARGET REMOTE_DATA_DIR LOCAL_BACKUP_DIR
 ```
 
-`create` поддерживает `core`, `full` и `both` и пишет обычный tar archive в `backups/`. `verify`
-возвращает `0` для успешной проверки, `1` для findings либо strict warnings и `2` для недоступного
-archive. Retention оставляет последний core и удаляет full archives старше 48 часов.
+`create` поддерживает `core`, `full` и `both` и пишет обычный tar archive в `backups/`; archive
+encryption не применяется. `verify` возвращает `0` для успешной проверки, `1` для findings либо
+strict warnings и `2` для недоступного archive. Retention оставляет последний core и удаляет full
+archives старше 48 часов.
 
 Offsite script запускается на внешней машине. Он переносит доступные `*.tar` через `rsync` с
 fallback на `scp`, не удаляет local copies и после успеха атомарно обновляет `last_fetch` на host.
 `doctor` использует configured max age для warning/finding.
 
-Этот archive path остаётся действующей страховкой, пока Git-backed checkpoint не достиг recovery
-parity. Целевой основной contract описан в Roadmap и не требует обязательного S3 transport.
+Этот archive path остаётся переходной страховкой, пока Git-backed checkpoint из
+[Recovery](RECOVERY.md) не достиг recovery parity. Основной контракт не требует обязательного S3
+transport и не переносит host `runtime.env`.
 
 ## Archive restore
 

@@ -315,7 +315,7 @@ class RestoreEndToEndTests(unittest.TestCase):
 
 
 class RestoreEndToEndOfflineTests(unittest.TestCase):
-    """Chain-level negatives that do not need real age tooling."""
+    """Chain-level negatives that only need local plain archives."""
 
     def test_restore_rejects_an_unsupported_archive_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
