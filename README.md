@@ -26,5 +26,3 @@ python3 -m secretary task list --project secretary
 Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available
 with `python3 -m pip install '.[memory]'`. A supported clean-host installer is tracked in the
 Roadmap.
-
-<!-- supervisor selftest marker A (safe change) -->
