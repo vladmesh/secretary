@@ -391,7 +391,11 @@ def _copy_instance_config(source: Path, destination: Path) -> None:
     _copy_tree_filtered(
         source,
         destination,
-        skip=lambda relative: ".git" in relative.parts or relative.name.startswith(".env"),
+        skip=lambda relative: (
+            ".git" in relative.parts
+            or relative.name == "runtime.env"
+            or relative.name.startswith(".env")
+        ),
     )
 
 

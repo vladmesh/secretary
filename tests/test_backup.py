@@ -43,6 +43,9 @@ class BackupTests(unittest.TestCase):
             instance = root / "instance"
             data_dir = root / "secretary-data"
             _write_instance(instance, data_dir)
+            (instance / "runtime.env").write_text(
+                "KANBOARD_API_TOKEN=do-not-archive\n", encoding="utf-8"
+            )
 
             pipeline_calls: list[str] = []
 
@@ -105,6 +108,7 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/debug/orca-state/inventory.json", names)
             self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
             self.assertNotIn("secretary-backup/secretary-data/backups/old.tar", names)
+            self.assertNotIn("secretary-backup/instance/runtime.env", names)
             self.assertNotIn("secretary-backup/instance/.env", names)
 
     def test_create_excludes_memory_journal_hooks_and_config(self):
