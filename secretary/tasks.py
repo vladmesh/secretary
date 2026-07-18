@@ -51,8 +51,10 @@ _CODEX_LAUNCH_MODES = {"exec", "tui"}
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro"}
 _COMMENT_ROLES = _ROLES
 _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro"}
+_STATES = ("ideas", "ready", "in_progress", "validate", "blocked", "done")
 _TRANSITIONS = {
-    "po": {("ideas", "ready"), ("blocked", "ready")},
+    # PO is the human operator and may move a card between any two states.
+    "po": {(source, target) for source in _STATES for target in _STATES if source != target},
     "dispatcher": {
         ("in_progress", "validate"), ("in_progress", "blocked"),
         ("in_progress", "ready"), ("validate", "in_progress"),
