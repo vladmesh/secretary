@@ -15,6 +15,7 @@ Productization now focuses on turning the proven setup into an automated install
 - [Architecture](docs/ARCHITECTURE.md)
 - [Protocols](docs/PROTOCOLS.md)
 - [Operations](docs/OPERATIONS.md)
+- [Recovery](docs/RECOVERY.md)
 
 The Pipeline board is the only active backlog. Read project cards through the product protocol:
 
