@@ -109,28 +109,40 @@ class FakeKanboard:
 
 
 class FakeCatalog:
-    def __init__(self, adapter: dict | None = None) -> None:
+    def __init__(self, adapter: dict | None = None, *, default_branch: str = "") -> None:
         self._adapter = adapter or {}
+        self._default_branch = default_branch
 
     def default_branch(self, project: str, override: str | None) -> str:
-        return override or "main"
+        # Same precedence as InstanceCatalog: card override, then the binding, then "main".
+        return override or self.binding(project).get("default_branch") or "main"
 
     def adapter(self, project: str) -> dict:
         return self._adapter
 
     def worker_head(self, task: dict) -> str:
-        return "codex"
+        # Routing overrides resolve ahead of the role default, as in InstanceCatalog: the resolved
+        # head is written to the board at claim and re-resolved on adoption, so a fake that always
+        # answers "codex" would hide an override that never propagates.
+        return str(task.get("routing", {}).get("head_override") or "codex")
 
     def review_head(self, task: dict) -> str:
-        return "codex-reviewer"
+        return str(task.get("routing", {}).get("review_head_override") or "codex-reviewer")
 
     def binding(self, project: str) -> dict:
-        return {"repo": f"/home/dev/{project}"}
+        binding = {"repo": f"/home/dev/{project}"}
+        if self._default_branch:
+            binding["default_branch"] = self._default_branch
+        return binding
 
 
 class FakeHost:
     def __init__(self, root: Path) -> None:
         self.root = root
+        # Ordered log of every host call. The per-method lists below answer "did it happen"; this
+        # answers "in what order", which some invariants depend on (complete_green must push from
+        # the workspace before teardown removes it).
+        self.calls: list[str] = []
         self.prepared: list[str] = []
         self.reviews: list[str] = []
         self.stopped: list[str] = []
@@ -139,6 +151,14 @@ class FakeHost:
         self.fail_prepare_reason = ""
         self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
+        # Failure hooks for host calls the real runtime can fail on: a rework workspace removed
+        # out of band, a merge push the remote rejects, an orca terminal inventory that errors.
+        self.fail_restart_reason = ""
+        self.fail_complete_reason = ""
+        self.review_running_error: Exception | None = None
+        # None keeps the default "a review started in this process is live"; set a bool to model a
+        # reviewer terminal that died after launch, which is what recovery actually has to detect.
+        self.review_running_result: bool | None = None
         # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
@@ -152,31 +172,47 @@ class FakeHost:
         *,
         attempt_id: str = "",
     ) -> dict[str, str]:
+        self.calls.append("prepare_worker")
         if self.fail_prepare_reason:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
         workspace.mkdir(parents=True, exist_ok=True)
         self.prepared.append(task["ref"])
-        return {"workspace": str(workspace), "handle": f"term:{worker_id}"}
+        return {
+            "workspace": str(workspace),
+            "handle": f"term:{worker_id}",
+            "base_branch": task.get("workspace", {}).get("base_branch") or "main",
+        }
 
     def start_review(self, task: dict, record) -> str:
+        self.calls.append("start_review")
         if self.fail_review_error is not None:
             raise self.fail_review_error
         self.reviews.append(task["ref"])
         return f"review:{task['ref']}"
 
     def restart_worker(self, task: dict, record) -> str:
+        self.calls.append("restart_worker")
+        if self.fail_restart_reason:
+            raise HostError(self.fail_restart_reason)
         self.prepared.append(task["ref"])
         return f"rework:{task['ref']}"
 
     def review_running(self, task: dict, record) -> bool:
+        self.calls.append("review_running")
+        if self.review_running_error is not None:
+            raise self.review_running_error
+        if self.review_running_result is not None:
+            return self.review_running_result
         return task["ref"] in self.reviews
 
     def verify_worker_result(self, task: dict, record) -> None:
+        self.calls.append("verify_worker_result")
         if self.fail_result_reason:
             raise HostError(self.fail_result_reason)
 
     def gate_check(self, task: dict, record) -> GateResult:
+        self.calls.append("gate_check")
         self.gate_calls.append(task["ref"])
         if self.gate_error is not None:
             raise self.gate_error
@@ -185,15 +221,21 @@ class FakeHost:
         return GateResult("green", "gate green")
 
     def restore_workspace(self, task: dict, worker: str) -> str:
+        self.calls.append("restore_workspace")
         return str(self.root / worker)
 
     def complete_green(self, task: dict, record) -> None:
+        self.calls.append("complete_green")
+        if self.fail_complete_reason:
+            raise HostError(self.fail_complete_reason)
         self.completed.append(task["ref"])
 
     def stop(self, record) -> None:
+        self.calls.append("stop")
         self.stopped.append(record.worker)
 
     def teardown(self, record) -> None:
+        self.calls.append("teardown")
         self.stop(record)
         self.torn_down.append(record.worker)
 
@@ -1047,6 +1089,178 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["to"], "done")
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_merge_publishes_from_the_workspace_before_tearing_it_down(self) -> None:
+        """`complete_green` pushes out of the worker workspace and `teardown` removes that
+        worktree. Swapping them merges nothing and only fails on a live host, so pin the order."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)  # gate green -> review started
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="green",
+            request_id="review-green",
+        )
+
+        self.runtime.tick(self.selector)
+
+        self.assertIn("complete_green", self.host.calls)
+        self.assertIn("teardown", self.host.calls)
+        self.assertLess(
+            self.host.calls.index("complete_green"),
+            self.host.calls.index("teardown"),
+            "the merge must publish before the worktree is removed",
+        )
+
+    def _drive_to_green_verdict(self) -> None:
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)  # gate green -> review started
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="green",
+            request_id="review-green",
+        )
+
+    def test_rejected_merge_blocks_the_card_instead_of_escaping_the_tick(self) -> None:
+        """The merge push is rejected when the branch is not a fast-forward of main. That must
+        park the card in Blocked: an escaping HostError would leave a green card in validate and
+        every later tick would retry the same doomed merge with the worker terminals still up."""
+        self.start_pilot()
+        self.host.fail_complete_reason = "merge push failed: ! [rejected] non-fast-forward"
+        self._drive_to_green_verdict()
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "merge failed")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertIn("non-fast-forward", task["comments"][-1]["body"])
+        self.assertEqual(self.host.torn_down, [], "a failed merge must not remove the workspace")
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+
+    def test_rework_bringup_failure_after_red_review_blocks_the_card(self) -> None:
+        """The rework workspace can be gone by the time a red verdict lands. The card has already
+        been moved to In progress at that point, so the failure has to move it on to Blocked."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.host.fail_restart_reason = "rework workspace is missing"
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix it",
+            request_id="review-red",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "rework bring-up failed")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertIn("rework workspace is missing", task["comments"][-1]["body"])
+        self.assertNotIn("secretary-510-pilot", self.runtime.state.load()["records"])
+
+    def test_rework_bringup_failure_after_red_gate_blocks_the_card(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.host.fail_restart_reason = "rework workspace is missing"
+        self._run_worker_to_validate()
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "rework bring-up failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+    def test_review_recovery_restarts_a_reviewer_whose_terminal_died(self) -> None:
+        """`review_running` asks the host whether the reviewer terminal is live, not whether one
+        was ever launched. A dead terminal must be relaunched rather than waited on forever."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)  # gate green -> review started
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        self.assertEqual(record.state, "reviewing")
+        record.state = "review_starting"  # a tick died between launch intent and confirmation
+        payload = self.runtime.state.load()
+        self.runtime.state.put_records(payload, {"secretary-510-pilot": record})
+        self.runtime.state.save(payload)
+        self.host.review_running_result = False
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "review-restarted")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
+
+    def test_review_inventory_failure_blocks_the_card(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        record.state = "review_starting"
+        payload = self.runtime.state.load()
+        self.runtime.state.put_records(payload, {"secretary-510-pilot": record})
+        self.runtime.state.save(payload)
+        self.host.review_running_error = HostError("orca terminal list failed")
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "review inventory failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+    def test_routing_head_overrides_reach_the_board_and_the_host(self) -> None:
+        """A card can pin its own worker/reviewer head. The resolved pair is written to the board
+        at claim and re-read on adoption, so a lost override shows up as a claim divergence."""
+        self.start_pilot()
+        self.board.metadata[12].update({"head": "claude", "review_head": "claude-reviewer"})
+
+        self.runtime.tick(self.selector)
+
+        routing = self.reader.show("secretary-510-pilot")["routing"]
+        self.assertEqual(routing["resolved_worker_head"], "claude")
+        self.assertEqual(routing["resolved_review_head"], "claude-reviewer")
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        self.assertEqual(record.head, "claude")
+        self.assertEqual(record.review_head, "claude-reviewer")
+
+    def test_reworked_card_reruns_the_gate_instead_of_coasting(self) -> None:
+        """A gate-red bounce resets the pass; the next done report is fresh code and must be gated
+        again. Reusing the stale green would ship exactly the regression the gate exists to stop."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        bounced = self.runtime.tick(self.selector)
+        self.assertEqual(bounced["action"], "gate-red-rework")
+        self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
+
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="fixed",
+            request_id="worker-done-after-gate-red",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        advanced = self.runtime.tick(self.selector)
+
+        self.assertEqual(advanced["action"], "review-started")
+        self.assertEqual(
+            self.host.gate_calls,
+            ["secretary-510-pilot", "secretary-510-pilot"],
+            "the gate must re-run for the reworked code state",
+        )
 
     def test_red_review_relaunches_worker_for_rework(self) -> None:
         self.start_pilot()

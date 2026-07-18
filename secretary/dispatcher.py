@@ -1261,7 +1261,25 @@ class DispatcherRuntime:
             return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
         if result.status != "green":
             return self._gate_red_to_worker(task, record, records, payload, attempt_id, result, phase="merge-gate")
-        self.host.complete_green(task, record)
+        try:
+            self.host.complete_green(task, record)
+        except HostError as exc:
+            # A rejected merge (non-fast-forward push, gh refusing on branch protection) must land
+            # the card in Blocked rather than escape the tick: an escaping error leaves the card in
+            # validate with a green verdict, so the next tick retries the same doomed merge forever
+            # while the worker's terminals stay up.
+            self.host.stop(record)
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"merge failed: {scrub_host_output(str(exc))}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "merge-blocked", ref),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "merge failed"}
         self.host.teardown(record)
         self.writer.move(
             role="dispatcher",

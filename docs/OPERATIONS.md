@@ -24,6 +24,18 @@ python3 -m unittest
 Для проверки действующей установки использовать `doctor`, `reconcile plan`, `memory verify` и
 `backup verify` по контракту из [Protocols](PROTOCOLS.md).
 
+### Контракт тест-дублей диспетчера
+
+`tests/test_dispatcher_contracts.py` держит `FakeHost`/`FakeCatalog`/`FakeKanboard` в контракте с
+`CommandHostRuntime`/`InstanceCatalog`/`KanboardClient`. Набор методов, которые дёргает
+`DispatcherRuntime`, вычисляется из исходников (AST), а не ведётся руками, поэтому новый вызов у
+реального host автоматически становится требованием к фейку. Формы возвратов сверяются прогоном
+реального host в `mode="noop"`.
+
+Вне unit-покрытия остаётся всё, что требует живого стека: сам shell-out в `orca`, `gh` и `git`
+внутри `CommandHostRuntime._run*`, отказы Kanboard-транспорта (`TaskError`) в середине board-move
+и реальная нумерация позиций карточек. Эти швы проверяет оператор на живом стенде.
+
 ## System requirements
 
 Memory runtime загружает локальную embedding model. На production cutover startup занимал около
