@@ -22,8 +22,8 @@ class PullBackupsOffsiteTests(unittest.TestCase):
             remote_backups = remote_data / "backups"
             fakebin.mkdir()
             remote_backups.mkdir(parents=True)
-            (remote_backups / "backup-20260710.tar.age").write_text(
-                "encrypted\n", encoding="utf-8"
+            (remote_backups / "backup-20260710.tar").write_text(
+                "archive\n", encoding="utf-8"
             )
             _write_executable(
                 fakebin / "ssh",
@@ -42,7 +42,7 @@ source=${@: -2:1}
 dest=${@: -1}
 source_path=${source#*:}
 mkdir -p "$dest"
-cp "$source_path"/*.tar.age "$dest"/
+cp "$source_path"/*.tar "$dest"/
 """,
             )
 
@@ -63,7 +63,7 @@ cp "$source_path"/*.tar.age "$dest"/
                 stderr=subprocess.PIPE,
                 check=False,
             )
-            copied_archive = local_backups / "backup-20260710.tar.age"
+            copied_archive = local_backups / "backup-20260710.tar"
             marker = remote_backups / "last_fetch"
             copied_archive_exists = copied_archive.is_file()
             if marker.exists():
@@ -115,7 +115,7 @@ bash -c "$1"
             marker_exists = (remote_backups / "last_fetch").exists()
 
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("no encrypted backup archives found", result.stderr)
+        self.assertIn("no backup archives found", result.stderr)
         self.assertFalse(marker_exists)
 
     def test_rsync_noop_does_not_update_last_fetch(self):
@@ -127,8 +127,8 @@ bash -c "$1"
             remote_backups = remote_data / "backups"
             fakebin.mkdir()
             remote_backups.mkdir(parents=True)
-            (remote_backups / "backup-20260710.tar.age").write_text(
-                "encrypted\n", encoding="utf-8"
+            (remote_backups / "backup-20260710.tar").write_text(
+                "archive\n", encoding="utf-8"
             )
             _write_executable(
                 fakebin / "ssh",
@@ -164,11 +164,11 @@ mkdir -p "$dest"
                 stderr=subprocess.PIPE,
                 check=False,
             )
-            copied_archive_exists = (local_backups / "backup-20260710.tar.age").exists()
+            copied_archive_exists = (local_backups / "backup-20260710.tar").exists()
             marker_exists = (remote_backups / "last_fetch").exists()
 
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("no encrypted backup archives copied", result.stderr)
+        self.assertIn("no backup archives copied", result.stderr)
         self.assertFalse(copied_archive_exists)
         self.assertFalse(marker_exists)
 

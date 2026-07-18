@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 import fcntl
 
@@ -60,27 +60,21 @@ def create_backup(
     instance_path: Path,
     *,
     data_dir: Path | None = None,
-    recipient: str | None = None,
     copy_transcripts: bool = False,
     allow_claimed_worker: bool = False,
     caller_workspace: Path | None = None,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     pipeline_command: list[str] | None = None,
-    age_command: str = "age",
-    encrypt: Callable[[Path, Path, str], None] | None = None,
     backup_kind: BackupKind = "full",
 ) -> BackupResult:
     return create_backups(
         instance_path,
         data_dir=data_dir,
-        recipient=recipient,
         copy_transcripts=copy_transcripts,
         allow_claimed_worker=allow_claimed_worker,
         caller_workspace=caller_workspace,
         pipeline_worktree=pipeline_worktree,
         pipeline_command=pipeline_command,
-        age_command=age_command,
-        encrypt=encrypt,
         backup_kinds=(backup_kind,),
     )[0]
 
@@ -89,14 +83,11 @@ def create_backups(
     instance_path: Path,
     *,
     data_dir: Path | None = None,
-    recipient: str | None = None,
     copy_transcripts: bool = False,
     allow_claimed_worker: bool = False,
     caller_workspace: Path | None = None,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     pipeline_command: list[str] | None = None,
-    age_command: str = "age",
-    encrypt: Callable[[Path, Path, str], None] | None = None,
     backup_kinds: tuple[BackupKind, ...] = ("full",),
 ) -> list[BackupResult]:
     kinds = tuple(dict.fromkeys(backup_kinds))
@@ -118,9 +109,6 @@ def create_backups(
         exclude_workspace = caller_workspace.expanduser().resolve()
     instance_file = _instance_file(instance_path)
     data_dir = (data_dir or _load_data_dir(instance_file)).expanduser().resolve()
-    recipient = recipient or _age_recipient(instance_file)
-    if not recipient:
-        raise RuntimeError("age recipient is not configured")
 
     backups_dir = data_dir / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +122,7 @@ def create_backups(
     temp_paths: list[Path] = []
     with _backup_create_lock(backups_dir):
         final_archives = [
-            _unique_archive_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar.age")
+            _unique_archive_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar")
             for kind in kinds
         ]
         try:
@@ -188,13 +176,7 @@ def create_backups(
                 _write_tar(plain_archive, payload)
                 temp_paths.append(plain_archive)
 
-                encrypted_archive = staging / f"{kind}.tar.age"
-                temp_paths.append(encrypted_archive)
-                if encrypt is None:
-                    _encrypt_with_age(plain_archive, encrypted_archive, recipient, age_command=age_command)
-                else:
-                    encrypt(plain_archive, encrypted_archive, recipient)
-                os.replace(encrypted_archive, final_archive)
+                os.replace(plain_archive, final_archive)
                 results.append(BackupResult(archive=final_archive, manifest=manifest))
             _apply_retention(backups_dir, keep=set(final_archives), now=datetime.now(UTC))
             completed = True
@@ -215,7 +197,7 @@ def create_backups(
 
     missing = [path for path in final_archives if not path.is_file()]
     if missing:
-        raise RuntimeError("encrypted archive was not created")
+        raise RuntimeError("archive was not created")
     return results
 
 
@@ -503,22 +485,6 @@ def _write_tar(destination: Path, source: Path) -> None:
         raise RuntimeError(f"could not write backup tar: {exc}") from None
 
 
-def _encrypt_with_age(source: Path, destination: Path, recipient: str, *, age_command: str) -> None:
-    try:
-        subprocess.run(
-            [age_command, "-r", recipient, "-o", str(destination), str(source)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(f"age command not found: {age_command}") from None
-    except subprocess.CalledProcessError as exc:
-        reason = (exc.stderr or exc.stdout or "age encryption failed").strip().splitlines()
-        raise RuntimeError(reason[-1] if reason else "age encryption failed") from None
-
-
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -544,22 +510,6 @@ def _load_data_dir(instance_file: Path) -> Path:
         raise RuntimeError("invalid instance: " + "; ".join(map(str, errors)))
     data_dir = instance["data_dir"]
     return Path(data_dir)
-
-
-def _age_recipient(instance_file: Path) -> str | None:
-    if os.environ.get("SECRETARY_AGE_RECIPIENT"):
-        return os.environ["SECRETARY_AGE_RECIPIENT"]
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise RuntimeError(str(exc)) from None
-    if not isinstance(instance, dict):
-        return None
-    offsite = instance.get("offsite")
-    if not isinstance(offsite, dict):
-        return None
-    recipient = offsite.get("age_recipient")
-    return recipient if isinstance(recipient, str) and recipient else None
 
 
 def _instance_identity(instance_file: Path) -> dict[str, str]:
@@ -606,6 +556,6 @@ def _unique_archive_path(path: Path) -> Path:
 
 def _suffixed_path(path: Path, suffix: int) -> Path:
     name = path.name
-    if name.endswith(".tar.age"):
-        return path.with_name(f"{name.removesuffix('.tar.age')}-{suffix}.tar.age")
+    if name.endswith(".tar"):
+        return path.with_name(f"{name.removesuffix('.tar')}-{suffix}.tar")
     return path.with_name(f"{path.stem}-{suffix}{path.suffix}")

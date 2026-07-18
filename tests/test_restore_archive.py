@@ -49,8 +49,7 @@ class RestoreArchiveTests(unittest.TestCase):
             archive = _core_archive(root, "test")
 
             plan = restore_backup(
-                archive, instance, age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
+                archive, instance,
             )
 
             data_dir = root / "secretary-data"
@@ -84,8 +83,6 @@ class RestoreArchiveTests(unittest.TestCase):
                 restore_backup(
                     archive,
                     instance,
-                    age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
 
         verify.assert_called_once()
@@ -101,7 +98,6 @@ class RestoreArchiveTests(unittest.TestCase):
                 return restore_backup(
                     archive_arg,
                     instance_arg,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                     **kwargs,
                 )
 
@@ -149,8 +145,7 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "identity"):
                 restore_backup(
-                    archive, instance, age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    archive, instance,
                 )
 
             self.assertFalse((root / "secretary-data").exists())
@@ -166,8 +161,7 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "already exists"):
                 restore_backup(
-                    archive, instance, age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    archive, instance,
                 )
             self.assertEqual((data_dir / "keep").read_text(encoding="utf-8"), "keep")
 
@@ -201,8 +195,7 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "memory/facts/.git/HEAD"):
                 restore_backup(
-                    stripped, instance, age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    stripped, instance,
                 )
             self.assertFalse((root / "secretary-data").exists())
 
@@ -220,7 +213,6 @@ class RestoreArchiveTests(unittest.TestCase):
 
             result = verify_backup(
                 damaged,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -248,15 +240,12 @@ class RestoreArchiveTests(unittest.TestCase):
 
             verified = verify_backup(
                 damaged,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
             with self.assertRaisesRegex(RestoreError, "memory journal has no valid HEAD commit"):
                 restore_backup(
                     damaged,
                     instance,
-                    age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
 
             self.assertFalse((root / "secretary-data").exists())
@@ -270,8 +259,7 @@ class RestoreArchiveTests(unittest.TestCase):
             archive = _full_archive(root, "test")
 
             plan = restore_backup(
-                archive, instance, age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
+                archive, instance,
             )
 
             actions = {component["name"]: component["action"] for component in plan.components}
@@ -296,8 +284,6 @@ class RestoreArchiveTests(unittest.TestCase):
                 restore_backup(
                     archive,
                     instance,
-                    age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
             self.assertFalse((root / "secretary-data").exists())
 
@@ -319,8 +305,6 @@ class RestoreArchiveTests(unittest.TestCase):
                 restore_backup(
                     archive,
                     instance,
-                    age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
             self.assertFalse((root / "secretary-data").exists())
 
@@ -345,8 +329,6 @@ class RestoreArchiveTests(unittest.TestCase):
             restore_backup(
                 archive,
                 instance,
-                age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
             restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
             self.assertFalse((restored_git / "hooks").exists())
@@ -395,13 +377,10 @@ class RestoreArchiveTests(unittest.TestCase):
 
             verified = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
             restore_backup(
                 archive,
                 instance,
-                age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
             restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
@@ -434,14 +413,11 @@ class RestoreArchiveTests(unittest.TestCase):
             with mock.patch("secretary.backup_verify.subprocess.run") as git:
                 verified = verify_backup(
                     archive,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
                 with self.assertRaisesRegex(RestoreError, "unexpected data component"):
                     restore_backup(
                         archive,
                         instance,
-                        age_identity=None,
-                        decrypt=lambda source, destination: shutil.copy2(source, destination),
                     )
             git.assert_not_called()
 
@@ -470,8 +446,6 @@ class RestoreArchiveTests(unittest.TestCase):
                     restore_backup(
                         archive,
                         instance,
-                        age_identity=None,
-                        decrypt=lambda source, destination: shutil.copy2(source, destination),
                     )
             self.assertFalse((root / "secretary-data").exists())
 
@@ -489,8 +463,6 @@ class RestoreArchiveTests(unittest.TestCase):
                     restore_backup(
                         archive,
                         instance,
-                        age_identity=None,
-                        decrypt=lambda source, destination: shutil.copy2(source, destination),
                     )
 
             self.assertFalse((root / "secretary-data").exists())
@@ -504,8 +476,6 @@ class RestoreArchiveTests(unittest.TestCase):
             restore_backup(
                 archive,
                 instance,
-                age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
             data_dir = root / "secretary-data"
@@ -545,16 +515,12 @@ class RestoreArchiveTests(unittest.TestCase):
                 ):
                     backup = create_backup(
                         source_instance,
-                        recipient="age1example",
                         backup_kind=kind,
-                        encrypt=lambda source, destination, _recipient: shutil.copy2(source, destination),
                     )
 
                 restore_backup(
                     backup.archive,
                     target_instance,
-                    age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
                 manifest = backup.manifest
                 cards = json.loads((target_data / "board" / "cards.json").read_text())["cards"]

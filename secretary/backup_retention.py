@@ -84,7 +84,7 @@ def check_backup_health(
 
 def backup_archives(backups_dir: Path) -> list[Path]:
     return sorted(
-        path for path in backups_dir.iterdir() if path.name.endswith(".tar.age") and path.is_file()
+        path for path in backups_dir.iterdir() if path.name.endswith(".tar") and path.is_file()
     )
 
 
@@ -103,7 +103,7 @@ def archive_sort_key(path: Path) -> tuple[float, str]:
 
 def archive_created_at(path: Path) -> datetime | None:
     match = re.fullmatch(
-        r"secretary-backup-(?:(?:core|full)-)?(\d{8}T\d{6}Z)(?:-\d+)?\.tar\.age",
+        r"secretary-backup-(?:(?:core|full)-)?(\d{8}T\d{6}Z)(?:-\d+)?\.tar",
         path.name,
     )
     if match is None:

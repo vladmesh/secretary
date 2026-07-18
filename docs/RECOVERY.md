@@ -136,8 +136,8 @@ backup host не требуются. Головы подключаются по�
 Порядок в production-контракте:
 
 1. git-checkpoint writer работает параллельно с архивами;
-2. parity gate пройден, выводятся archive backup, offsite (`pull-backups-offsite.sh`),
-   backup-таймер, archive-age; docs перестают называть архив recovery-контрактом;
+2. parity gate пройден, выводятся archive backup, offsite (`pull-backups-offsite.sh`) и
+   backup-таймер; docs перестают называть архив recovery-контрактом;
 3. optional cold archive для сырых transcripts и artifacts остаётся будущим решением.
 
 В текущем процессе разработки пайплайна cutover агрессивный: sops/age убираются сразу, архивы
@@ -146,8 +146,8 @@ backup host не требуются. Головы подключаются по�
 ## Реализационная нарезка
 
 1. Дизайн-контракт (этот документ).
-2. Выпилить sops/age: `secrets/*.sops.yaml`, `.sops.yaml`, `age_recipient`,
-   `SECRETARY_AGE_IDENTITY`, sops-ветки в `reconcile`/`backup`.
+2. Выпилить sops/age из install/reconcile/backup path. Секреты остаются только в host
+   `runtime.env`.
 3. Checkpoint writer: влить `state/` в приватный репозиторий, flatten memory, хук на тике
    (validate, `git add state/`, commit on-change), отдельный 30-минутный push, lag в `status`/`doctor`.
 4. Вывести archive/offsite из основного пути после dry-run восстановления из git.

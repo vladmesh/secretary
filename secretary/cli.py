@@ -205,13 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
     export_artifacts_command.set_defaults(handler=run_export_artifacts)
     data.set_defaults(handler=not_implemented("data"))
 
-    backup = subparsers.add_parser("backup", help="create or verify encrypted backups")
+    backup = subparsers.add_parser("backup", help="create or verify backups")
     backup_subcommands = backup.add_subparsers(dest="backup_command")
 
     backup_create = backup_subcommands.add_parser("create")
     backup_create.add_argument("--instance", required=True)
     backup_create.add_argument("--data-dir")
-    backup_create.add_argument("--age-recipient")
     backup_create.add_argument(
         "--kind",
         choices=("full", "core", "both"),
@@ -232,7 +231,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     backup_verify = backup_subcommands.add_parser("verify")
     backup_verify.add_argument("archive")
-    backup_verify.add_argument("--age-identity")
     backup_verify.add_argument(
         "--strict",
         action="store_true",
@@ -907,7 +905,6 @@ def run_backup_create(args: argparse.Namespace) -> int:
         results = create_backups(
             Path(args.instance),
             data_dir=Path(args.data_dir) if args.data_dir else None,
-            recipient=args.age_recipient,
             copy_transcripts=args.copy_transcripts,
             backup_kinds=kinds,
         )
@@ -924,11 +921,7 @@ def run_backup_create(args: argparse.Namespace) -> int:
 
 
 def run_backup_verify(args: argparse.Namespace) -> int:
-    identity = args.age_identity or os.environ.get("SECRETARY_AGE_IDENTITY")
-    result = verify_backup(
-        Path(args.archive),
-        identity=Path(identity).expanduser() if identity else None,
-    )
+    result = verify_backup(Path(args.archive))
     print(f"archive: {args.archive}")
     if result.manifest:
         print(f"kind: {result.manifest.get('backup_kind', 'full')}")

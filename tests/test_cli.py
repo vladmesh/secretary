@@ -238,8 +238,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             backups = data_dir / "backups"
-            core = backups / "secretary-backup-core-20260709T000000Z.tar.age"
-            full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
+            core = backups / "secretary-backup-core-20260709T000000Z.tar"
+            full = backups / "secretary-backup-full-20260708T000000Z.tar"
             core.write_bytes(b"core")
             full.write_bytes(b"full")
             stale = datetime(2026, 7, 8, tzinfo=UTC).timestamp()
@@ -299,8 +299,8 @@ class CliTests(unittest.TestCase):
 
             with mock.patch("secretary.cli.create_backups") as create:
                 create.return_value = [
-                    mock.Mock(archive=Path("/tmp/core.tar.age"), manifest={"version": 1, "backup_kind": "core"}),
-                    mock.Mock(archive=Path("/tmp/full.tar.age"), manifest={"version": 1, "backup_kind": "full"}),
+                    mock.Mock(archive=Path("/tmp/core.tar"), manifest={"version": 1, "backup_kind": "core"}),
+                    mock.Mock(archive=Path("/tmp/full.tar"), manifest={"version": 1, "backup_kind": "full"}),
                 ]
                 code, output = self.run_cli(
                     [
@@ -308,8 +308,6 @@ class CliTests(unittest.TestCase):
                         "create",
                         "--instance",
                         str(instance_dir),
-                        "--age-recipient",
-                        "age1example",
                         "--kind",
                         "both",
                     ]
@@ -1115,7 +1113,7 @@ class CliTests(unittest.TestCase):
                 "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
                 encoding="utf-8",
             )
-            archive = root / "missing.tar.age"
+            archive = root / "missing.tar"
             code, output = self.run_cli(
                 ["restore", str(archive), "--instance", str(instance), "--dry-run"]
             )

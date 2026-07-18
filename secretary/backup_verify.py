@@ -33,38 +33,15 @@ class VerifyResult:
 
 def verify_backup(
     archive: Path,
-    *,
-    identity: Path | None = None,
-    age_command: str = "age",
-    decrypt=None,
 ) -> VerifyResult:
     archive = archive.expanduser()
     if not archive.is_file():
         return VerifyResult(2, [f"archive not found: {archive}"], [])
 
-    if decrypt is None:
-        if identity is None:
-            return VerifyResult(2, ["age identity is not configured"], [])
-        if not identity.expanduser().is_file():
-            return VerifyResult(2, [f"age identity not found: {identity}"], [])
-        if shutil.which(age_command) is None:
-            return VerifyResult(2, [f"age command not found: {age_command}"], [])
-
-    with tempfile.TemporaryDirectory(prefix=".secretary-verify-") as tmpdir:
-        plain_archive = Path(tmpdir) / "payload.tar"
-        try:
-            if decrypt is None:
-                _decrypt_with_age(
-                    archive,
-                    plain_archive,
-                    identity=identity.expanduser(),
-                    age_command=age_command,
-                )
-            else:
-                decrypt(archive, plain_archive)
-            return _verify_plain_tar(plain_archive)
-        except RuntimeError as exc:
-            return VerifyResult(1, [str(exc)], [])
+    try:
+        return _verify_plain_tar(archive)
+    except RuntimeError as exc:
+        return VerifyResult(1, [str(exc)], [])
 
 
 def _verify_plain_tar(path: Path) -> VerifyResult:
@@ -185,20 +162,6 @@ def _verify_manifest_components(
 
 def _is_legacy_full_manifest(manifest: dict[str, Any], components: dict[str, Any]) -> bool:
     return "backup_kind" not in manifest and "kind" not in manifest and "runs_state" not in components
-
-
-def _decrypt_with_age(source: Path, destination: Path, *, identity: Path, age_command: str) -> None:
-    try:
-        subprocess.run(
-            [age_command, "-d", "-i", str(identity), "-o", str(destination), str(source)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        reason = (exc.stderr or exc.stdout or "age decryption failed").strip().splitlines()
-        raise RuntimeError(reason[-1] if reason else "age decryption failed") from None
 
 
 def _read_member_json(archive: tarfile.TarFile, name: str) -> Any:

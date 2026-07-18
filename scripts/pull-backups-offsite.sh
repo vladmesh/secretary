@@ -9,7 +9,7 @@ Usage:
 Example:
   pull-backups-offsite.sh vps.example.com /home/dev/secretary-data ~/secretary-backups
 
-The script runs on the offsite machine. It pulls encrypted archives from
+The script runs on the offsite machine. It pulls backup archives from
 <remote-data-dir>/backups/ and then atomically updates last_fetch on the VPS.
 USAGE
 }
@@ -36,14 +36,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-remote_archives=$("${ssh_cmd[@]}" "$ssh_target" "find '$remote_backups_dir' -maxdepth 1 -type f -name '*.tar.age' -print")
+remote_archives=$("${ssh_cmd[@]}" "$ssh_target" "find '$remote_backups_dir' -maxdepth 1 -type f -name '*.tar' -print")
 if [[ -z "$remote_archives" ]]; then
-  echo "no encrypted backup archives found in $ssh_target:$remote_backups_dir" >&2
+  echo "no backup archives found in $ssh_target:$remote_backups_dir" >&2
   exit 1
 fi
 
 if command -v rsync >/dev/null 2>&1; then
-  rsync -av --include='*.tar.age' --exclude='*' \
+  rsync -av --include='*.tar' --exclude='*' \
     "$ssh_target:$remote_backups_dir/" "$staging_dir/"
 else
   printf '%s\n' "$remote_archives" |
@@ -52,13 +52,13 @@ else
     done
 fi
 
-copied_archives=$(find "$staging_dir" -maxdepth 1 -type f -name '*.tar.age' -print -quit)
+copied_archives=$(find "$staging_dir" -maxdepth 1 -type f -name '*.tar' -print -quit)
 if [[ -z "$copied_archives" ]]; then
-  echo "no encrypted backup archives copied from $ssh_target:$remote_backups_dir" >&2
+  echo "no backup archives copied from $ssh_target:$remote_backups_dir" >&2
   exit 1
 fi
 
-find "$staging_dir" -maxdepth 1 -type f -name '*.tar.age' -exec cp -p {} "$local_backup_dir/" \;
+find "$staging_dir" -maxdepth 1 -type f -name '*.tar' -exec cp -p {} "$local_backup_dir/" \;
 
 "${ssh_cmd[@]}" "$ssh_target" \
   "set -euo pipefail; mkdir -p '$remote_backups_dir'; tmp=\$(mktemp '$remote_backups_dir/.last_fetch.XXXXXX'); date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$tmp\"; mv \"\$tmp\" '$remote_backups_dir/last_fetch'"

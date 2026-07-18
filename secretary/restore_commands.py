@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from secretary.restore import (
@@ -35,10 +34,9 @@ def add_restore_subcommands(subparsers) -> None:
     bootstrap.add_argument("--dry-run", action="store_true")
     bootstrap.set_defaults(handler=run_bootstrap_empty)
 
-    restore = subparsers.add_parser("restore", help="restore secretary-data from an encrypted archive")
+    restore = subparsers.add_parser("restore", help="restore secretary-data from an archive")
     restore.add_argument("archive")
     restore.add_argument("--instance", required=True)
-    restore.add_argument("--age-identity")
     restore.add_argument("--dry-run", action="store_true")
     restore.set_defaults(handler=run_restore)
 
@@ -61,12 +59,10 @@ def run_bootstrap_empty(args: argparse.Namespace) -> int:
 
 
 def run_restore(args: argparse.Namespace) -> int:
-    identity = args.age_identity or os.environ.get("SECRETARY_AGE_IDENTITY")
     try:
         plan = restore_backup(
             Path(args.archive),
             Path(args.instance),
-            age_identity=Path(identity) if identity else None,
             dry_run=args.dry_run,
         )
     except RestoreError as exc:

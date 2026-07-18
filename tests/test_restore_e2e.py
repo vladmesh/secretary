@@ -1,9 +1,8 @@
 """End-to-end restore of a fixture backup onto an empty target.
 
-These tests own the Phase 8 chain as a whole: a real age-encrypted archive is
-produced, the producer host is destroyed, and the archive is the only input to
-the restore. Component-level behaviour stays in test_restore.py and
-test_restore_archive.py.
+These tests own the Phase 8 chain as a whole: a real backup archive is produced,
+the producer host is destroyed, and the archive is the only input to the restore.
+Component-level behaviour stays in test_restore.py and test_restore_archive.py.
 """
 
 from __future__ import annotations
@@ -42,9 +41,6 @@ from tests.restore_fixtures import (
 )
 
 
-AGE_AVAILABLE = bool(shutil.which("age") and shutil.which("age-keygen"))
-AGE_REASON = "age and age-keygen are required for the restore e2e"
-
 REINDEX_SCRIPT = '''
 import argparse, hashlib, json, sqlite3, sys
 from pathlib import Path
@@ -74,16 +70,6 @@ print(json.dumps({"ok": True, "parity": {"indexed": len(facts)}}))
 '''
 
 FACT_BODY = "---\ntags: [restore]\nsource: e2e\ncreated: 2026-07-16\npinned: false\n---\n"
-
-
-def _age_keypair(root: Path, name: str) -> tuple[str, Path]:
-    """Generate a real age identity and return its recipient and key file."""
-    identity = root / f"{name}.agekey"
-    subprocess.run(["age-keygen", "-o", str(identity)], capture_output=True, check=True)
-    recipient = subprocess.run(
-        ["age-keygen", "-y", str(identity)], text=True, capture_output=True, check=True
-    )
-    return recipient.stdout.strip(), identity
 
 
 def _seed_producer(data_dir: Path) -> tuple[list[dict[str, object]], int]:
@@ -150,8 +136,8 @@ class _Fixture(NamedTuple):
     history: list[str]
 
 
-def _create_fixture_backup(root: Path, *, kind: str, recipient: str) -> _Fixture:
-    """Produce an encrypted archive the way the nightly backup timer does."""
+def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
+    """Produce an archive the way the nightly backup timer does."""
     source_data = root / "source-data"
     source_instance = _write_instance_to(root / "source-instance", "e2e", source_data)
     cards, facts = _seed_producer(source_data)
@@ -171,7 +157,7 @@ def _create_fixture_backup(root: Path, *, kind: str, recipient: str) -> _Fixture
             ),
         ),
     ):
-        backup = create_backup(source_instance, recipient=recipient, backup_kind=kind)
+        backup = create_backup(source_instance, backup_kind=kind)
 
     # The pull to vladmesh's machine is the only artefact that leaves the host.
     offsite = root / "offsite"
@@ -225,13 +211,11 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
         return main(["restore-reconcile", "--instance", str(instance)])
 
 
-@unittest.skipUnless(AGE_AVAILABLE, AGE_REASON)
 class RestoreEndToEndTests(unittest.TestCase):
     def test_fixture_backup_restores_to_green_doctor_without_the_source_data_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            recipient, identity = _age_keypair(root, "operator")
-            fixture = _create_fixture_backup(root, kind="full", recipient=recipient)
+            fixture = _create_fixture_backup(root, kind="full")
             script = _reindex_script(root)
 
             # An empty target is a supported install on its own.
@@ -240,13 +224,12 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(main(["doctor", "--offline", "--instance", str(empty_instance)]), 0)
             self.assertFalse((empty_data / "board" / "cards.json").exists())
 
-            # The restored target sees only the archive and the age key.
+            # The restored target sees only the archive.
             instance, data_dir = _target_instance(root, "target", script)
             self.assertFalse(data_dir.exists())
             self.assertFalse((root / "source-data").exists())
             self.assertEqual(main([
                 "restore", str(fixture.archive), "--instance", str(instance),
-                "--age-identity", str(identity),
             ]), 0)
 
             # A full archive carries the raw dump and every card, done ones included.
@@ -267,13 +250,11 @@ class RestoreEndToEndTests(unittest.TestCase):
     def test_core_archive_restores_normalized_board_without_a_raw_dump(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            recipient, identity = _age_keypair(root, "operator")
-            fixture = _create_fixture_backup(root, kind="core", recipient=recipient)
+            fixture = _create_fixture_backup(root, kind="core")
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
             self.assertEqual(main([
                 "restore", str(fixture.archive), "--instance", str(instance),
-                "--age-identity", str(identity),
             ]), 0)
 
             self.assertEqual(list((data_dir / "board").glob("kanboard-raw-*")), [])
@@ -297,33 +278,38 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(sorted(task["title"] for task in client.tasks), ["First", "Second"])
             self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
-    def test_restore_rejects_a_foreign_age_key_without_creating_the_target(self):
+    def test_restore_rejects_a_truncated_archive_without_creating_the_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            recipient, _ = _age_keypair(root, "operator")
-            _, foreign = _age_keypair(root, "foreign")
-            fixture = _create_fixture_backup(root, kind="core", recipient=recipient)
+            fixture = _create_fixture_backup(root, kind="core")
+            fixture.archive.write_bytes(fixture.archive.read_bytes()[:32])
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
             self.assertEqual(main([
                 "restore", str(fixture.archive), "--instance", str(instance),
-                "--age-identity", str(foreign),
             ]), 2)
             self.assertFalse(data_dir.exists())
 
     def test_restore_rejects_a_corrupted_archive_without_creating_the_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            recipient, identity = _age_keypair(root, "operator")
-            fixture = _create_fixture_backup(root, kind="core", recipient=recipient)
-            payload = bytearray(fixture.archive.read_bytes())
-            payload[-1] ^= 0xFF
-            fixture.archive.write_bytes(payload)
+            fixture = _create_fixture_backup(root, kind="core")
+            corrupt_root = root / "corrupt"
+            with tarfile.open(fixture.archive) as bundle:
+                bundle.extractall(corrupt_root, filter="data")
+            (
+                corrupt_root
+                / ARCHIVE_ROOT
+                / "secretary-data"
+                / "board"
+                / "cards.json"
+            ).write_text('{"version": 1, "cards": []}\n', encoding="utf-8")
+            with tarfile.open(fixture.archive, "w") as bundle:
+                bundle.add(corrupt_root / ARCHIVE_ROOT, arcname=ARCHIVE_ROOT)
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
             self.assertEqual(main([
                 "restore", str(fixture.archive), "--instance", str(instance),
-                "--age-identity", str(identity),
             ]), 2)
             self.assertFalse(data_dir.exists())
 
@@ -339,8 +325,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "unsupported backup version"):
                 restore_backup(
-                    archive, instance, age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    archive, instance,
                 )
             self.assertFalse(data_dir.exists())
 
@@ -355,8 +340,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "target data root already exists"):
                 restore_backup(
-                    archive, instance, age_identity=None,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
+                    archive, instance,
                 )
             self.assertEqual(marker.read_text(), '{"version": 1, "cards": []}')
 
@@ -366,8 +350,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             archive = _plain_archive(root)
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
             restore_backup(
-                archive, instance, age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
+                archive, instance,
             )
             client = _EmptyWriteKanboard()
             client.tasks.append({
@@ -390,8 +373,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             archive = _plain_archive(root)
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
             restore_backup(
-                archive, instance, age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
+                archive, instance,
             )
             # A core archive carries the two non-done cards.
             self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 2)
@@ -412,8 +394,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
             plan = restore_backup(
-                archive, instance, age_identity=None,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
+                archive, instance,
             )
 
             actions = {component["name"]: component["action"] for component in plan.components}
@@ -454,10 +435,5 @@ def _repacked_archive(root: Path, manifest_changes: dict[str, object], *, kind: 
 
 
 def _plain_archive(root: Path, *, kind: str = "core") -> Path:
-    """Build a fixture archive without paying for age on every negative."""
-    with mock.patch("secretary.backup._encrypt_with_age", _copy_instead_of_age):
-        return _create_fixture_backup(root, kind=kind, recipient="age1e2e").archive
-
-
-def _copy_instead_of_age(source: Path, destination: Path, recipient: str, *, age_command: str) -> None:
-    shutil.copy2(source, destination)
+    """Build a fixture archive for negative restore tests."""
+    return _create_fixture_backup(root, kind=kind).archive

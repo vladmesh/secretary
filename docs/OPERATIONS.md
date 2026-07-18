@@ -60,16 +60,15 @@ python3 -m secretary data raw-kanboard-dump --instance INSTANCE \
 
 ```bash
 python3 -m secretary backup create --instance INSTANCE --kind both
-python3 -m secretary backup verify ARCHIVE.tar.age [--age-identity FILE] [--strict]
+python3 -m secretary backup verify ARCHIVE.tar [--strict]
 scripts/pull-backups-offsite.sh SSH_TARGET REMOTE_DATA_DIR LOCAL_BACKUP_DIR
 ```
 
-`create` поддерживает `core`, `full` и `both`; age recipient берётся из instance или задаётся
-явно. `verify` возвращает `0` для успешной проверки, `1` для findings либо strict warnings и `2`
-для недоступного archive. Retention оставляет последний core и удаляет full archives старше 48
-часов.
+`create` поддерживает `core`, `full` и `both` и пишет обычный tar archive в `backups/`. `verify`
+возвращает `0` для успешной проверки, `1` для findings либо strict warnings и `2` для недоступного
+archive. Retention оставляет последний core и удаляет full archives старше 48 часов.
 
-Offsite script запускается на внешней машине. Он переносит доступные `*.tar.age` через `rsync` с
+Offsite script запускается на внешней машине. Он переносит доступные `*.tar` через `rsync` с
 fallback на `scp`, не удаляет local copies и после успеха атомарно обновляет `last_fetch` на host.
 `doctor` использует configured max age для warning/finding.
 
@@ -79,8 +78,7 @@ parity. Целевой основной contract описан в Roadmap и не
 ## Archive restore
 
 ```bash
-python3 -m secretary restore ARCHIVE.tar.age --instance INSTANCE \
-  --age-identity IDENTITY [--dry-run]
+python3 -m secretary restore ARCHIVE.tar --instance INSTANCE [--dry-run]
 python3 -m secretary restore-board --instance INSTANCE
 python3 -m secretary memory reindex --instance INSTANCE
 python3 -m secretary reconcile plan --instance INSTANCE

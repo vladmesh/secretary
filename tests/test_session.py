@@ -23,13 +23,13 @@ class OperatorEnvTest(unittest.TestCase):
                 "KANBOARD_API_USER=svc\n"
                 "KANBOARD_API_TOKEN=tok\n"
                 "KANBOARD_ADMIN_PASSWORD=hunter2\n"
-                "SECRETARY_AGE_IDENTITY=AGE-SECRET\n",
+                "GITHUB_TOKEN=gh-test-token\n",
             )
             env = session.operator_env(env_file, base_env={"PATH": "/bin"})
         # Board creds plus every other secret from the file — operator is unscoped on purpose.
         self.assertEqual(env["KANBOARD_URL"], "http://board/jsonrpc.php")
         self.assertEqual(env["KANBOARD_ADMIN_PASSWORD"], "hunter2")
-        self.assertEqual(env["SECRETARY_AGE_IDENTITY"], "AGE-SECRET")
+        self.assertEqual(env["GITHUB_TOKEN"], "gh-test-token")
         self.assertEqual(env["PATH"], "/bin")
         self.assertEqual(env["SECRETARY_ROLE"], "operator")
 

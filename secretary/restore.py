@@ -21,7 +21,7 @@ from secretary.backup_policy import (
     restore_plan_components,
     should_skip_data_entry,
 )
-from secretary.backup_verify import _decrypt_with_age, _verify_plain_tar
+from secretary.backup_verify import _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary.data import init_layout
 from secretary._fsutil import file_lock, write_text_atomic
@@ -343,36 +343,19 @@ def restore_backup(
     archive: Path,
     instance_path: Path,
     *,
-    age_identity: Path | None,
     dry_run: bool = False,
-    age_command: str = "age",
-    decrypt=None,
 ) -> RestorePlan:
     _, target, target_identity = _target(instance_path)
     _reject_existing_target(target)
     archive = archive.expanduser()
     if not archive.is_file():
         raise RestoreError(f"archive not found: {archive}")
-    if decrypt is None:
-        if age_identity is None:
-            raise RestoreError("age identity is not configured")
-        age_identity = age_identity.expanduser()
-        if not age_identity.is_file():
-            raise RestoreError(f"age identity not found: {age_identity}")
-        if shutil.which(age_command) is None:
-            raise RestoreError(f"age command not found: {age_command}")
 
-    with tempfile.TemporaryDirectory(prefix=".secretary-restore-") as temporary:
-        plain = Path(temporary) / "payload.tar"
-        try:
-            if decrypt is None:
-                _decrypt_with_age(archive, plain, identity=age_identity, age_command=age_command)
-            else:
-                decrypt(archive, plain)
-        except RuntimeError as exc:
-            raise RestoreError(str(exc)) from None
-
-        verified = _verify_plain_tar(plain)
+    try:
+        verified = _verify_plain_tar(archive)
+    except RuntimeError as exc:
+        raise RestoreError(str(exc)) from None
+    else:
         if verified.code or verified.findings or not isinstance(verified.manifest, dict):
             findings = "; ".join(verified.findings) or "archive verification failed"
             raise RestoreError(findings)
@@ -396,7 +379,7 @@ def restore_backup(
         )
         if dry_run:
             return plan
-        _stage_and_publish(plain, target, policy=policy)
+        _stage_and_publish(archive, target, policy=policy)
         return plan
 
 

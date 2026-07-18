@@ -37,7 +37,7 @@ class BackupTests(unittest.TestCase):
             Path.home() / "orca" / "workspaces" / "secretary" / "pipeline",
         )
 
-    def test_create_writes_encrypted_archive_with_expected_structure_and_verify_is_ok(self):
+    def test_create_writes_archive_with_expected_structure_and_verify_is_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
@@ -75,9 +75,6 @@ class BackupTests(unittest.TestCase):
                     ),
                 }
 
-            def fake_encrypt(source, destination, _recipient):
-                shutil.copy2(source, destination)
-
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
@@ -86,15 +83,12 @@ class BackupTests(unittest.TestCase):
             ):
                 result = create_backup(
                     instance,
-                    recipient="age1example",
-                    encrypt=fake_encrypt,
                 )
 
             self.assertEqual(pipeline_calls, ["pause", "resume"])
             self.assertTrue(result.archive.is_file())
             verified = verify_backup(
                 result.archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
             self.assertEqual(verified.code, 0, verified.findings)
@@ -110,7 +104,7 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
             self.assertIn("secretary-backup/debug/orca-state/inventory.json", names)
             self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
-            self.assertNotIn("secretary-backup/secretary-data/backups/old.tar.age", names)
+            self.assertNotIn("secretary-backup/secretary-data/backups/old.tar", names)
             self.assertNotIn("secretary-backup/instance/.env", names)
 
     def test_create_excludes_memory_journal_hooks_and_config(self):
@@ -149,8 +143,6 @@ class BackupTests(unittest.TestCase):
                  mock.patch("secretary.backup.export_all", return_value=exports):
                 result = create_backup(
                     instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(source, destination),
                 )
 
             with tarfile.open(result.archive, "r") as archive:
@@ -166,7 +158,6 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(
                 verify_backup(
                     result.archive,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 ).code,
                 0,
             )
@@ -180,7 +171,7 @@ class BackupTests(unittest.TestCase):
 
             with mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
     def test_create_rejects_relative_instance_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -189,7 +180,7 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, Path("secretary-data"))
 
             with self.assertRaisesRegex(RuntimeError, "data_dir: value must match pattern"):
-                create_backup(instance, recipient="age1example")
+                create_backup(instance)
 
         self.assertFalse((root / "secretary-data").exists())
 
@@ -212,7 +203,7 @@ class BackupTests(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "snapshot reached"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
     def test_create_rejects_claimed_workspace_when_board_role_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -231,7 +222,7 @@ class BackupTests(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
     def test_create_resumes_pipeline_when_snapshot_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -254,7 +245,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup.export_all", side_effect=RuntimeError("boom")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
             self.assertEqual(pipeline_calls, ["pause", "resume"])
 
@@ -389,7 +380,6 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "stop"):
                     create_backup(
                         instance,
-                        recipient="age1example",
                         allow_claimed_worker=True,
                         caller_workspace=Path("/ws/backup"),
                     )
@@ -407,7 +397,6 @@ class BackupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "caller_workspace"):
                 create_backup(
                     instance,
-                    recipient="age1example",
                     allow_claimed_worker=True,
                 )
 
@@ -435,7 +424,7 @@ class BackupTests(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "already paused"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
     def test_create_releases_lock_when_preexisting_freeze_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -458,7 +447,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_action") as pipeline_action,
             ):
                 with self.assertRaisesRegex(RuntimeError, "already paused"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
             pipeline_action.assert_not_called()
             fd = os.open(data_dir / "backups" / ".create.lock", os.O_RDWR)
@@ -483,7 +472,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_action") as pipeline_action,
             ):
                 with self.assertRaisesRegex(RuntimeError, "already paused"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
             pipeline_action.assert_not_called()
 
@@ -499,7 +488,7 @@ class BackupTests(unittest.TestCase):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 with self.assertRaisesRegex(RuntimeError, "already running"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
@@ -513,7 +502,7 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, data_dir)
             backups = data_dir / "backups"
             backups.mkdir(parents=True)
-            existing = backups / "secretary-backup-full-20260710T000000Z.tar.age"
+            existing = backups / "secretary-backup-full-20260710T000000Z.tar"
             existing.write_bytes(b"keep")
 
             def fake_raw(data_dir_arg):
@@ -540,15 +529,11 @@ class BackupTests(unittest.TestCase):
                 fake_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
                 result = create_backup(
                     instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(
-                        source, destination
-                    ),
                 )
 
             self.assertEqual(existing.read_bytes(), b"keep")
             self.assertNotEqual(result.archive, existing)
-            self.assertEqual(result.archive.name, "secretary-backup-full-20260710T000000Z-2.tar.age")
+            self.assertEqual(result.archive.name, "secretary-backup-full-20260710T000000Z-2.tar")
             self.assertTrue(result.archive.is_file())
 
     def test_create_both_uses_one_pause_and_writes_core_and_full_archives(self):
@@ -580,11 +565,6 @@ class BackupTests(unittest.TestCase):
             ):
                 results = create_backups(
                     instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(
-                        source,
-                        destination,
-                    ),
                     backup_kinds=("core", "full"),
                 )
 
@@ -593,7 +573,6 @@ class BackupTests(unittest.TestCase):
             for result in results:
                 verified = verify_backup(
                     result.archive,
-                    decrypt=lambda source, destination: shutil.copy2(source, destination),
                 )
                 self.assertEqual(verified.code, 0, verified.findings)
 
@@ -626,9 +605,9 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_action", side_effect=RuntimeError("pause failed")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "pause failed"):
-                    create_backup(instance, recipient="age1example")
+                    create_backup(instance)
 
-            self.assertEqual(list((data_dir / "backups").glob("*.tar.age")), [])
+            self.assertEqual(list((data_dir / "backups").glob("*.tar")), [])
 
     def test_core_filters_done_cards(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -658,11 +637,6 @@ class BackupTests(unittest.TestCase):
             ):
                 result = create_backup(
                     instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(
-                        source,
-                        destination,
-                    ),
                     backup_kind="core",
                 )
 
@@ -686,9 +660,9 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, data_dir)
             backups = data_dir / "backups"
             backups.mkdir(parents=True)
-            old_core = backups / "secretary-backup-core-20260708T000000Z.tar.age"
-            old_full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
-            recent_full = backups / "secretary-backup-full-20260710T230000Z.tar.age"
+            old_core = backups / "secretary-backup-core-20260708T000000Z.tar"
+            old_full = backups / "secretary-backup-full-20260708T000000Z.tar"
+            recent_full = backups / "secretary-backup-full-20260710T230000Z.tar"
             for path in (old_core, old_full, recent_full):
                 path.write_bytes(b"old")
             fresh_mtime = 2_000_000_000
@@ -717,11 +691,6 @@ class BackupTests(unittest.TestCase):
                 fake_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
                 result = create_backup(
                     instance,
-                    recipient="age1example",
-                    encrypt=lambda source, destination, _recipient: shutil.copy2(
-                        source,
-                        destination,
-                    ),
                     backup_kind="core",
                 )
 
@@ -737,8 +706,8 @@ class BackupTests(unittest.TestCase):
             root = Path(tmpdir)
             backups = root / "backups"
             backups.mkdir()
-            core = backups / "secretary-backup-core-20260709T000000Z.tar.age"
-            full = backups / "secretary-backup-full-20260708T000000Z.tar.age"
+            core = backups / "secretary-backup-core-20260709T000000Z.tar"
+            full = backups / "secretary-backup-full-20260708T000000Z.tar"
             core.write_bytes(b"core")
             full.write_bytes(b"full")
             fresh_mtime = datetime(2026, 7, 11, tzinfo=UTC).timestamp()
@@ -786,7 +755,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_reports_missing_runs_state_sidecars(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "core.tar.age"
+            archive = root / "core.tar"
             payload = root / "payload" / "secretary-backup"
             _write_core_payload(payload)
             (payload / "secretary-data" / "runs" / "claims.json").unlink()
@@ -795,7 +764,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -806,7 +774,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_accepts_legacy_full_archive_without_runs_state_claims(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "legacy-full.tar.age"
+            archive = root / "legacy-full.tar"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
             journal = payload / "secretary-data" / "memory" / "facts" / ".git"
@@ -831,7 +799,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 0, result.findings)
@@ -839,7 +806,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_reports_missing_normalized_board_export_sidecars(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "core.tar.age"
+            archive = root / "core.tar"
             payload = root / "payload" / "secretary-backup"
             _write_core_payload(payload)
             (payload / "secretary-data" / "board" / "cards.ndjson").unlink()
@@ -849,7 +816,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -865,7 +831,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_rejects_archive_without_memory_journal_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "core.tar.age"
+            archive = root / "core.tar"
             payload = root / "payload" / "secretary-backup"
             _write_core_payload(payload)
             with tarfile.open(archive, "w") as tar:
@@ -873,7 +839,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -886,7 +851,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_reports_unsupported_non_string_backup_kind(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "invalid-kind.tar.age"
+            archive = root / "invalid-kind.tar"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
             manifest_path = payload / "versions.json"
@@ -905,29 +870,28 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
         self.assertIn("unsupported backup kind", result.findings)
 
-    def test_verify_returns_2_when_archive_or_key_is_unavailable(self):
+    def test_verify_returns_2_when_archive_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            missing = verify_backup(root / "missing.tar.age")
-            archive = root / "archive.tar.age"
+            missing = verify_backup(root / "missing.tar")
+            archive = root / "archive.tar"
             archive.write_bytes(b"not checked")
-            no_key = verify_backup(archive)
+            invalid = verify_backup(archive)
 
         self.assertEqual(missing.code, 2)
         self.assertIn("archive not found", missing.findings[0])
-        self.assertEqual(no_key.code, 2)
-        self.assertIn("age identity is not configured", no_key.findings[0])
+        self.assertEqual(invalid.code, 1)
+        self.assertIn("invalid archive", invalid.findings[0])
 
     def test_verify_returns_1_for_incomplete_plain_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "broken.tar.age"
+            archive = root / "broken.tar"
             payload = root / "payload"
             (payload / "secretary-backup").mkdir(parents=True)
             with tarfile.open(archive, "w") as tar:
@@ -935,7 +899,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -944,7 +907,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_returns_1_when_component_paths_are_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "incomplete.tar.age"
+            archive = root / "incomplete.tar"
             payload = root / "payload" / "secretary-backup"
             (payload / "instance").mkdir(parents=True)
             (payload / "secretary-data" / "board").mkdir(parents=True)
@@ -986,7 +949,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -996,7 +958,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_returns_1_when_raw_board_dump_has_no_data_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "incomplete.tar.age"
+            archive = root / "incomplete.tar"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
             raw = payload / "secretary-data" / "board" / "kanboard-raw-empty"
@@ -1007,7 +969,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -1016,7 +977,7 @@ class BackupTests(unittest.TestCase):
     def test_verify_returns_1_when_transcript_payload_copies_are_present(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "with-transcript-copies.tar.age"
+            archive = root / "with-transcript-copies.tar"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
             copy_path = payload / "secretary-data" / "transcripts" / "copies" / "session.jsonl"
@@ -1030,7 +991,6 @@ class BackupTests(unittest.TestCase):
 
             result = verify_backup(
                 archive,
-                decrypt=lambda source, destination: shutil.copy2(source, destination),
             )
 
         self.assertEqual(result.code, 1)
@@ -1099,7 +1059,7 @@ def _write_export_surface(data_dir: Path, *, include_done: bool = False) -> None
         encoding="utf-8",
     )
     (data_dir / "backups").mkdir(parents=True, exist_ok=True)
-    (data_dir / "backups" / "old.tar.age").write_bytes(b"old")
+    (data_dir / "backups" / "old.tar").write_bytes(b"old")
 
 
 def _write_complete_payload(payload: Path) -> None:

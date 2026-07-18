@@ -16,9 +16,9 @@ secretary-data            изменяемые board, memory, runs, transcripts 
 ```
 
 Product repository не хранит bindings реальных проектов, credentials, карточки или host-local
-state. Instance содержит persona, project bindings, adapters, policies, head profiles и encrypted
-configuration material. Структурированный реестр проектов живёт только в
-`secretary-instance/projects/`.
+state. Instance содержит persona, project bindings, adapters, policies и head profiles. Секреты
+живут только в host `runtime.env`, который не входит в git или checkpoint. Структурированный
+реестр проектов живёт только в `secretary-instance/projects/`.
 
 `secretary-data` хранит mutable runtime state. Memory facts внутри него ведутся Git-журналом;
 остальные компоненты экспортируются в нормализованном виде. SQLite/vector index, worktrees,
