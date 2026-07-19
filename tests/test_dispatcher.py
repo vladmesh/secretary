@@ -30,6 +30,11 @@ from secretary.dispatcher import (
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
+from secretary.dispatcher_watchdog import (
+    REVIEW_VERDICT_STALL_SECONDS,
+    WAIT_LIVENESS_GRACE_SECONDS,
+    wait_outcome,
+)
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
@@ -160,6 +165,9 @@ class FakeHost:
         # None keeps the default "a review started in this process is live"; set a bool to model a
         # reviewer terminal that died after launch, which is what recovery actually has to detect.
         self.review_running_result: bool | None = None
+        # Same knobs for the worker terminal, which the report watchdog probes.
+        self.worker_running_error: Exception | None = None
+        self.worker_running_result: bool | None = None
         # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
@@ -206,6 +214,14 @@ class FakeHost:
         if self.review_running_result is not None:
             return self.review_running_result
         return task["ref"] in self.reviews
+
+    def worker_running(self, task: dict, record) -> bool:
+        self.calls.append("worker_running")
+        if self.worker_running_error is not None:
+            raise self.worker_running_error
+        if self.worker_running_result is not None:
+            return self.worker_running_result
+        return task["ref"] in self.prepared
 
     def verify_worker_result(self, task: dict, record) -> None:
         self.calls.append("verify_worker_result")
@@ -1044,6 +1060,126 @@ class DispatcherRuntimeTests(unittest.TestCase):
         advanced = self.runtime.tick(self.selector)
         self.assertEqual(advanced["to"], "validate")
 
+    def _rewind_wait(self, kind: str, seconds: float = 100_000.0) -> None:
+        """Age the current wait so the next tick sees it past the watchdog thresholds."""
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        self.assertTrue(record[f"{kind}_waiting_since"], f"{kind} wait was never stamped")
+        record[f"{kind}_waiting_since"] -= seconds
+        self.runtime.state.save(payload)
+
+    def test_silent_reviewer_is_respawned_once_then_escalated(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        waiting = self.runtime.tick(self.selector)
+        self.assertEqual(waiting["action"], "waiting-review-verdict")
+
+        # The reviewer head exited without registering a verdict (secretary-637). The wait is
+        # only minutes old, well inside the stall ceiling: liveness alone must end it.
+        self.host.review_running_result = False
+        self._rewind_wait("review", seconds=600.0)
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "review-respawned")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+        self._rewind_wait("review", seconds=600.0)
+        escalated = self.runtime.tick(self.selector)
+
+        self.assertEqual(escalated["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(len(self.host.reviews), 2, "escalation must not start a third reviewer")
+
+    def test_live_reviewer_keeps_waiting_inside_the_stall_ceiling(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+
+        self.host.review_running_result = True
+        self._rewind_wait("review", seconds=3600.0)
+        waiting = self.runtime.tick(self.selector)
+
+        self.assertEqual(waiting["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_live_but_wedged_reviewer_is_respawned_past_the_stall_ceiling(self) -> None:
+        """The terminal is still up, so liveness says nothing; the ceiling ends the wait anyway."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+
+        self.host.review_running_result = True
+        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS + 60)
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "review-respawned")
+        self.assertEqual(len(self.host.reviews), 2)
+
+    def test_reviewer_inventory_failure_does_not_respawn(self) -> None:
+        """A failed orca probe is not evidence the head is gone: keep waiting on the ceiling."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+
+        self.host.review_running_error = HostError("orca terminal list failed")
+        self._rewind_wait("review", seconds=3600.0)
+        waiting = self.runtime.tick(self.selector)
+
+        self.assertEqual(waiting["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_dead_worker_is_respawned_once_then_escalated(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        waiting = self.runtime.tick(self.selector)
+        self.assertEqual(waiting["action"], "waiting-worker-report")
+
+        # The rework worker never came up / died before reporting (secretary-649).
+        self.host.worker_running_result = False
+        self._rewind_wait("worker", seconds=600.0)
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+        self._rewind_wait("worker", seconds=600.0)
+        escalated = self.runtime.tick(self.selector)
+
+        self.assertEqual(escalated["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(
+            self.host.calls.count("restart_worker"), 1, "escalation must not respawn again"
+        )
+
+    def test_worker_report_clears_the_worker_wait_watchdog(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker")
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="worker-done-after-wait",
+        )
+
+        advanced = self.runtime.tick(self.selector)
+
+        self.assertEqual(advanced["to"], "validate")
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(record["worker_waiting_since"], 0.0)
+        self.assertEqual(record["worker_respawns"], 0)
+
     def test_gate_green_advances_to_review(self) -> None:
         self.start_pilot()
         self.host.gate_results = [GateResult("green", "local validation passed")]
@@ -1503,6 +1639,97 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [comment["marker"] for comment in task["comments"]],
             ["dispatcher", "report:done", "dispatcher"],
+        )
+
+
+class HeadPromptTests(unittest.TestCase):
+    """The report/verdict commands handed to a head must survive the codex runtime: a concrete
+    body-file path written with a normal editing tool, no inline shell assembly (secretary-637)."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.host = CommandHostRuntime(FakeCatalog(), Path(self.tmpdir.name), mode="noop")  # type: ignore[arg-type]
+        self.task = {
+            "ref": "secretary-510-pilot",
+            "project": "secretary",
+            "description": "body with `backticks` and \"quotes\"",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _command_lines(self, doc: str) -> list[str]:
+        return [line for line in doc.splitlines() if "python3 -m secretary task" in line]
+
+    def test_review_prompt_names_a_concrete_body_file(self) -> None:
+        doc = self.host._review_prompt(self.task, "attempt-1")
+        commands = self._command_lines(doc)
+
+        self.assertEqual(len(commands), 2, "one green and one red command")
+        for command in commands:
+            self.assertIn("--body-file /tmp/secretary-verdict-secretary-510-pilot.md", command)
+            self.assertNotIn("<file>", command)
+
+    def test_worker_prompt_names_a_concrete_body_file(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+        commands = self._command_lines(doc)
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot.md", commands[0])
+        self.assertNotIn("<file>", commands[0])
+
+    def test_body_file_lives_outside_the_workspace(self) -> None:
+        """A body file inside the worktree would make `git status` dirty, and the done-report
+        check rejects a dirty workspace."""
+        for doc in (
+            self.host._review_prompt(self.task, "attempt-1"),
+            self.host._worker_task_doc(self.task, "main", "attempt-1"),
+        ):
+            for command in self._command_lines(doc):
+                path = command.split("--body-file ", 1)[1].split()[0]
+                self.assertTrue(path.startswith("/tmp/"), path)
+
+    def test_prompts_forbid_inline_shell_body_assembly(self) -> None:
+        for doc in (
+            self.host._review_prompt(self.task, "attempt-1"),
+            self.host._worker_task_doc(self.task, "main", "attempt-1"),
+        ):
+            for command in self._command_lines(doc):
+                for banned in ("mktemp", "rm -f", "<<", "$(", "`"):
+                    self.assertNotIn(banned, command)
+            self.assertIn("(no heredoc, no mktemp, no echo pipeline)", doc)
+
+
+class WaitWatchdogTests(unittest.TestCase):
+    def test_unknown_liveness_inside_the_ceiling_keeps_waiting(self) -> None:
+        outcome = wait_outcome(
+            waiting_since=0.0, now=60.0, running=None, stall_seconds=7200, respawns=0
+        )
+
+        self.assertEqual(outcome, "wait")
+
+    def test_dead_head_inside_the_grace_window_keeps_waiting(self) -> None:
+        """A terminal takes a moment to appear in orca's inventory after launch."""
+        outcome = wait_outcome(
+            waiting_since=0.0,
+            now=WAIT_LIVENESS_GRACE_SECONDS - 1,
+            running=False,
+            stall_seconds=7200,
+            respawns=0,
+        )
+
+        self.assertEqual(outcome, "wait")
+
+    def test_dead_head_past_the_grace_window_respawns_once_then_escalates(self) -> None:
+        now = WAIT_LIVENESS_GRACE_SECONDS + 1
+
+        self.assertEqual(
+            wait_outcome(waiting_since=0.0, now=now, running=False, stall_seconds=7200, respawns=0),
+            "respawn",
+        )
+        self.assertEqual(
+            wait_outcome(waiting_since=0.0, now=now, running=False, stall_seconds=7200, respawns=1),
+            "escalate",
         )
 
 

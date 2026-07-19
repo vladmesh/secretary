@@ -39,6 +39,13 @@ class DispatcherRecord:
     # rollup first went non-terminal, driving the pending watchdog.
     gate_state: str = ""
     gate_pending_since: float = 0.0
+    # Wait watchdogs (secretary-654): when the current wait for a worker report / review
+    # verdict started, and how many times that wait has already respawned its head. Both
+    # reset whenever the card enters a fresh wait of that kind.
+    worker_waiting_since: float = 0.0
+    worker_respawns: int = 0
+    review_waiting_since: float = 0.0
+    review_respawns: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -51,8 +58,12 @@ class DispatcherRecord:
             "attempt_id": self.attempt_id,
             "review_baseline": self.review_baseline,
             "review_head": self.review_head,
+            "review_respawns": self.review_respawns,
+            "review_waiting_since": self.review_waiting_since,
             "state": self.state,
             "worker": self.worker,
+            "worker_respawns": self.worker_respawns,
+            "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
         }
 
@@ -71,6 +82,10 @@ class DispatcherRecord:
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
+            worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
+            worker_respawns=int(payload.get("worker_respawns") or 0),
+            review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
+            review_respawns=int(payload.get("review_respawns") or 0),
         )
 
 

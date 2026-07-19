@@ -46,8 +46,16 @@ from secretary.dispatcher_production import (
 )
 from secretary.dispatcher_review import (
     command_review_running as _command_review_running,
+    command_worker_running as _command_worker_running,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
+)
+from secretary.dispatcher_watchdog import (
+    REVIEW_VERDICT_STALL_SECONDS,
+    WORKER_REPORT_STALL_SECONDS,
+    reset_wait as _reset_wait,
+    wait_outcome as _wait_outcome,
+    wait_probe_due as _wait_probe_due,
 )
 from secretary.dispatcher_state import (
     CutoverState,
@@ -61,6 +69,7 @@ from secretary.dispatcher_state import (
     now_rfc3339,
     record_attempt as _record_attempt,
     record_divergence as _record_divergence,
+    request_token as _request_token,
 )
 from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
@@ -268,6 +277,9 @@ class CommandHostRuntime:
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
 
+    def worker_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
+        return _command_worker_running(self, task, record)
+
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)
 
@@ -452,6 +464,7 @@ class CommandHostRuntime:
         # reuses the same attempt_id, so without it the second done-report collides with
         # the first and is idempotently deduped, leaving the dispatcher waiting forever.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
+        body_file = _body_file_path("report", task["ref"])
         return "\n".join([
             f"# Task {task['ref']}",
             "",
@@ -463,7 +476,8 @@ class CommandHostRuntime:
             "so a partial `git add` that misses your fix files will bounce the card.",
             "",
             "Report through the secretary task protocol only:",
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file <file>',
+            *_body_file_instructions(body_file),
+            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -473,14 +487,16 @@ class CommandHostRuntime:
     def _review_prompt(self, task: dict[str, Any], attempt_id: str) -> str:
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"])
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"])
+        body_file = _body_file_path("verdict", task["ref"])
         return "\n".join([
             f"# Review {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
             "",
             "Post exactly one review verdict through the secretary task protocol:",
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file <file>',
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file <file>',
+            *_body_file_instructions(body_file),
+            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
+            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
             "",
         ])
 
@@ -985,6 +1001,8 @@ class DispatcherRuntime:
             # Fresh code state: the mechanical gate must re-run before this report reaches review.
             record.gate_state = ""
             record.gate_pending_since = 0.0
+            _reset_wait(record, "worker")
+            _reset_wait(record, "review")
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -1006,6 +1024,9 @@ class DispatcherRuntime:
             )
             records.pop(ref, None)
             return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+        watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="worker")
+        if watchdog is not None:
+            return watchdog
         return {
             "status": "ok",
             "step": "advance",
@@ -1047,6 +1068,8 @@ class DispatcherRuntime:
             record.comment_baseline = len(task.get("comments") or [])
             record.gate_state = ""
             record.gate_pending_since = 0.0
+            _reset_wait(record, "review")
+            _reset_wait(record, "worker")
             moved = self.reader.show(ref)
             try:
                 record.handle = self.host.restart_worker(moved, record)
@@ -1102,6 +1125,9 @@ class DispatcherRuntime:
             )
             record.state = "review_starting"
             return _start_review(self, task, records, record, attempt_id, action="review-started")
+        watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="review")
+        if watchdog is not None:
+            return watchdog
         return {
             "status": "ok",
             "step": "review",
@@ -1109,6 +1135,125 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
             "action": "waiting-review-verdict",
         }
+
+    def _wait_watchdog(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        kind: str,
+    ) -> dict[str, Any] | None:
+        """Watch an open-ended wait (kind "worker" or "review"). Returns None to keep waiting,
+        or a tick outcome once the head is gone or the wait blew its ceiling: one respawn,
+        then Blocked. Without this a head that died before posting parks the card forever."""
+        probe = self.host.review_running if kind == "review" else self.host.worker_running
+        stall = REVIEW_VERDICT_STALL_SECONDS if kind == "review" else WORKER_REPORT_STALL_SECONDS
+        waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
+        now = time.time()
+        if not waiting_since:
+            setattr(record, f"{kind}_waiting_since", now)
+            self._save_records(payload, records)
+            return None
+        running: bool | None = None
+        if _wait_probe_due(waiting_since, now):
+            try:
+                running = probe(task, record)
+            except Exception:
+                # An inventory failure says nothing about the head; the stall ceiling still
+                # covers this wait, so keep waiting rather than respawn on a flaky probe.
+                running = None
+        outcome = _wait_outcome(
+            waiting_since=waiting_since,
+            now=now,
+            running=running,
+            stall_seconds=stall,
+            respawns=int(getattr(record, f"{kind}_respawns") or 0),
+        )
+        if outcome == "wait":
+            return None
+        if outcome == "respawn":
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now)
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall)
+
+    def _respawn_wait(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        kind: str,
+        now: float,
+    ) -> dict[str, Any]:
+        ref = task["ref"]
+        step = "review" if kind == "review" else "advance"
+        self.host.stop(record)
+        try:
+            if kind == "review":
+                record.handle = self.host.start_review(task, record)
+                record.state = "reviewing"
+            else:
+                record.handle = self.host.restart_worker(task, record)
+                record.state = "claimed"
+        except Exception as exc:
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"{kind} respawn failed: {scrub_host_output(str(exc))}",
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, f"{kind}-respawn-blocked", ref
+                ),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": f"{kind} respawn failed"}
+        setattr(record, f"{kind}_waiting_since", now)
+        setattr(record, f"{kind}_respawns", int(getattr(record, f"{kind}_respawns") or 0) + 1)
+        records[ref] = record
+        self._save_records(payload, records)
+        return {
+            "status": "ok",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": f"{kind}-respawned",
+        }
+
+    def _escalate_wait(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        kind: str,
+        stall: int,
+    ) -> dict[str, Any]:
+        ref = task["ref"]
+        step = "review" if kind == "review" else "advance"
+        expected = "вердикт ревьюера" if kind == "review" else "отчёт воркера"
+        self.host.stop(record)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=(
+                f"Вотчдог ожидания: {expected} не пришёл после respawn "
+                f"(порог {stall}s). Карточка в Blocked до vladmesh."
+            ),
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{kind}-wait-stall", ref),
+        )
+        records.pop(ref, None)
+        self._save_records(payload, records)
+        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
 
     def _run_gate(
         self,
@@ -1180,6 +1325,8 @@ class DispatcherRuntime:
         record.comment_baseline = len(self.reader.show(ref)["comments"])
         record.gate_state = ""
         record.gate_pending_since = 0.0
+        _reset_wait(record, "review")
+        _reset_wait(record, "worker")
         moved = self.reader.show(ref)
         try:
             record.handle = self.host.restart_worker(moved, record)
@@ -1353,3 +1500,23 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
+
+
+def _body_file_path(kind: str, reference: str) -> str:
+    """Where a head writes its report/verdict body. Outside the workspace on purpose: a stray
+    file in the worktree makes `git status` dirty, and the done-report check rejects that."""
+    root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
+    return f"{root}/secretary-{kind}-{_request_token(reference)}.md"
+
+
+def _body_file_instructions(body_file: str) -> list[str]:
+    """Spell out the delivery path (secretary-637: a reviewer assembled the body inline with
+    mktemp/rm, the codex runtime refused the rm, and the card sat in validate for four hours
+    with no verdict). File first with a normal editing tool, then one plain command."""
+    return [
+        f"Write the body to {body_file} with your file-writing tool,",
+        "then run the command below verbatim. Do not assemble the body inside the shell command",
+        "(no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses",
+        "rm-style commands, and quotes or backticks in the body break the call. Leave the file in",
+        "place afterwards; the dispatcher does not read it.",
+    ]

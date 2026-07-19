@@ -10,6 +10,17 @@ from secretary.dispatcher_types import HostError
 
 
 def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:
+    return _terminal_running(host, record, {f"{task['ref']} review"})
+
+
+def command_worker_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:
+    """Worker liveness for the report watchdog. Both launch titles count: a first run is
+    "<ref> worker", a rework run is "<ref> worker rework"."""
+    ref = task["ref"]
+    return _terminal_running(host, record, {f"{ref} worker", f"{ref} worker rework"})
+
+
+def _terminal_running(host: Any, record: DispatcherRecord, titles: set[str]) -> bool:
     if host.mode == "noop":
         return False
     if not record.workspace:
@@ -28,11 +39,10 @@ def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRe
     terminals = payload.get("terminals") if isinstance(payload, dict) else []
     if not isinstance(terminals, list):
         raise HostError("orca terminal list returned an unsupported shape")
-    title = f"{task['ref']} review"
     return any(
         isinstance(terminal, dict)
         and terminal.get("connected") is not False
-        and terminal.get("title") == title
+        and terminal.get("title") in titles
         for terminal in terminals
     )
 
