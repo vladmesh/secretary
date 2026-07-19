@@ -3,10 +3,16 @@
 Templates for the current secretary runtime. The live installation uses units for production
 dispatcher ticks, memory service, backup, curator, steward and retro.
 
-Paths in committed templates still reflect the current production layout. Until the installer and
-renderer milestone is complete, review rendered commands for the target instance and run
-`systemd-analyze verify` before installation. Copying a unit does not grant product ownership of an
-existing service.
+These files are the desired state, not a starting point to copy by hand: `secretary reconcile apply`
+installs them and records ownership in `host-managed.json`, and `secretary upgrade` runs that on
+every release. A unit's file digest is part of its planned resource, so editing a file here makes
+the next apply reinstall it.
+
+Every unit name here must fall under the instance's `host.unit_prefix`, and its component name (the
+file name minus that prefix and the suffix) is what `host.components` opts out of. Paths in
+committed templates still reflect the current production layout; run `systemd-analyze verify` on
+anything you change. A unit already on the host is never overwritten until it is adopted — apply
+refuses to write over a name it cannot prove it owns.
 
 `secretary-dispatcher-production.timer` launches a one-shot `production-tick`.
 `secretary-memory.service` serves MCP on the configured local endpoint and loads the instance

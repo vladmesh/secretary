@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -117,6 +118,191 @@ def production_tick(runtime: Any) -> dict[str, Any]:
             "actions": outcomes,
             "errors": errors,
         }
+
+
+class ProbeAbort(Exception):
+    """A dry tick reached the point where the real tick would have written.
+
+    The operation and its arguments are the probe's actual result: they say what
+    the next real tick will do, which is the only evidence that the tick's
+    decision logic still works end to end.
+    """
+
+    def __init__(self, operation: str, detail: dict[str, Any]) -> None:
+        super().__init__(operation)
+        self.operation = operation
+        self.detail = detail
+
+
+class _ProbeWriter:
+    """Stands in for the board writer. Every write aborts the task's probe."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def move(self, **kwargs: Any) -> None:
+        raise ProbeAbort("move", {"ref": kwargs.get("reference", ""), "to": kwargs.get("target", "")})
+
+    def claim(self, *args: Any, **kwargs: Any) -> None:
+        raise ProbeAbort("claim", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
+
+    def comment(self, *args: Any, **kwargs: Any) -> None:
+        raise ProbeAbort("comment", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _ProbeHost:
+    """Stands in for the command host. Path arithmetic passes; effects abort.
+
+    ``gate_check`` is listed as an effect even though it mostly reads: it runs
+    the project's setup and test commands, which is far too expensive and far
+    too side-effecting for a health probe that a timer may call every minute.
+    """
+
+    EFFECTS = (
+        "prepare_worker",
+        "restart_worker",
+        "verify_worker_result",
+        "gate_check",
+        "complete_green",
+        "teardown",
+        "stop",
+    )
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
+        return self._inner.restore_workspace(task, worker)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self.EFFECTS:
+            def effect(*args: Any, **kwargs: Any) -> Any:
+                raise ProbeAbort(name, {})
+            return effect
+        return getattr(self._inner, name)
+
+
+class _ProbeState:
+    """Reads through to the real state; a save is an abort, never a write."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def save(self, payload: dict[str, Any]) -> None:
+        raise ProbeAbort("save-state", {})
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _probe_runtime(runtime: Any) -> Any:
+    """The real runtime with only its writers swapped out.
+
+    A wrapper object would not work: the tick's own methods are bound to the
+    real runtime, so ``self.writer`` inside them would still reach the live
+    board. A shallow copy shares every collaborator by reference and rebinds
+    those methods to an object whose writer, host and state cannot write.
+    """
+    probe = copy.copy(runtime)
+    probe.writer = _ProbeWriter(runtime.writer)
+    probe.host = _ProbeHost(runtime.host)
+    probe.production_state = _ProbeState(runtime.production_state)
+    return probe
+
+
+def production_probe(runtime: Any) -> dict[str, Any]:
+    """Run a real tick with every write replaced by an abort.
+
+    This is the health gate, so it has to fail for the same reasons the real
+    tick fails: it takes the same singleton lock, runs the same mutation guards,
+    scans the same task states and drives the same ``_tick_task`` decision for
+    each of them. The only difference is that the first write per task raises
+    instead of landing, and the state file is never saved.
+    """
+    with try_file_lock(runtime.production_state.tick_lock) as acquired:
+        if not acquired:
+            return {
+                "status": "blocked",
+                "step": "production-probe",
+                "reason": "production dispatcher singleton lock is held",
+            }
+        payload = runtime.production_state.load()
+        guard = _production_mutation_guard(runtime, payload)
+        if guard is not None:
+            guard["step"] = "production-probe"
+            return guard
+
+        probe = _probe_runtime(runtime)
+        records = runtime.production_state.records(payload)
+        would: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+
+        active = _production_tasks(runtime, {"in_progress", "validate"})
+        for task in active:
+            if is_steward_report(task):
+                continue
+            would.append(_probe_one(probe, task, dict(records), dict(payload)))
+
+        ready = [task for task in _production_tasks(runtime, {"ready"}) if not is_steward_report(task)]
+        # The claim path is the one a health gate most needs to exercise: it is
+        # where capacity, predecessors and per-project concurrency are decided,
+        # and none of that is visible from the active scan. The real tick skips
+        # it when an active task blocks, but an aborted probe cannot know that a
+        # task would have blocked, so this is always evaluated and reported as
+        # its own entry rather than as a prediction of the next tick's one move.
+        would.append(_probe_ready(probe, dict(records), dict(payload)))
+        for entry in would:
+            if entry.get("code"):
+                errors.append({"ref": entry["ref"], "code": entry["code"], "message": entry.get("message", "")})
+
+        return {
+            "status": "ok" if not errors else "degraded",
+            "step": "production-probe",
+            "owner": runtime.owner,
+            "active": [str(task.get("ref") or "") for task in active],
+            "ready": [str(task.get("ref") or "") for task in ready],
+            "would": would,
+            "errors": errors,
+        }
+
+
+def _probe_one(
+    probe: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    ref = str(task.get("ref") or "")
+    try:
+        outcome = _production_tick_active(probe, task, records, payload)
+    except ProbeAbort as abort:
+        return {"ref": ref, "operation": abort.operation, "detail": abort.detail}
+    except TaskError as exc:
+        return {"ref": ref, "operation": "error", "code": exc.code, "message": exc.message}
+    except Exception as exc:  # noqa: BLE001
+        return {"ref": ref, "operation": "error", "code": "unexpected_error", "message": exc.__class__.__name__}
+    return {"ref": ref, "operation": "none", "status": outcome.get("status", ""), "step": outcome.get("step", "")}
+
+
+def _probe_ready(
+    probe: Any,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        outcome = _production_claim_ready(probe, records, payload)
+    except ProbeAbort as abort:
+        return {"ref": abort.detail.get("ref", ""), "operation": abort.operation, "detail": abort.detail}
+    except TaskError as exc:
+        return {"ref": "", "operation": "error", "code": exc.code, "message": exc.message}
+    except Exception as exc:  # noqa: BLE001
+        return {"ref": "", "operation": "error", "code": "unexpected_error", "message": exc.__class__.__name__}
+    if outcome is None:
+        return {"ref": "", "operation": "none", "step": "production-claim", "status": "idle"}
+    return {"ref": str(outcome.get("ref") or ""), "operation": "none", "step": "production-claim", "status": outcome.get("status", "")}
 
 
 def production_run(

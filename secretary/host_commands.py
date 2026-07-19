@@ -14,9 +14,12 @@ from secretary.host import (
     LiveHostSource,
     build_expectations,
     build_plan,
+    foreign_units,
     load_managed_manifest,
+    manifest_text as _manifest_text,
     plan_changes,
     plan_input_errors,
+    strict_manifest as _strict_manifest,
 )
 
 
@@ -41,71 +44,24 @@ def run_reconcile_plan(args) -> int:
             if reason := collected.errors.get(kind):
                 print(f"  {kind}: unavailable: {reason}")
         return 2
-    manifest = Path(args.managed_manifest) if args.managed_manifest else Path(report.instance["data_dir"]) / "host-managed.json"
+    manifest = _manifest_path(args, report)
     prefix = report.host.get("unit_prefix", "")
     changes = plan_changes(
         build_plan(report.instance, report.bindings),
         collected.inventory,
         load_managed_manifest(manifest),
         prefix if isinstance(prefix, str) else "",
+        foreign_units(report.host),
     )
     for change in changes:
         print(f"{change.action} {change.logical_id} {change.kind} {change.name}")
     return 1 if any(change.action == "conflict" for change in changes) else 0
 
 
-def _strict_manifest(path: Path) -> tuple[list, str]:
-    """Load state for a write path. Unlike plan, adoption must fail closed."""
-    if path.is_symlink():
-        return [], "managed manifest must not be a symlink"
-    if not path.exists():
-        return [], ""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except UnicodeError:
-        return [], "managed manifest is not valid UTF-8"
-    except OSError:
-        return [], "managed manifest is unreadable"
-    except ValueError:
-        return [], "managed manifest is not valid JSON"
-    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("resources"), list):
-        return [], "managed manifest has an unsupported shape"
-    resources = load_managed_manifest(path)
-    if len(resources) != len(payload["resources"]):
-        return [], "managed manifest contains invalid resource records"
-    logical_ids: set[str] = set()
-    names: set[tuple[str, str]] = set()
-    for resource in resources:
-        if resource.kind not in {"unit", "orca"} or not resource.spec:
-            return [], "managed manifest contains non-canonical resource records"
-        value = json.dumps(
-            [resource.logical_id, resource.kind, resource.name, resource.spec],
-            separators=(",", ":"),
-        )
-        if hashlib.sha256(value.encode()).hexdigest() != resource.fingerprint:
-            return [], "managed manifest contains a fingerprint mismatch"
-        if resource.logical_id in logical_ids:
-            return [], "managed manifest has duplicate logical ids"
-        logical_ids.add(resource.logical_id)
-        key = (resource.kind, resource.name)
-        if key in names:
-            return [], "managed manifest has duplicate resource names"
-        names.add(key)
-    return resources, ""
-
-
-def _manifest_text(resources) -> str:
-    records = [
-        {
-            "fingerprint": resource.fingerprint,
-            "kind": resource.kind,
-            "logical_id": resource.logical_id,
-            "name": resource.name,
-            "spec": resource.spec,
-        }
-        for resource in sorted(resources, key=lambda item: (item.kind, item.logical_id))
-    ]
-    return json.dumps({"version": 1, "resources": records}, indent=2, sort_keys=True) + "\n"
+def _manifest_path(args, report) -> Path:
+    if getattr(args, "managed_manifest", None):
+        return Path(args.managed_manifest)
+    return Path(report.instance["data_dir"]) / "host-managed.json"
 
 
 def _merge_adoption(managed, resource):
@@ -134,6 +90,12 @@ def run_reconcile_adopt(args) -> int:
     if resource is None:
         print("secretary reconcile adopt: logical id is not in desired state")
         return 2
+    if resource.kind == "unit":
+        problem = _verify_unit_identity(resource, Path(args.unit_dir))
+        if problem:
+            print("secretary reconcile adopt: " + problem)
+            return 2
+        return _record_adoption(args, report, resource)
     if resource.kind != "orca":
         print("secretary reconcile adopt: resource kind has no verifiable adoption identity")
         return 2
@@ -164,7 +126,35 @@ def run_reconcile_adopt(args) -> int:
         print("secretary reconcile adopt: Orca registration repo path does not match desired state")
         return 2
 
-    manifest = Path(args.managed_manifest) if args.managed_manifest else Path(report.instance["data_dir"]) / "host-managed.json"
+    return _record_adoption(args, report, resource)
+
+
+def _verify_unit_identity(resource, unit_dir: Path) -> str:
+    """Adopt a unit only when the installed file is what this product ships.
+
+    The desired spec carries the shipped file's digest, so a byte-for-byte match
+    is proof that the unit on the host is the one we would have written. A
+    hand-edited or third-party unit under our prefix never matches, and stays a
+    conflict for the operator to resolve deliberately.
+    """
+    try:
+        expected = json.loads(resource.spec)["digest"]
+    except (ValueError, KeyError, TypeError):
+        return "desired unit carries no shipped file digest to verify against"
+    path = unit_dir / resource.name
+    if path.is_symlink():
+        return "installed unit must not be a symlink"
+    try:
+        installed = path.read_bytes()
+    except OSError:
+        return "installed unit is missing or unreadable"
+    if hashlib.sha256(installed).hexdigest() != expected:
+        return "installed unit does not match the shipped file"
+    return ""
+
+
+def _record_adoption(args, report, resource) -> int:
+    manifest = _manifest_path(args, report)
     managed, error = _strict_manifest(manifest)
     if error:
         print("secretary reconcile adopt: " + error)
@@ -201,6 +191,62 @@ def run_reconcile_adopt(args) -> int:
     return 0
 
 
+def run_reconcile_apply(args) -> int:
+    """Bring the host to the instance config. This is the write half of plan."""
+    from secretary.host_apply import (
+        ApplyInputs,
+        LiveOrcaRegistrar,
+        SystemdUnitInstaller,
+        apply_host,
+        resolve_packaged,
+    )
+
+    report = validate_instance(Path(args.instance))
+    if not report.ok:
+        print("secretary reconcile apply: invalid instance config")
+        return 2
+    packaged = resolve_packaged(report.instance)
+    expected = build_expectations(report.bindings, report.host)
+    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
+    collected = source.collect(expected)
+    if collected.errors:
+        # Reconciling against a half-read host would read a missing unit as
+        # "absent" and reinstall over whatever is really there.
+        print("secretary reconcile apply: host inventory unavailable")
+        for kind in ("projects", "units", "orca repos"):
+            if reason := collected.errors.get(kind):
+                print(f"  {kind}: unavailable: {reason}")
+        return 2
+    manifest = _manifest_path(args, report)
+    managed, error = _strict_manifest(manifest)
+    if error:
+        print("secretary reconcile apply: " + error)
+        return 2
+    result = apply_host(
+        ApplyInputs(
+            instance=report.instance,
+            bindings=report.bindings,
+            inventory=collected.inventory,
+            managed=managed,
+            manifest_path=manifest,
+            packaged=packaged,
+        ),
+        units=SystemdUnitInstaller(),
+        orca=LiveOrcaRegistrar(),
+        dry_run=args.dry_run,
+    )
+    for line in result.render():
+        print(line)
+    if result.conflicts:
+        print("secretary reconcile apply: refusing to write while the host holds unowned names")
+        print("  adopt them with `secretary reconcile adopt`, or declare them in host.foreign_units")
+        return 1
+    if result.errors:
+        return 2
+    print("applied" if result.changed else "already reconciled")
+    return 0
+
+
 def add_reconcile_subcommands(subcommands) -> None:
     """Register the Phase 7 host commands outside the already busy CLI module."""
     plan = subcommands.add_parser("plan", help="show the read-only desired host plan")
@@ -218,12 +264,27 @@ def add_reconcile_subcommands(subcommands) -> None:
     plan.add_argument("--managed-manifest", metavar="FILE")
     plan.set_defaults(handler=run_reconcile_plan)
 
+    apply_command = subcommands.add_parser(
+        "apply", help="bring the host to the instance config (the write half of plan)"
+    )
+    apply_command.add_argument("--instance", required=True)
+    apply_command.add_argument(
+        "--dry-run", action="store_true", help="show the changes without touching the host"
+    )
+    apply_command.add_argument(
+        "--host-fixture", metavar="DIR",
+        help="read a deterministic fixture inventory instead of the live host",
+    )
+    apply_command.add_argument("--managed-manifest", metavar="FILE")
+    apply_command.set_defaults(handler=run_reconcile_apply)
+
     adopt = subcommands.add_parser(
         "adopt", help="record one verified existing desired resource as managed"
     )
     adopt.add_argument("--instance", required=True)
     adopt.add_argument("--logical-id", required=True)
     adopt.add_argument("--managed-manifest", metavar="FILE")
+    adopt.add_argument("--unit-dir", default="/etc/systemd/system", metavar="DIR")
     adopt.add_argument(
         "--yes", action="store_true", help="write the managed manifest after showing the record"
     )

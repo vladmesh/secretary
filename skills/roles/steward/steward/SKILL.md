@@ -151,12 +151,15 @@ watermark: сигнальный `advance` его не трогает, и нао�
 - **Воркспейсы на диске** во всех проектах — то же самое, что даёт `new_orphan_workspaces`, но без
   привязки к watermark-дедупу: посмотри на всё, что там есть сейчас, не только на новое с прошлого
   часа.
-- **systemd/journalctl** обоих таймеров стюарда (`ta-steward`, `ta-steward-deep-sweep`) и таймеров
+- **systemd/journalctl** обоих таймеров стюарда (`secretary-steward`, `secretary-steward-deep-sweep`) и таймеров
   остальных агентов — тикают ли, не молчит ли precheck-гейт где-то незамеченно, нет ли флапа.
-- **Дрейф systemd-юнитов от текущих specs**: команда `steward drift` снята. Она сверяла живые
-  `ta-*` юниты с рендером `deploy/provision.py`, а этот контур декоммишен: юниты теперь статические
-  в `packaging/systemd/secretary-*`. Реимплементация чека под новую модель — отдельная карточка.
-  Пока живой дрейф юнитов смотри глазами через `systemctl`/`journalctl` в пункте выше.
+- **Дрейф systemd-юнитов и Orca-автоматизаций от текущих specs**:
+  ```
+  secretary upgrade --instance /home/dev/secretary-instance --dry-run --no-pull
+  ```
+  Показывает, что разошлось с каноном, ничего не меняя. Шаг `host` печатает создания/обновления
+  юнитов и conflict-имена, которых нет в `host-managed.json`; шаг `automations` — какие поля
+  автоматизации (workspace, repo, prompt, precheck, enabled) уехали от `automation.toml`.
 - **Дрейф ролевых скиллов между головами** (секретарь/куратор/ретро/стюард должны получать
   скиллы из `~/secretary/skills/roles`, а не из разрозненных каталогов оболочек):
   ```

@@ -196,7 +196,7 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_runtime_payload_changes_require_an_update(self):
         instance = {"host": {"unit_prefix": "secretary-"}, "heads": [{"role": "worker", "model": "old"}]}
         bindings = [{"id": "project-id", "repo": "/srv/old-path", "orca_binding": "project_id", "enabled": True}]
-        original = build_plan(instance, bindings)
+        original = build_plan(instance, bindings, packaged=[])
         actual = HostInventory(
             units={
                 "secretary-worker.service",
@@ -207,7 +207,7 @@ class ReconcilePlanTests(unittest.TestCase):
         )
         instance["heads"][0]["model"] = "new"
         bindings[0]["repo"] = "/srv/new-path"
-        changed = build_plan(instance, bindings)
+        changed = build_plan(instance, bindings, packaged=[])
         changes = [change for change in plan_changes(changed, actual, original) if change.action != "unchanged"]
         self.assertEqual({change.action for change in changes}, {"update"})
 
@@ -245,7 +245,7 @@ class ReconcilePlanTests(unittest.TestCase):
             "heads": [{"role": "worker", "model": "test"}],
         }
         bindings = [{"id": "project-id", "repo": "/srv/project_id", "orca_binding": "project_id", "enabled": True}]
-        desired = build_plan(instance, bindings)
+        desired = build_plan(instance, bindings, packaged=[])
         self.assertEqual(
             [resource.name for resource in desired],
             [
@@ -340,10 +340,12 @@ class ReconcilePlanTests(unittest.TestCase):
             )
             fixture = root / "host"
             fixture.mkdir()
-            (fixture / "units.txt").write_text("secretary-retro.timer\n", encoding="utf-8")
+            # A name in our namespace that the product does not ship: nothing in
+            # the plan claims it and no managed record owns it.
+            (fixture / "units.txt").write_text("secretary-legacy-sweep.timer\n", encoding="utf-8")
             code, output = run_cli(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)])
         self.assertEqual(code, 1, output)
-        self.assertIn("conflict systemd:conflict:secretary-retro.timer", output)
+        self.assertIn("conflict systemd:conflict:secretary-legacy-sweep.timer", output)
 
     def test_cli_plan_rejects_heads_without_unit_prefix(self):
         import tempfile

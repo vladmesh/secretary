@@ -51,6 +51,8 @@ from secretary.restore_commands import add_restore_subcommands, run_memory_reind
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
 from secretary.task_commands import add_task_subcommands
+from secretary.role_skills import add_role_skills_subcommands
+from secretary.upgrade import add_upgrade_command
 
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -99,7 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.set_defaults(handler=run_doctor)
 
-    reconcile = subparsers.add_parser("reconcile", help="render a host plan without applying it")
+    add_upgrade_command(subparsers)
+    add_role_skills_subcommands(subparsers)
+
+    reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
     add_reconcile_subcommands(reconcile_subcommands)
     reconcile.set_defaults(handler=not_implemented("reconcile"))

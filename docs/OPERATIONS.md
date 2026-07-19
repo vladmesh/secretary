@@ -126,10 +126,91 @@ Kill-switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` отключает push и fas
 ## Units
 
 Актуальные templates и их назначение находятся в
-[packaging/systemd/README.md](../packaging/systemd/README.md). Live units были установлены вручную
-из этих assets. Любое изменение должно сначала пройти render/reconcile review и
-`systemd-analyze verify`; копирование template само по себе не передаёт ownership.
+[packaging/systemd/README.md](../packaging/systemd/README.md). Юниты раскатывает
+`secretary reconcile apply`; ручная установка больше не нужна и не даёт ownership.
 
 Production dispatcher timer запускает one-shot tick. Memory, backup, curator, steward и retro
-должны иметь ровно одного scheduler owner. Автоматический apply и централизованный schedule
-contract остаются roadmap work.
+должны иметь ровно одного scheduler owner.
+
+## Upgrade
+
+`secretary upgrade --instance <dir>` подтягивает новую версию продукта и пере-материализует
+установку под неё. Идемпотентна: повторный запуск на актуальном хосте не делает ничего.
+
+```
+secretary upgrade --instance /home/dev/secretary-instance --dry-run   # решить всё, ничего не писать
+secretary upgrade --instance /home/dev/secretary-instance
+```
+
+Шаги, по порядку; каждый печатает `changed`/`unchanged`/`skipped`/`failed`, первый `failed`
+останавливает прогон:
+
+| шаг | что делает |
+| --- | --- |
+| `pull` | `git fetch` + `merge --ff-only` чекаута продукта. Грязный чекаут — отказ. |
+| `dependencies` | переустановка в `.venv`, если в pull двигался манифест зависимостей |
+| `role-skills` | `role_skills sync` в shell-овые skill-директории |
+| `role-worktrees` | ff worktree ролей (`~/orca/workspaces/secretary/<role>`) на base branch |
+| `host` | `reconcile apply`: юниты из `packaging/systemd` + Orca-регистрации |
+| `automations` | create/repoint Orca-автоматизаций из `automation.toml` |
+| `memory` | рестарт `secretary-memory.service`, если менялся код, зависимости или сам юнит |
+| `verify` | повторный dry-run: вторая раскатка обязана быть no-op |
+
+Флаги: `--no-pull` (только пере-материализация), `--base-branch`, `--product-root`, `--json`.
+
+### Ownership и fail-closed
+
+`reconcile apply` пишет только то, что подтверждено `host-managed.json`. Имя под
+`host.unit_prefix`, которого нет ни в плане, ни в manifest, — это `conflict`, и любой conflict
+отменяет весь прогон до первой записи. Разрешить можно двумя способами:
+
+- юнит действительно наш и совпадает с packaged-файлом байт в байт →
+  `secretary reconcile adopt --instance <dir> --logical-id systemd:unit:<name> --yes`;
+- имя принадлежит чему-то другому (например dev-only `secretary-supervisor.*`) → перечислить его
+  в `host.foreign_units` в instance.yaml.
+
+Юнит, который отличается от packaged-файла, adopt не примет: сначала удалить его руками
+(`sudo rm /etc/systemd/system/<name>`) и дать `apply` поставить канон, либо разобраться, почему
+хост разошёлся с продуктом.
+
+Компонент, который эта установка сознательно не крутит, выключается в конфиге, а не отсутствием
+юнита на хосте:
+
+```yaml
+host:
+  components:
+    curator:
+      enabled: false
+      reason: "load shedding, secretary-XXX"
+```
+
+Выключенный компонент, юнит которого стоит и принадлежит нам, будет остановлен и удалён.
+
+### Разовая миграция существующей установки
+
+В desired-состояние юнита теперь входит дайджест packaged-файла, поэтому первый прогон на хосте,
+который ставили руками, потребует один раз навести порядок:
+
+1. `secretary upgrade --instance <dir> --dry-run` — посмотреть список conflict-имён.
+2. Для каждого юнита, который байт в байт совпадает с `packaging/systemd/`:
+   `secretary reconcile adopt --instance <dir> --logical-id systemd:unit:<name> --yes`.
+3. Юниты не нашей установки (`secretary-supervisor.*`) — в `host.foreign_units`.
+4. Уже записанные в manifest юниты покажут `update` — это refresh fingerprint под новую схему;
+   apply перезапишет файл каноном (для совпадающих файлов запись байт-в-байт).
+5. Повторить dry-run: он должен быть чистым, после этого запускать upgrade без флага.
+
+### Health-набор
+
+Детерминированный набор, пригодный как gate перед и после upgrade:
+
+```
+secretary doctor --instance <dir>
+secretary role-skills audit --check
+secretary dispatcher production-tick --instance <dir> --probe
+python3 -m unittest discover -s tests
+```
+
+`--probe` — это настоящий сухой тик: он берёт тот же singleton-lock, проходит те же mutation
+guards, сканирует те же состояния карточек и прогоняет ту же логику решения, но первая же запись
+превращается в abort и попадает в отчёт как «что сделал бы следующий тик». Зелёный probe при
+сломанном тике невозможен — сломанный тик падает и здесь.

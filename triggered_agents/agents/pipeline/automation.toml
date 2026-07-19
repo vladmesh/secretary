@@ -2,7 +2,7 @@
 #
 # Unlike the other agents, the dispatcher is deterministic — no LLM head. `dispatch` routes to
 # runtime code (agents/pipeline/dispatcher.tick), not the singleton claude terminal driver, so
-# there is no `skill`/`provider`: deploy/provision.py sets up only the systemd timer (the real
+# there is no `skill`/`provider`: `secretary upgrade` installs only the systemd timer (the real
 # clock) and skips the vestigial Orca automation for a skill-less agent.
 
 name = "pipeline"
@@ -11,7 +11,7 @@ dispatcher = true          # deterministic tick; no claude head, no Orca automat
 precheck = "python3 -m triggered_agents pipeline precheck"
 
 [systemd]
-# The real scheduler on this headless box. Unit name is derived as ta-pipeline. The dispatcher
+# The real scheduler on this headless box is secretary-dispatcher-production.timer. The dispatcher
 # tick is cheap after precheck, so a tight cadence (every 3 min) keeps latency low.
 calendar = "*:0/3:00 *:1/3:30"
 randomized_delay_sec = 20

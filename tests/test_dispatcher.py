@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import role_env
+from secretary._fsutil import try_file_lock
 from secretary.dispatcher import (
     CommandHostRuntime,
     CutoverState,
@@ -448,6 +449,71 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["errors"][0]["ref"], "secretary-510-pilot")
         self.assertEqual(result["errors"][0]["code"], "unexpected_error")
         self.assertEqual(result["errors"][0]["message"], "KeyError")
+
+    def test_probe_reports_the_claim_the_next_tick_would_make(self) -> None:
+        self.commit_cutover()
+
+        result = self.runtime.production_probe()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["step"], "production-probe")
+        self.assertEqual(result["ready"], ["secretary-510-pilot", "secretary-510-neighbor"])
+        claim = [entry for entry in result["would"] if entry["operation"] == "claim"]
+        self.assertEqual(claim[0]["detail"]["ref"], "secretary-510-pilot")
+
+    def test_probe_leaves_the_board_state_and_host_untouched(self) -> None:
+        self.commit_cutover()
+        before = self.runtime.production_state.load()
+
+        self.runtime.production_probe()
+
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.board.calls))
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertEqual(self.host.prepared, [])
+        self.assertEqual(self.runtime.production_state.load(), before)
+
+    def test_probe_fails_the_same_guard_the_real_tick_fails(self) -> None:
+        result = self.runtime.production_probe()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["step"], "production-probe")
+        self.assertEqual(result["reason"], "production cutover is not committed")
+
+    def test_probe_is_blocked_while_a_real_tick_holds_the_singleton_lock(self) -> None:
+        self.commit_cutover()
+        lock = self.runtime.production_state.tick_lock
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with try_file_lock(lock) as acquired:
+            self.assertTrue(acquired)
+            result = self.runtime.production_probe()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("singleton lock", result["reason"])
+
+    def test_probe_surfaces_a_broken_tick_instead_of_reporting_green(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+
+        def broken(task, records, payload, attempt_id):
+            raise KeyError("bad card")
+
+        self.runtime._tick_task = broken  # type: ignore[method-assign]
+
+        result = self.runtime.production_probe()
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["errors"][0]["code"], "unexpected_error")
+
+    def test_probe_walks_an_active_card_without_running_the_gate(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.host.prepared.clear()
+
+        result = self.runtime.production_probe()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["active"], ["secretary-510-pilot"])
+        self.assertEqual(self.host.prepared, [])
 
     def test_production_run_backs_off_on_blocked_ticks(self) -> None:
         calls = []

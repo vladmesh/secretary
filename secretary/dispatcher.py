@@ -40,6 +40,7 @@ from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
 from secretary.dispatcher_production import (
     ProductionState,
     production_observe as _production_observe,
+    production_probe as _production_probe,
     production_run as _production_run,
     production_tick as _production_tick,
 )
@@ -688,6 +689,9 @@ class DispatcherRuntime:
 
     def production_tick(self) -> dict[str, Any]:
         return _production_tick(self)
+
+    def production_probe(self) -> dict[str, Any]:
+        return _production_probe(self)
 
     def production_run(
         self,

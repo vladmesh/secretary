@@ -47,6 +47,12 @@ def add_dispatcher_subcommands(subparsers) -> None:
         command = commands.add_parser(name)
         add_production_common(command)
         command.set_defaults(handler=handler)
+        if name == "production-tick":
+            command.add_argument(
+                "--probe",
+                action="store_true",
+                help="run the tick with every write aborted, as a health gate",
+            )
         if name == "production-run":
             command.add_argument("--interval-seconds", type=float, default=60.0)
             command.add_argument("--max-interval-seconds", type=float, default=300.0)
@@ -121,6 +127,8 @@ def run_dispatcher_rollback(args: argparse.Namespace) -> int:
 
 
 def run_dispatcher_production_tick(args: argparse.Namespace) -> int:
+    if getattr(args, "probe", False):
+        return _run_production(args, lambda runtime: runtime.production_probe())
     return _run_production(args, lambda runtime: runtime.production_tick())
 
 

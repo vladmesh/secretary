@@ -1,10 +1,17 @@
-"""Read-only host inventory for ``doctor --dry-run --host``.
+"""Desired host state and read-only host inventory.
 
 This compares what an instance config describes against what is actually on the
 host across three resource kinds: project repos, systemd units and Orca repo
-registrations. It never changes the host and never reads config values or
-secrets. Every source here only lists resource *names*; env files and secret
-material are never opened.
+registrations. Nothing here changes the host, and no source reads config values
+or secrets: they only list resource *names*, so env files and secret material
+are never opened.
+
+Desired state has two inputs, both of them declarative. The instance config says
+which components this installation runs and which foreign names under its unit
+prefix it does not own; the product's own ``packaging/systemd`` directory says
+what those components actually are. Because a unit file's content is part of the
+desired state, its digest rides in the planned resource's spec, so editing a
+shipped unit shows up as an ``update`` on the next plan.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 KINDS = ("projects", "units", "orca repos")
+UNIT_SUFFIXES = (".service", ".timer")
 
 
 @dataclass(frozen=True)
@@ -45,15 +53,104 @@ def _resource(logical_id: str, kind: str, name: str, payload: dict[str, str]) ->
     return PlannedResource(logical_id, kind, name, spec, hashlib.sha256(value.encode()).hexdigest())
 
 
-def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[PlannedResource]:
+@dataclass(frozen=True)
+class PackagedUnit:
+    """One systemd unit shipped by the product, with the digest of its file."""
+
+    component: str
+    name: str
+    path: Path
+    digest: str
+    installable: bool
+
+
+def default_packaging_root() -> Path:
+    """Where the running product keeps its shipped units."""
+    return Path(__file__).resolve().parents[1] / "packaging" / "systemd"
+
+
+def load_packaged_units(root: Path, prefix: str) -> list[PackagedUnit]:
+    """Read the shipped unit catalogue. A unit outside the prefix is not ours.
+
+    Returns an empty catalogue when the directory is absent or unreadable rather
+    than raising: callers that need the units to exist say so themselves, and a
+    plan built without them must not crash a read-only doctor run.
+    """
+    if not prefix:
+        return []
+    try:
+        entries = sorted(entry for entry in root.iterdir() if entry.is_file())
+    except OSError:
+        return []
+    units: list[PackagedUnit] = []
+    for entry in entries:
+        if not entry.name.startswith(prefix) or not entry.name.endswith(UNIT_SUFFIXES):
+            continue
+        try:
+            payload = entry.read_bytes()
+        except OSError:
+            continue
+        suffix = entry.name[entry.name.rindex(".") :]
+        component = entry.name[len(prefix) : -len(suffix)]
+        if not component:
+            continue
+        units.append(
+            PackagedUnit(
+                component=component,
+                name=entry.name,
+                path=entry,
+                digest=hashlib.sha256(payload).hexdigest(),
+                # Only a unit with [Install] can be enabled; the rest are pulled
+                # in by a timer's Unit= and enabling them would fail.
+                installable=b"[Install]" in payload,
+            )
+        )
+    return units
+
+
+def component_enabled(host: dict[str, Any], component: str) -> bool:
+    """Whether this installation runs a shipped component. Absent means yes.
+
+    The product ships a component because it is part of the runtime; an
+    installation opts out explicitly. That keeps a fresh install complete by
+    default and makes a deliberately shed component a config fact rather than
+    an undocumented gap on the host.
+    """
+    components = host.get("components") if isinstance(host, dict) else None
+    if not isinstance(components, dict):
+        return True
+    entry = components.get(component)
+    if not isinstance(entry, dict):
+        return True
+    return entry.get("enabled") is not False
+
+
+def foreign_units(host: dict[str, Any]) -> set[str]:
+    """Unit names under our prefix that this installation declares are not ours."""
+    if not isinstance(host, dict):
+        return set()
+    return set(_str_list(host.get("foreign_units")))
+
+
+def build_plan(
+    instance: dict[str, Any],
+    bindings: Iterable[dict[str, Any]],
+    *,
+    packaged: Iterable[PackagedUnit] | None = None,
+) -> list[PlannedResource]:
     """Render the supported host surface without consulting the live host.
 
-    Heads produce systemd services. Enabled project bindings produce Orca
+    Heads produce systemd services. Every enabled component of the shipped unit
+    catalogue produces its unit. Enabled project bindings produce Orca
     registrations, whose names are explicit binding data. The host block only
-    supplies a namespace boundary; it never carries a second list of resources.
+    supplies a namespace boundary and the component opt-outs; it never carries a
+    second list of resources.
     """
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
+    if packaged is None:
+        packaged = load_packaged_units(default_packaging_root(), prefix)
+    digests = {unit.name: unit.digest for unit in packaged}
     result: list[PlannedResource] = []
     heads = instance.get("heads", []) if isinstance(instance, dict) else []
     if isinstance(heads, list) and prefix:
@@ -68,7 +165,8 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
                 continue
             result.append(_resource(logical_id, "unit", name, {"model": model, "role": role}))
     if prefix:
-        result.extend(_production_dispatcher_units(prefix))
+        result.extend(_production_dispatcher_units(prefix, digests))
+        result.extend(_packaged_component_units(host, packaged))
     for binding in bindings:
         if not isinstance(binding, dict) or not binding.get("enabled"):
             continue
@@ -84,39 +182,70 @@ def build_plan(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> 
     return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
 
 
-def _production_dispatcher_units(prefix: str) -> list[PlannedResource]:
+def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[PlannedResource]:
+    """The dispatcher pair keeps its own logical ids and semantic spec.
+
+    doctor reads these ids to tell an operator that the tick's own units drifted,
+    so they are not folded into the generic packaged-component ids. The shipped
+    file's digest still rides along, so editing the unit is an update here too.
+    """
     service = f"{prefix}dispatcher-production.service"
     timer = f"{prefix}dispatcher-production.timer"
+    service_spec = {
+        "component": "dispatcher-production",
+        "managed_by": "secretary",
+        "runtime": "python3 -m secretary dispatcher production-tick --instance $SECRETARY_INSTANCE",
+        "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER",
+    }
+    timer_spec = {
+        "component": "dispatcher-production",
+        "managed_by": "secretary",
+        "service": service,
+        "on_boot_sec": "30s",
+        "on_unit_active_sec": "60s",
+    }
+    for name, spec in ((service, service_spec), (timer, timer_spec)):
+        if digest := digests.get(name):
+            spec["digest"] = digest
     return [
-        _resource(
-            "systemd:dispatcher:production.service",
-            "unit",
-            service,
-            {
-                "component": "dispatcher-production",
-                "managed_by": "secretary",
-                "runtime": "python3 -m secretary dispatcher production-tick --instance $SECRETARY_INSTANCE",
-                "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER",
-            },
-        ),
-        _resource(
-            "systemd:dispatcher:production.timer",
-            "unit",
-            timer,
-            {
-                "component": "dispatcher-production",
-                "managed_by": "secretary",
-                "service": service,
-                "on_boot_sec": "30s",
-                "on_unit_active_sec": "60s",
-            },
-        ),
+        _resource("systemd:dispatcher:production.service", "unit", service, service_spec),
+        _resource("systemd:dispatcher:production.timer", "unit", timer, timer_spec),
     ]
 
 
-def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> list[str]:
+def _packaged_component_units(host: dict[str, Any], packaged: Iterable[PackagedUnit]) -> list[PlannedResource]:
+    """Every shipped unit of an enabled component, keyed by its own name."""
+    result: list[PlannedResource] = []
+    for unit in packaged:
+        if unit.component == "dispatcher-production":
+            continue  # owned by _production_dispatcher_units, which carries its digest
+        if not component_enabled(host, unit.component):
+            continue
+        result.append(
+            _resource(
+                f"systemd:unit:{unit.name}",
+                "unit",
+                unit.name,
+                {
+                    "component": unit.component,
+                    "managed_by": "secretary",
+                    "digest": unit.digest,
+                    "installable": "yes" if unit.installable else "no",
+                },
+            )
+        )
+    return result
+
+
+def plan_input_errors(
+    instance: dict[str, Any],
+    bindings: Iterable[dict[str, Any]],
+    *,
+    packaged: Iterable[PackagedUnit] | None = None,
+) -> list[str]:
     """Reject incomplete desired-state inputs before a plan can fail open."""
     bindings = list(bindings)
+    packaged = list(packaged) if packaged is not None else None
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix") if isinstance(host, dict) else None
     heads = instance.get("heads", []) if isinstance(instance, dict) else []
@@ -126,7 +255,7 @@ def plan_input_errors(instance: dict[str, Any], bindings: Iterable[dict[str, Any
     for binding in bindings:
         if isinstance(binding, dict) and binding.get("enabled") and not isinstance(binding.get("orca_binding"), str):
             errors.append("enabled binding requires explicit orca_binding")
-    desired = build_plan(instance, bindings)
+    desired = build_plan(instance, bindings, packaged=packaged)
     logical_ids: set[str] = set()
     names: set[tuple[str, str]] = set()
     for resource in desired:
@@ -158,7 +287,72 @@ def load_managed_manifest(path: Path) -> list[PlannedResource]:
     return resources
 
 
-def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, managed: Iterable[PlannedResource], unit_prefix: str = "") -> list[PlanChange]:
+def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
+    """Load state for a write path. Unlike plan, a writer must fail closed.
+
+    Returns ``(resources, reason)``; a non-empty reason means the manifest could
+    not be trusted, and the caller must refuse to write rather than treat the
+    unreadable state as "we own nothing".
+    """
+    if path.is_symlink():
+        return [], "managed manifest must not be a symlink"
+    if not path.exists():
+        return [], ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeError:
+        return [], "managed manifest is not valid UTF-8"
+    except OSError:
+        return [], "managed manifest is unreadable"
+    except ValueError:
+        return [], "managed manifest is not valid JSON"
+    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("resources"), list):
+        return [], "managed manifest has an unsupported shape"
+    resources = load_managed_manifest(path)
+    if len(resources) != len(payload["resources"]):
+        return [], "managed manifest contains invalid resource records"
+    logical_ids: set[str] = set()
+    names: set[tuple[str, str]] = set()
+    for resource in resources:
+        if resource.kind not in {"unit", "orca"} or not resource.spec:
+            return [], "managed manifest contains non-canonical resource records"
+        value = json.dumps(
+            [resource.logical_id, resource.kind, resource.name, resource.spec],
+            separators=(",", ":"),
+        )
+        if hashlib.sha256(value.encode()).hexdigest() != resource.fingerprint:
+            return [], "managed manifest contains a fingerprint mismatch"
+        if resource.logical_id in logical_ids:
+            return [], "managed manifest has duplicate logical ids"
+        logical_ids.add(resource.logical_id)
+        key = (resource.kind, resource.name)
+        if key in names:
+            return [], "managed manifest has duplicate resource names"
+        names.add(key)
+    return resources, ""
+
+
+def manifest_text(resources: Iterable[PlannedResource]) -> str:
+    records = [
+        {
+            "fingerprint": resource.fingerprint,
+            "kind": resource.kind,
+            "logical_id": resource.logical_id,
+            "name": resource.name,
+            "spec": resource.spec,
+        }
+        for resource in sorted(resources, key=lambda item: (item.kind, item.logical_id))
+    ]
+    return json.dumps({"version": 1, "resources": records}, indent=2, sort_keys=True) + "\n"
+
+
+def plan_changes(
+    desired: Iterable[PlannedResource],
+    actual: HostInventory,
+    managed: Iterable[PlannedResource],
+    unit_prefix: str = "",
+    declared_foreign: Iterable[str] = (),
+) -> list[PlanChange]:
     """Classify changes. A name match is a conflict unless exact state owns it."""
     actual_names = {"unit": actual.units, "orca": actual.orca_repos}
     managed_by_id = {resource.logical_id: resource for resource in managed}
@@ -181,6 +375,11 @@ def plan_changes(desired: Iterable[PlannedResource], actual: HostInventory, mana
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
     known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
     known_units.update(resource.name for resource in managed_by_id.values() if resource.kind == "unit")
+    # A name the instance declares foreign stays out of our namespace: it is not
+    # a conflict to resolve, it is somebody else's unit we have agreed to leave
+    # alone. Declaring it is the only way to say so, so silence here is still
+    # fail-closed.
+    known_units.update(declared_foreign)
     if unit_prefix:
         for name in actual.units:
             if name.startswith(unit_prefix) and name not in known_units:

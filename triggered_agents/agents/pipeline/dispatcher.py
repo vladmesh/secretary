@@ -196,9 +196,9 @@ def _ff_agent_worktrees() -> None:
     Strictly --ff-only per worktree (worker.ff_worktree): a worktree with local commits or a
     diverged history just warns with its name and is left untouched, never reset or forced. Safe
     to run against a worktree with a live head — these worktrees never carry local edits (agents
-    don't commit to this repo, by convention), and deploy/provision.py already `reset --hard`s
-    every one of them on every redeploy with no head check at all; an --ff-only pull is a strictly
-    gentler version of that same accepted move. Best-effort end to end: any failure here (a
+    don't commit to this repo, by convention). `secretary upgrade` fast-forwards the same set on
+    every release, with the same --ff-only rule; this tick just keeps them current between
+    upgrades rather than waiting for one. Best-effort end to end: any failure here (a
     missing manifest, a gone worktree, a hung git) is logged and swallowed, never allowed to turn
     into a precheck error."""
     try:
@@ -803,7 +803,7 @@ def pause(requested_mode: str, *, reason: str = pause_flag.DEFAULT_REASON,
           actor: str = pause_flag.DEFAULT_ACTOR,
           exclude_workspaces: list[str] | None = None) -> dict:
     """Pause the pipeline (triggered-agents-281) — the built-in replacement for the 2026-07-04
-    workaround: hand-moving Ready cards to Blocked, disabling ta-pipeline.timer, killing terminals
+    workaround: hand-moving Ready cards to Blocked, disabling secretary-dispatcher-production.timer, killing terminals
     by hand. `soft` stops new worker claims and steward/curator/retro dispatch (runtime/dispatch.py
     checks the same flag), but every card already In progress or in Validate keeps riding its
     normal cycle untouched — advance, CI/stand, layer-3 review, automerge, all of it. `hard` also

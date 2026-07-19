@@ -25,6 +25,12 @@ from .dispatch import _workspace
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_MAX_AGE = os.environ.get("TA_HEALTH_MAX_AGE_S")  # global override, wins for every agent
+# Units are the packaged ones under host.unit_prefix, not the decommissioned
+# ta-* names. Most agents map to <prefix><agent>.timer; the pipeline's clock is
+# the production dispatcher's timer, which is named after the component rather
+# than the agent.
+_UNIT_PREFIX = os.environ.get("SECRETARY_UNIT_PREFIX", "secretary-")
+_UNIT_COMPONENT = {"pipeline": "dispatcher-production"}
 # Freshness budget per systemd cadence: timer period + slack. Read from the agent's spec so a
 # daily agent (retro) isn't flagged red just for ticking less often than an hourly one.
 _CADENCE_MAX_AGE_S = {"hourly": 3 * 3600, "daily": 26 * 3600}
@@ -46,8 +52,12 @@ def _max_age_s(agent: str) -> int:
     return _CADENCE_MAX_AGE_S.get(cadence, 3 * 3600)
 
 
+def timer_unit(agent: str) -> str:
+    return f"{_UNIT_PREFIX}{_UNIT_COMPONENT.get(agent, agent)}.timer"
+
+
 def _timer_active(agent: str) -> bool:
-    p = subprocess.run(["systemctl", "is-active", f"ta-{agent}.timer"], capture_output=True, text=True)
+    p = subprocess.run(["systemctl", "is-active", timer_unit(agent)], capture_output=True, text=True)
     return p.stdout.strip() == "active"
 
 
@@ -81,7 +91,7 @@ def check(agents: tuple[str, ...]) -> int:
             continue
         problems = []
         if not _timer_active(agent):
-            problems.append(f"ta-{agent}.timer not active")
+            problems.append(f"{timer_unit(agent)} not active")
         runs = _runs(agent)
         if not runs:
             problems.append("no runs.jsonl yet")

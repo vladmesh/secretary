@@ -1,0 +1,435 @@
+"""``secretary upgrade``: pull a new product version and re-materialize the host.
+
+Self-deploy used to mean one ``git merge --ff-only`` of the dispatcher's own
+checkout. That moves the dispatcher's code and nothing else, so every other part
+of a release — role skills, the role worktrees, systemd units, Orca automations,
+the memory service — had to be finished by hand. Three ways to install the same
+system is how they drift apart.
+
+So there is one materializer and three entry points into it. ``upgrade`` pulls
+the new version and then runs it; a fresh install runs it against an empty host;
+recovery runs it against a half-built one. Nothing about a step knows which of
+the three called it, which is what makes the three stay identical.
+
+Every step is idempotent and reports one of ``changed``/``unchanged``/
+``skipped``/``failed``. A failed step stops the run: later steps assume the
+earlier ones landed, and a half-upgraded host that keeps going is harder to
+reason about than one that stopped at a named step. ``--dry-run`` runs the same
+decisions and performs no writes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Callable
+
+from secretary import role_skills
+from secretary.automations import (
+    AutomationError,
+    OrcaAutomationClient,
+    apply_automations,
+    load_specs,
+    workspaces_root,
+)
+from secretary.config import validate_instance
+from secretary.host import FixtureHostSource, LiveHostSource, build_expectations, strict_manifest
+from secretary.host_apply import (
+    ApplyInputs,
+    HostCommandError,
+    LiveOrcaRegistrar,
+    OrcaRegistrar,
+    SystemdUnitInstaller,
+    UnitInstaller,
+    apply_host,
+    resolve_packaged,
+)
+
+MEMORY_COMPONENT = "memory"
+# A pull that touches any of these can change what the long-running memory
+# service executes, so the service has to be restarted even when its unit file
+# is byte-identical. Restarting only on a changed unit leaves the MCP serving
+# the previous release's code, which is the opposite of re-materializing.
+MEMORY_CODE_PATHS = ("secretary/", "pyproject.toml", "uv.lock", "requirements.txt")
+DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock", "requirements.txt")
+
+
+@dataclass
+class StepResult:
+    name: str
+    status: str
+    detail: str = ""
+    facts: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def failed(self) -> bool:
+        return self.status == "failed"
+
+
+@dataclass
+class UpgradeContext:
+    """Everything the steps share, resolved once before the first of them runs."""
+
+    instance_path: Path
+    product_root: Path
+    base_branch: str
+    dry_run: bool
+    units: UnitInstaller
+    orca: OrcaRegistrar
+    automations: OrcaAutomationClient
+    host_fixture: Path | None = None
+    pull: bool = True
+    report: Any = None
+    changed_paths: tuple[str, ...] = ()
+    code_changed: bool = False
+    unit_changed: bool = False
+
+
+@dataclass
+class UpgradeResult:
+    steps: list[StepResult] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not any(step.failed for step in self.steps)
+
+    @property
+    def changed(self) -> bool:
+        return any(step.status == "changed" for step in self.steps)
+
+    def render(self) -> str:
+        lines = ["secretary upgrade"]
+        for step in self.steps:
+            suffix = f": {step.detail}" if step.detail else ""
+            lines.append(f"  {step.status:9} {step.name}{suffix}")
+        lines.append("status: " + ("ok" if self.ok else "failed"))
+        return "\n".join(lines)
+
+
+class GitError(RuntimeError):
+    """A git command failed. The message carries git's reason, not a traceback."""
+
+
+def _git(root: Path, args: list[str], timeout: int = 120) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError:
+        raise GitError("git not found") from None
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git {args[0]} timed out") from None
+    except OSError:
+        raise GitError(f"git {args[0]} could not run") from None
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout).strip().splitlines()
+        raise GitError(f"git {args[0]}: {reason[0] if reason else 'failed'}")
+    return (result.stdout or "").strip()
+
+
+def fast_forward(root: Path, base_branch: str) -> tuple[str, str]:
+    """Fetch and fast-forward one checkout. Returns ``(before, after)``.
+
+    Strictly ``--ff-only``: a checkout with local commits or a diverged history
+    is left exactly as found and the caller hears why. Nothing in an upgrade is
+    allowed to discard work that is only on this host.
+    """
+    before = _git(root, ["rev-parse", "HEAD"])
+    _git(root, ["fetch", "--quiet", "origin", base_branch])
+    _git(root, ["merge", "--ff-only", f"origin/{base_branch}"])
+    return before, _git(root, ["rev-parse", "HEAD"])
+
+
+def _changed_paths(root: Path, before: str, after: str) -> tuple[str, ...]:
+    if before == after:
+        return ()
+    return tuple(_git(root, ["diff", "--name-only", f"{before}..{after}"]).splitlines())
+
+
+def _touches(changed: tuple[str, ...], prefixes: tuple[str, ...]) -> bool:
+    return any(path.startswith(prefix) for path in changed for prefix in prefixes)
+
+
+def step_pull(context: UpgradeContext) -> StepResult:
+    if not context.pull:
+        return StepResult("pull", "skipped", "--no-pull")
+    try:
+        dirty = _git(context.product_root, ["status", "--porcelain"])
+        if dirty:
+            return StepResult("pull", "failed", "product checkout has uncommitted changes")
+        if context.dry_run:
+            _git(context.product_root, ["fetch", "--quiet", "origin", context.base_branch])
+            head = _git(context.product_root, ["rev-parse", "HEAD"])
+            target = _git(context.product_root, ["rev-parse", f"origin/{context.base_branch}"])
+            if head == target:
+                return StepResult("pull", "unchanged", head[:12])
+            return StepResult("pull", "changed", f"{head[:12]} -> {target[:12]} (not applied)")
+        before, after = fast_forward(context.product_root, context.base_branch)
+    except GitError as exc:
+        return StepResult("pull", "failed", str(exc))
+    if before == after:
+        return StepResult("pull", "unchanged", after[:12])
+    context.changed_paths = _changed_paths(context.product_root, before, after)
+    context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
+    return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}", {"paths": len(context.changed_paths)})
+
+
+def step_dependencies(context: UpgradeContext) -> StepResult:
+    venv_python = context.product_root / ".venv" / "bin" / "python"
+    if not venv_python.is_file():
+        return StepResult("dependencies", "skipped", "no .venv in the product checkout")
+    if not _touches(context.changed_paths, DEPENDENCY_PATHS):
+        return StepResult("dependencies", "unchanged", "no dependency manifest moved")
+    if context.dry_run:
+        return StepResult("dependencies", "changed", "would reinstall the product into .venv")
+    try:
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "--quiet", "-e", str(context.product_root)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        return StepResult("dependencies", "failed", f"pip install exited {exc.returncode}")
+    except (OSError, subprocess.TimeoutExpired):
+        return StepResult("dependencies", "failed", "pip install could not run")
+    context.code_changed = True
+    return StepResult("dependencies", "changed", "reinstalled the product into .venv")
+
+
+def step_role_skills(context: UpgradeContext) -> StepResult:
+    before = role_skills.audit()
+    if before["ok"]:
+        return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
+    pending = len(before["missing"]) + len(before["drift"])
+    if before["config_errors"] or before["source_missing"]:
+        return StepResult("role-skills", "failed", "manifest is not usable: overlapping roots or a missing source skill")
+    if context.dry_run:
+        return StepResult("role-skills", "changed", f"would sync {pending} skill copies")
+    try:
+        after = role_skills.sync()
+    except (OSError, ValueError) as exc:
+        return StepResult("role-skills", "failed", exc.__class__.__name__)
+    if not after["after"]["ok"]:
+        return StepResult("role-skills", "failed", "sync ran but the audit is still red")
+    return StepResult("role-skills", "changed", f"synced {pending} skill copies")
+
+
+def role_worktrees(product_root: Path) -> list[Path]:
+    """The role worktrees this product ships an agent for, as they exist on disk."""
+    root = workspaces_root() / "secretary"
+    agents = product_root / "triggered_agents" / "agents"
+    try:
+        names = sorted(entry.name for entry in agents.iterdir() if (entry / "automation.toml").is_file())
+    except OSError:
+        return []
+    return [root / name for name in names if (root / name / ".git").exists()]
+
+
+def step_worktrees(context: UpgradeContext) -> StepResult:
+    worktrees = role_worktrees(context.product_root)
+    if not worktrees:
+        return StepResult("role-worktrees", "skipped", "no role worktree on this host")
+    moved: list[str] = []
+    stuck: list[str] = []
+    for worktree in worktrees:
+        try:
+            if context.dry_run:
+                head = _git(worktree, ["rev-parse", "HEAD"])
+                _git(worktree, ["fetch", "--quiet", "origin", context.base_branch])
+                if head != _git(worktree, ["rev-parse", f"origin/{context.base_branch}"]):
+                    moved.append(worktree.name)
+                continue
+            before, after = fast_forward(worktree, context.base_branch)
+        except GitError as exc:
+            stuck.append(f"{worktree.name}: {exc}")
+            continue
+        if before != after:
+            moved.append(worktree.name)
+    if stuck:
+        return StepResult("role-worktrees", "failed", "; ".join(stuck))
+    if not moved:
+        return StepResult("role-worktrees", "unchanged", f"{len(worktrees)} worktrees current")
+    return StepResult("role-worktrees", "changed", ", ".join(moved))
+
+
+def step_host(context: UpgradeContext) -> StepResult:
+    report = context.report
+    packaged = resolve_packaged(report.instance, context.product_root / "packaging" / "systemd")
+    expected = build_expectations(report.bindings, report.host)
+    source = FixtureHostSource(context.host_fixture) if context.host_fixture else LiveHostSource()
+    collected = source.collect(expected)
+    if collected.errors:
+        reasons = "; ".join(f"{kind}: {reason}" for kind, reason in sorted(collected.errors.items()))
+        return StepResult("host", "failed", f"host inventory unavailable: {reasons}")
+    manifest = Path(report.instance["data_dir"]) / "host-managed.json"
+    managed, error = strict_manifest(manifest)
+    if error:
+        return StepResult("host", "failed", error)
+    result = apply_host(
+        ApplyInputs(
+            instance=report.instance,
+            bindings=report.bindings,
+            inventory=collected.inventory,
+            managed=managed,
+            manifest_path=manifest,
+            packaged=packaged,
+        ),
+        units=context.units,
+        orca=context.orca,
+        dry_run=context.dry_run,
+    )
+    pending = [change for change in result.changes if change.action != "unchanged"]
+    if result.conflicts:
+        names = ", ".join(change.name for change in result.conflicts)
+        return StepResult("host", "failed", f"unowned names in our namespace: {names}")
+    if result.errors:
+        return StepResult("host", "failed", "; ".join(result.errors))
+    context.unit_changed = any(
+        change.kind == "unit" and change.name.startswith(_memory_unit_prefix(report)) for change in pending
+    )
+    if not pending:
+        return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
+    detail = ", ".join(f"{change.action} {change.name}" for change in pending)
+    return StepResult("host", "changed", detail)
+
+
+def _memory_unit_prefix(report: Any) -> str:
+    prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
+    return f"{prefix}{MEMORY_COMPONENT}." if isinstance(prefix, str) else f"{MEMORY_COMPONENT}."
+
+
+def step_automations(context: UpgradeContext) -> StepResult:
+    try:
+        specs = load_specs(context.product_root)
+        changes, applied = apply_automations(specs, context.automations, dry_run=context.dry_run)
+    except AutomationError as exc:
+        return StepResult("automations", "failed", str(exc))
+    pending = [change for change in changes if change.action != "unchanged"]
+    if not pending:
+        return StepResult("automations", "unchanged", f"{len(changes)} automations current")
+    detail = ", ".join(
+        f"{change.action} {change.name}" + (f" ({', '.join(change.drifted)})" if change.drifted else "")
+        for change in pending
+    )
+    return StepResult("automations", "changed", detail, {"applied": applied})
+
+
+def step_memory(context: UpgradeContext) -> StepResult:
+    report = context.report
+    unit = f"{_memory_unit_prefix(report)}service"
+    if not context.units.is_active(unit):
+        reason = "service is not active"
+    elif context.unit_changed:
+        reason = "unit file changed"
+    elif context.code_changed:
+        reason = "product code or dependencies changed"
+    else:
+        return StepResult("memory", "unchanged", "serving the current code")
+    if context.dry_run:
+        return StepResult("memory", "changed", f"would restart {unit}: {reason}")
+    try:
+        context.units.restart(unit)
+    except HostCommandError as exc:
+        return StepResult("memory", "failed", str(exc))
+    return StepResult("memory", "changed", f"restarted {unit}: {reason}")
+
+
+def step_verify(context: UpgradeContext) -> StepResult:
+    """Re-plan against the host we just wrote. A second pass must be a no-op."""
+    if context.dry_run:
+        return StepResult("verify", "skipped", "--dry-run made no changes to verify")
+    probe = replace(context, dry_run=True, pull=False)
+    result = step_host(probe)
+    if result.failed:
+        return StepResult("verify", "failed", f"host is still not reconciled: {result.detail}")
+    if result.status == "changed":
+        return StepResult("verify", "failed", f"reconcile is not idempotent: {result.detail}")
+    audit = role_skills.audit()
+    if not audit["ok"]:
+        return StepResult("verify", "failed", "role skills are still out of sync")
+    return StepResult("verify", "unchanged", "host reconciled and role skills in sync")
+
+
+STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
+    step_pull,
+    step_dependencies,
+    step_role_skills,
+    step_worktrees,
+    step_host,
+    step_automations,
+    step_memory,
+    step_verify,
+)
+
+
+def run_steps(context: UpgradeContext, steps=STEPS) -> UpgradeResult:
+    result = UpgradeResult()
+    for step in steps:
+        outcome = step(context)
+        result.steps.append(outcome)
+        if outcome.failed:
+            break
+    return result
+
+
+def default_product_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def run_upgrade(args) -> int:
+    report = validate_instance(Path(args.instance))
+    if not report.ok:
+        print(f"secretary upgrade: {len(report.errors)} config problem(s):")
+        for error in report.errors:
+            print(f"  {error}")
+        return 2
+    product_root = Path(args.product_root).expanduser() if args.product_root else default_product_root()
+    context = UpgradeContext(
+        instance_path=Path(args.instance),
+        product_root=product_root,
+        base_branch=args.base_branch,
+        dry_run=args.dry_run,
+        units=SystemdUnitInstaller(),
+        orca=LiveOrcaRegistrar(),
+        automations=OrcaAutomationClient(),
+        host_fixture=Path(args.host_fixture) if args.host_fixture else None,
+        pull=not args.no_pull,
+        report=report,
+    )
+    result = run_steps(context)
+    if args.json:
+        print(json.dumps(
+            {
+                "status": "ok" if result.ok else "failed",
+                "dry_run": context.dry_run,
+                "steps": [
+                    {"name": step.name, "status": step.status, "detail": step.detail}
+                    for step in result.steps
+                ],
+            },
+            sort_keys=True,
+            indent=2,
+        ))
+    else:
+        print(result.render())
+    return 0 if result.ok else 1
+
+
+def add_upgrade_command(subparsers) -> None:
+    upgrade = subparsers.add_parser(
+        "upgrade",
+        help="pull the current product version and re-materialize this installation",
+    )
+    upgrade.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    upgrade.add_argument("--dry-run", action="store_true", help="decide every step but write nothing")
+    upgrade.add_argument("--no-pull", action="store_true", help="re-materialize without moving the checkout")
+    upgrade.add_argument("--base-branch", default="main")
+    upgrade.add_argument("--product-root", help="product checkout to upgrade (defaults to the running one)")
+    upgrade.add_argument("--host-fixture", metavar="DIR", help=argparse.SUPPRESS)
+    upgrade.add_argument("--json", action="store_true", help="emit the step report as JSON")
+    upgrade.set_defaults(handler=run_upgrade)

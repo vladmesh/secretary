@@ -28,3 +28,13 @@ host:
     - example-project
     - secretary
     - secretary-instance
+  # Components this installation deliberately does not run. Anything the product
+  # ships and this block does not name is enabled.
+  components:
+    retro:
+      enabled: false
+      reason: example installation has nothing to reflect on
+  # Names under unit_prefix owned by something else. Without an entry here an
+  # unrecognised unit in our namespace is a conflict and apply refuses to write.
+  foreign_units:
+    - secretary-supervisor.timer

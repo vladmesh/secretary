@@ -98,6 +98,23 @@
           "items": {"type": "string", "minLength": 1},
           "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
         },
+        "components": {
+          "type": "object",
+          "description": "Opt-outs from the shipped runtime components. A component absent here is enabled; the key is the packaged unit name minus host.unit_prefix and the unit suffix, e.g. 'curator' or 'steward-deep-sweep'.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {"type": "boolean"},
+              "reason": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "foreign_units": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"},
+          "description": "Units under host.unit_prefix that this installation knows are owned by something else. Without an entry here an unrecognised unit in our namespace is a conflict and reconcile refuses to write."
+        },
         "memory_reindex_python": {
           "type": "string",
           "minLength": 1,
