@@ -422,6 +422,108 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(closes, len([call for call in self.client.calls if call[0] == "closeTask"]))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
+    def test_archive_retry_after_failed_comment_recreates_reason_before_close(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        original_call = self.client.call
+        failed_once = False
+
+        def fail_first_comment(method: str, **params: object) -> object:
+            nonlocal failed_once
+            if method == "createComment" and not failed_once:
+                failed_once = True
+                self.client.calls.append((method, params))
+                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            return original_call(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=fail_first_comment):
+            with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+                self.writer.archive(
+                    role="po",
+                    actor="operator",
+                    reference="secretary-468",
+                    reason="backlog cleanup",
+                    request_id="archive-comment-retry",
+                )
+            self.assertEqual(raised.exception.code, "audit_pending")
+
+            result = self.writer.archive(
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                reason="backlog cleanup",
+                request_id="archive-comment-retry",
+            )
+
+        self.assertEqual(result["action"], "archived")
+        self.assertEqual(self.client.tasks[0]["is_active"], 0)
+        self.assertEqual(
+            [comment["comment"] for comment in self.client.comments[12]],
+            ["[archive]\nbacklog cleanup"],
+        )
+        self.assertLess(
+            [call[0] for call in self.client.calls].index("createComment", 1),
+            [call[0] for call in self.client.calls].index("closeTask"),
+        )
+
+    def test_archive_reconcile_without_missing_reason_does_not_close(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        original_call = self.client.call
+        failed_once = False
+
+        def fail_first_comment(method: str, **params: object) -> object:
+            nonlocal failed_once
+            if method == "createComment" and not failed_once:
+                failed_once = True
+                self.client.calls.append((method, params))
+                raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            return original_call(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=fail_first_comment):
+            with self.assertRaises(TaskError):
+                self.writer.archive(
+                    role="po",
+                    actor="operator",
+                    reference="secretary-468",
+                    reason="backlog cleanup",
+                    request_id="archive-reconcile-missing-reason",
+                )
+
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertNotEqual(self.client.tasks[0].get("is_active"), 0)
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
+    def test_archive_refuses_dispatcher_record_after_claim_was_cleared(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        state_dir = Path(self.tmpdir.name) / "dispatcher"
+        state_dir.mkdir()
+        (state_dir / "production-state.json").write_text(
+            json.dumps({
+                "version": 1,
+                "phase": "production",
+                "records": {
+                    "secretary-468": {
+                        "worker": "worker-secretary-468",
+                        "workspace": "/home/dev/orca/workspaces/secretary/468-archive",
+                        "handle": "terminal-1",
+                        "review_handle": "review-1",
+                    }
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(TaskError, "live dispatcher work") as raised:
+            self.writer.archive(
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                reason="cleanup",
+                request_id="archive-live-dispatcher-record",
+            )
+
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
     def test_pending_is_visible_and_reconciles_without_backend_retry(self) -> None:
         with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(TaskError, "committed") as raised:

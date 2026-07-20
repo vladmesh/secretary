@@ -396,6 +396,7 @@ class TaskWriter:
     ) -> None:
         self.client = client
         self.reader = TaskReader(client)
+        self.data_dir = Path(data_dir)
         self.audit = TaskAudit(data_dir)
         self.workspace = Path(workspace) if workspace is not None else None
 
@@ -465,7 +466,7 @@ class TaskWriter:
         pending = self.audit.pending_event(request_id)
         if pending is not None:
             try:
-                self._finish_pending_cleanup(pending)
+                self._finish_pending_cleanup(pending, None)
                 task = self.reader.show(str(pending["ref"]))
                 pending["task_id"] = task["id"]
                 pending["backend"]["revision"] = _revision(task)
@@ -760,6 +761,7 @@ class TaskWriter:
 
         def mutation(task: dict[str, Any]) -> Any:
             self._check_archivable(task)
+            self._check_dispatcher_archivable(reference)
             try:
                 self.client.call(
                     "createComment",
@@ -780,6 +782,7 @@ class TaskWriter:
             request_id,
             {"reason_sha256": _digest(reason)},
             mutation,
+            retry_payload={"reason": reason},
         )
 
     def restore_card(
@@ -828,7 +831,18 @@ class TaskWriter:
             raise TaskError("not_found", "task was not found", 2)
         return _positive_int(raw.get("swimlane_id")) or 0
 
-    def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Any) -> dict[str, Any]:
+    def _write(
+        self,
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str | None,
+        payload: dict[str, Any],
+        mutation: Any,
+        *,
+        retry_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
         if committed is not None:
@@ -840,7 +854,7 @@ class TaskWriter:
         pending = self.audit.pending_event(request_id)
         if pending is not None:
             try:
-                self._finish_pending_cleanup(pending)
+                self._finish_pending_cleanup(pending, retry_payload)
                 task = self.reader.show(str(pending["ref"]))
                 pending["task_id"] = task["id"]
                 pending["backend"]["revision"] = _revision(task)
@@ -876,7 +890,7 @@ class TaskWriter:
         unresolved = 0
         for event in self.audit.pending_events():
             try:
-                self._finish_pending_cleanup(event)
+                self._finish_pending_cleanup(event, None)
                 task = self.reader.show(str(event["ref"]))
                 event["task_id"] = task["id"]
                 event["backend"]["revision"] = _revision(task)
@@ -887,7 +901,11 @@ class TaskWriter:
                 unresolved += 1
         return repaired, unresolved
 
-    def _finish_pending_cleanup(self, event: dict[str, Any]) -> None:
+    def _finish_pending_cleanup(
+        self,
+        event: dict[str, Any],
+        retry_payload: dict[str, Any] | None,
+    ) -> None:
         """Complete idempotent backend cleanup before recording a pending event."""
         payload = event.get("payload")
         if not isinstance(payload, dict):
@@ -902,7 +920,7 @@ class TaskWriter:
             self._finish_pending_restore(event, payload)
             return
         if event.get("kind") == "archived":
-            self._finish_pending_archive(event)
+            self._finish_pending_archive(event, retry_payload)
             return
         if event.get("kind") == "restored_comment":
             from secretary.task_restore import finish_pending_restore_comment
@@ -949,11 +967,20 @@ class TaskWriter:
         if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
-    def _finish_pending_archive(self, event: dict[str, Any]) -> None:
+    def _finish_pending_archive(
+        self,
+        event: dict[str, Any],
+        retry_payload: dict[str, Any] | None,
+    ) -> None:
         """Complete an archive whose comment or close committed before the reply was lost."""
         ref = str(event.get("ref") or "")
         if not ref:
             raise TaskError("backend_error", "pending archive is missing its task ref", 1)
+        event_payload = event.get("payload")
+        expected_digest = _text(event_payload.get("reason_sha256")) if isinstance(event_payload, dict) else ""
+        retry_reason = _text((retry_payload or {}).get("reason"))
+        if retry_reason and _digest(retry_reason) != expected_digest:
+            raise TaskError("validation", "archive retry reason does not match the pending request", 2)
         board_id, _, _ = self.reader._board()
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
         if not isinstance(raw, dict):
@@ -961,8 +988,33 @@ class TaskWriter:
         if _task_is_active(raw):
             task = self.reader.show(ref)
             self._check_archivable(task)
+            self._check_dispatcher_archivable(ref)
+            if not _has_archive_reason(task, expected_digest):
+                if not retry_reason:
+                    raise TaskError("backend_error", "pending archive reason comment is missing", 1)
+                self.client.call(
+                    "createComment",
+                    task_id=_task_number(task),
+                    user_id=0,
+                    content=f"[archive]\n{retry_reason}",
+                )
+                task = self.reader.show(ref)
+                if not _has_archive_reason(task, expected_digest):
+                    raise TaskError("backend_error", "pending archive reason comment remains incomplete", 1)
             if not self.client.call("closeTask", task_id=_task_number(task)):
                 raise TaskError("backend_error", "pending archive remains incomplete", 1)
+        elif expected_digest:
+            task_id = _positive_int(raw.get("id"))
+            if task_id is None:
+                raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+            raw_comments = self.client.call("getAllComments", task_id=task_id) or []
+            comments = [
+                _normalize_comment(comment)
+                for comment in raw_comments
+                if isinstance(comment, dict)
+            ]
+            if not _has_archive_reason({"comments": comments}, expected_digest):
+                raise TaskError("backend_error", "pending archive reason comment is missing", 1)
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
         if isinstance(raw, dict) and _task_is_active(raw):
             raise TaskError("backend_error", "pending archive remains incomplete", 1)
@@ -1011,9 +1063,56 @@ class TaskWriter:
         if task["claim"]["worker"] is not None:
             raise TaskError("live_work", "archive refuses a card with an active claim", 3)
 
+    def _check_dispatcher_archivable(self, reference: str) -> None:
+        for state_path in (
+            self.data_dir / "dispatcher" / "pilot-state.json",
+            self.data_dir / "dispatcher" / "production-state.json",
+        ):
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, UnicodeError):
+                raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3) from None
+            if not isinstance(payload, dict):
+                raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3)
+            records = payload.get("records") or {}
+            if not isinstance(records, dict):
+                raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3)
+            record = records.get(reference)
+            if not isinstance(record, dict):
+                continue
+            if _dispatcher_record_has_live_work(record):
+                raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
+
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else "" if value is None else str(value)
+
+
+def _has_archive_reason(task: dict[str, Any], reason_sha256: str) -> bool:
+    if not reason_sha256:
+        return False
+    comments = task.get("comments") or []
+    if not isinstance(comments, list):
+        return False
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        if comment.get("marker") != "archive":
+            continue
+        body = _text(comment.get("body"))
+        reason = body.split("\n", 1)[1] if body.startswith("[archive]\n") else ""
+        if _digest(reason) == reason_sha256:
+            return True
+    return False
+
+
+def _dispatcher_record_has_live_work(record: dict[str, Any]) -> bool:
+    return any(
+        _text(record.get(key))
+        for key in ("workspace", "handle", "review_handle", "review_leaf")
+    )
 
 
 def _task_number(task: dict[str, Any]) -> int:
