@@ -376,13 +376,29 @@ class CommandHostRuntime:
                 ["git", "-C", record.workspace, "rev-list", "--parents", "-n", "1", current_commit],
                 "review recovery parents",
             ).stdout.split()
+            local_head = self._run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                "review recovery local head",
+            ).stdout.strip()
             self._run(
                 ["git", "-C", record.workspace, "merge-base", "--is-ancestor", reviewed_commit, current_commit],
                 "review recovery ancestry",
             )
         except HostError:
             return False
-        return bool(remote_head) and remote_head == current_commit and reviewed_commit in parents[1:] and len(parents) > 2
+        if not (
+            remote_head
+            and remote_head == current_commit
+            and reviewed_commit in parents[1:]
+            and len(parents) > 2
+        ):
+            return False
+        for parent in parents[1:]:
+            if parent == reviewed_commit:
+                continue
+            if not self._commit_is_ancestor(str(repo), parent, local_head):
+                return False
+        return True
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)

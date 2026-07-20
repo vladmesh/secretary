@@ -2961,6 +2961,38 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             self.assertFalse(recovered)
 
+    def test_instance_publish_recovery_rejects_foreign_merge_parent(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+            foreign = root / "foreign"
+            git(root, "clone", "--quiet", str(remote), str(foreign))
+            _configure_git_user(foreign)
+            foreign_commit = _commit_file(foreign, "foreign.txt", "not reviewed\n", "foreign")
+            reviewed = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            git(workspace, "fetch", "--quiet", str(foreign), "HEAD")
+            git(workspace, "merge", "--quiet", "--no-edit", "FETCH_HEAD")
+            current = git(workspace, "rev-parse", "HEAD")
+            git(workspace, "push", "--quiet", "origin", "pipeline/secretary-669:main")
+            host = CommandHostRuntime(
+                _InstanceRepoCatalog(instance),
+                root,
+                mode="real",
+            )
+
+            recovered = host.is_instance_publish_recovery(
+                {"ref": "secretary-669", "project": "secretary_instance"},
+                SimpleNamespace(workspace=str(workspace)),
+                reviewed,
+                current,
+            )
+
+            self.assertFalse(recovered)
+            self.assertFalse(_is_ancestor(instance, foreign_commit, git(instance, "rev-parse", "HEAD")))
+            self.assertEqual(git(remote, "show", "HEAD:foreign.txt"), "not reviewed")
+
     def test_instance_repo_publish_rejects_foreign_remote_history(self) -> None:
         from types import SimpleNamespace
 
