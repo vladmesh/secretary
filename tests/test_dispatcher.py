@@ -129,9 +129,18 @@ class FakeKanboard:
 
 
 class FakeCatalog:
-    def __init__(self, adapter: dict | None = None, *, default_branch: str = "") -> None:
+    def __init__(
+        self,
+        adapter: dict | None = None,
+        *,
+        default_branch: str = "",
+        instance_dir: Path | None = None,
+    ) -> None:
         self._adapter = adapter or {}
         self._default_branch = default_branch
+        # Checkpoint freshness reads the instance repo; the default is deliberately
+        # not a repo, so tests that do not care read back empty git fields.
+        self.instance_dir = instance_dir or Path("/nonexistent-instance")
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
@@ -294,6 +303,18 @@ class FakeCheckpoint:
         return self.outcome
 
 
+class FakePusher:
+    def __init__(self, outcome: dict | Exception) -> None:
+        self.outcome = outcome
+        self.calls: list[dict] = []
+
+    def push(self, state: dict | None = None) -> dict:
+        self.calls.append(dict(state or {}))
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return {**(state or {}), **self.outcome}
+
+
 class FakeLegacyPause:
     def __init__(self) -> None:
         self.sufficient = True
@@ -347,7 +368,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.writer,
             TaskAudit(self.data_dir),
             CutoverState(self.data_dir),
-            FakeCatalog(),  # type: ignore[arg-type]
+            FakeCatalog(instance_dir=self.data_dir),  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=self.legacy_pause,  # type: ignore[arg-type]
@@ -460,6 +481,65 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["step"], "claim")
         self.assertEqual(result["checkpoint"]["status"], "blocked")
         self.assertIn("secret detected", result["checkpoint"]["reason"])
+
+    def test_production_tick_pushes_and_carries_the_push_state_forward(self) -> None:
+        self.commit_cutover()
+        pusher = FakePusher({"status": "pushed", "last_push_commit": "abc123"})
+        self.runtime.checkpoint_push = pusher
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["checkpoint_push"]["status"], "pushed")
+        payload = self.runtime.production_state.load()
+        self.assertEqual(payload["checkpoint_push"]["last_push_commit"], "abc123")
+
+        self.runtime.production_tick()
+        # The window lives in state, so the second tick sees the first tick's result.
+        self.assertEqual(pusher.calls[1]["last_push_commit"], "abc123")
+
+    def test_failed_push_leaves_the_tick_working(self) -> None:
+        self.commit_cutover()
+        self.runtime.checkpoint_push = FakePusher(
+            {"status": "failed", "reason": "could not resolve host github.com", "failures": 3}
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["actions"][0]["step"], "claim")
+        self.assertEqual(result["checkpoint_push"]["status"], "failed")
+        self.assertEqual(result["checkpoint_push"]["failures"], 3)
+
+    def test_push_crash_is_contained_and_still_closes_its_window(self) -> None:
+        self.commit_cutover()
+        self.runtime.checkpoint_push = FakePusher(RuntimeError("ssh agent is gone"))
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["checkpoint_push"]["status"], "failed")
+        self.assertIn("ssh agent is gone", result["checkpoint_push"]["reason"])
+        self.assertGreater(result["checkpoint_push"]["attempted_epoch"], 0)
+
+    def test_production_observe_reports_checkpoint_freshness(self) -> None:
+        self.commit_cutover()
+        self.runtime.checkpoint = FakeCheckpoint(
+            CheckpointResult(status="blocked", reason="task audit has 1 unresolved pending record(s)")
+        )
+        self.runtime.checkpoint_push = FakePusher(
+            {
+                "status": "diverged",
+                "reason": "remote origin/main is at deadbeef0000",
+                "remote_diverged": True,
+            }
+        )
+        self.runtime.production_tick()
+
+        observed = self.runtime.production_observe()
+
+        self.assertEqual(observed["checkpoint"]["push_status"], "diverged")
+        self.assertTrue(observed["checkpoint"]["remote_diverged"])
+        self.assertIn("unresolved pending", observed["checkpoint"]["blocked_reason"])
 
     def test_checkpoint_crash_is_contained_in_the_tick_result(self) -> None:
         self.commit_cutover()

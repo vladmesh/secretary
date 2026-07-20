@@ -6,6 +6,11 @@ import os
 from pathlib import Path
 
 from secretary.backup import check_backup_health, create_backups, verify_backup
+from secretary.checkpoint import (
+    PUSH_INTERVAL_SECONDS,
+    checkpoint_snapshot,
+    render_checkpoint_lines,
+)
 from secretary.config import ConfigError, load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
@@ -55,6 +60,7 @@ from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
 
 
+PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
@@ -408,6 +414,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         host_incomplete, collected_host = print_host_inventory(report, args)
 
     dispatcher_findings = print_dispatcher_status(report, collected_host, inspect_live=not args.offline)
+    checkpoint_findings = print_checkpoint_status(report)
 
     print("host changes: none")
     if host_incomplete:
@@ -415,6 +422,9 @@ def run_doctor(args: argparse.Namespace) -> int:
         print("status: host inventory incomplete")
         return 1 if args.dry_run else 2
     if dispatcher_findings:
+        print("status: findings")
+        return 1
+    if checkpoint_findings:
         print("status: findings")
         return 1
     if restore_problems:
@@ -559,6 +569,46 @@ def print_dispatcher_status(
         for finding in findings:
             print(f"  {finding}")
     return bool(findings)
+
+
+def print_checkpoint_status(report) -> list[str]:
+    """Checkpoint freshness: docs/RECOVERY.md, "Observability".
+
+    Last commit, last push, lag, the gate's blocking reason and the
+    `remote diverged` alarm.
+    """
+    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
+    if not isinstance(data_dir_value, str) or not data_dir_value:
+        return []
+    data_dir = Path(data_dir_value).expanduser()
+    production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    if "checkpoint" not in production and "checkpoint_push" not in production:
+        return []
+
+    snapshot = checkpoint_snapshot(
+        report.instance_path.parent,
+        write_state=production.get("checkpoint"),
+        push_state=production.get("checkpoint_push"),
+    )
+    print("")
+    print("checkpoint freshness: read-only")
+    for line in render_checkpoint_lines(snapshot):
+        print(f"  {line}")
+
+    findings: list[str] = []
+    if snapshot["remote_diverged"]:
+        findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
+    if snapshot["blocked_reason"]:
+        findings.append(f"checkpoint gate blocked: {snapshot['blocked_reason']}")
+    lag = snapshot["lag_minutes"]
+    # Two missed windows: one late push is the cadence, two is a stuck remote.
+    if isinstance(lag, int) and lag > 2 * PUSH_INTERVAL_MINUTES:
+        findings.append(f"checkpoint lag is {lag} min, past the {PUSH_INTERVAL_MINUTES} min RPO")
+    if findings:
+        print("checkpoint findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return findings
 
 
 def _load_dispatcher_state(path: Path) -> dict[str, object]:

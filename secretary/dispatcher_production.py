@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
+from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -72,6 +73,11 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "legacy_pause": legacy_pause.to_json(),
         "records": list((payload.get("records") or {}).keys()),
         "divergences": list((payload.get("controlled_divergences") or [])),
+        "checkpoint": checkpoint_snapshot(
+            runtime.catalog.instance_dir,
+            write_state=payload.get("checkpoint"),
+            push_state=payload.get("checkpoint_push"),
+        ),
     }
 
 
@@ -112,6 +118,9 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         checkpoint = _write_checkpoint(runtime)
         if checkpoint is not None:
             payload["checkpoint"] = checkpoint
+        push = _push_checkpoint(runtime, payload)
+        if push is not None:
+            payload["checkpoint_push"] = push
         payload["last_tick_finished_at"] = now_rfc3339()
         runtime.production_state.save(payload)
         result = {
@@ -123,6 +132,8 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         }
         if checkpoint is not None:
             result["checkpoint"] = checkpoint
+        if push is not None:
+            result["checkpoint_push"] = push
         return result
 
 
@@ -141,6 +152,35 @@ def _write_checkpoint(runtime: Any) -> dict[str, Any] | None:
         result = {"status": "blocked", "reason": f"{type(exc).__name__}: {exc}"}
     result["at"] = now_rfc3339()
     return result
+
+
+def _push_checkpoint(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Run the 30-minute push window at the end of the tick.
+
+    Fail-closed on the checkpoint, not on the work: a push that cannot land
+    records why, the lag keeps growing in plain sight, and the tick still
+    reports on the cards it moved.
+    """
+    pusher = getattr(runtime, "checkpoint_push", None)
+    if pusher is None:
+        return None
+    state = payload.get("checkpoint_push")
+    state = dict(state) if isinstance(state, dict) else {}
+    try:
+        return pusher.push(state)
+    except Exception as exc:
+        state.update(
+            {
+                "status": "failed",
+                "reason": f"{type(exc).__name__}: {exc}",
+                # Stamp the window too, or a pusher that raises every call turns
+                # the tick into a retry loop against a broken remote.
+                "attempted_epoch": time.time(),
+                "attempted_at": now_rfc3339(),
+                "failures": int(state.get("failures") or 0) + 1,
+            }
+        )
+        return state
 
 
 class ProbeAbort(Exception):

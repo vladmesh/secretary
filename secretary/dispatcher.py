@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import file_lock, write_text_atomic
-from secretary.checkpoint import CheckpointWriter
+from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import validate_instance
 from secretary.dispatcher_launcher import (
     HeadLaunch,
@@ -705,6 +705,7 @@ class DispatcherRuntime:
         legacy_pause: FileLegacyPauseProbe | None = None,
         production_state: ProductionState | None = None,
         checkpoint: CheckpointWriter | None = None,
+        checkpoint_push: CheckpointPusher | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -716,6 +717,7 @@ class DispatcherRuntime:
         self.owner = owner
         self.legacy_pause = legacy_pause or FileLegacyPauseProbe()
         self.checkpoint = checkpoint
+        self.checkpoint_push = checkpoint_push
 
     def preflight(self, selector: PilotSelector) -> dict[str, Any]:
         audit = self.audit.status()
@@ -1703,6 +1705,7 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
         CommandHostRuntime(catalog, data, mode=host_mode),
         owner=owner,
         checkpoint=CheckpointWriter(data, catalog.instance_dir),
+        checkpoint_push=CheckpointPusher(catalog.instance_dir),
     )
 
 

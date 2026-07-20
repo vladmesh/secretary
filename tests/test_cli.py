@@ -136,6 +136,106 @@ class CliTests(unittest.TestCase):
         self.assertIn("last_fetch missing", output)
         self.assertIn("status: ok", output)
 
+    def seed_checkpoint_instance(self, tmpdir: Path, production: dict) -> Path:
+        """An instance repo with one commit and a production state to read."""
+        instance_dir = tmpdir / "instance"
+        data_dir = tmpdir / "secretary-data"
+        instance_dir.mkdir()
+        (instance_dir / "instance.yaml").write_text(
+            "version: 1\n"
+            "name: example\n"
+            f"data_dir: {data_dir}\n"
+            "offsite:\n"
+            "  instance_remote: git@example.invalid:x/y.git\n"
+            "  backup_pull_max_age_days: 7\n",
+            encoding="utf-8",
+        )
+        git(instance_dir, "init", "--quiet", "--initial-branch", "main")
+        git(instance_dir, "config", "user.name", "operator")
+        git(instance_dir, "config", "user.email", "operator@example.invalid")
+        git(instance_dir, "add", "instance.yaml")
+        git(instance_dir, "commit", "--quiet", "-m", "config")
+        self.run_cli(["data", "init", "--instance", str(instance_dir)])
+        state = data_dir / "dispatcher"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "production-state.json").write_text(json.dumps(production), encoding="utf-8")
+        return instance_dir
+
+    def test_doctor_prints_checkpoint_freshness(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint": {"status": "committed", "commit": "abc123"},
+                    "checkpoint_push": {
+                        "status": "pushed",
+                        "last_push_at": "2026-07-20T10:00:00Z",
+                        "last_push_commit": "deadbeef",
+                    },
+                },
+            )
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("checkpoint freshness: read-only", output)
+        self.assertIn("last push: 2026-07-20T10:00:00Z", output)
+        self.assertIn("push: pushed", output)
+        self.assertIn("lag: ", output)
+        self.assertIn("status: ok", output)
+
+    def test_doctor_reports_remote_divergence_as_a_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint_push": {
+                        "status": "diverged",
+                        "reason": "remote origin/main is at deadbeef0000",
+                        "remote_diverged": True,
+                    },
+                },
+            )
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("alarm: remote diverged", output)
+        self.assertIn("checkpoint findings:", output)
+        self.assertIn("remote diverged: remote origin/main is at deadbeef0000", output)
+        self.assertIn("status: findings", output)
+
+    def test_doctor_reports_a_blocked_checkpoint_gate_as_a_finding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint": {"status": "blocked", "reason": "secret detected in state/board/cards.ndjson"},
+                },
+            )
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("blocked: secret detected in state/board/cards.ndjson", output)
+        self.assertIn("status: findings", output)
+
+    def test_doctor_stays_quiet_about_checkpoints_an_instance_never_wrote(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("checkpoint freshness", output)
+
     def test_doctor_reports_stale_offsite_marker_as_finding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

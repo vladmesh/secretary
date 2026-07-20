@@ -74,6 +74,28 @@ def _used_attributes(collaborator: str) -> set[str]:
     return used
 
 
+def _declares(cls, name: str) -> bool:
+    """Plain data attributes (`catalog.instance_dir`) are part of the surface too.
+
+    They are assigned in `__init__` rather than declared on the class, so `hasattr`
+    alone would read them as missing on the real class and as a drift on the double.
+    """
+    if hasattr(cls, name):
+        return True
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+    except (OSError, TypeError, SyntaxError):
+        return False
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == name
+        and isinstance(node.ctx, ast.Store)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        for node in ast.walk(tree)
+    )
+
+
 def _signature(func) -> list[tuple[str, str, bool]]:
     """(name, kind, has-default) per parameter, ignoring `self` and annotations."""
     parameters = list(inspect.signature(func).parameters.values())
@@ -116,13 +138,15 @@ class HostSurfaceContractTests(unittest.TestCase):
         for name in sorted(used):
             with self.subTest(method=name):
                 self.assertTrue(
-                    hasattr(InstanceCatalog, name),
+                    _declares(InstanceCatalog, name),
                     f"the dispatcher calls catalog.{name}, missing on InstanceCatalog",
                 )
                 self.assertTrue(
-                    hasattr(FakeCatalog, name),
+                    _declares(FakeCatalog, name),
                     f"the dispatcher calls catalog.{name}, missing on FakeCatalog",
                 )
+                if not callable(getattr(InstanceCatalog, name, None)):
+                    continue
                 self.assertEqual(
                     _signature(getattr(InstanceCatalog, name)),
                     _signature(getattr(FakeCatalog, name)),
