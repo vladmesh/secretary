@@ -350,6 +350,40 @@ class CommandHostRuntime:
             return False
         return True
 
+    def is_instance_publish_recovery(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        reviewed_commit: str,
+        current_commit: str,
+    ) -> bool:
+        if self.mode == "noop" or not record.workspace:
+            return False
+        try:
+            repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
+        except (KeyError, HostError):
+            return False
+        if not _same_repo(repo, Path(getattr(self.catalog, "instance_dir"))):
+            return False
+        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        try:
+            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "review recovery fetch")
+            remote_head = self._run(
+                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
+                "review recovery remote head",
+            ).stdout.strip()
+            parents = self._run(
+                ["git", "-C", record.workspace, "rev-list", "--parents", "-n", "1", current_commit],
+                "review recovery parents",
+            ).stdout.split()
+            self._run(
+                ["git", "-C", record.workspace, "merge-base", "--is-ancestor", reviewed_commit, current_commit],
+                "review recovery ancestry",
+            )
+        except HostError:
+            return False
+        return bool(remote_head) and remote_head == current_commit and reviewed_commit in parents[1:] and len(parents) > 2
+
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)
 
@@ -1654,7 +1688,7 @@ class DispatcherRuntime:
         """Green review verdict. Re-run the mechanical gate right before merging so a non-green
         CI/local gate never lands: green merges, red bounces back to the worker, pending waits."""
         ref = task["ref"]
-        drift = self._review_drift(record)
+        drift = self._review_drift(task, record)
         if drift:
             return self._gate_red_to_worker(
                 task, record, records, payload, attempt_id, GateResult("red", drift), phase="review-freeze"
@@ -1709,7 +1743,7 @@ class DispatcherRuntime:
         records.pop(ref, None)
         return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
 
-    def _review_drift(self, record: DispatcherRecord) -> str:
+    def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes
         one code state; merging a different one lands work nobody reviewed. Returns the operator
         message for the bounce, or "" when the states match (or when neither can be read — an
@@ -1719,7 +1753,7 @@ class DispatcherRuntime:
         current = self.host.head_commit(record)
         if not current or current == record.review_commit:
             return ""
-        if self.host.is_ancestor(record, record.review_commit, current):
+        if self.host.is_instance_publish_recovery(task, record, record.review_commit, current):
             return ""
         return (
             f"Ревью выдано для коммита `{record.review_commit[:12]}`, а рабочая копия сейчас на "

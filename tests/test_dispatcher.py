@@ -198,7 +198,7 @@ class FakeHost:
         self.split_from: list[str] = []
         self.stopped_reviews: list[str] = []
         self.commit = "c0ffee1234567890"
-        self.ancestors: set[tuple[str, str]] = set()
+        self.instance_publish_recoveries: set[tuple[str, str]] = set()
 
     def prepare_worker(
         self,
@@ -286,9 +286,9 @@ class FakeHost:
         self.calls.append("head_commit")
         return self.commit
 
-    def is_ancestor(self, record, ancestor: str, descendant: str) -> bool:
-        self.calls.append("is_ancestor")
-        return (ancestor, descendant) in self.ancestors
+    def is_instance_publish_recovery(self, task: dict, record, reviewed_commit: str, current_commit: str) -> bool:
+        self.calls.append("is_instance_publish_recovery")
+        return (reviewed_commit, current_commit) in self.instance_publish_recoveries
 
     def teardown(self, record) -> None:
         self.calls.append("teardown")
@@ -1933,6 +1933,53 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.torn_down, [])
         self.assertIn("другому состоянию кода", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
+    def test_green_verdict_for_a_descendant_checkout_is_not_merged_by_default(self) -> None:
+        """A descendant can contain new commits after review; only the instance publish recovery
+        path is allowed to finish from a moved checkout."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        reviewed = self.host.commit
+        self.host.commit = "1111111111111111"
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="looks good",
+            request_id="review-green-descendant",
+        )
+
+        bounced = self.runtime.tick(self.selector)
+
+        self.assertEqual(bounced["action"], "review-freeze-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.completed, [])
+        self.assertIn(("is_instance_publish_recovery"), self.host.calls)
+        self.assertEqual(reviewed, "c0ffee1234567890")
+
+    def test_green_verdict_for_instance_publish_recovery_can_finish_from_published_descendant(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        reviewed = self.host.commit
+        self.host.commit = "2222222222222222"
+        self.host.instance_publish_recoveries.add((reviewed, self.host.commit))
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="looks good",
+            request_id="review-green-instance-recovery",
+        )
+
+        done = self.runtime.tick(self.selector)
+
+        self.assertEqual(done["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "done")
+
     def test_green_verdict_for_the_reviewed_checkout_merges_and_tears_down(self) -> None:
         self.start_pilot()
         self._run_worker_to_validate()
@@ -2861,6 +2908,30 @@ class DispatcherLauncherTests(unittest.TestCase):
             self.assertTrue(_is_ancestor(instance, feature, local_head))
             self.assertEqual(git(instance, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
             self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
+
+    def test_instance_publish_recovery_rejects_linear_unreviewed_descendant(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+            reviewed = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            current = _commit_file(workspace, "unreviewed.txt", "not reviewed\n", "unreviewed")
+            git(workspace, "push", "--quiet", "origin", "pipeline/secretary-669:main")
+            host = CommandHostRuntime(
+                _InstanceRepoCatalog(instance),
+                root,
+                mode="real",
+            )
+
+            recovered = host.is_instance_publish_recovery(
+                {"ref": "secretary-669", "project": "secretary_instance"},
+                SimpleNamespace(workspace=str(workspace)),
+                reviewed,
+                current,
+            )
+
+            self.assertFalse(recovered)
 
     def test_finish_green_recovers_after_worker_side_checkpoint_merge_was_published(self) -> None:
         from types import SimpleNamespace
