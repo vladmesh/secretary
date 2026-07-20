@@ -24,6 +24,7 @@ from secretary.dispatcher_launcher import (
 )
 from secretary.dispatcher_helpers import (
     _last_marker,
+    _last_review_red_body,
     _legacy_worker_branch,
     _review_adoption_baseline,
     _tail,
@@ -452,11 +453,24 @@ class CommandHostRuntime:
         # reuses the same attempt_id, so without it the second done-report collides with
         # the first and is idempotently deduped, leaving the dispatcher waiting forever.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
-        return "\n".join([
+        sections = [
             f"# Task {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
             "",
+        ]
+        review_red = _last_review_red_body(task)
+        if review_red:
+            sections += [
+                "## Reviewer verdict to address (previous submission was RED)",
+                "",
+                "Your last commit was reviewed and rejected. Fix these findings before reporting",
+                "done again — do NOT re-report the same commit unchanged:",
+                "",
+                review_red,
+                "",
+            ]
+        sections += [
             "Before reporting done, stage AND commit everything on the worker branch: run",
             "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
             "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
@@ -468,7 +482,8 @@ class CommandHostRuntime:
             f"Base branch: {base}",
             f"Worker branch: {branch}",
             "",
-        ])
+        ]
+        return "\n".join(sections)
 
     def _review_prompt(self, task: dict[str, Any], attempt_id: str) -> str:
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"])

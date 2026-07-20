@@ -1830,6 +1830,32 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(rid(first).endswith("-0"))
         self.assertTrue(rid(rework).endswith("-2"))
 
+    def test_rework_task_doc_delivers_latest_review_red_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            base_task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "description": "body",
+                "workspace": {"base_branch": "main"},
+            }
+            # No review yet: no reviewer section.
+            self.assertNotIn("Reviewer verdict to address", host._worker_task_doc(base_task, "main", "a", 0))
+            # After a red review, the rework doc must carry the latest findings verbatim so the
+            # worker does not rework blind and re-report the same commit.
+            reviewed = {
+                **base_task,
+                "comments": [
+                    {"marker": "review:red", "body": "[review:red]\nstale finding"},
+                    {"marker": "report:done", "body": "[report:done]\ndone"},
+                    {"marker": "review:red", "body": "[review:red]\nP1: use a time ceiling, not the terminal title"},
+                ],
+            }
+            doc = host._worker_task_doc(reviewed, "main", "a", 2)
+        self.assertIn("Reviewer verdict to address", doc)
+        self.assertIn("P1: use a time ceiling, not the terminal title", doc)
+        self.assertNotIn("stale finding", doc)  # only the latest red
+
     def test_complete_green_publishes_branch_and_fast_forwards_checkout(self) -> None:
         from types import SimpleNamespace
 
