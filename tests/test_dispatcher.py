@@ -31,8 +31,9 @@ from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.dispatcher_watchdog import (
-    REVIEW_VERDICT_STALL_SECONDS,
-    WORKER_REPORT_STALL_SECONDS,
+    REVIEW_VERDICT_STALL_DEFAULT,
+    WORKER_REPORT_STALL_DEFAULT,
+    stall_seconds,
     wait_outcome,
 )
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
@@ -1067,14 +1068,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         # The reviewer head exited without registering a verdict (secretary-637), or is up but
         # wedged. Either way nothing lands and the ceiling ends the wait.
-        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS + 60)
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
         respawned = self.runtime.tick(self.selector)
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "validate")
+        # The operator must be able to tell a first stall from an already-restarted head, hours
+        # before the escalation shows up.
+        self.assertIn("respawned the review head", card["comments"][-1]["body"])
 
-        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS + 60)
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
         escalated = self.runtime.tick(self.selector)
 
         self.assertEqual(escalated["to"], "blocked")
@@ -1087,7 +1092,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.runtime.tick(self.selector)
 
-        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS - 60)
+        self._rewind_wait("review", seconds=stall_seconds("review") - 60)
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
@@ -1103,7 +1108,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.host.review_running_result = False
         self.host.calls.clear()
-        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS - 60)
+        self._rewind_wait("review", seconds=stall_seconds("review") - 60)
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
@@ -1118,14 +1123,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(waiting["action"], "waiting-worker-report")
 
         # The rework worker never came up / died before reporting (secretary-649).
-        self._rewind_wait("worker", seconds=WORKER_REPORT_STALL_SECONDS + 60)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
         respawned = self.runtime.tick(self.selector)
 
         self.assertEqual(respawned["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
-        self._rewind_wait("worker", seconds=WORKER_REPORT_STALL_SECONDS + 60)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
         escalated = self.runtime.tick(self.selector)
 
         self.assertEqual(escalated["to"], "blocked")
@@ -1481,6 +1486,87 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(advanced["to"], "validate")
 
+    def _reviewer_red_request_id(self) -> str:
+        """The red request-id the dispatcher actually hands the reviewer, taken from the prompt
+        it renders rather than recomputed here."""
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        prompt = CommandHostRuntime(
+            FakeCatalog(), self.data_dir, mode="noop"  # type: ignore[arg-type]
+        )._review_prompt(
+            self.reader.show("secretary-510-pilot"),
+            record["attempt_id"],
+            int(record["review_baseline"]),
+        )
+        line = next(line for line in prompt.splitlines() if "--kind red" in line)
+        return line.split("--request-id ", 1)[1].split()[0]
+
+    def test_second_red_verdict_in_one_attempt_is_registered(self) -> None:
+        """secretary-654: attempt_id survives review:red -> rework -> report:done, so a round-less
+        red request-id made round 2's verdict a replay of round 1. The write was deduped, the
+        reviewer was told "recorded" and exited, and the card sat in validate until the watchdog
+        escalated it with the findings lost."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        round_one = self._reviewer_red_request_id()
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="round 1: fix the hermetic test",
+            request_id=round_one,
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="rework report",
+            request_id="worker-done-rework",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        round_two = self._reviewer_red_request_id()
+        self.assertNotEqual(round_two, round_one, "round 2 must not reuse round 1's request-id")
+
+        before = len(self.reader.show("secretary-510-pilot")["comments"])
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="round 2: the fix regressed the watchdog",
+            request_id=round_two,
+        )
+        after = self.reader.show("secretary-510-pilot")["comments"]
+
+        self.assertEqual(len(after), before + 1, "round 2 verdict was deduped away")
+        self.assertIn("round 2", after[-1]["body"])
+
+        reworked = self.runtime.tick(self.selector)
+        self.assertEqual(reworked["action"], "rework-started")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_verdict_body_file_is_per_round(self) -> None:
+        """Heads are told to leave the body file behind, so a shared name lets round 2 post
+        round 1's body if the head reuses the file without rewriting it."""
+        host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="noop")  # type: ignore[arg-type]
+        task = {"ref": "secretary-510-pilot", "project": "secretary", "routing": {}}
+
+        first = host._review_prompt(task, "attempt-1", 4)
+        second = host._review_prompt(task, "attempt-1", 9)
+
+        def body_file(doc: str) -> str:
+            line = next(line for line in doc.splitlines() if "--kind red" in line)
+            return line.split("--body-file ", 1)[1].split()[0]
+
+        self.assertNotEqual(body_file(first), body_file(second))
+
     def test_done_report_with_uncommitted_result_blocks_before_review(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)
@@ -1637,12 +1723,12 @@ class HeadPromptTests(unittest.TestCase):
         return [line for line in doc.splitlines() if "python3 -m secretary task" in line]
 
     def test_review_prompt_names_a_concrete_body_file(self) -> None:
-        doc = self.host._review_prompt(self.task, "attempt-1")
+        doc = self.host._review_prompt(self.task, "attempt-1", 3)
         commands = self._command_lines(doc)
 
         self.assertEqual(len(commands), 2, "one green and one red command")
         for command in commands:
-            self.assertIn("--body-file /tmp/secretary-verdict-secretary-510-pilot.md", command)
+            self.assertIn("--body-file /tmp/secretary-verdict-secretary-510-pilot-3.md", command)
             self.assertNotIn("<file>", command)
 
     def test_worker_prompt_names_a_concrete_body_file(self) -> None:
@@ -1650,14 +1736,14 @@ class HeadPromptTests(unittest.TestCase):
         commands = self._command_lines(doc)
 
         self.assertEqual(len(commands), 1)
-        self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot.md", commands[0])
+        self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot-0.md", commands[0])
         self.assertNotIn("<file>", commands[0])
 
     def test_body_file_lives_outside_the_workspace(self) -> None:
         """A body file inside the worktree would make `git status` dirty, and the done-report
         check rejects a dirty workspace."""
         for doc in (
-            self.host._review_prompt(self.task, "attempt-1"),
+            self.host._review_prompt(self.task, "attempt-1", 3),
             self.host._worker_task_doc(self.task, "main", "attempt-1"),
         ):
             for command in self._command_lines(doc):
@@ -1666,7 +1752,7 @@ class HeadPromptTests(unittest.TestCase):
 
     def test_prompts_forbid_inline_shell_body_assembly(self) -> None:
         for doc in (
-            self.host._review_prompt(self.task, "attempt-1"),
+            self.host._review_prompt(self.task, "attempt-1", 3),
             self.host._worker_task_doc(self.task, "main", "attempt-1"),
         ):
             for command in self._command_lines(doc):
@@ -1690,6 +1776,22 @@ class WaitWatchdogTests(unittest.TestCase):
             wait_outcome(waiting_since=0.0, now=7201.0, stall_seconds=7200, respawns=1),
             "escalate",
         )
+
+    def test_ceiling_comes_from_the_env_at_call_time(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"SECRETARY_REVIEW_VERDICT_STALL_SECONDS": "120"}
+        ):
+            self.assertEqual(stall_seconds("review"), 120)
+        self.assertEqual(stall_seconds("review"), REVIEW_VERDICT_STALL_DEFAULT)
+
+    def test_unparseable_ceiling_falls_back_to_the_default(self) -> None:
+        """A typo in the unit's env must not raise out of module import and keep the dispatcher
+        from starting at all."""
+        for bogus in ("", "soon", "0", "-5"):
+            with mock.patch.dict(
+                os.environ, {"SECRETARY_WORKER_REPORT_STALL_SECONDS": bogus}
+            ):
+                self.assertEqual(stall_seconds("worker"), WORKER_REPORT_STALL_DEFAULT)
 
 
 class LegacyPauseProbeTests(unittest.TestCase):

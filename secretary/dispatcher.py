@@ -51,9 +51,8 @@ from secretary.dispatcher_review import (
     start_review as _start_review,
 )
 from secretary.dispatcher_watchdog import (
-    REVIEW_VERDICT_STALL_SECONDS,
-    WORKER_REPORT_STALL_SECONDS,
     reset_wait as _reset_wait,
+    stall_seconds as _stall_seconds,
     wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_state import (
@@ -263,7 +262,7 @@ class CommandHostRuntime:
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
         review_file = Path(record.workspace) / "REVIEW.md"
-        self._write_prompt(review_file, self._review_prompt(task, record.attempt_id))
+        self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
         return self._launch(
             record.workspace,
             f"{task['ref']} review",
@@ -460,7 +459,7 @@ class CommandHostRuntime:
         # reuses the same attempt_id, so without it the second done-report collides with
         # the first and is idempotently deduped, leaving the dispatcher waiting forever.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
-        body_file = _body_file_path("report", task["ref"])
+        body_file = _body_file_path("report", task["ref"], review_round)
         sections = [
             f"# Task {task['ref']}",
             "",
@@ -494,10 +493,14 @@ class CommandHostRuntime:
         ]
         return "\n".join(sections)
 
-    def _review_prompt(self, task: dict[str, Any], attempt_id: str) -> str:
-        green_request = _attempt_request_id(attempt_id, "review-green", task["ref"])
-        red_request = _attempt_request_id(attempt_id, "review-red", task["ref"])
-        body_file = _body_file_path("verdict", task["ref"])
+    def _review_prompt(self, task: dict[str, Any], attempt_id: str, review_round: int) -> str:
+        # The round belongs in the key for the same reason it does in the worker report id: a card
+        # that goes red twice within one attempt reuses attempt_id, so a round-less id makes the
+        # second verdict a replay of the first. TaskWriter then skips the mutation, the CLI still
+        # answers "verdict recorded", and the reviewer exits leaving the card waiting (secretary-654).
+        green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
+        red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
+        body_file = _body_file_path("verdict", task["ref"], review_round)
         return "\n".join([
             f"# Review {task['ref']}",
             "",
@@ -1160,7 +1163,7 @@ class DispatcherRuntime:
         or a tick outcome once the wait blew its ceiling: one respawn, then Blocked. Without
         this a head that died before posting parks the card forever. The ceiling is the only
         input on purpose; see dispatcher_watchdog for why no liveness probe is trustworthy."""
-        stall = REVIEW_VERDICT_STALL_SECONDS if kind == "review" else WORKER_REPORT_STALL_SECONDS
+        stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         now = time.time()
         if not waiting_since:
@@ -1193,29 +1196,48 @@ class DispatcherRuntime:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
         self.host.stop(record)
-        try:
-            if kind == "review":
-                record.handle = self.host.start_review(task, record)
-                record.state = "reviewing"
-            else:
+        if kind == "review":
+            # One bring-up path for the reviewer: the same helper the normal launch and the
+            # recovery path use, so its error handling can't drift from theirs.
+            outcome = _start_review(self, task, records, record, attempt_id, action="review-respawned")
+            if outcome.get("status") != "ok":
+                self._save_records(payload, records)
+                return outcome
+        else:
+            try:
                 record.handle = self.host.restart_worker(task, record)
-                record.state = "claimed"
-        except Exception as exc:
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                target="blocked",
-                reason=f"{kind} respawn failed: {scrub_host_output(str(exc))}",
-                request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id, f"{kind}-respawn-blocked", ref
-                ),
-            )
-            records.pop(ref, None)
-            self._save_records(payload, records)
-            return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": f"{kind} respawn failed"}
+            except Exception as exc:
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=f"worker respawn failed: {scrub_host_output(str(exc))}",
+                    request_id=_attempt_request_id(
+                        record.attempt_id or attempt_id, "worker-respawn-blocked", ref
+                    ),
+                )
+                records.pop(ref, None)
+                self._save_records(payload, records)
+                return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": "worker respawn failed"}
+            record.state = "claimed"
         setattr(record, f"{kind}_waiting_since", now)
-        setattr(record, f"{kind}_respawns", int(getattr(record, f"{kind}_respawns") or 0) + 1)
+        respawns = int(getattr(record, f"{kind}_respawns") or 0) + 1
+        setattr(record, f"{kind}_respawns", respawns)
+        # Leave a trace: without it the operator sees only the Blocked hours later and has no
+        # way to tell a first stall from a card whose head was already restarted once.
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher wait watchdog: no {_wait_expectation(kind)} within {_stall_seconds(kind)}s, "
+                f"respawned the {kind} head (respawn {respawns}). Another stall escalates to Blocked."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{kind}-respawn", ref, str(respawns)
+            ),
+        )
         records[ref] = record
         self._save_records(payload, records)
         return {
@@ -1239,7 +1261,6 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
-        expected = "вердикт ревьюера" if kind == "review" else "отчёт воркера"
         self.host.stop(record)
         self.writer.move(
             role="dispatcher",
@@ -1247,8 +1268,8 @@ class DispatcherRuntime:
             reference=ref,
             target="blocked",
             reason=(
-                f"Вотчдог ожидания: {expected} не пришёл после respawn "
-                f"(порог {stall}s). Карточка в Blocked до vladmesh."
+                f"wait watchdog: no {_wait_expectation(kind)} after respawn "
+                f"(ceiling {stall}s), blocked for the operator"
             ),
             request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{kind}-wait-stall", ref),
         )
@@ -1503,11 +1524,17 @@ def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
 
 
-def _body_file_path(kind: str, reference: str) -> str:
+def _wait_expectation(kind: str) -> str:
+    return "review verdict" if kind == "review" else "worker report"
+
+
+def _body_file_path(kind: str, reference: str, review_round: int) -> str:
     """Where a head writes its report/verdict body. Outside the workspace on purpose: a stray
-    file in the worktree makes `git status` dirty, and the done-report check rejects that."""
+    file in the worktree makes `git status` dirty, and the done-report check rejects that. The
+    round is in the name because heads are told to leave the file behind: without it round 2
+    starts on top of round 1's body and a head that skips the write posts a stale verdict."""
     root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
-    return f"{root}/secretary-{kind}-{_request_token(reference)}.md"
+    return f"{root}/secretary-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
 
 
 def _body_file_instructions(body_file: str) -> list[str]:

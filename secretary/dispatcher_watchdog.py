@@ -16,14 +16,22 @@ from __future__ import annotations
 
 import os
 
-REVIEW_VERDICT_STALL_SECONDS = int(
-    os.environ.get("SECRETARY_REVIEW_VERDICT_STALL_SECONDS", str(90 * 60))
-)
-WORKER_REPORT_STALL_SECONDS = int(
-    os.environ.get("SECRETARY_WORKER_REPORT_STALL_SECONDS", str(6 * 3600))
-)
+REVIEW_VERDICT_STALL_DEFAULT = 90 * 60
+WORKER_REPORT_STALL_DEFAULT = 6 * 3600
 
-WAIT_KINDS = ("worker", "review")
+
+def stall_seconds(kind: str) -> int:
+    """Ceiling for a wait, read per call. A typo in the env var falls back to the default rather
+    than raising out of module import and taking the whole dispatcher down with it."""
+    if kind == "review":
+        name, default = "SECRETARY_REVIEW_VERDICT_STALL_SECONDS", REVIEW_VERDICT_STALL_DEFAULT
+    else:
+        name, default = "SECRETARY_WORKER_REPORT_STALL_SECONDS", WORKER_REPORT_STALL_DEFAULT
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def wait_outcome(
