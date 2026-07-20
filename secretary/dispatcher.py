@@ -399,10 +399,32 @@ class CommandHostRuntime:
         """
         with state_repo.state_repo_lock(repo):
             self._run(["git", "-C", record.workspace, "fetch", "origin", base], "merge preflight fetch")
-            self._run(["git", "-C", record.workspace, "merge", "--no-edit", f"origin/{base}"], "merge preflight sync")
+            self._run(
+                [
+                    "git",
+                    *state_repo.commit_identity(Path(record.workspace)),
+                    "-C",
+                    record.workspace,
+                    "merge",
+                    "--no-edit",
+                    f"origin/{base}",
+                ],
+                "merge preflight sync",
+            )
             self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
             self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
-            self._run(["git", "-C", str(repo), "merge", "--no-edit", f"origin/{base}"], "post-merge reconcile")
+            self._run(
+                [
+                    "git",
+                    *state_repo.commit_identity(repo),
+                    "-C",
+                    str(repo),
+                    "merge",
+                    "--no-edit",
+                    f"origin/{base}",
+                ],
+                "post-merge reconcile",
+            )
 
     def _merge_github_pr(self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str) -> None:
         """Land a github-CI project through its PR. gh honours branch protection and refuses to

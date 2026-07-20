@@ -12,7 +12,7 @@ from unittest import mock
 
 from secretary import role_env
 from secretary._fsutil import try_file_lock
-from secretary.checkpoint import CheckpointPusher, CheckpointResult
+from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.dispatcher import (
     CommandHostRuntime,
     CutoverState,
@@ -2851,6 +2851,58 @@ class DispatcherLauncherTests(unittest.TestCase):
             self.assertEqual(git(instance, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
             self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
 
+    def test_instance_repo_merge_uses_fallback_identity_without_global_git_identity(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            empty_global = root / "empty-gitconfig"
+            empty_global.write_text("", encoding="utf-8")
+            with mock.patch.dict(os.environ):
+                os.environ["GIT_CONFIG_GLOBAL"] = str(empty_global)
+                os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+                for key in (
+                    "EMAIL",
+                    "GIT_AUTHOR_EMAIL",
+                    "GIT_AUTHOR_NAME",
+                    "GIT_COMMITTER_EMAIL",
+                    "GIT_COMMITTER_NAME",
+                ):
+                    os.environ.pop(key, None)
+                _, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+                git(instance, "config", "--unset", "user.name")
+                git(instance, "config", "--unset", "user.email")
+
+                (instance / "state" / "board" / "cards.ndjson").write_text(
+                    "checkpoint\n",
+                    encoding="utf-8",
+                )
+                checkpoint_result = CheckpointWriter(root / "data", instance)._commit_locked(
+                    board_cards=1,
+                    run_records=0,
+                )
+                self.assertEqual(checkpoint_result.status, "committed")
+                checkpoint = checkpoint_result.commit
+
+                feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
+                git(workspace, "push", "origin", "pipeline/secretary-669:main")
+                host = CommandHostRuntime(
+                    _InstanceRepoCatalog(instance),
+                    root,
+                    mode="real",
+                )
+
+                host.complete_green(
+                    {"ref": "secretary-669", "project": "secretary_instance"},
+                    SimpleNamespace(workspace=str(workspace)),
+                )
+
+                local_head = git(instance, "rev-parse", "HEAD")
+                self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
+                self.assertTrue(_is_ancestor(instance, feature, local_head))
+                self.assertEqual(git(instance, "show", "HEAD:state/board/cards.ndjson"), "checkpoint")
+                self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
+
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
@@ -2956,6 +3008,8 @@ def _instance_repo_fixture(root: Path, ref: str) -> tuple[Path, Path, Path]:
     git(root, "clone", "--quiet", str(remote), str(instance))
     _configure_git_user(instance)
     _commit_file(instance, "README.md", "seed\n", "seed")
+    _commit_file(instance, "state/board/cards.ndjson", "", "seed board checkpoint")
+    _commit_file(instance, "state/runs/runs.ndjson", "", "seed runs checkpoint")
     git(instance, "push", "--quiet", "origin", "main")
     git(root, "clone", "--quiet", str(remote), str(workspace))
     _configure_git_user(workspace)
