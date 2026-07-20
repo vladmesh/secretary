@@ -24,7 +24,9 @@ from mcp.server.fastmcp import FastMCP
 
 HERE = Path(__file__).parent
 DEFAULT_MEMORY_DIR = Path.home() / "secretary-data" / "memory"
-DEFAULT_CANON = DEFAULT_MEMORY_DIR / "facts"
+# Canon lives in the private instance repo (docs/RECOVERY.md, "Layout"); the
+# export and the vector index stay derived under the data dir.
+DEFAULT_CANON = Path.home() / "secretary-instance" / "state" / "memory" / "facts"
 
 if "MEMORY_CANON_ROOT" in os.environ:
     CANON = Path(os.environ["MEMORY_CANON_ROOT"])

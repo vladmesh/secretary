@@ -48,11 +48,14 @@ class DataLayoutTests(unittest.TestCase):
 
             for name in ("board", "memory", "runs", "transcripts", "artifacts", "backups"):
                 self.assertTrue((data_dir / name).is_dir(), name)
-            self.assertTrue((data_dir / "memory" / "facts" / ".git").is_dir())
+            self.assertFalse((data_dir / "memory" / "facts").exists())
             self.assertEqual(layout.manifest_path, data_dir / "data-manifest.json")
-            self.assertIn('"data_dir"', layout.manifest_path.read_text(encoding="utf-8"))
-            remotes = git(data_dir / "memory" / "facts", "remote")
-            self.assertEqual(remotes, "")
+            manifest_text = layout.manifest_path.read_text(encoding="utf-8")
+            self.assertIn('"data_dir"', manifest_text)
+            manifest = json.loads(manifest_text)
+            self.assertEqual(
+                manifest["components"]["memory"]["facts"], "state/memory/facts"
+            )
 
     def test_init_layout_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -524,17 +527,17 @@ class ExportTests(unittest.TestCase):
             (fact_dir / "one.md").write_text("fact one\n", encoding="utf-8")
             init_git_repo(source)
             data_dir = root / "secretary-data"
+            instance_dir = init_instance_repo(root / "instance")
 
-            first = import_memory_journal(data_dir, source_dir=source)
-            second = import_memory_journal(data_dir, source_dir=source)
+            first = import_memory_journal(data_dir, instance_dir, source_dir=source)
+            second = import_memory_journal(data_dir, instance_dir, source_dir=source)
             (fact_dir / "two.md").write_text("fact two\n", encoding="utf-8")
             git(source, "add", "-A", ".")
             git(source, "commit", "-m", "Add second fact")
-            third = import_memory_journal(data_dir, source_dir=source)
-            fourth = import_memory_journal(data_dir, source_dir=source)
-            facts_dir = data_dir / "memory" / "facts"
-            tracked = git(facts_dir, "ls-files").splitlines()
-            log_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            third = import_memory_journal(data_dir, instance_dir, source_dir=source)
+            fourth = import_memory_journal(data_dir, instance_dir, source_dir=source)
+            tracked = tracked_facts(instance_dir)
+            log_count = memory_commit_count(instance_dir)
             manifest = json.loads((data_dir / "memory" / "manifest.json").read_text(encoding="utf-8"))
 
         self.assertTrue(first.changed)
@@ -554,17 +557,18 @@ class ExportTests(unittest.TestCase):
             (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
             init_git_repo(source)
             data_dir = root / "secretary-data"
-            import_memory_journal(data_dir, source_dir=source)
-            facts_dir = data_dir / "memory" / "facts"
+            instance_dir = init_instance_repo(root / "instance")
+            import_memory_journal(data_dir, instance_dir, source_dir=source)
+            facts_dir = memory_facts_dir(instance_dir)
             (facts_dir / "secretary" / "manual.md").write_text("manual\n", encoding="utf-8")
-            git(facts_dir, "add", "-A", ".")
-            git(facts_dir, "commit", "-m", "Manual protocol write")
+            git(instance_dir, "add", "--", "state/memory")
+            git(instance_dir, "commit", "-m", "Manual protocol write")
 
             (source / "memory" / "secretary" / "two.md").write_text("fact two\n", encoding="utf-8")
             git(source, "add", "-A", ".")
             git(source, "commit", "-m", "Add second fact")
             with self.assertRaisesRegex(RuntimeError, "refused after non-import"):
-                import_memory_journal(data_dir, source_dir=source)
+                import_memory_journal(data_dir, instance_dir, source_dir=source)
 
     def test_memory_import_lock_conflict(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -585,8 +589,10 @@ class ExportTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            instance_dir = init_instance_repo(root / "instance")
+
             with self.assertRaisesRegex(RuntimeError, "journal is locked"):
-                import_memory_journal(data_dir, source_dir=source)
+                import_memory_journal(data_dir, instance_dir, source_dir=source)
 
     def test_memory_import_removes_proven_stale_lock(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -607,7 +613,9 @@ class ExportTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = import_memory_journal(data_dir, source_dir=source)
+            instance_dir = init_instance_repo(root / "instance")
+
+            result = import_memory_journal(data_dir, instance_dir, source_dir=source)
 
         self.assertEqual(result.count, 1)
 
@@ -619,10 +627,11 @@ class ExportTests(unittest.TestCase):
             facts.mkdir(parents=True)
             (facts / "one.md").write_text("fact one\n", encoding="utf-8")
             data_dir = root / "secretary-data"
-            import_memory_journal(data_dir, source_dir=source)
-            facts_dir = data_dir / "memory" / "facts"
-            old_tracked = git(facts_dir, "ls-files")
-            old_head = git(facts_dir, "rev-parse", "HEAD")
+            instance_dir = init_instance_repo(root / "instance")
+            import_memory_journal(data_dir, instance_dir, source_dir=source)
+            facts_dir = memory_facts_dir(instance_dir)
+            old_tracked = tracked_facts(instance_dir)
+            old_head = memory_head(instance_dir)
             (facts / "two.md").write_text("fact two\n", encoding="utf-8")
 
             original_copy_tree = data_module._copy_tree
@@ -639,16 +648,17 @@ class ExportTests(unittest.TestCase):
 
             with mock.patch("secretary.memory_journal._copy_tree", side_effect=fail_when_publishing):
                 with self.assertRaisesRegex(RuntimeError, "copy failed"):
-                    import_memory_journal(data_dir, source_dir=source)
+                    import_memory_journal(data_dir, instance_dir, source_dir=source)
 
-            self.assertEqual(git(facts_dir, "ls-files"), old_tracked)
-            self.assertEqual(git(facts_dir, "rev-parse", "HEAD"), old_head)
-            self.assertEqual(git(facts_dir, "status", "--porcelain"), "")
+            self.assertEqual(tracked_facts(instance_dir), old_tracked)
+            self.assertEqual(memory_head(instance_dir), old_head)
+            self.assertEqual(memory_status(instance_dir), "")
 
     def test_memory_protocol_commit_writes_one_journal_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "secretary-data"
+            instance_dir = init_instance_repo(root / "instance")
             fact = root / "fact.md"
             fact.write_text("new durable fact\n", encoding="utf-8")
 
@@ -663,13 +673,13 @@ class ExportTests(unittest.TestCase):
             )
             result = commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
-            facts_dir = data_dir / "memory" / "facts"
-            log_count = git(facts_dir, "rev-list", "--count", "HEAD")
-            message = git(facts_dir, "log", "-1", "--format=%B")
-            status = git(facts_dir, "status", "--porcelain")
+            log_count = memory_commit_count(instance_dir)
+            message = memory_message(instance_dir)
+            status = memory_status(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
         self.assertEqual(result.fact, "secretary/new-fact")
@@ -687,6 +697,7 @@ class ExportTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             fact = root / "fact.md"
             fact.write_text("verified durable fact\n", encoding="utf-8")
+            instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
@@ -697,6 +708,7 @@ class ExportTests(unittest.TestCase):
             )
             commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
@@ -706,7 +718,7 @@ class ExportTests(unittest.TestCase):
                 conn.execute("insert into memories default values")
                 conn.commit()
 
-            result = verify_memory_journal(data_dir)
+            result = verify_memory_journal(data_dir, instance_dir)
 
         self.assertTrue(result.ok, result.findings)
         self.assertEqual(result.fact_count, 1)
@@ -719,6 +731,7 @@ class ExportTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             fact = root / "fact.md"
             fact.write_text("retryable fact\n", encoding="utf-8")
+            instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
@@ -735,25 +748,26 @@ class ExportTests(unittest.TestCase):
                 with self.assertRaises(MemoryExportPublishError) as raised:
                     commit_memory_proposal(
                         data_dir,
+                        instance_dir,
                         actor="curator:claude/session",
                         propose_id=proposal.propose_id,
                     )
 
             failed_result = raised.exception.result
-            facts_dir = data_dir / "memory" / "facts"
-            after_failure_head = git(facts_dir, "rev-parse", "HEAD")
-            log_count_after_failure = git(facts_dir, "rev-list", "--count", "HEAD")
+            after_failure_head = memory_head(instance_dir)
+            log_count_after_failure = memory_commit_count(instance_dir)
             completed_marker = data_dir / "memory" / ".staging" / proposal.propose_id / "committed.json"
             completed_exists_after_failure = completed_marker.is_file()
             export_exists_after_failure = (data_dir / "memory" / "export.ndjson").exists()
 
             retry_result = commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
-            retry_head = git(facts_dir, "rev-parse", "HEAD")
-            retry_log_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            retry_head = memory_head(instance_dir)
+            retry_log_count = memory_commit_count(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             staging_exists_after_retry = completed_marker.parent.exists()
 
@@ -892,10 +906,12 @@ class ExportTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             fact = root / "fact.md"
             fact.write_text("replacement\n", encoding="utf-8")
+            instance_dir = init_instance_repo(root / "instance")
 
             with self.assertRaisesRegex(MemoryValidationError, "not found"):
                 supersede_memory_fact(
                     data_dir,
+                    instance_dir,
                     actor="curator:claude/session",
                     scope="project:secretary",
                     slug="replacement",
@@ -903,8 +919,7 @@ class ExportTests(unittest.TestCase):
                     supersedes=["missing"],
                     source="curator:claude/session",
                 )
-            facts_dir = data_dir / "memory" / "facts"
-            status = git(facts_dir, "status", "--porcelain")
+            status = memory_status(instance_dir)
 
         self.assertEqual(status, "")
 
@@ -914,6 +929,7 @@ class ExportTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             old_fact = root / "old.md"
             old_fact.write_text("old fact\n", encoding="utf-8")
+            instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
@@ -924,6 +940,7 @@ class ExportTests(unittest.TestCase):
             )
             commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
@@ -932,6 +949,7 @@ class ExportTests(unittest.TestCase):
 
             result = supersede_memory_fact(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 scope="project:secretary",
                 slug="new",
@@ -939,10 +957,9 @@ class ExportTests(unittest.TestCase):
                 supersedes=["old"],
                 source="curator:claude/session",
             )
-            facts_dir = data_dir / "memory" / "facts"
-            tracked = git(facts_dir, "ls-files").splitlines()
-            log_count = git(facts_dir, "rev-list", "--count", "HEAD")
-            message = git(facts_dir, "log", "-1", "--format=%B")
+            tracked = tracked_facts(instance_dir)
+            log_count = memory_commit_count(instance_dir)
+            message = memory_message(instance_dir)
 
         self.assertEqual(result.changed_facts, ("secretary/new", "secretary/old"))
         self.assertEqual(tracked, ["secretary/new.md"])
@@ -985,6 +1002,7 @@ class ExportTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             first_fact = root / "first.md"
             first_fact.write_text("first fact\n", encoding="utf-8")
+            instance_dir = init_instance_repo(root / "instance")
             first = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
@@ -995,10 +1013,11 @@ class ExportTests(unittest.TestCase):
             )
             commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=first.propose_id,
             )
-            facts_dir = data_dir / "memory" / "facts"
+            facts_dir = memory_facts_dir(instance_dir)
             (facts_dir / "secretary" / "first.md").write_text("dirty edit\n", encoding="utf-8")
             (facts_dir / "secretary" / "residue.md").write_text("residue\n", encoding="utf-8")
             second_fact = root / "second.md"
@@ -1014,12 +1033,13 @@ class ExportTests(unittest.TestCase):
             )
             commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=second.propose_id,
             )
             first_text = (facts_dir / "secretary" / "first.md").read_text(encoding="utf-8")
-            tracked = git(facts_dir, "ls-files").splitlines()
-            status = git(facts_dir, "status", "--porcelain")
+            tracked = tracked_facts(instance_dir)
+            status = memory_status(instance_dir)
 
         self.assertIn("first fact", first_text)
         self.assertEqual(tracked, ["secretary/first.md", "secretary/second.md"])
@@ -1037,6 +1057,7 @@ class ExportTests(unittest.TestCase):
             )
             protocol_fact = root / "protocol.md"
             protocol_fact.write_text("protocol fact\n", encoding="utf-8")
+            instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
@@ -1047,18 +1068,18 @@ class ExportTests(unittest.TestCase):
             )
             commit_memory_proposal(
                 data_dir,
+                instance_dir,
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
-            facts_dir = data_dir / "memory" / "facts"
-            before_head = git(facts_dir, "rev-parse", "HEAD")
-            before_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            before_head = memory_head(instance_dir)
+            before_count = memory_commit_count(instance_dir)
 
-            result = export_memory(data_dir, source_dir=source)
-            after_head = git(facts_dir, "rev-parse", "HEAD")
-            after_count = git(facts_dir, "rev-list", "--count", "HEAD")
+            result = export_memory(data_dir, instance_dir, source_dir=source)
+            after_head = memory_head(instance_dir)
+            after_count = memory_commit_count(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
-            status = git(facts_dir, "status", "--porcelain")
+            status = memory_status(instance_dir)
 
         self.assertEqual(result.count, 1)
         self.assertEqual(after_head, before_head)
@@ -1305,9 +1326,9 @@ class ExportTests(unittest.TestCase):
                 ),
                 mock.patch(
                     "secretary.data.export_memory",
-                    side_effect=lambda data_dir_arg: calls.append("memory")
+                    side_effect=lambda data_dir_arg, instance_dir_arg=None: calls.append("memory")
                     or data_module.DataExport(data_dir_arg / "memory.ndjson", 1, "memory"),
-                ),
+                ) as memory,
                 mock.patch(
                     "secretary.data.export_runs",
                     side_effect=lambda data_dir_arg: calls.append("runs")
@@ -1333,6 +1354,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(calls, ["memory", "board", "runs", "transcripts", "artifacts"])
         transcripts.assert_called_once_with(data_dir, copy=True)
         artifacts.assert_called_once_with(data_dir)
+        memory.assert_called_once_with(data_dir, None)
 
     def test_default_pipeline_state_uses_secretary_workspace(self):
         self.assertEqual(
@@ -1349,6 +1371,47 @@ class ExportTests(unittest.TestCase):
 
 def subprocess_completed(stdout: str):
     return mock.Mock(stdout=stdout, stderr="", returncode=0)
+
+
+def init_instance_repo(path: Path) -> Path:
+    """A private instance repo with one commit, the way `secretary init` leaves it."""
+    path.mkdir(parents=True, exist_ok=True)
+    git(path, "init", "--initial-branch=main")
+    git(path, "config", "user.name", "Test User")
+    git(path, "config", "user.email", "test@example.invalid")
+    git(path, "config", "commit.gpgsign", "false")
+    (path / "instance.yaml").write_text("version: 1\nname: example\n", encoding="utf-8")
+    git(path, "add", "instance.yaml")
+    git(path, "commit", "-m", "config")
+    return path
+
+
+def memory_facts_dir(instance_dir: Path) -> Path:
+    return instance_dir / "state" / "memory" / "facts"
+
+
+def tracked_facts(instance_dir: Path) -> list[str]:
+    prefix = "state/memory/facts/"
+    return [
+        line.removeprefix(prefix)
+        for line in git(instance_dir, "ls-files", "--", "state/memory").splitlines()
+    ]
+
+
+def memory_commit_count(instance_dir: Path) -> str:
+    return git(instance_dir, "rev-list", "--count", "HEAD", "--", "state/memory")
+
+
+def memory_head(instance_dir: Path) -> str:
+    return git(instance_dir, "log", "-1", "--format=%H", "--", "state/memory")
+
+
+def memory_message(instance_dir: Path) -> str:
+    return git(instance_dir, "log", "-1", "--format=%B", "--", "state/memory")
+
+
+def memory_status(instance_dir: Path) -> str:
+    return git(instance_dir, "status", "--porcelain", "--", "state/memory")
 
 
 def init_git_repo(path: Path) -> None:

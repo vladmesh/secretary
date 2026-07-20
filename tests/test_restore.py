@@ -35,7 +35,21 @@ from secretary.restore import (
 from tests.test_tasks import WriteKanboard
 
 
-from tests.restore_fixtures import _EmptyWriteKanboard, _restore_card, _write_instance_to
+from tests.restore_fixtures import (
+    _EmptyWriteKanboard,
+    _restore_card,
+    _seed_instance_facts,
+    _write_instance_to,
+)
+
+
+def _seed_legacy_facts(data_dir: Path) -> Path:
+    """Seed the pre-flatten canon path: a plain directory, no nested journal."""
+    facts = data_dir / "memory" / "facts" / "global"
+    facts.mkdir(parents=True)
+    (facts / "one.md").write_text("fact\n", encoding="utf-8")
+    return data_dir / "memory" / "facts"
+
 
 class RestoreTests(unittest.TestCase):
     def test_empty_bootstrap_stays_outside_restore_doctor_state(self):
@@ -117,11 +131,8 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
-            facts = data_dir / "memory" / "facts"
-            (facts / "global").mkdir()
-            (facts / "global" / "one.md").write_text("fact\n", encoding="utf-8")
-            subprocess.run(["git", "add", "."], cwd=facts, check=True)
-            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
+            # No instance dir here, so the rebuild falls back to legacy canon.
+            _seed_legacy_facts(data_dir)
             (data_dir / "memory" / "index.sqlite").write_bytes(b"broken")
 
             self.assertEqual(
@@ -222,9 +233,11 @@ class RestoreTests(unittest.TestCase):
 
     def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
             init_layout(data_dir)
-            facts = data_dir / "memory" / "facts"
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+            facts = _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             script = Path(tmpdir) / "reindex.py"
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
@@ -234,39 +247,52 @@ class RestoreTests(unittest.TestCase):
             completed = subprocess.CompletedProcess([], 0, '{"ok":true,"parity":{"indexed":2}}', "")
             with mock.patch("secretary.restore.subprocess.run", return_value=completed) as run:
                 self.assertEqual(
-                    rebuild_memory_index(data_dir, python=venv_python, script=script, model="test", dim=4),
+                    rebuild_memory_index(
+                        data_dir, instance, python=venv_python, script=script, model="test", dim=4
+                    ),
                     2,
                 )
-            self.assertEqual(run.call_args.args[0][0], str(venv_python.absolute()))
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[0], str(venv_python.absolute()))
+            # Canon is the private repo's state/memory/facts, not the data dir.
+            self.assertEqual(argv[argv.index("--canon") + 1], str(facts))
             self.assertEqual(restore_state(data_dir)["memory_index_count"], 2)
 
     def test_reindex_cli_reports_public_contract_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
             init_layout(data_dir)
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+            _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             script = Path(tmpdir) / "reindex.py"
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
-            completed = subprocess.CompletedProcess([], 1, '{"ok":false,"error":"canon unavailable"}', "")
+            completed = subprocess.CompletedProcess([], 1, '{"ok":false,"error":"index parity failed"}', "")
             with mock.patch("secretary.restore.subprocess.run", return_value=completed):
-                with self.assertRaisesRegex(RestoreError, "canon unavailable"):
+                with self.assertRaisesRegex(RestoreError, "index parity failed"):
                     rebuild_memory_index(
-                        data_dir, python=Path(sys.executable), script=script, model="test", dim=4
+                        data_dir, instance, python=Path(sys.executable), script=script,
+                        model="test", dim=4,
                     )
 
     def test_reindex_timeout_is_a_restore_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
             init_layout(data_dir)
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+            _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             script = Path(tmpdir) / "reindex.py"
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
             with mock.patch(
                 "secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)
             ):
-                with self.assertRaisesRegex(RestoreError, "could not rebuild"):
+                with self.assertRaisesRegex(RestoreError, "could not rebuild memory index"):
                     rebuild_memory_index(
-                        data_dir, python=Path(sys.executable), script=script, model="test", dim=4
+                        data_dir, instance, python=Path(sys.executable), script=script,
+                        model="test", dim=4,
                     )
 
     def test_restore_board_wraps_missing_backend_configuration(self):
@@ -304,14 +330,15 @@ class RestoreTests(unittest.TestCase):
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
-            facts = data_dir / "memory" / "facts"
-            (facts / "global").mkdir()
-            (facts / "global" / "one.md").write_text("fact\n", encoding="utf-8")
-            subprocess.run(["git", "add", "."], cwd=facts, check=True)
-            subprocess.run(["git", "commit", "-m", "fact"], cwd=facts, check=True, stdout=subprocess.DEVNULL)
+            _seed_instance_facts(instance, {"global/one.md": "fact\n"})
 
             self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 1)
-            self.assertEqual(rebuild_memory_index(data_dir, runner=lambda *_: {"parity": {"indexed": 1}}), 1)
+            self.assertEqual(
+                rebuild_memory_index(
+                    data_dir, instance, runner=lambda *_: {"parity": {"indexed": 1}}
+                ),
+                1,
+            )
 
             report = restore_commands.validate_instance(instance)
             desired = build_plan(report.instance, report.bindings)

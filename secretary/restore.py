@@ -23,6 +23,7 @@ from secretary.backup_policy import (
 )
 from secretary.backup_verify import _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
+from secretary import state_repo
 from secretary.data import init_layout
 from secretary._fsutil import file_lock, write_text_atomic
 from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
@@ -104,19 +105,20 @@ DEFAULT_MEMORY_DIM = 1024
 
 
 def rebuild_memory_index(
-    data_dir: Path, *, python: Path | None = None, script: Path | None = None, model: str | None = None,
-    dim: int | None = None, runner=None,
+    data_dir: Path, instance_dir: Path | None = None, *, python: Path | None = None,
+    script: Path | None = None, model: str | None = None, dim: int | None = None, runner=None,
 ) -> int:
     """Replace the derived index from restored canon.
 
-    The in-package implementation is the default. ``python`` and ``script`` keep
-    the old memory-mcp argv contract available during the side-by-side window.
+    Canon is `state/memory/facts` in the private repo (docs/RECOVERY.md,
+    "Layout"), so recovery rebuilds the index straight off the checkpoint the
+    remote carries. The in-package implementation is the default; ``python`` and
+    ``script`` keep the old memory-mcp argv contract available during the
+    side-by-side window.
     """
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
-    facts_dir = memory_dir / "facts"
-    if not (facts_dir / ".git").is_dir():
-        raise RestoreError("memory facts journal is not available for index rebuild")
+    facts_dir = _memory_canon_dir(data_dir, instance_dir)
     try:
         if runner is not None:
             result = runner(facts_dir, memory_dir / "export.ndjson", memory_dir / "index.sqlite")
@@ -476,7 +478,6 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
         with tempfile.TemporaryDirectory(prefix=f".{target.name}.restore-", dir=parent) as temporary:
             data_staging = Path(temporary) / "data"
             init_layout(data_staging)
-            shutil.rmtree(data_staging / "memory" / "facts")
             with tarfile.open(plain_archive, "r") as archive:
                 prefix = f"{ARCHIVE_ROOT}/secretary-data/"
                 for member in archive.getmembers():
@@ -499,7 +500,6 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                         raise RestoreError(f"could not read archive entry: {member.name}")
                     with source, destination.open("wb") as output:
                         shutil.copyfileobj(source, output)
-            _rebuild_memory_journal_index(data_staging / "memory" / "facts")
             _update_restore_state(
                 data_staging,
                 board="pending",
@@ -514,15 +514,14 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
         raise RestoreError(f"restore staging failed: {exc}") from None
 
 
-def _rebuild_memory_journal_index(facts_dir: Path) -> None:
-    try:
-        subprocess.run(
-            ["git", "reset", "-q"],
-            cwd=facts_dir,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise RestoreError(f"could not rebuild memory journal index: {exc}") from None
+def _memory_canon_dir(data_dir: Path, instance_dir: Path | None) -> Path:
+    """Canon facts, from the private repo; the data dir is the pre-flatten path."""
+    if instance_dir is not None:
+        facts_dir = state_repo.memory_facts_dir(instance_dir)
+        if facts_dir.is_dir():
+            return facts_dir
+        raise RestoreError(f"memory canon is not available for index rebuild: {facts_dir}")
+    legacy = data_dir / "memory" / "facts"
+    if not legacy.is_dir():
+        raise RestoreError("memory facts are not available for index rebuild")
+    return legacy

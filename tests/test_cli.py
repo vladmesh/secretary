@@ -31,6 +31,16 @@ def git(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def init_instance_repo(instance_dir: Path) -> None:
+    """Turn a written-out instance dir into the private repo the writers commit to."""
+    git(instance_dir, "init", "--quiet", "--initial-branch", "main")
+    git(instance_dir, "config", "user.name", "operator")
+    git(instance_dir, "config", "user.email", "operator@example.invalid")
+    git(instance_dir, "config", "commit.gpgsign", "false")
+    git(instance_dir, "add", "instance.yaml")
+    git(instance_dir, "commit", "--quiet", "-m", "config")
+
+
 class CliTests(unittest.TestCase):
     def run_cli(self, argv: list[str]) -> tuple[int, str]:
         output = io.StringIO()
@@ -695,6 +705,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
 
             code, output = self.run_cli(
                 [
@@ -731,6 +742,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
 
             code, output = self.run_cli(
                 [
@@ -765,6 +777,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
 
             first_code, first_output = self.run_cli(
                 [
@@ -787,7 +800,9 @@ class CliTests(unittest.TestCase):
                 ]
             )
             export_exists = (data_dir / "memory" / "export.ndjson").is_file()
-            fact_exists = (data_dir / "memory" / "facts" / "secretary" / "fact.md").is_file()
+            fact_exists = (
+                instance_dir / "state" / "memory" / "facts" / "secretary" / "fact.md"
+            ).is_file()
 
         self.assertEqual(first_code, 0, first_output)
         self.assertIn("memory facts: 1", first_output)
@@ -812,6 +827,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
             fact = root / "fact.md"
             fact.write_text("fact from cli\n", encoding="utf-8")
 
@@ -873,6 +889,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
             fact = root / "fact.md"
             fact.write_text("verified cli fact\n", encoding="utf-8")
             _propose_code, propose_output = self.run_cli(
@@ -936,6 +953,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
             fact = root / "fact.md"
             fact.write_text("cli retryable fact\n", encoding="utf-8")
             propose_code, propose_output = self.run_cli(
@@ -988,7 +1006,9 @@ class CliTests(unittest.TestCase):
                 ]
             )
             retried = json.loads(retry_output)
-            log_count = git(data_dir / "memory" / "facts", "rev-list", "--count", "HEAD")
+            log_count = git(
+                instance_dir, "rev-list", "--count", "HEAD", "--", "state/memory"
+            )
 
         self.assertEqual(propose_code, 0, propose_output)
         self.assertEqual(failed_code, 1, failed_output)
@@ -1014,6 +1034,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
             fact = root / "fact.md"
             fact.write_text("fact from cli\n", encoding="utf-8")
 

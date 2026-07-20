@@ -30,7 +30,6 @@ from secretary.memory_journal import (
     PANELMEM_KB,
     export_memory_snapshot,
     import_memory_journal,
-    init_memory_journal,
 )
 from secretary.tasks import TaskAudit
 
@@ -73,7 +72,7 @@ def manifest_for(data_dir: Path) -> dict[str, Any]:
             "board": {"path": "board"},
             "memory": {
                 "path": "memory",
-                "facts": "memory/facts",
+                "facts": "state/memory/facts",
                 "export": "memory/export.ndjson",
                 "index": "memory/index.sqlite",
             },
@@ -95,7 +94,6 @@ def init_layout(data_dir: Path) -> DataLayout:
             directory.mkdir(parents=True, exist_ok=True)
             if not existed:
                 created_dirs.append(directory)
-        init_memory_journal(data_dir)
     except OSError as exc:
         raise RuntimeError(f"cannot prepare secretary-data layout: {exc}") from None
 
@@ -276,11 +274,12 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
 
 def export_memory(
     data_dir: Path,
+    instance_dir: Path | None = None,
     *,
     source_dir: Path = PANELMEM_KB,
 ) -> DataExport:
     data_dir = data_dir.expanduser().resolve()
-    result = export_memory_snapshot(data_dir, source_dir=source_dir)
+    result = export_memory_snapshot(data_dir, instance_dir, source_dir=source_dir)
     return DataExport(
         path=result.path,
         count=result.count,
@@ -512,9 +511,14 @@ def export_artifacts(
     )
 
 
-def export_all(data_dir: Path, *, copy_transcripts: bool = False) -> dict[str, DataExport]:
+def export_all(
+    data_dir: Path,
+    instance_dir: Path | None = None,
+    *,
+    copy_transcripts: bool = False,
+) -> dict[str, DataExport]:
     return {
-        "memory": export_memory(data_dir),
+        "memory": export_memory(data_dir, instance_dir),
         "board": export_board(data_dir),
         "runs": export_runs(data_dir),
         "transcripts": export_transcripts(data_dir, copy=copy_transcripts),

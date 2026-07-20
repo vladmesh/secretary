@@ -832,12 +832,15 @@ class BackupTests(unittest.TestCase):
             result.findings,
         )
 
-    def test_verify_rejects_archive_without_memory_journal_metadata(self):
+    def test_verify_rejects_archive_without_the_memory_component(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "core.tar"
             payload = root / "payload" / "secretary-backup"
             _write_core_payload(payload)
+            # Facts are canon in the private repo, so the archive's whole memory
+            # component is the derived export. Without it there is no memory.
+            (payload / "secretary-data" / "memory" / "export.ndjson").unlink()
             with tarfile.open(archive, "w") as tar:
                 tar.add(payload, arcname="secretary-backup")
 
@@ -848,7 +851,7 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(result.code, 1)
         self.assertIn(
             "missing required archive entry: "
-            "secretary-backup/secretary-data/memory/facts/.git/HEAD",
+            "secretary-backup/secretary-data/memory/export.ndjson",
             result.findings,
         )
 

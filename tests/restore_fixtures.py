@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from secretary import state_repo
 from secretary._fsutil import sha256_file
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
@@ -63,6 +64,17 @@ def _write_instance_to(
     return instance
 
 
+def _seed_instance_facts(instance_dir: Path, facts: dict[str, str]) -> Path:
+    """Write canon facts where the private repo keeps them since the flatten."""
+    facts_dir = state_repo.memory_facts_dir(instance_dir)
+    facts_dir.mkdir(parents=True, exist_ok=True)
+    for relative, text in facts.items():
+        target = facts_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return facts_dir
+
+
 def _restore_card(
     *, task_id: int = 12, reference: str = "secretary-1", title: str = "Restore",
     description: str = "body", column: str = "Ready", swimlane: str = "Secretary",
@@ -82,13 +94,11 @@ def _restore_card(
     )
 
 
-def _prepare_producer_data(data_dir: Path) -> None:
+def _prepare_producer_data(data_dir: Path, instance_dir: Path) -> None:
+    """Seed a post-flatten producer: canon in the private repo, export derived."""
     init_layout(data_dir)
-    journal = data_dir / "memory" / "facts"
-    (journal / "fact.md").write_text("# fact\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=journal, check=True)
-    subprocess.run(["git", "commit", "-m", "seed"], cwd=journal, check=True, stdout=subprocess.DEVNULL)
-    export_memory(data_dir)
+    _seed_instance_facts(instance_dir, {"fact.md": "# fact\n"})
+    export_memory(data_dir, instance_dir)
     board = data_dir / "board"
     cards = [{"reference": "secretary-1", "column": "Ready"}]
     (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")

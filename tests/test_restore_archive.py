@@ -180,20 +180,23 @@ class RestoreArchiveTests(unittest.TestCase):
                 bootstrap_empty(instance)
             self.assertFalse((root / "relative-data").exists())
 
-    def test_restore_rejects_archive_without_memory_journal_before_staging(self):
+    def test_restore_rejects_archive_without_the_memory_component_before_staging(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = _write_instance(root, "test")
-            archive = _core_archive(root, "test")
-            with tarfile.open(archive, "r") as source:
-                members = [member for member in source.getmembers() if ".git" not in member.name]
-                stripped = root / "without-journal.tar"
-                with tarfile.open(stripped, "w") as destination:
-                    for member in members:
-                        handle = source.extractfile(member) if member.isfile() else None
-                        destination.addfile(member, handle)
+            _core_archive(root, "test")
+            # Facts are canon in the private repo, so the derived export is the
+            # whole memory component an archive carries.
+            payload = root / ARCHIVE_ROOT
+            (payload / "secretary-data" / "memory" / "export.ndjson").unlink()
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            stripped = root / "without-memory.tar"
+            with tarfile.open(stripped, "w") as destination:
+                destination.add(payload, arcname=ARCHIVE_ROOT)
 
-            with self.assertRaisesRegex(RestoreError, "memory/facts/.git/HEAD"):
+            with self.assertRaisesRegex(RestoreError, "memory/export.ndjson"):
                 restore_backup(
                     stripped, instance,
                 )
@@ -334,23 +337,22 @@ class RestoreArchiveTests(unittest.TestCase):
             self.assertFalse((restored_git / "hooks").exists())
             self.assertFalse((restored_git / "config").exists())
             self.assertFalse((restored_git / "modules").exists())
+            # The index is runtime state too, and nothing rebuilds it on the way
+            # in now that the journal is no longer canon.
+            self.assertFalse((restored_git / "index").exists())
             self.assertEqual(len(_git_history(restored_git.parent)), 2)
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
+            # Both facts still reach the target: on disk, and in the commit the
+            # history points at. Read the tree, not the discarded index.
+            self.assertTrue((restored_git.parent / "fact.md").is_file())
+            self.assertTrue((restored_git.parent / "second-fact.md").is_file())
+            committed = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", "HEAD"],
                 cwd=restored_git.parent,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(status.stdout, "")
-            tracked = subprocess.run(
-                ["git", "ls-files"],
-                cwd=restored_git.parent,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(tracked.stdout.splitlines(), ["fact.md", "second-fact.md"])
+            self.assertEqual(committed.stdout.splitlines(), ["fact.md", "second-fact.md"])
 
     def test_verify_and_restore_ignore_memory_journal_runtime_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -493,7 +495,8 @@ class RestoreArchiveTests(unittest.TestCase):
             root = Path(tmpdir)
             source_data = root / "source-data"
             source_instance = _write_instance_to(root / "source-instance", "test", source_data)
-            _prepare_producer_data(source_data)
+            _prepare_producer_data(source_data, source_instance)
+            source_export = (source_data / "memory" / "export.ndjson").read_text()
 
             for kind in ("core", "full"):
                 target_data = root / f"target-{kind}-data"
@@ -527,7 +530,22 @@ class RestoreArchiveTests(unittest.TestCase):
                 facts = (target_data / "memory" / "export.ndjson").read_text().splitlines()
                 self.assertEqual(len(cards), manifest["components"]["board"]["count"])
                 self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
+                # A post-flatten archive carries the derived export byte for
+                # byte and no journal at all; canon travels in the private repo.
                 self.assertEqual(
-                    _git_history(target_data / "memory" / "facts"),
-                    _git_history(source_data / "memory" / "facts"),
+                    (target_data / "memory" / "export.ndjson").read_text(), source_export
                 )
+                self.assertFalse((target_data / "memory" / "facts").exists())
+                with tarfile.open(backup.archive) as bundle:
+                    names = bundle.getnames()
+                data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
+                self.assertEqual(
+                    [
+                        name for name in names
+                        if name.startswith(data_prefix) and "memory/facts" in name
+                    ],
+                    [],
+                )
+                # Canon rides along with the instance config, which is where the
+                # private repo keeps it.
+                self.assertIn(f"{ARCHIVE_ROOT}/instance/state/memory/facts/fact.md", names)

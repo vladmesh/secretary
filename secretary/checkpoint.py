@@ -9,7 +9,10 @@ own. The pusher runs on the same tick but on its own 30-minute window, and
 `checkpoint_snapshot` turns both into the freshness view `status` and `doctor`
 print.
 
-Memory (`state/memory`) lives in a separate card and is deliberately absent here.
+Memory (`state/memory`) is written by its own writer (`secretary.memory_write`)
+directly into the same repo, so it is deliberately outside this pathspec: the
+two writers share the repo but never the paths. `state_repo_lock` keeps their
+index operations from overlapping.
 """
 
 from __future__ import annotations
@@ -37,6 +40,8 @@ from secretary.data import (
     export_board,
     export_runs,
 )
+from secretary import state_repo
+from secretary.state_repo import BOARD_RUNS_PATHSPEC
 from secretary.tasks import TaskAudit
 
 from triggered_agents.runtime.redact import redact
@@ -54,9 +59,7 @@ RUNS_REQUIRED = RUNS_ENTRIES
 BOARD_IGNORE = ("cards.json", "kanboard-raw-*/", "pending-audit/", ".audit.lock")
 RUNS_IGNORE = ("cards.json",)
 
-STAGED_PATHSPEC = ("state/board", "state/runs")
-
-FALLBACK_IDENTITY = ("secretary checkpoint", "secretary-checkpoint@localhost")
+STAGED_PATHSPEC = BOARD_RUNS_PATHSPEC
 
 # Commit runs on every tick, push on its own window. 30 minutes is the durable
 # RPO the contract promises.
@@ -195,6 +198,12 @@ class CheckpointWriter:
         return tuple(staged)
 
     def _commit(self, *, board_cards: int, run_records: int) -> CheckpointResult:
+        # The memory writer commits into the same repo on its own pathspec; the
+        # lock keeps the two out of each other's index.
+        with state_repo.state_repo_lock(self.instance_dir):
+            return self._commit_locked(board_cards=board_cards, run_records=run_records)
+
+    def _commit_locked(self, *, board_cards: int, run_records: int) -> CheckpointResult:
         pathspec = ["--", *STAGED_PATHSPEC]
         try:
             self._git(["add", *pathspec], "checkpoint stage")
@@ -235,18 +244,7 @@ class CheckpointWriter:
             )
 
     def _identity(self) -> list[str]:
-        """Fall back to a writer identity only when the repo declares none."""
-        for key in ("user.name", "user.email"):
-            configured = subprocess.run(
-                ["git", "-C", str(self.instance_dir), "config", "--get", key],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if configured.returncode != 0 or not configured.stdout.strip():
-                name, email = FALLBACK_IDENTITY
-                return ["-c", f"user.name={name}", "-c", f"user.email={email}"]
-        return []
+        return state_repo.commit_identity(self.instance_dir)
 
     def _git(self, args: list[str], label: str) -> subprocess.CompletedProcess[str]:
         try:

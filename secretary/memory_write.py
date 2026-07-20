@@ -16,8 +16,9 @@ from secretary._fsutil import (
     write_json as _write_json,
     write_text_atomic as _write_text_atomic,
 )
+from secretary import state_repo
+from secretary.state_repo import MEMORY_PATHSPEC
 from secretary.memory_journal import (
-    _git,
     _git_status,
     _journal_head,
     _memory_journal_lock,
@@ -26,6 +27,8 @@ from secretary.memory_journal import (
     _recover_journal_worktree,
     init_memory_journal,
 )
+from triggered_agents.runtime.redact import redact
+
 from secretary.memory_errors import (
     MemoryExportPublishError,
     MemoryLockError,
@@ -139,6 +142,7 @@ def propose_memory_fact(
 
 def commit_memory_proposal(
     data_dir: Path,
+    instance_dir: Path,
     *,
     actor: str,
     propose_id: str,
@@ -160,7 +164,7 @@ def commit_memory_proposal(
         _ensure_commit_actor(actor, str(proposal["actor"]))
         _mark_proposal_active(proposal_dir)
         try:
-            result = _apply_memory_write(memory_dir, proposal, op="commit")
+            result = _apply_memory_write(memory_dir, instance_dir, proposal, op="commit")
         except Exception:
             _remove_proposal_active(proposal_dir)
             raise
@@ -172,6 +176,7 @@ def commit_memory_proposal(
 
 def supersede_memory_fact(
     data_dir: Path,
+    instance_dir: Path,
     *,
     actor: str,
     scope: str,
@@ -211,7 +216,7 @@ def supersede_memory_fact(
         "fact_text": fact_text,
     }
     with _memory_journal_lock(memory_dir):
-        result = _apply_memory_write(memory_dir, proposal, op="supersede")
+        result = _apply_memory_write(memory_dir, instance_dir, proposal, op="supersede")
         _publish_write_export(memory_dir, result)
         return result
 
@@ -550,12 +555,34 @@ def _proposal_created_at(proposal_dir: Path) -> int | None:
 
 def _apply_memory_write(
     memory_dir: Path,
+    instance_dir: Path,
     proposal: dict[str, Any],
     *,
     op: str,
 ) -> MemoryWriteResult:
-    facts_dir, _initialized = init_memory_journal(memory_dir.parent)
-    _recover_journal_worktree(facts_dir)
+    """Write one fact and commit it into `state/memory` of the private repo.
+
+    Contract: docs/RECOVERY.md, "Writer". The commit is scoped to the memory
+    pathspec and taken under the state lock, so a dispatcher tick committing
+    `state/board`/`state/runs` at the same moment neither blocks this write nor
+    picks up half of it.
+    """
+    # Migration takes the state lock itself, so it has to finish before this
+    # writer claims it: flock does not re-enter from the same process.
+    facts_dir, _created = init_memory_journal(instance_dir, data_dir=memory_dir.parent)
+    instance_dir = state_repo.require_repo(instance_dir)
+    with state_repo.state_repo_lock(instance_dir):
+        return _write_locked(facts_dir, instance_dir, proposal, op=op)
+
+
+def _write_locked(
+    facts_dir: Path,
+    instance_dir: Path,
+    proposal: dict[str, Any],
+    *,
+    op: str,
+) -> MemoryWriteResult:
+    _recover_journal_worktree(instance_dir)
     scope_dir = _clean_path_part(str(proposal["scope_dir"]), "scope")
     slug = _clean_slug(str(proposal["slug"]))
     actor = str(proposal["actor"])
@@ -572,26 +599,27 @@ def _apply_memory_write(
     if fact_id in supersedes:
         raise MemoryValidationError("new fact cannot supersede itself")
 
+    fact_text = str(proposal["fact_text"])
+    # `state/memory` rides to the remote with the rest of the checkpoint, so the
+    # fact passes the same secret gate the tick writer applies to board and runs.
+    if redact(fact_text) != fact_text:
+        raise MemoryValidationError(f"secret detected in memory fact: {fact_id}")
+
     try:
-        _write_text_atomic(target, str(proposal["fact_text"]))
+        _write_text_atomic(target, fact_text)
         for _old_id, old_path in supersede_paths:
             _remove_path(old_path)
-        _git(facts_dir, ["add", "-A", "."], context=f"stage memory {op}")
-        changed = _git_status(facts_dir)
-        if not changed:
-            raise MemoryValidationError("memory write produced no journal changes")
-        _git(
-            facts_dir,
-            ["commit", "-m", _commit_message(op, proposal, fact_id)],
-            context=f"commit memory {op}",
+        commit = state_repo.commit(
+            instance_dir,
+            MEMORY_PATHSPEC,
+            _commit_message(op, proposal, fact_id),
         )
-        commit = _journal_head(facts_dir)
         if commit is None:
-            raise RuntimeError("memory write did not create a commit")
-        if _git_status(facts_dir):
-            raise RuntimeError("memory journal dirty after commit")
+            raise MemoryValidationError("memory write produced no journal changes")
+        if _git_status(instance_dir):
+            raise RuntimeError("state/memory dirty after commit")
     except Exception:
-        _recover_journal_worktree(facts_dir)
+        _recover_journal_worktree(instance_dir)
         raise
 
     return MemoryWriteResult(

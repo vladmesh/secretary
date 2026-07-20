@@ -62,11 +62,12 @@ RUNS_STATE = ComponentPolicy(
     required_fields=("cards", "claims"),
 )
 
+# Facts are canon in the private repo (docs/RECOVERY.md, "Layout"), so an
+# archive carries the derived export, not a nested journal.
 MEMORY = ComponentPolicy(
     "memory",
     "memory/export.ndjson",
     source_export="memory",
-    required_entries=("memory/facts/.git/HEAD",),
 )
 
 CORE_POLICY = BackupPolicy(

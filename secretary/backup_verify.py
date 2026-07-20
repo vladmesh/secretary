@@ -243,14 +243,24 @@ def _unsafe_member(member: tarfile.TarInfo) -> bool:
 
 
 def _verify_memory_journal(plain_archive: Path) -> list[str]:
+    """Check a nested memory journal, for archives old enough to carry one.
+
+    Facts are canon in the private repo since the flatten (docs/RECOVERY.md,
+    "Layout"), so a current archive has no `memory/facts` at all and there is
+    nothing here to verify; its memory component is covered by the required
+    `memory/export.ndjson`. Archives predating the flatten still get the full
+    journal check.
+    """
     prefix = f"{ARCHIVE_ROOT}/secretary-data/memory/facts/"
     try:
         with tempfile.TemporaryDirectory(prefix=".secretary-journal-") as temporary:
             journal = Path(temporary) / "facts"
+            found_journal = False
             with tarfile.open(plain_archive, "r") as archive:
                 for member in archive.getmembers():
                     if not member.name.startswith(prefix):
                         continue
+                    found_journal = True
                     relative = Path(member.name.removeprefix(prefix))
                     if is_memory_journal_git_runtime_entry(
                         Path("memory", "facts") / relative
@@ -270,6 +280,8 @@ def _verify_memory_journal(plain_archive: Path) -> list[str]:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     with source, destination.open("wb") as output:
                         shutil.copyfileobj(source, output)
+            if not found_journal:
+                return []
             head = subprocess.run(
                 ["git", "rev-parse", "--verify", "HEAD^{commit}"],
                 cwd=journal,

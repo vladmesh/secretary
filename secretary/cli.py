@@ -692,7 +692,9 @@ def run_data_export(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        exports = export_all(data_dir, copy_transcripts=args.copy_transcripts)
+        exports = export_all(
+            data_dir, _instance_dir(args.instance), copy_transcripts=args.copy_transcripts
+        )
     except RuntimeError as exc:
         print(f"secretary data export: {exc}")
         return 1
@@ -724,7 +726,9 @@ def run_export_memory(args: argparse.Namespace) -> int:
     if data_dir is None:
         return 1
     try:
-        result = export_memory(data_dir, source_dir=Path(args.source_dir))
+        result = export_memory(
+            data_dir, _instance_dir(args.instance), source_dir=Path(args.source_dir)
+        )
     except RuntimeError as exc:
         print(f"secretary data export-memory: {exc}")
         return 1
@@ -739,7 +743,9 @@ def run_memory_import(args: argparse.Namespace) -> int:
     if data_dir is None:
         return 1
     try:
-        result = import_memory_journal(data_dir, source_dir=Path(args.source_dir))
+        result = import_memory_journal(
+            data_dir, _instance_dir(args.instance), source_dir=Path(args.source_dir)
+        )
     except RuntimeError as exc:
         print(f"secretary memory import: {exc}")
         return 1
@@ -758,7 +764,7 @@ def run_memory_verify(args: argparse.Namespace) -> int:
     if data_dir is None:
         return 1
     try:
-        result = verify_memory_journal(data_dir)
+        result = verify_memory_journal(data_dir, _instance_dir(args.instance))
     except RuntimeError as exc:
         print(f"secretary memory verify: {exc}")
         return 1
@@ -818,6 +824,7 @@ def run_memory_commit(args: argparse.Namespace) -> int:
     try:
         result = commit_memory_proposal(
             data_dir,
+            _instance_dir(args.instance),
             actor=args.actor,
             propose_id=args.propose_id,
         )
@@ -834,6 +841,7 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
     try:
         result = supersede_memory_fact(
             data_dir,
+            _instance_dir(args.instance),
             actor=args.actor,
             scope=args.scope,
             slug=args.slug,
@@ -1042,6 +1050,11 @@ def _join(names: list[str]) -> str:
 def _instance_path(value: str) -> Path:
     path = Path(value).expanduser()
     return path / "instance.yaml" if path.is_dir() else path
+
+
+def _instance_dir(value: str) -> Path:
+    """The private repo root. `--instance` may name it or its instance.yaml."""
+    return _instance_path(value).parent
 
 
 def _data_dir_from_args(args: argparse.Namespace, *, validate_tree: bool) -> Path | None:

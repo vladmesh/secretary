@@ -1,15 +1,16 @@
 """End-to-end restore of a fixture backup onto an empty target.
 
-These tests own the Phase 8 chain as a whole: a real backup archive is produced,
-the producer host is destroyed, and the archive is the only input to the restore.
-Component-level behaviour stays in test_restore.py and test_restore_archive.py.
+These tests own the Phase 8 chain as a whole: a real backup archive is produced
+and the producer host is destroyed. Recovery then has exactly two inputs, the
+private repo that carries canon and the archive that carries everything derived
+from it. Component-level behaviour stays in test_restore.py and
+test_restore_archive.py.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -33,9 +34,9 @@ from secretary.restore import (
 )
 from tests.restore_fixtures import (
     _EmptyWriteKanboard,
-    _git_history,
     _producer_exports,
     _restore_card,
+    _seed_instance_facts,
     _write_checksums,
     _write_instance_to,
 )
@@ -52,8 +53,8 @@ parser.add_argument("--dim", type=int, required=True)
 args = parser.parse_args()
 
 canon = Path(args.canon)
-if not (canon / ".git").is_dir():
-    print(json.dumps({"ok": False, "error": "canon journal is unavailable"}))
+if not any(canon.rglob("*.md")):
+    print(json.dumps({"ok": False, "error": "canon facts are unavailable"}))
     sys.exit(1)
 facts = [json.loads(line) for line in Path(args.export).read_text().splitlines() if line]
 database = Path(args.target_db)
@@ -71,8 +72,16 @@ print(json.dumps({"ok": True, "parity": {"indexed": len(facts)}}))
 
 FACT_BODY = "---\ntags: [restore]\nsource: e2e\ncreated: 2026-07-16\npinned: false\n---\n"
 
+# Canon since the flatten: facts live in the private repo, not in the data root.
+# Recovery has two inputs, the repo clone and the archive, so the tests seed the
+# facts on both the producer and the restore target.
+CANON_FACTS = {
+    f"global/{slug}.md": FACT_BODY + f"{slug.title()} fact survives restore.\n"
+    for slug in ("alpha", "beta")
+}
 
-def _seed_producer(data_dir: Path) -> tuple[list[dict[str, object]], int]:
+
+def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, object]], int]:
     """Fill a producer data root with restorable canon and derived state."""
     init_layout(data_dir)
     cards = [
@@ -95,17 +104,8 @@ def _seed_producer(data_dir: Path) -> tuple[list[dict[str, object]], int]:
     (raw / "manifest.json").write_text("{}", encoding="utf-8")
     (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
 
-    journal = data_dir / "memory" / "facts"
-    (journal / "global").mkdir()
-    for index, slug in enumerate(("alpha", "beta"), start=1):
-        (journal / "global" / f"{slug}.md").write_text(
-            FACT_BODY + f"{slug.title()} fact survives restore.\n", encoding="utf-8"
-        )
-        subprocess.run(["git", "add", "."], cwd=journal, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", f"fact {index}"], cwd=journal, check=True, stdout=subprocess.DEVNULL
-        )
-    facts = export_memory(data_dir, source_dir=journal).count
+    _seed_instance_facts(instance_dir, CANON_FACTS)
+    facts = export_memory(data_dir, instance_dir).count
 
     runs = data_dir / "runs"
     for name in ("watermarks.json", "cards.json", "claims.json"):
@@ -133,15 +133,15 @@ class _Fixture(NamedTuple):
     cards: list[dict[str, object]]
     facts: int
     manifest: dict[str, object]
-    history: list[str]
+    export: str
 
 
 def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
     """Produce an archive the way the nightly backup timer does."""
     source_data = root / "source-data"
     source_instance = _write_instance_to(root / "source-instance", "e2e", source_data)
-    cards, facts = _seed_producer(source_data)
-    history = _git_history(source_data / "memory" / "facts")
+    cards, facts = _seed_producer(source_data, source_instance)
+    export = (source_data / "memory" / "export.ndjson").read_text(encoding="utf-8")
     with (
         mock.patch("secretary.backup._reject_claimed_worker_context"),
         mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
@@ -166,7 +166,7 @@ def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
     shutil.copy2(backup.archive, archive)
     shutil.rmtree(source_data)
     shutil.rmtree(source_instance)
-    return _Fixture(archive, cards, facts, backup.manifest, history)
+    return _Fixture(archive, cards, facts, backup.manifest, export)
 
 
 def _target_instance(root: Path, name: str, script: Path) -> tuple[Path, Path]:
@@ -180,6 +180,9 @@ def _target_instance(root: Path, name: str, script: Path) -> tuple[Path, Path]:
             "memory_dim": 4,
         },
     )
+    # The private repo is the operator's other recovery input: it lands before
+    # the archive does, and it is what the index is rebuilt from.
+    _seed_instance_facts(instance, CANON_FACTS)
     return instance, data_dir
 
 
@@ -245,7 +248,12 @@ class RestoreEndToEndTests(unittest.TestCase):
             state = restore_state(data_dir)
             self.assertEqual(state["board_count"], fixture.manifest["components"]["board"]["count"])
             self.assertEqual(state["memory_index_count"], fixture.facts)
-            self.assertEqual(_git_history(data_dir / "memory" / "facts"), fixture.history)
+            # The archive carries the derived export, not a journal: canon came
+            # back with the private repo and the index was rebuilt off it.
+            self.assertEqual(
+                (data_dir / "memory" / "export.ndjson").read_text(), fixture.export
+            )
+            self.assertFalse((data_dir / "memory" / "facts").exists())
 
     def test_core_archive_restores_normalized_board_without_a_raw_dump(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -267,11 +275,13 @@ class RestoreEndToEndTests(unittest.TestCase):
                 json.loads((data_dir / "board" / "export.json").read_text())["policy"]["done_cards"],
                 "excluded",
             )
-            exported = (data_dir / "memory" / "export.ndjson").read_text().splitlines()
-            self.assertEqual(len(exported), fixture.manifest["components"]["memory"]["count"])
-            self.assertEqual(len(exported), fixture.facts)
-            self.assertEqual(_git_history(data_dir / "memory" / "facts"), fixture.history)
-            self.assertGreater(len(fixture.history), 1)
+            exported = (data_dir / "memory" / "export.ndjson").read_text()
+            self.assertEqual(len(exported.splitlines()), fixture.manifest["components"]["memory"]["count"])
+            self.assertEqual(len(exported.splitlines()), fixture.facts)
+            self.assertGreater(fixture.facts, 1)
+            # Memory reaches the target as the derived export alone.
+            self.assertEqual(exported, fixture.export)
+            self.assertFalse((data_dir / "memory" / "facts").exists())
 
             client = _EmptyWriteKanboard()
             self.assertEqual(import_normalized_board(data_dir, client=client), len(expected))

@@ -126,6 +126,8 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
         dim = host.get("memory_dim", 1024)
         count = rebuild_memory_index(
             data_dir,
+            # `_target` hands back instance.yaml; canon hangs off the repo root.
+            instance_path.parent,
             python=Path(python) if isinstance(python, str) else None,
             script=Path(script) if isinstance(script, str) else None,
             model=model if isinstance(model, str) else None,
