@@ -269,7 +269,7 @@ def import_memory_journal(
 
 def export_memory_snapshot(
     data_dir: Path,
-    instance_dir: Path | None = None,
+    instance_dir: Path | None,
     *,
     source_dir: Path = PANELMEM_KB,
 ) -> MemoryExportSnapshot:
@@ -278,6 +278,8 @@ def export_memory_snapshot(
     The seed source is a fallback for an instance that has no facts yet. An
     instance that does have them must never silently export `panelmem-kb`
     instead: that is how a checkpoint ends up carrying somebody else's memory.
+    `instance_dir` has no default so that fallback is always a choice the
+    caller made, never an argument it forgot.
     """
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"

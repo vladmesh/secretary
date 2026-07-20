@@ -98,6 +98,7 @@ def main() -> int:
     try:
         import numpy as np
         from secretary import memory_service as server
+        from secretary import state_repo
         from secretary.cli import main as secretary_main
         from secretary.config import validate_instance
         from secretary.data import export_memory, normalize_board_card
@@ -150,17 +151,21 @@ def main() -> int:
         (data_dir / "board" / "cards.json").write_text(
             json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
         )
-        facts = data_dir / "memory" / "facts"
-        (facts / "global").mkdir()
+        # Canon is `state/memory/facts` in the private repo, not the data dir.
+        _run(["git", "init", "--quiet", "--initial-branch", "main"], cwd=instance)
+        _run(["git", "config", "user.name", "restore-e2e"], cwd=instance)
+        _run(["git", "config", "user.email", "restore-e2e@example.invalid"], cwd=instance)
+        facts = state_repo.memory_facts_dir(instance)
+        (facts / "global").mkdir(parents=True)
         (facts / "global" / "alpha.md").write_text(
             _fact("restore", "Alpha restore fact is searchable."), encoding="utf-8"
         )
         (facts / "global" / "beta.md").write_text(
             _fact("restore", "Beta restore fact remains readable."), encoding="utf-8"
         )
-        _run(["git", "add", "."], cwd=facts)
-        _run(["git", "commit", "-m", "restore facts"], cwd=facts)
-        export_memory(data_dir, source_dir=facts)
+        _run(["git", "add", "."], cwd=instance)
+        _run(["git", "commit", "-m", "restore facts"], cwd=instance)
+        export_memory(data_dir, instance)
         if import_normalized_board(data_dir, client=_BoardFixture()) != 1:
             raise AssertionError("normalized board import did not restore one card")
 
@@ -169,7 +174,7 @@ def main() -> int:
                 canon, export, target, "secretary-restore-e2e", 4, document_embed=fake_embed
             )
 
-        indexed = rebuild_memory_index(data_dir, runner=rebuild)
+        indexed = rebuild_memory_index(data_dir, instance, runner=rebuild)
         if indexed != 2 or restore_state(data_dir).get("memory_index") != "complete":
             raise AssertionError("secretary did not record a complete memory rebuild")
 

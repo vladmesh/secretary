@@ -105,7 +105,7 @@ DEFAULT_MEMORY_DIM = 1024
 
 
 def rebuild_memory_index(
-    data_dir: Path, instance_dir: Path | None = None, *, python: Path | None = None,
+    data_dir: Path, instance_dir: Path | None, *, python: Path | None = None,
     script: Path | None = None, model: str | None = None, dim: int | None = None, runner=None,
 ) -> int:
     """Replace the derived index from restored canon.

@@ -426,9 +426,9 @@ class ExportTests(unittest.TestCase):
             init_git_repo(source)
             data_dir = root / "secretary-data"
 
-            first = export_memory(data_dir, source_dir=source)
+            first = export_memory(data_dir, None, source_dir=source)
             first_payload = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
-            second = export_memory(data_dir, source_dir=source)
+            second = export_memory(data_dir, None, source_dir=source)
             facts_dir_exists = (data_dir / "memory" / "facts").exists()
             manifest = json.loads((data_dir / "memory" / "manifest.json").read_text(encoding="utf-8"))
             source_head = git(source, "rev-parse", "HEAD")
@@ -455,7 +455,7 @@ class ExportTests(unittest.TestCase):
                 fact.write_text("changed after snapshot\n", encoding="utf-8")
 
             with mock.patch("secretary.memory_journal._copy_tree", side_effect=copy_then_mutate):
-                export_memory(root / "secretary-data", source_dir=source)
+                export_memory(root / "secretary-data", None, source_dir=source)
             exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
                 encoding="utf-8"
             )
@@ -474,7 +474,7 @@ class ExportTests(unittest.TestCase):
             (facts / "one.md").write_text("fact one\n", encoding="utf-8")
             (facts / "secret.md").symlink_to(secret)
 
-            result = export_memory(root / "secretary-data", source_dir=source)
+            result = export_memory(root / "secretary-data", None, source_dir=source)
             exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
                 encoding="utf-8"
             )
@@ -494,7 +494,7 @@ class ExportTests(unittest.TestCase):
             fact.write_bytes(b"\xff\xfe")
 
             with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
-                export_memory(root / "secretary-data", source_dir=source)
+                export_memory(root / "secretary-data", None, source_dir=source)
 
     def test_export_memory_preserves_previous_snapshot_on_decode_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -504,13 +504,13 @@ class ExportTests(unittest.TestCase):
             facts.mkdir(parents=True)
             (facts / "good.md").write_text("good fact\n", encoding="utf-8")
             data_dir = root / "secretary-data"
-            export_memory(data_dir, source_dir=source)
+            export_memory(data_dir, None, source_dir=source)
             old_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
             (facts / "bad.md").write_bytes(b"\xff\xfe")
 
             with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
-                export_memory(data_dir, source_dir=source)
+                export_memory(data_dir, None, source_dir=source)
 
             current_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             facts_dir_exists = (data_dir / "memory" / "facts").exists()
@@ -1112,7 +1112,7 @@ class ExportTests(unittest.TestCase):
             )
 
             with self.assertRaises(MemoryLockError):
-                export_memory(data_dir, source_dir=source)
+                export_memory(data_dir, None, source_dir=source)
 
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1349,7 +1349,7 @@ class ExportTests(unittest.TestCase):
                     or data_module.DataExport(data_dir_arg / "artifacts.json", 1, "artifacts"),
                 ) as artifacts,
             ):
-                export_all(data_dir, copy_transcripts=True)
+                export_all(data_dir, None, copy_transcripts=True)
 
         self.assertEqual(calls, ["memory", "board", "runs", "transcripts", "artifacts"])
         transcripts.assert_called_once_with(data_dir, copy=True)

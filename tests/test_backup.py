@@ -59,8 +59,10 @@ class BackupTests(unittest.TestCase):
                 (raw / "manifest.json").write_text("{}", encoding="utf-8")
                 return SimpleNamespace(dump_dir=raw)
 
-            def fake_export_all(data_dir_arg, *, copy_transcripts):
+            def fake_export_all(data_dir_arg, instance_dir_arg, *, copy_transcripts):
                 self.assertFalse(copy_transcripts)
+                # Canon hangs off the repo root, so the export needs it.
+                self.assertEqual(Path(instance_dir_arg).resolve(), instance.resolve())
                 _write_export_surface(data_dir_arg)
                 return {
                     "board": DataExport(data_dir_arg / "board" / "cards.json", 1, "board"),
@@ -523,7 +525,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
-                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                    side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
                 from datetime import datetime, UTC
@@ -564,7 +566,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
-                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                    side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
                 results = create_backups(
@@ -633,7 +635,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
-                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(
+                    side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(
                         data_dir_arg,
                         include_done=True,
                     ),
@@ -687,7 +689,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
-                    side_effect=lambda data_dir_arg, **_kwargs: _fake_exports(data_dir_arg),
+                    side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
                 fake_datetime.now.return_value = datetime(2026, 7, 11, tzinfo=UTC)
@@ -1154,6 +1156,97 @@ def _write_core_payload(payload: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+class BackupMemoryCanonTests(unittest.TestCase):
+    """`backup create` archives the live facts, never the seed source.
+
+    Contract: docs/RECOVERY.md, "Layout". The memory component of an archive is
+    just `memory/export.ndjson` now that the facts live in the private repo, so
+    an export built from the seed would put somebody else's memory in the
+    archive and in the live data dir the reindex reads.
+    """
+
+    def setUp(self):
+        self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.workspace_patch = mock.patch(
+            "secretary.backup._claimed_workspace_from_cwd", return_value=None
+        )
+        self.workspace_patch.start()
+        self.addCleanup(self.workspace_patch.stop)
+
+    def test_create_exports_facts_from_the_private_repo_not_the_seed(self):
+        from secretary import state_repo
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            _write_export_surface(data_dir)
+            for command in (
+                ["git", "init", "--quiet", "--initial-branch", "main"],
+                ["git", "config", "user.name", "operator"],
+                ["git", "config", "user.email", "operator@example.invalid"],
+            ):
+                subprocess.run(command, cwd=instance, check=True)
+            facts = state_repo.memory_facts_dir(instance)
+            (facts / "global").mkdir(parents=True)
+            (facts / "global" / "live.md").write_text(
+                "live fact from the private repo\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", "-A", "."], cwd=instance, check=True)
+            subprocess.run(["git", "commit", "--quiet", "-m", "facts"], cwd=instance, check=True)
+
+            seed = root / "panelmem-kb"
+            (seed / "global").mkdir(parents=True)
+            (seed / "global" / "foreign.md").write_text("foreign seed fact\n", encoding="utf-8")
+
+            def fake_raw(data_dir_arg):
+                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
+                (raw / "data").mkdir(parents=True)
+                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+                (raw / "manifest.json").write_text("{}", encoding="utf-8")
+                return SimpleNamespace(dump_dir=raw)
+
+            def stub(name):
+                return lambda data_dir_arg, **_kwargs: DataExport(
+                    data_dir_arg / name, 1, name
+                )
+
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
+                # The seed resolves to a populated source, so a fallback would
+                # succeed silently instead of failing on a missing panelmem-kb.
+                mock.patch(
+                    "secretary.memory_journal._resolve_memory_source",
+                    return_value=(seed, seed),
+                ),
+                mock.patch("secretary.data.export_board", side_effect=stub("board")),
+                mock.patch("secretary.data.export_runs", side_effect=stub("runs")),
+                mock.patch("secretary.data.export_transcripts", side_effect=stub("transcripts")),
+                mock.patch("secretary.data.export_artifacts", side_effect=stub("artifacts")),
+            ):
+                result = create_backup(instance, backup_kind="core")
+
+            with tarfile.open(result.archive, "r") as archive:
+                member = archive.extractfile(
+                    "secretary-backup/secretary-data/memory/export.ndjson"
+                )
+                exported = member.read().decode("utf-8")
+
+            self.assertIn("live fact from the private repo", exported)
+            self.assertNotIn("foreign seed fact", exported)
+            # The export is published into the live data dir too; the reindex
+            # and memory-mcp read it from there.
+            self.assertIn(
+                "live fact from the private repo",
+                (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8"),
+            )
 
 
 def _fake_exports(data_dir: Path, *, include_done: bool = False) -> dict[str, DataExport]:

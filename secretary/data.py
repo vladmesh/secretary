@@ -274,10 +274,13 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
 
 def export_memory(
     data_dir: Path,
-    instance_dir: Path | None = None,
+    instance_dir: Path | None,
     *,
     source_dir: Path = PANELMEM_KB,
 ) -> DataExport:
+    """Export canon facts. `instance_dir` is required: passing `None` opts into
+    the seed fallback, and a caller that forgets it fails instead of silently
+    exporting somebody else's memory."""
     data_dir = data_dir.expanduser().resolve()
     result = export_memory_snapshot(data_dir, instance_dir, source_dir=source_dir)
     return DataExport(
@@ -513,7 +516,7 @@ def export_artifacts(
 
 def export_all(
     data_dir: Path,
-    instance_dir: Path | None = None,
+    instance_dir: Path | None,
     *,
     copy_transcripts: bool = False,
 ) -> dict[str, DataExport]:

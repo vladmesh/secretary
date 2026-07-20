@@ -60,6 +60,12 @@ Board export держим только в `cards.ndjson` (построчный d
 Memory facts хранятся плоско в едином репозитории. Вложенный git-журнал `memory/facts` убирается;
 writer памяти коммитит `propose/commit/supersede` в общий репозиторий. Единая история, один HEAD.
 
+Канон для всех производных (`memory/export.ndjson`, `memory/index.sqlite`, memory-компонент
+архива) — только `state/memory/facts`. Seed-источник `panelmem-kb` годится единственно для
+инстанса без фактов, поэтому `instance_dir` у `export_all`/`export_memory`/
+`export_memory_snapshot`/`rebuild_memory_index` обязателен: забытый аргумент падает, а не уводит
+экспорт на чужую память.
+
 ## Каденция и RPO
 
 - commit раз в тик диспетчера (60с), on-change: если хэш нормализованного `state/` не менялся,

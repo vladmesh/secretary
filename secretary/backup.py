@@ -141,7 +141,9 @@ def create_backups(
 
             init_layout(data_dir)
             raw_dump = raw_kanboard_dump(data_dir)
-            exports = export_all(data_dir, copy_transcripts=copy_transcripts)
+            exports = export_all(
+                data_dir, instance_file.parent, copy_transcripts=copy_transcripts
+            )
 
             for kind, final_archive in zip(kinds, final_archives, strict=True):
                 policy = policy_for(kind)

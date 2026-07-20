@@ -137,7 +137,7 @@ class RestoreTests(unittest.TestCase):
 
             self.assertEqual(
                 rebuild_memory_index(
-                    data_dir, runner=lambda *_: {"parity": {"indexed": 1}}
+                    data_dir, None, runner=lambda *_: {"parity": {"indexed": 1}}
                 ),
                 1,
             )
