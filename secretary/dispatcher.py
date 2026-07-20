@@ -1235,7 +1235,10 @@ class DispatcherRuntime:
                 f"respawned the {kind} head (respawn {respawns}). Another stall escalates to Blocked."
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{kind}-respawn", ref, str(respawns)
+                record.attempt_id or attempt_id,
+                f"{kind}-respawn",
+                ref,
+                f"{_wait_cycle_token(record)}-{respawns}",
             ),
         )
         records[ref] = record
@@ -1271,7 +1274,9 @@ class DispatcherRuntime:
                 f"wait watchdog: no {_wait_expectation(kind)} after respawn "
                 f"(ceiling {stall}s), blocked for the operator"
             ),
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{kind}-wait-stall", ref),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{kind}-wait-stall", ref, _wait_cycle_token(record)
+            ),
         )
         records.pop(ref, None)
         self._save_records(payload, records)
@@ -1522,6 +1527,16 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
+
+
+def _wait_cycle_token(record: DispatcherRecord) -> str:
+    """Per-cycle discriminator for the wait-watchdog request-ids. attempt_id outlives the card
+    (production adopts under a constant id) and the record is dropped on escalation, so a bare
+    attempt-scoped id repeats on the next stall; TaskWriter then dedups the move into a success
+    with no mutation and the tick reports "blocked" while the card stays put. comment_baseline is
+    re-read from the board on every adoption, so it is stable within one wait cycle and distinct
+    across them."""
+    return str(record.comment_baseline)
 
 
 def _wait_expectation(kind: str) -> str:

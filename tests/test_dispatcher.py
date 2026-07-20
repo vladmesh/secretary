@@ -1139,6 +1139,52 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.host.calls.count("restart_worker"), 1, "escalation must not respawn again"
         )
 
+    def _stall_worker_wait_to_blocked(self) -> dict:
+        """Drive one full stall cycle: wait past the ceiling, respawn, stall again, escalate."""
+        for _ in range(5):
+            if self.runtime.tick(self.selector).get("action") == "waiting-worker-report":
+                break
+        else:
+            self.fail("card never reached the worker wait")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "worker-respawned")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        return self.runtime.tick(self.selector)
+
+    def test_second_stall_cycle_escalates_again_instead_of_deduping(self) -> None:
+        """secretary-654: attempt_id outlives the card and the record is dropped on escalation, so
+        an escalation request-id without a per-cycle token repeats on the next stall. TaskWriter
+        answers a repeated request-id with success and no mutation, which would leave the tick
+        reporting "blocked" while the card sits in in_progress forever."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        first = self._stall_worker_wait_to_blocked()
+        self.assertEqual(first["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="in_progress",
+            reason="operator retries the card",
+            request_id="po-unblock",
+        )
+        second = self._stall_worker_wait_to_blocked()
+
+        self.assertEqual(second["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        stalls = [
+            event["request_id"]
+            for event in self.audit_events()
+            if event["kind"] == "moved" and "worker-wait-stall" in event["request_id"]
+        ]
+        self.assertEqual(len(set(stalls)), 2, f"escalations must be distinct requests: {stalls}")
+        comments = self.reader.show("secretary-510-pilot")["comments"]
+        respawns = [c for c in comments if "respawned the worker head" in c["body"]]
+        self.assertEqual(len(respawns), 2, "each stall cycle must leave its own respawn trace")
+
     def test_worker_report_clears_the_worker_wait_watchdog(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)
