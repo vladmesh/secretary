@@ -314,6 +314,8 @@ class CheckpointPusher:
         return self._record(current, self._attempt(), now)
 
     def _due(self, state: dict[str, Any], now: float) -> bool:
+        if state.get("remote_diverged") or state.get("status") == "diverged":
+            return True
         attempted = _float_field(state, "attempted_epoch")
         if attempted <= 0:
             return True

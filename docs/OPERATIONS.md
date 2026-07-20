@@ -96,7 +96,8 @@ force-push. Перед пушем `ls-remote` сверяет тип remote: ес
 `remote diverged` — на remote есть коммиты, которых нет локально. Пуш останавливается, алярм
 висит в `status` и `doctor`, автоматика ничего не переписывает. Если причина была в interleaving
 green publish и checkpoint, следующий dispatcher tick сам сведёт локальный instance checkout, а
-следующее push-окно погасит алярм fast-forward-only. Ручной разбор нужен только когда remote
+checkpoint pusher сразу перепроверит diverged-состояние и погасит алярм fast-forward-only. Ручной
+разбор нужен только когда remote
 содержит чужую историю, которую dispatcher не может получить обычным merge:
 
 ```bash
@@ -104,7 +105,7 @@ git -C INSTANCE fetch origin
 git -C INSTANCE merge --no-edit FETCH_HEAD   # или rebase, по ситуации
 ```
 
-После того как remote стал предком локального HEAD, следующее окно пушит сам и алярм гаснет.
+После того как remote стал предком локального HEAD, следующий тик пушит сам и алярм гаснет.
 
 Freshness видна в `dispatcher production-observe` (поле `checkpoint`) и в `doctor` блоком
 `checkpoint freshness`: последний коммит, последний успешный push, lag в коммитах и минутах,

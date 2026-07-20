@@ -23,6 +23,16 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 CARD = {
     "id": 1,
     "reference": "secretary-637",
@@ -398,6 +408,23 @@ class CheckpointPusherTests(unittest.TestCase):
         self.assertEqual(state["status"], "pushed")
         self.assertFalse(state["remote_diverged"])
         self.assertEqual(self.remote_head(), git(self.instance_dir, "rev-parse", "HEAD").strip())
+
+    def test_diverged_state_rechecks_without_waiting_for_the_next_window(self):
+        state = self.pusher().push()
+        self.push_from_elsewhere()
+        ours = self.commit("ours")
+        self.clock.advance(PUSH_INTERVAL_SECONDS)
+        state = self.pusher().push(state)
+
+        git(self.instance_dir, "fetch", "--quiet", "origin", "main")
+        git(self.instance_dir, "merge", "--quiet", "--no-edit", "FETCH_HEAD")
+        resolved = git(self.instance_dir, "rev-parse", "HEAD").strip()
+        self.assertTrue(is_ancestor(self.instance_dir, ours, resolved))
+        state = self.pusher().push(state)
+
+        self.assertEqual(state["status"], "pushed")
+        self.assertFalse(state["remote_diverged"])
+        self.assertEqual(self.remote_head(), resolved)
 
     def test_a_remote_that_moves_under_the_push_reads_as_divergence(self):
         state = self.pusher().push()

@@ -2815,8 +2815,14 @@ class DispatcherLauncherTests(unittest.TestCase):
             # The merge commit is local until the checkpoint pusher's next ff-only window.
             self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), feature)
 
-            state = CheckpointPusher(instance, interval_seconds=0).push(
-                {"status": "diverged", "remote_diverged": True, "failures": 2}
+            state = CheckpointPusher(instance).push(
+                {
+                    "status": "diverged",
+                    "remote_diverged": True,
+                    "failures": 2,
+                    "attempted_epoch": time.time(),
+                    "attempted_at": "2026-07-20T21:00:00Z",
+                }
             )
 
             self.assertEqual(state["status"], "pushed")
