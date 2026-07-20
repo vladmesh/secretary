@@ -338,6 +338,18 @@ class CommandHostRuntime:
             return ""
         return completed.stdout.strip()
 
+    def is_ancestor(self, record: DispatcherRecord, ancestor: str, descendant: str) -> bool:
+        if self.mode == "noop" or not record.workspace:
+            return False
+        try:
+            self._run(
+                ["git", "-C", record.workspace, "merge-base", "--is-ancestor", ancestor, descendant],
+                "review head ancestry",
+            )
+        except HostError:
+            return False
+        return True
+
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)
 
@@ -1706,6 +1718,8 @@ class DispatcherRuntime:
             return ""
         current = self.host.head_commit(record)
         if not current or current == record.review_commit:
+            return ""
+        if self.host.is_ancestor(record, record.review_commit, current):
             return ""
         return (
             f"Ревью выдано для коммита `{record.review_commit[:12]}`, а рабочая копия сейчас на "

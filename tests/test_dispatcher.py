@@ -198,6 +198,7 @@ class FakeHost:
         self.split_from: list[str] = []
         self.stopped_reviews: list[str] = []
         self.commit = "c0ffee1234567890"
+        self.ancestors: set[tuple[str, str]] = set()
 
     def prepare_worker(
         self,
@@ -284,6 +285,10 @@ class FakeHost:
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
         return self.commit
+
+    def is_ancestor(self, record, ancestor: str, descendant: str) -> bool:
+        self.calls.append("is_ancestor")
+        return (ancestor, descendant) in self.ancestors
 
     def teardown(self, record) -> None:
         self.calls.append("teardown")
@@ -2857,6 +2862,76 @@ class DispatcherLauncherTests(unittest.TestCase):
             self.assertEqual(git(instance, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
             self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
 
+    def test_finish_green_recovers_after_worker_side_checkpoint_merge_was_published(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, instance, workspace = _instance_repo_fixture(root, "secretary-510-pilot")
+            checkpoint = _commit_file(instance, "state/runs/runs.ndjson", "checkpoint\n", "checkpoint")
+            git(instance, "push", "--quiet", "origin", "main")
+            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            first_host = _CrashAfterMergePushHost(_InstanceRepoCatalog(instance), root, mode="real")  # type: ignore[arg-type]
+            with self.assertRaisesRegex(HostError, "simulated crash after merge push"):
+                first_host.complete_green(
+                    {"ref": "secretary-510-pilot", "project": "secretary"},
+                    SimpleNamespace(workspace=str(workspace)),
+                )
+            published = git(remote, "rev-parse", "refs/heads/main")
+            self.assertTrue(_is_ancestor(workspace, checkpoint, published))
+            self.assertTrue(_is_ancestor(workspace, feature, published))
+
+            board = FakeKanboard()
+            board.tasks[0]["column_id"] = 4
+            data_dir = root / "data"
+            writer = TaskWriter(board, data_dir=data_dir, workspace=data_dir)  # type: ignore[arg-type]
+            runtime = DispatcherRuntime(
+                TaskReader(board),  # type: ignore[arg-type]
+                writer,
+                TaskAudit(data_dir),
+                CutoverState(data_dir),
+                _InstanceRepoCatalog(instance),  # type: ignore[arg-type]
+                CommandHostRuntime(_InstanceRepoCatalog(instance), root, mode="real"),  # type: ignore[arg-type]
+                owner="secretary-pilot",
+                legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+            )
+            record = DispatcherRecord(
+                worker="secretary-510-pilot-pilot",
+                workspace=str(workspace),
+                handle="term:secretary-510-pilot-pilot",
+                head="codex",
+                review_head="codex-reviewer",
+                attempt_id="attempt-1",
+                comment_baseline=0,
+                review_baseline=0,
+                state="reviewing",
+                claimed_at=time.time(),
+                gate_state="green",
+                review_commit=feature,
+            )
+            records = {"secretary-510-pilot": record}
+
+            result = runtime._finish_green(
+                TaskReader(board).show("secretary-510-pilot"),  # type: ignore[arg-type]
+                record,
+                records,
+                {"version": 1, "phase": "cutover_committed"},
+                "attempt-1",
+            )
+
+            self.assertEqual(result["to"], "done")
+            self.assertEqual(TaskReader(board).show("secretary-510-pilot")["state"], "done")  # type: ignore[arg-type]
+            self.assertEqual(records, {})
+            local_head = git(instance, "rev-parse", "HEAD")
+            self.assertEqual(local_head, published)
+            self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
+            self.assertTrue(_is_ancestor(instance, feature, local_head))
+            state = CheckpointPusher(instance, interval_seconds=0).push(
+                {"status": "diverged", "remote_diverged": True}
+            )
+            self.assertEqual(state["status"], "unchanged")
+            self.assertFalse(state["remote_diverged"])
+
     def test_instance_repo_merge_uses_fallback_identity_without_global_git_identity(self) -> None:
         from types import SimpleNamespace
 
@@ -3004,6 +3079,14 @@ class _InstanceRepoCatalog:
 
     def adapter(self, project: str) -> dict:
         return {}
+
+
+class _CrashAfterMergePushHost(CommandHostRuntime):
+    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+        completed = super()._run(args, label, cwd=cwd)
+        if label == "merge push":
+            raise HostError("simulated crash after merge push")
+        return completed
 
 
 def _instance_repo_fixture(root: Path, ref: str) -> tuple[Path, Path, Path]:
