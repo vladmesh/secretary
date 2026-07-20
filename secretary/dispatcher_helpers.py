@@ -59,6 +59,26 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
     return baseline
 
 
+def _report_adoption_baseline(task: dict[str, Any]) -> int:
+    """Where to start looking for worker report markers on an adopted card.
+
+    `len(comments)` would hide a `report:done` the worker already posted: the dispatcher can lose
+    its record at any point (restart, state reset, any `records.pop`), and re-adoption then blinds
+    it to the finished report. It used to cost one extra tick; with the wait watchdog it burns the
+    whole worker ceiling, respawns the head to redo work that is already on the board, and tells
+    the operator "no worker report within Ns", which is false.
+
+    Every report the dispatcher has consumed is followed by the dispatcher's own comment (the move
+    to Validate, the review:red bounce, the gate-red bounce), so the last dispatcher comment is the
+    boundary: markers after it are unconsumed.
+    """
+    baseline = 0
+    for index, comment in enumerate(task.get("comments") or []):
+        if comment.get("marker") == "dispatcher":
+            baseline = index + 1
+    return baseline
+
+
 def scrub_host_output(text: str) -> str:
     text = _ASSIGN_RE.sub(r"\1=<redacted>", text)
     return _BLOB_RE.sub(lambda match: match.group(0) if _HEX_RE.match(match.group(0)) else "<redacted>", text)

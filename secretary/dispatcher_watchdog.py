@@ -51,3 +51,19 @@ def reset_wait(record, kind: str) -> None:
     """Clear a wait's watchdog bookkeeping so the next wait of that kind starts fresh."""
     setattr(record, f"{kind}_waiting_since", 0.0)
     setattr(record, f"{kind}_respawns", 0)
+
+
+def wait_cycle_token(record) -> str:
+    """Per-cycle discriminator for every request-id the watchdog path can emit.
+
+    attempt_id outlives the card (production adopts under a constant `production-adopt-<ref>`)
+    and the record is dropped whenever the card lands in Blocked, so a bare attempt-scoped id
+    repeats on the next stall. TaskWriter answers a repeated request-id with success and no
+    mutation, so the tick reports "blocked" while the card stays put and the next tick re-adopts
+    it: the card hangs forever, which is the failure this whole watchdog exists to end.
+
+    comment_baseline is re-read from the board on adoption and every cycle leaves at least one
+    comment behind, so it is stable within a cycle and distinct across them. The respawn counters
+    separate the request-ids emitted before and after a respawn inside one cycle.
+    """
+    return f"{record.comment_baseline}-{record.worker_respawns}-{record.review_respawns}"

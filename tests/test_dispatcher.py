@@ -29,7 +29,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
-from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
+from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
@@ -37,6 +37,17 @@ from secretary.dispatcher_watchdog import (
     wait_outcome,
 )
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+
+
+def _clear_env(test: unittest.TestCase, *names: str) -> None:
+    """Drop dispatcher env overrides for the duration of a test and restore them afterwards.
+    These are documented as unit-level knobs in docs/OPERATIONS.md, so a host that exports one
+    would otherwise fail tests that assert the defaults."""
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    for name in names:
+        os.environ.pop(name, None)
 
 
 class FakeKanboard:
@@ -1185,6 +1196,125 @@ class DispatcherRuntimeTests(unittest.TestCase):
         respawns = [c for c in comments if "respawned the worker head" in c["body"]]
         self.assertEqual(len(respawns), 2, "each stall cycle must leave its own respawn trace")
 
+    def _stall_worker_wait_to_respawn_failure(self) -> dict:
+        """Wait past the ceiling, then fail the respawn itself (the workspace went missing)."""
+        for _ in range(5):
+            if self.runtime.tick(self.selector).get("action") == "waiting-worker-report":
+                break
+        else:
+            self.fail("card never reached the worker wait")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.fail_restart_reason = "rework workspace is missing"
+        try:
+            return self.runtime.tick(self.selector)
+        finally:
+            self.host.fail_restart_reason = ""
+
+    def test_second_respawn_failure_blocks_the_card_instead_of_deduping(self) -> None:
+        """secretary-654: the respawn-failed escalation needs a per-cycle request-id for the same
+        reason the stall escalation does. In production attempt_id is a constant per card, so a
+        bare attempt-scoped id makes the request-id a pure function of the ref: once committed,
+        every later respawn failure on that card dedups into a success with no mutation, the tick
+        reports "blocked", and the card sits in in_progress being re-adopted forever."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        first = self._stall_worker_wait_to_respawn_failure()
+        self.assertEqual(first["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="in_progress",
+            reason="operator restored the workspace",
+            request_id="po-unblock",
+        )
+        second = self._stall_worker_wait_to_respawn_failure()
+
+        self.assertEqual(second["status"], "blocked")
+        self.assertEqual(
+            self.reader.show("secretary-510-pilot")["state"],
+            "blocked",
+            "tick reported blocked but the card never moved",
+        )
+        blocks = [
+            event["request_id"]
+            for event in self.audit_events()
+            if event["kind"] == "moved" and "worker-respawn-blocked" in event["request_id"]
+        ]
+        self.assertEqual(len(set(blocks)), 2, f"escalations must be distinct requests: {blocks}")
+
+    def test_adopted_card_still_sees_a_report_the_dispatcher_never_consumed(self) -> None:
+        """secretary-654: the worker posts report:done and the dispatcher loses its record before
+        acting on it. Baselining adoption at len(comments) hid the report, so the card burned the
+        whole worker ceiling and respawned a head to redo work already sitting on the board."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id="worker-done-before-adoption",
+        )
+        payload = self.runtime.state.load()
+        payload["records"] = {}
+        self.runtime.state.save(payload)
+
+        self.runtime.tick(self.selector)  # re-adoption re-verifies the claim
+        advanced = self.runtime.tick(self.selector)
+
+        self.assertEqual(advanced["to"], "validate")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def test_review_red_clears_the_review_wait_watchdog(self) -> None:
+        """Each review round gets its own respawn budget. Without the reset, a round-1 stall that
+        was already respawned leaves respawns=1 and a stale waiting_since, so the first waiting
+        tick of round 2 escalates straight to Blocked with no respawn at all."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-respawned")
+
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="findings from the respawned reviewer",
+            request_id="review-red-round-1",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(record["review_waiting_since"], 0.0)
+        self.assertEqual(record["review_respawns"], 0)
+
+        # And the invariant the counters exist for: round 2 still gets its one respawn.
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="reworked",
+            request_id="worker-done-round-2",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+
+        stalled = self.runtime.tick(self.selector)
+
+        self.assertEqual(stalled["action"], "review-respawned")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
     def test_worker_report_clears_the_worker_wait_watchdog(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)
@@ -1756,6 +1886,9 @@ class HeadPromptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
+        # The assertions below name /tmp, and docs/OPERATIONS.md documents this override on the
+        # unit, so a host that exports it would fail the suite for no reason.
+        _clear_env(self, "SECRETARY_DISPATCHER_BODY_DIR")
         self.host = CommandHostRuntime(FakeCatalog(), Path(self.tmpdir.name), mode="noop")  # type: ignore[arg-type]
         self.task = {
             "ref": "secretary-510-pilot",
@@ -1796,18 +1929,61 @@ class HeadPromptTests(unittest.TestCase):
                 path = command.split("--body-file ", 1)[1].split()[0]
                 self.assertTrue(path.startswith("/tmp/"), path)
 
+    def _record(self, workspace: Path, review_baseline: int) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-510-pilot-w",
+            workspace=str(workspace),
+            handle="",
+            head="head",
+            review_head="review-head",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=review_baseline,
+            state="reviewing",
+            claimed_at=0.0,
+        )
+
+    def test_launching_a_head_drops_a_stale_body_file(self) -> None:
+        """A respawned head inherits the ref+round path its half-dead predecessor wrote, and heads
+        are told to leave the file behind. Nothing downstream catches a stale body: `_read_body`
+        only rejects a missing file, and an empty one posts fine as a green verdict or a done
+        report. Clearing the path first turns a skipped write into a loud failure."""
+        root = Path(self.tmpdir.name)
+        workspace = root / "ws"
+        workspace.mkdir()
+        stale = root / "secretary-verdict-secretary-510-pilot-3.md"
+        stale.write_text("half-written verdict from the head that died", encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(root)}):
+            with mock.patch.object(self.host, "_launch", return_value="term:review"):
+                self.host.start_review(self.task, self._record(workspace, 3))
+
+        self.assertFalse(stale.exists(), "respawned reviewer inherited the stale body file")
+
     def test_prompts_forbid_inline_shell_body_assembly(self) -> None:
+        """The 637 failure mode was the body assembled inside the command. Guard the shape that
+        actually prevents it: past the `secretary task` verb every argument is a plain token, so
+        nothing in the body can reach the shell. The task fixture carries backticks and quotes."""
         for doc in (
             self.host._review_prompt(self.task, "attempt-1", 3),
             self.host._worker_task_doc(self.task, "main", "attempt-1"),
         ):
             for command in self._command_lines(doc):
-                for banned in ("mktemp", "rm -f", "<<", "$(", "`"):
-                    self.assertNotIn(banned, command)
+                arguments = command.split("python3 -m secretary task", 1)[1]
+                for banned in ("`", "$", "'", '"', "|", ";", "&", ">", "<", "(", ")"):
+                    self.assertNotIn(banned, arguments, command)
+                self.assertIn("--body-file /tmp/secretary-", command)
             self.assertIn("(no heredoc, no mktemp, no echo pipeline)", doc)
 
 
 class WaitWatchdogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _clear_env(
+            self,
+            "SECRETARY_REVIEW_VERDICT_STALL_SECONDS",
+            "SECRETARY_WORKER_REPORT_STALL_SECONDS",
+        )
+
     def test_inside_the_ceiling_keeps_waiting(self) -> None:
         outcome = wait_outcome(waiting_since=0.0, now=7199.0, stall_seconds=7200, respawns=0)
 

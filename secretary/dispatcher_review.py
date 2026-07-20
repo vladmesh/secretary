@@ -7,6 +7,7 @@ from typing import Any
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import HostError
+from secretary.dispatcher_watchdog import wait_cycle_token as _wait_cycle_token
 
 
 def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:
@@ -54,7 +55,12 @@ def recover_review_launch(
             reference=ref,
             target="blocked",
             reason=f"review inventory failed: {scrub_host_output(str(exc))}",
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-inventory-blocked", ref),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                "review-inventory-blocked",
+                ref,
+                _wait_cycle_token(record),
+            ),
         )
         records.pop(ref, None)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "review inventory failed"}
@@ -89,7 +95,9 @@ def start_review(
             reference=ref,
             target="blocked",
             reason=f"review bring-up failed: {scrub_host_output(str(exc))}",
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-blocked", ref),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "review-blocked", ref, _wait_cycle_token(record)
+            ),
         )
         records.pop(ref, None)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}

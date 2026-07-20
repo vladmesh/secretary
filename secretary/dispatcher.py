@@ -26,6 +26,7 @@ from secretary.dispatcher_helpers import (
     _last_marker,
     _last_review_red_body,
     _legacy_worker_branch,
+    _report_adoption_baseline,
     _review_adoption_baseline,
     _tail,
     _worker_id,
@@ -53,6 +54,7 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_watchdog import (
     reset_wait as _reset_wait,
     stall_seconds as _stall_seconds,
+    wait_cycle_token as _wait_cycle_token,
     wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_state import (
@@ -218,6 +220,7 @@ class CommandHostRuntime:
         workspace = self._create_workspace(project, worker_id, base)
         self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
         self._run_setup(project, workspace)
+        self._clear_body_file("report", task["ref"], 0)
         self._write_prompt(Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id))
         handle = self._launch(
             workspace,
@@ -241,6 +244,7 @@ class CommandHostRuntime:
         base = self.catalog.default_branch(
             task["project"], task.get("workspace", {}).get("base_branch")
         )
+        self._clear_body_file("report", task["ref"], record.review_baseline)
         self._write_prompt(workspace / "TASK.md", self._worker_task_doc(task, base, record.attempt_id, record.review_baseline))
         return self._launch(
             str(workspace),
@@ -262,6 +266,7 @@ class CommandHostRuntime:
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
         review_file = Path(record.workspace) / "REVIEW.md"
+        self._clear_body_file("verdict", task["ref"], record.review_baseline)
         self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
         return self._launch(
             record.workspace,
@@ -443,6 +448,19 @@ class CommandHostRuntime:
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
+
+    def _clear_body_file(self, kind: str, reference: str, review_round: int) -> None:
+        """Drop the body file before launching the head that is supposed to write it.
+
+        Heads are told to leave the file in place, and the path is keyed on ref+round, so a
+        respawned head inherits whatever its half-dead predecessor left there. Nothing downstream
+        catches a stale body: `_read_body` only rejects a missing file, and `report done` /
+        `verdict green` accept an empty one, so a truncated body would land on the board as a real
+        report. A missing file at least fails loudly."""
+        try:
+            Path(_body_file_path(kind, reference, review_round)).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _worker_launch_prompt(self) -> str:
         """Short pointer delivered to the worker head at launch. The full spec lives in TASK.md
@@ -1214,16 +1232,24 @@ class DispatcherRuntime:
                     target="blocked",
                     reason=f"worker respawn failed: {scrub_host_output(str(exc))}",
                     request_id=_attempt_request_id(
-                        record.attempt_id or attempt_id, "worker-respawn-blocked", ref
+                        record.attempt_id or attempt_id,
+                        "worker-respawn-blocked",
+                        ref,
+                        _wait_cycle_token(record),
                     ),
                 )
                 records.pop(ref, None)
                 self._save_records(payload, records)
                 return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": "worker respawn failed"}
             record.state = "claimed"
+        # Persist the restart before commenting. The pilot tick has no try/except around this, so
+        # a writer.comment that raises would otherwise escape with the head already respawned and
+        # respawns still 0: the next tick respawns again and the escalation never arrives.
         setattr(record, f"{kind}_waiting_since", now)
         respawns = int(getattr(record, f"{kind}_respawns") or 0) + 1
         setattr(record, f"{kind}_respawns", respawns)
+        records[ref] = record
+        self._save_records(payload, records)
         # Leave a trace: without it the operator sees only the Blocked hours later and has no
         # way to tell a first stall from a card whose head was already restarted once.
         self.writer.comment(
@@ -1241,8 +1267,6 @@ class DispatcherRuntime:
                 f"{_wait_cycle_token(record)}-{respawns}",
             ),
         )
-        records[ref] = record
-        self._save_records(payload, records)
         return {
             "status": "ok",
             "step": step,
@@ -1490,7 +1514,7 @@ class DispatcherRuntime:
             head=self.catalog.worker_head(task),
             review_head=self.catalog.review_head(task),
             attempt_id=attempt_id,
-            comment_baseline=len(task.get("comments") or []),
+            comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,
             state=state,
             claimed_at=time.time(),
@@ -1527,16 +1551,6 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
-
-
-def _wait_cycle_token(record: DispatcherRecord) -> str:
-    """Per-cycle discriminator for the wait-watchdog request-ids. attempt_id outlives the card
-    (production adopts under a constant id) and the record is dropped on escalation, so a bare
-    attempt-scoped id repeats on the next stall; TaskWriter then dedups the move into a success
-    with no mutation and the tick reports "blocked" while the card stays put. comment_baseline is
-    re-read from the board on every adoption, so it is stable within one wait cycle and distinct
-    across them."""
-    return str(record.comment_baseline)
 
 
 def _wait_expectation(kind: str) -> str:
