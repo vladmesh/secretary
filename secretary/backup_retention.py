@@ -1,16 +1,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from secretary.backup_policy import BACKUPS_MAX_BYTES, BackupKind, POLICIES
-
-
-@dataclass(frozen=True)
-class BackupHealth:
-    warnings: list[str]
+from secretary.backup_policy import BackupKind, POLICIES
 
 
 def apply_retention(backups_dir: Path, *, keep: set[Path], now: datetime) -> None:
@@ -31,55 +25,6 @@ def apply_retention(backups_dir: Path, *, keep: set[Path], now: datetime) -> Non
             created_at = archive_created_at(archive)
             if created_at is not None and created_at.timestamp() < cutoff:
                 remove_path_quietly(archive)
-
-
-def check_backup_health(
-    data_dir: Path,
-    *,
-    now: datetime | None = None,
-    max_bytes: int = BACKUPS_MAX_BYTES,
-    archive_loader=None,
-) -> BackupHealth:
-    backups_dir = data_dir.expanduser() / "backups"
-    if not backups_dir.exists():
-        return BackupHealth(["backup directory is unavailable"])
-    if not backups_dir.is_dir():
-        return BackupHealth(["backup directory is unavailable"])
-    try:
-        archive_loader = archive_loader or backup_archives
-        archives = archive_loader(backups_dir)
-    except OSError:
-        return BackupHealth(["backup directory is unavailable"])
-
-    now = now or datetime.now(UTC)
-    warnings: list[str] = []
-    for kind, policy in POLICIES.items():
-        kind_archives = [archive for archive in archives if archive_kind_from_name(archive) == kind]
-        newest = max(kind_archives, key=archive_sort_key, default=None)
-        if newest is None:
-            warnings.append(f"backup {kind} archive is missing")
-            continue
-        created_at = archive_created_at(newest)
-        if created_at is None:
-            warnings.append(f"backup {kind} archive timestamp is unavailable: {newest.name}")
-        elif now - created_at > policy.max_age:
-            warnings.append(
-                f"backup {kind} archive is stale: newest {kind} is older than "
-                f"{policy.max_age_label}"
-            )
-
-    total = 0
-    for archive in archives:
-        try:
-            total += archive.stat().st_size
-        except OSError:
-            warnings.append(f"backup archive is unavailable: {archive.name}")
-    if total > max_bytes:
-        warnings.append(
-            "backup directory is large: "
-            f"{total // (1024 * 1024)}MiB exceeds {max_bytes // (1024 * 1024)}MiB"
-        )
-    return BackupHealth(warnings)
 
 
 def backup_archives(backups_dir: Path) -> list[Path]:

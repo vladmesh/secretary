@@ -4,8 +4,8 @@
 memory protocols, dispatcher lifecycle, installation contracts и восстановлением. Нативные CLI
 провайдеров выполняют работу поверх этого контура.
 
-На текущей production-установке dispatcher, memory daemon, backup runtime и фоновые роли работают
-из `secretary`. Legacy runtime repositories и units удалены.
+На текущей production-установке dispatcher, memory daemon и фоновые роли работают из `secretary`.
+Legacy runtime repositories и units удалены.
 
 ## Граница хранилищ
 

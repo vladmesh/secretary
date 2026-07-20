@@ -364,13 +364,13 @@ class ErrorLeakTests(unittest.TestCase):
     def test_message_does_not_echo_offending_value(self):
         secret = "sk-live-do-not-print-3f9a"
         data = copy.deepcopy(VALID_INSTANCE)
-        data["offsite"]["backup_pull_max_age_days"] = secret  # wrong type
+        data["host"] = {"memory_dim": secret}  # wrong type
         errors = validate(data, "instance", "instance.yaml")
         self.assertTrue(errors)
         blob = "\n".join(str(e) for e in errors)
         self.assertNotIn(secret, blob, blob)
         # path and keyword are still present
-        self.assertTrue(any("backup_pull_max_age_days" in e.path for e in errors))
+        self.assertTrue(any("memory_dim" in e.path for e in errors))
         self.assertIn("expected type integer", blob)
 
     def test_pattern_error_does_not_echo_value(self):

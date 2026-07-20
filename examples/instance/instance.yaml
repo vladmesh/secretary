@@ -5,7 +5,6 @@ description: Example installation used by doctor --dry-run and schema tests.
 data_dir: /var/lib/secretary-data
 offsite:
   instance_remote: git@example.invalid:example/secretary-instance.git
-  backup_pull_max_age_days: 7
 persona:
   name: example-operator
   style: terse

@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from secretary.backup import check_backup_health, create_backups, verify_backup
+from secretary.backup import create_backups, verify_backup
 from secretary.checkpoint import (
     PUSH_INTERVAL_SECONDS,
     checkpoint_snapshot,
@@ -49,7 +49,6 @@ from secretary.memory_write import (
     propose_memory_fact,
     supersede_memory_fact,
 )
-from secretary.offsite import check_last_fetch
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
@@ -404,8 +403,6 @@ def run_doctor(args: argparse.Namespace) -> int:
         for warning in report.warnings:
             print(f"  {warning}")
 
-    offsite_warnings, offsite_findings = print_offsite_status(instance_path)
-    backup_warnings = print_backup_status(report.instance_path)
     restore_problems = print_restore_status(report)
 
     host_incomplete = False
@@ -430,10 +427,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if restore_problems:
         print("status: findings")
         return 1
-    if offsite_findings:
-        print("status: findings")
-        return 1
-    if (report.warnings or offsite_warnings or backup_warnings) and args.strict:
+    if report.warnings and args.strict:
         print("status: warnings")
         return 1
     print("status: ok")
@@ -480,38 +474,6 @@ def run_project_gate(args: argparse.Namespace) -> int:
     code, result = run_gate(args.instance, args.project_id)
     print(render_result(result), end="")
     return code
-
-
-def print_offsite_status(instance_path: Path) -> tuple[list[str], list[str]]:
-    try:
-        instance = load_config(_instance_path(str(instance_path)))
-    except ConfigError:
-        return [], []
-    if not isinstance(instance, dict):
-        return [], []
-
-    status = check_last_fetch(instance)
-    if status.warnings:
-        print("offsite warnings:")
-        for warning in status.warnings:
-            print(f"  {warning}")
-    if status.findings:
-        print("offsite findings:")
-        for finding in status.findings:
-            print(f"  {finding}")
-    return status.warnings, status.findings
-
-
-def print_backup_status(instance_path: Path) -> list[str]:
-    data_dir = _load_data_dir(_instance_path(str(instance_path)))
-    if data_dir is None:
-        return []
-    status = check_backup_health(data_dir)
-    if status.warnings:
-        print("backup warnings:")
-        for warning in status.warnings:
-            print(f"  {warning}")
-    return status.warnings
 
 
 def print_dispatcher_status(

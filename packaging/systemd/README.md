@@ -1,7 +1,9 @@
 # systemd assets
 
 Templates for the current secretary runtime. The live installation uses units for production
-dispatcher ticks, memory service, backup, curator, steward and retro.
+dispatcher ticks, memory service, curator, steward and retro. Archive backup is no longer a
+scheduled unit: git-checkpoint is the recovery contract (docs/RECOVERY.md), and `backup create`
+remains only a manual, optional cold-archive tool.
 
 These files are the desired state, not a starting point to copy by hand: `secretary reconcile apply`
 installs them and records ownership in `host-managed.json`, and `secretary upgrade` runs that on

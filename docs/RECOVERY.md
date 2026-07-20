@@ -6,9 +6,9 @@ checkpoint конфигурации и переносимого состояни
 Отдельный bundle/S3 не является обязательной частью основного пути.
 
 Документ задаёт целевой контракт. Реализация writer, installer и recovery workflow остаётся за
-отдельными карточками. Текущий процесс разработки пайплайна выводит archive path агрессивно
-(см. [Переход и parity](#переход-и-parity)); production-контракт ниже описывает нужный уровень
-надёжности, к которому пайплайн приходит.
+отдельными карточками. Archive backup, offsite-перенос и backup-таймер уже выведены из основного
+пути (см. [Переход и parity](#переход-и-parity)); git-checkpoint — единственный recovery contract,
+архив остаётся максимум переходной страховкой.
 
 ## Топология
 
@@ -148,19 +148,20 @@ backup host не требуются. Головы подключаются по�
 
 ## Переход и parity
 
-Целевой parity gate, критерий ухода с архива на git: clean-host E2E recovery из приватного
-репозитория. Установить продукт, clone, ручной `runtime.env`, `restore-board`, `memory reindex`,
+Parity gate, критерий ухода с архива на git: recovery из приватного репозитория. Установить
+продукт, clone, ручной `runtime.env`, `bootstrap --empty`, `restore-board`, `memory reindex`,
 `reconcile`, `doctor` зелёный, счётчики board/memory/runs совпадают с источником.
 
-Порядок в production-контракте:
+Статус: в текущем процессе разработки пайплайна cutover агрессивный, без долгого параллельного
+периода. После одной dry-run проверки restore-from-git из основного пути выведены:
 
-1. git-checkpoint writer работает параллельно с архивами;
-2. parity gate пройден, выводятся archive backup, offsite (`pull-backups-offsite.sh`) и
-   backup-таймер; docs перестают называть архив recovery-контрактом;
-3. optional cold archive для сырых transcripts и artifacts остаётся будущим решением.
+1. archive backup create/verify как обязательная часть контракта — остаётся ручным опциональным
+   инструментом (`secretary backup create`), не recovery-контрактом;
+2. offsite-перенос (`pull-backups-offsite.sh`) и его doctor-гейт — удалены;
+3. backup-таймер (`secretary-backup.service`/`.timer`) и archive-age doctor-проверка — удалены.
 
-В текущем процессе разработки пайплайна cutover агрессивный: sops/age убираются сразу, архивы
-выводятся после одной dry-run проверки restore-from-git, без долгого параллельного периода.
+git-checkpoint — единственный recovery contract. Optional cold archive для сырых transcripts и
+artifacts остаётся будущим решением.
 
 ## Реализационная нарезка
 
@@ -169,7 +170,7 @@ backup host не требуются. Головы подключаются по�
    `runtime.env`.
 3. Checkpoint writer: влить `state/` в приватный репозиторий, flatten memory, хук на тике
    (validate, `git add state/`, commit on-change), отдельный 30-минутный push, lag в `status`/`doctor`.
-4. Вывести archive/offsite из основного пути после dry-run восстановления из git.
+4. Вывести archive/offsite из основного пути после dry-run восстановления из git (готово).
 5. Fresh install и recovery path (`install -> clone -> runtime.env -> rebuild -> status`),
    карточки под Milestone 1/2.
 

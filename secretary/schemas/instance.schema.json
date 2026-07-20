@@ -29,17 +29,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["instance_remote"],
-      "description": "Offsite / restore-chain settings. The instance repo needs a private remote off the VPS.",
+      "description": "Recovery-chain settings. The instance repo needs a private git remote off the VPS; it is the single recovery contract (docs/RECOVERY.md).",
       "properties": {
         "instance_remote": {
           "type": "string",
           "minLength": 1,
           "description": "Private git remote URL for this instance repo."
-        },
-        "backup_pull_max_age_days": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "doctor warns if the last backup pull to an offsite machine is older than this."
         }
       }
     },

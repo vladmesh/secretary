@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,8 +31,6 @@ class BackupPolicy:
     kind: BackupKind
     components: tuple[ComponentPolicy, ...]
     forbidden_entries: tuple[str, ...]
-    max_age: timedelta
-    max_age_label: str
     retention_seconds: int | None
     restore_capability: str
 
@@ -88,8 +85,6 @@ CORE_POLICY = BackupPolicy(
         f"{ARCHIVE_ROOT}/secretary-data/artifacts/inventory.json",
         f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json",
     ),
-    max_age=timedelta(days=1),
-    max_age_label="1d",
     retention_seconds=None,
     restore_capability="normalized-core",
 )
@@ -121,8 +116,6 @@ FULL_POLICY = BackupPolicy(
         ),
     ),
     forbidden_entries=(),
-    max_age=timedelta(hours=48),
-    max_age_label="48h",
     retention_seconds=48 * 60 * 60,
     restore_capability="full-snapshot",
 )

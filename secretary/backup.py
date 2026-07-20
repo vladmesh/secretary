@@ -27,17 +27,13 @@ from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
-    BACKUPS_MAX_BYTES,
     BackupKind,
     build_components_manifest,
     policy_for,
     should_skip_data_entry,
 )
 from secretary.backup_retention import (
-    BackupHealth,
     apply_retention as _apply_retention,
-    backup_archives as _backup_archives,
-    check_backup_health as _check_backup_health,
     remove_path_quietly as _remove_path_quietly,
 )
 from secretary.backup_verify import VerifyResult, verify_backup
@@ -201,20 +197,6 @@ def create_backups(
     if missing:
         raise RuntimeError("archive was not created")
     return results
-
-
-def check_backup_health(
-    data_dir: Path,
-    *,
-    now: datetime | None = None,
-    max_bytes: int = BACKUPS_MAX_BYTES,
-) -> BackupHealth:
-    return _check_backup_health(
-        data_dir,
-        now=now,
-        max_bytes=max_bytes,
-        archive_loader=_backup_archives,
-    )
 
 
 def _reject_claimed_worker_context() -> None:

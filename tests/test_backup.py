@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.backup import check_backup_health, create_backup, create_backups, verify_backup
+from secretary.backup import create_backup, create_backups, verify_backup
 from secretary._fsutil import sha256_file
 from secretary.data import DataExport
 
@@ -704,59 +704,6 @@ class BackupTests(unittest.TestCase):
             self.assertFalse(old_core.exists())
             self.assertFalse(old_full.exists())
             self.assertTrue(recent_full.exists())
-
-    def test_backup_health_warns_for_stale_archives_and_large_directory(self):
-        from datetime import UTC, datetime
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            backups = root / "backups"
-            backups.mkdir()
-            core = backups / "secretary-backup-core-20260709T000000Z.tar"
-            full = backups / "secretary-backup-full-20260708T000000Z.tar"
-            core.write_bytes(b"core")
-            full.write_bytes(b"full")
-            fresh_mtime = datetime(2026, 7, 11, tzinfo=UTC).timestamp()
-            os.utime(core, (fresh_mtime, fresh_mtime))
-            os.utime(full, (fresh_mtime, fresh_mtime))
-
-            status = check_backup_health(
-                root,
-                now=datetime(2026, 7, 11, tzinfo=UTC),
-                max_bytes=1,
-            )
-
-        self.assertTrue(any("core archive is stale" in warning for warning in status.warnings))
-        self.assertTrue(any("full archive is stale" in warning for warning in status.warnings))
-        self.assertTrue(any("backup directory is large" in warning for warning in status.warnings))
-
-    def test_backup_health_warns_when_core_or_full_is_missing(self):
-        from datetime import UTC, datetime
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            (root / "backups").mkdir()
-
-            status = check_backup_health(root, now=datetime(2026, 7, 11, tzinfo=UTC))
-
-        self.assertIn("backup core archive is missing", status.warnings)
-        self.assertIn("backup full archive is missing", status.warnings)
-
-    def test_backup_health_warns_when_backup_dir_is_missing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status = check_backup_health(Path(tmpdir))
-
-        self.assertIn("backup directory is unavailable", status.warnings)
-
-    def test_backup_health_warns_when_backup_dir_is_unavailable(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            (root / "backups").mkdir()
-
-            with mock.patch("secretary.backup._backup_archives", side_effect=OSError("denied")):
-                status = check_backup_health(root)
-
-        self.assertIn("backup directory is unavailable", status.warnings)
 
     def test_verify_reports_missing_runs_state_sidecars(self):
         with tempfile.TemporaryDirectory() as tmpdir:

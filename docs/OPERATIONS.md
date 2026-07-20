@@ -2,11 +2,11 @@
 
 ## Текущее состояние
 
-Live ownership принадлежит `secretary`: production dispatcher, memory daemon, backup runtime и
-systemd timers работают из product checkout. `secretary-instance` хранит installation config,
-`secretary-data` хранит mutable data. Legacy checkouts и units удалены.
+Live ownership принадлежит `secretary`: production dispatcher, memory daemon и systemd timers
+работают из product checkout. `secretary-instance` хранит installation config, `secretary-data`
+хранит mutable data. Legacy checkouts и units удалены.
 
-Живой `doctor`, memory parity, task read/write и systemd backup были проверены после cutover.
+Живой `doctor`, memory parity и task read/write были проверены после cutover.
 Исторический журнал процедуры доступен в Git history и не является действующим runbook.
 
 ## Установка и проверка кода
@@ -21,8 +21,8 @@ python3 -m unittest
 не устанавливают unit, не создают Kanboard/Orca и не применяют host resources. Поддержанный
 автоматический installer является первым milestone [Roadmap](ROADMAP.md).
 
-Для проверки действующей установки использовать `doctor`, `reconcile plan`, `memory verify` и
-`backup verify` по контракту из [Protocols](PROTOCOLS.md).
+Для проверки действующей установки использовать `doctor`, `reconcile plan` и `memory verify` по
+контракту из [Protocols](PROTOCOLS.md).
 
 ## Runtime secrets
 
@@ -110,41 +110,42 @@ Freshness видна в `dispatcher production-observe` (поле `checkpoint`) 
 finding на `remote diverged`, на заблокированный гейт и на lag больше 60 минут (два пропущенных
 окна).
 
-## Текущий archive backup
+## Восстановление
+
+Единственный recovery contract — Git-backed checkpoint из [Recovery](RECOVERY.md). Живое
+восстановление идёт из приватного репозитория инстанса, без обязательного S3 transport; host
+`runtime.env` переносится вручную.
 
 ```bash
-python3 -m secretary backup create --instance INSTANCE --kind both
-python3 -m secretary backup verify ARCHIVE.tar [--strict]
-scripts/pull-backups-offsite.sh SSH_TARGET REMOTE_DATA_DIR LOCAL_BACKUP_DIR
-```
-
-`create` поддерживает `core`, `full` и `both` и пишет обычный tar archive в `backups/`; archive
-encryption не применяется. `verify` возвращает `0` для успешной проверки, `1` для findings либо
-strict warnings и `2` для недоступного archive. Retention оставляет последний core и удаляет full
-archives старше 48 часов.
-
-Offsite script запускается на внешней машине. Он переносит доступные `*.tar` через `rsync` с
-fallback на `scp`, не удаляет local copies и после успеха атомарно обновляет `last_fetch` на host.
-`doctor` использует configured max age для warning/finding.
-
-Этот archive path остаётся переходной страховкой, пока Git-backed checkpoint из
-[Recovery](RECOVERY.md) не достиг recovery parity. Основной контракт не требует обязательного S3
-transport и не переносит host `runtime.env`.
-
-## Archive restore
-
-```bash
-python3 -m secretary restore ARCHIVE.tar --instance INSTANCE [--dry-run]
+# install secretary; git clone <instance_remote>; заполнить runtime.env вручную
+python3 -m secretary bootstrap --empty --instance INSTANCE
 python3 -m secretary restore-board --instance INSTANCE
 python3 -m secretary memory reindex --instance INSTANCE
-python3 -m secretary reconcile plan --instance INSTANCE
+python3 -m secretary reconcile apply --instance INSTANCE
 python3 -m secretary restore-reconcile --instance INSTANCE
 python3 -m secretary doctor --instance INSTANCE
 ```
 
-Restore публикует data root только после успешной проверки и extraction в staging. Board import,
-memory reindex и host reconcile являются отдельными handoff стадиями. До их завершения `doctor`
-сохраняет findings. Vector index является derived state и не входит в backup canon.
+`bootstrap --empty` создаёт пустой data-layout, дальше board import, memory reindex и host reconcile
+идут отдельными стадиями. Board восстанавливается из `state/board` checkpoint, memory index
+пересобирается из canon `state/memory/facts`. Vector index является derived state и в canon не
+входит. До завершения стадий `doctor` держит restore findings; на выходе счётчики board/memory/runs
+совпадают с источником.
+
+## Опциональный cold archive
+
+`backup create`/`backup verify` остаются ручным инструментом на случай выгрузки сырья, не
+recovery-контрактом. Автоматического таймера, offsite-переноса и doctor-гейта у него больше нет.
+
+```bash
+python3 -m secretary backup create --instance INSTANCE --kind both
+python3 -m secretary backup verify ARCHIVE.tar [--strict]
+```
+
+`create` пишет обычный tar в `backups/` (`core`, `full`, `both`), без шифрования. `verify`
+возвращает `0` при успехе, `1` для findings или strict warnings, `2` для недоступного archive.
+Восстановление из такого архива по-прежнему доступно через `secretary restore ARCHIVE.tar`, но это
+переходная страховка, а не основной путь.
 
 ## Авто-мёрж зелёных карточек
 
@@ -206,8 +207,8 @@ red в рамках одной попытки выглядит для `TaskWrite
 [packaging/systemd/README.md](../packaging/systemd/README.md). Юниты раскатывает
 `secretary reconcile apply`; ручная установка больше не нужна и не даёт ownership.
 
-Production dispatcher timer запускает one-shot tick. Memory, backup, curator, steward и retro
-должны иметь ровно одного scheduler owner.
+Production dispatcher timer запускает one-shot tick. Memory, curator, steward и retro должны иметь
+ровно одного scheduler owner.
 
 ## Upgrade
 

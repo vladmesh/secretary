@@ -55,8 +55,8 @@ install secretary
 
 Приватный instance repository становится автоматическим durable checkpoint конфигурации и
 нормализованного состояния. Основной recovery path не требует отдельного S3 bucket или backup
-host. Archive backup остаётся переходной страховкой до достижения parity, а не вторым
-равноправным контрактом.
+host. После dry-run проверки restore-from-git archive backup, offsite и backup-таймер выведены из
+основного пути; archive остаётся ручной переходной страховкой, а не вторым равноправным контрактом.
 
 ### Пользовательский путь
 
