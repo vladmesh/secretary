@@ -52,9 +52,11 @@ skill = "/steward deep-sweep"
 [variants.deep-sweep.systemd]
 # Fixed, deliberately not-round time so it never coincides with retro's daily pass (00:00 +
 # <=5min jitter, see retro/automation.toml) or the :00-:03 crowd (curator/pipeline).
-# Time-only systemd OnCalendar shorthand (no date field, so no internal space — provision.py's
-# `_timer_unit` splits `calendar` on whitespace to emit one OnCalendar line per space-separated
-# spec, the same convention pipeline/automation.toml uses for its two-offset 3-min cadence; a
-# spec with its own internal space would get split apart and break).
+# Time-only systemd OnCalendar shorthand (no date field, so no internal space). The timer itself is
+# a static packaged unit (packaging/systemd/secretary-steward-deep-sweep.timer), installed by
+# `secretary reconcile apply` / `secretary upgrade`; this field is the recorded canon that unit must
+# match (and the cadence runtime/health.py reads for staleness). A space-separated `calendar` maps
+# to one OnCalendar line per spec, the same convention pipeline/automation.toml uses for its
+# two-offset 3-min cadence; keep any single spec free of an internal space so that split stays clean.
 calendar = "03:47:00"
 randomized_delay_sec = 600

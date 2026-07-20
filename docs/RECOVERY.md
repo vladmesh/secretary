@@ -41,7 +41,12 @@ recovery checkpoint. Между коммитами live-состояние оп�
 - raw Kanboard dumps (`board/kanboard-raw-*`);
 - vector index (`memory/index.sqlite`), derived exports (`memory/export.ndjson`);
 - transcripts, artifacts, backups;
-- терминалы, worktrees, generated host state.
+- терминалы, worktrees, generated host state (systemd units из `packaging/systemd/` и Orca-
+  автоматизации фоновых ролей curator/retro/steward). Каноном для них служит продукт, а не
+  checkpoint: юниты берутся из `packaging/systemd/`, а расписание/диспетчеризация автоматизаций —
+  из `triggered_agents/agents/<role>/automation.toml`. `secretary reconcile apply` / `secretary
+  upgrade` пере-материализуют их идемпотентно на провижининге и recovery (match Orca-автоматизации
+  по `name`, edit in place, id/юнит стабильны), поэтому в checkpoint они не входят.
 
 Board export держим только в `cards.ndjson` (построчный diff). Дубль `cards.json` в checkpoint
 не входит.

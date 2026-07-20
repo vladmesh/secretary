@@ -11,6 +11,7 @@ from pathlib import Path
 from secretary import upgrade
 from secretary.automations import (
     AutomationSpec,
+    create_argv,
     drifted_fields,
     load_specs,
     plan_automations,
@@ -402,6 +403,15 @@ class AutomationSpecTests(unittest.TestCase):
         self.assertNotIn("pipeline", specs)
         self.assertEqual(specs["steward"].prompt, "/steward")
         self.assertTrue(specs["steward"].workspace.endswith("/secretary/steward"))
+
+    def test_every_background_role_disables_its_orca_trigger(self):
+        # The systemd timer is the sole schedule owner on the headless box; the Orca automation
+        # itself stays --disabled so a non-headless orca (or a GUI re-enable) cannot double-fire a
+        # role alongside its timer. retro used to ship without this and would be created --enabled.
+        specs = {spec.name: spec for spec in load_specs(upgrade.default_product_root())}
+        for role in ("curator", "retro", "steward"):
+            self.assertFalse(specs[role].enabled, f"{role} Orca automation must be disabled")
+            self.assertIn("--disabled", create_argv(specs[role]))
 
 
 class UpgradeStepTests(unittest.TestCase):

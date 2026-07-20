@@ -184,17 +184,18 @@ def ci_expected(project: str) -> bool:
 
 
 # --- Agent worktrees (curator/pipeline/retro/steward's own worktrees, not a task workspace) ---
-# Each triggered-agent gets its own named Orca worktree under AGENTS_ROOT (deploy/provision.py
-# creates it, pinned to origin/main at provision time). Agents never commit to this repo, so from
-# then on the worktree only needs to move forward with origin — the dispatcher's precheck does
-# that on every tick instead of a human doing it by hand after every push.
+# Each triggered-agent gets its own named Orca worktree under AGENTS_ROOT (provisioned at
+# install/bootstrap, pinned to origin/main). Agents never commit to this repo, so from then on the
+# worktree only needs to move forward with origin — `secretary upgrade` fast-forwards it, and the
+# dispatcher's precheck does the same on every tick instead of a human doing it by hand after every
+# push.
 AGENTS_ROOT = WORKSPACES_ROOT / "secretary"
 _AGENTS_SPEC_DIR = Path(__file__).resolve().parents[2] / "agents"
 
 
 def list_agent_worktrees() -> list[tuple[str, str]]:
     """(name, path) for every triggered-agent with a spec (triggered_agents/agents/<name>/
-    automation.toml — the same set deploy/provision.py provisions) whose own worktree already
+    automation.toml — the same set `secretary upgrade` fast-forwards) whose own worktree already
     exists on disk under AGENTS_ROOT. An agent not yet provisioned has nothing to fast-forward, so
     it's silently absent here rather than warned about."""
     names = sorted(p.name for p in _AGENTS_SPEC_DIR.iterdir() if (p / "automation.toml").is_file())
@@ -532,7 +533,7 @@ def terminal_kind(head: str | None) -> str | None:
 
 def ensure_trust(workspace: str) -> None:
     """Проставить folder trust Claude Code для свежего worktree. Без этого голова виснет на
-    интерактивном вопросе «доверяешь ли папке» (та же логика — deploy/provision.py у агентов)."""
+    интерактивном вопросе «доверяешь ли папке» (та же логика — worktree provisioning у агентов)."""
     try:
         claude_env.ensure_trust(CLAUDE_JSON, workspace)
     except claude_env.ClaudeConfigError as e:

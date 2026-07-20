@@ -18,6 +18,12 @@ precheck = "python3 -m triggered_agents retro precheck"
 # Orca's own rrule does not tick in headless `orca serve`; kept for correctness but the real
 # clock is the systemd timer below.
 orca = "daily"
+# secretary-retro.timer is the sole schedule owner: a non-headless orca (its rrule DOES tick there)
+# or a manual re-enable in the GUI must not fire /retro a second time alongside the timer. Same
+# reasoning as curator/steward. `secretary upgrade` reads this and passes --disabled on every
+# create/edit; a manual diagnostic `orca automations run <id>` is unaffected — it dispatches on
+# demand regardless of this flag.
+enabled = false
 
 [systemd]
 # The actual scheduler on this headless box; packaged as secretary-<name>.timer. Retro is a

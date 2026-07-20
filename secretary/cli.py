@@ -407,8 +407,11 @@ def run_doctor(args: argparse.Namespace) -> int:
 
     host_incomplete = False
     collected_host: CollectResult | None = None
-    if not args.offline and (not args.dry_run or args.host or args.host_fixture):
+    inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
+    if inspect_host:
         host_incomplete, collected_host = print_host_inventory(report, args)
+
+    print_background_automations(inspect=inspect_host)
 
     dispatcher_findings = print_dispatcher_status(report, collected_host, inspect_live=not args.offline)
     checkpoint_findings = print_checkpoint_status(report)
@@ -1003,6 +1006,52 @@ def _print_kind(kind: str, diff: KindDiff) -> None:
     print(f"  matched: {_join(diff.matched)}")
     print(f"  missing-on-host: {_join(diff.missing_on_host)}")
     print(f"  unmanaged-on-host: {_join(diff.unmanaged_on_host)}")
+
+
+def print_background_automations(*, inspect: bool) -> None:
+    """Read-only view of the background-role Orca automations (curator/retro/steward) as managed
+    resources, mirroring the host inventory: which shipped ``automation.toml`` specs are currently
+    reconciled on the live host and which have drifted or are not provisioned yet.
+
+    Product-level (the specs are the same for every instance), so unlike the other doctor sections
+    it takes no instance ``report``.
+
+    ``secretary upgrade`` owns them — created and repointed from the spec, matched by ``name`` so
+    the automation id stays stable across re-provisions — the same way ``reconcile apply`` owns the
+    packaged timers. Doctor only reports their state so an operator can see a role a
+    provisioning/recovery run has not caught up on. Like ``missing-on-host`` in the host inventory,
+    a missing or drifted automation is printed for visibility but does not by itself flip doctor's
+    exit code: that stays reserved for a kind that could not be inspected at all. Best-effort — an
+    unreadable Orca inventory prints as unavailable, never as "every role missing".
+    """
+    from secretary.automations import (
+        AutomationError,
+        OrcaAutomationClient,
+        load_specs,
+        plan_automations,
+    )
+    from secretary.upgrade import default_product_root
+
+    specs = load_specs(default_product_root())
+    if not specs:
+        return
+    print("")
+    print("background automations: read-only")
+    if not inspect:
+        print("  not inspected")
+        return
+    try:
+        live = OrcaAutomationClient().list()
+    except AutomationError as exc:
+        print(f"  unavailable: {exc}")
+        return
+    for change in plan_automations(specs, live):
+        if change.action == "unchanged":
+            print(f"  {change.name}: managed")
+        elif change.action == "create":
+            print(f"  {change.name}: missing (not provisioned)")
+        else:  # repoint
+            print(f"  {change.name}: drifted ({', '.join(change.drifted)})")
 
 
 def _join(names: list[str]) -> str:

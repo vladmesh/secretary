@@ -145,6 +145,49 @@ class CliTests(unittest.TestCase):
         (state / "production-state.json").write_text(json.dumps(production), encoding="utf-8")
         return instance_dir
 
+    def test_doctor_lists_background_automations_but_offline_leaves_them_uninspected(self):
+        code, output = self.run_cli(
+            ["doctor", "--dry-run", "--offline", "--instance", str(EXAMPLE_INSTANCE)]
+        )
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("background automations: read-only", output)
+        self.assertIn("not inspected", output)
+        # Offline must never shell out to orca, so no role can be reported as reconciled or missing.
+        self.assertNotIn(": managed", output)
+        self.assertNotIn(": missing", output)
+
+    def test_background_automations_report_missing_and_managed_roles(self):
+        from secretary.cli import print_background_automations
+
+        # No live automation of any name -> every shipped background role reads as not provisioned.
+        with mock.patch(
+            "secretary.automations.OrcaAutomationClient.list", return_value=[]
+        ):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                print_background_automations(inspect=True)
+        rendered = out.getvalue()
+        self.assertIn("background automations: read-only", rendered)
+        for role in ("curator", "retro", "steward"):
+            self.assertIn(f"{role}: missing (not provisioned)", rendered)
+
+    def test_background_automations_report_an_unreadable_inventory_as_unavailable(self):
+        from secretary.automations import AutomationError
+        from secretary.cli import print_background_automations
+
+        with mock.patch(
+            "secretary.automations.OrcaAutomationClient.list",
+            side_effect=AutomationError("list automations: orca not found"),
+        ):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                print_background_automations(inspect=True)
+        rendered = out.getvalue()
+        self.assertIn("unavailable: list automations: orca not found", rendered)
+        # A hiccup reading Orca must not masquerade as "every role missing".
+        self.assertNotIn("missing (not provisioned)", rendered)
+
     def test_doctor_prints_checkpoint_freshness(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = self.seed_checkpoint_instance(

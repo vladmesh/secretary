@@ -54,9 +54,9 @@ _AGENTS_PROJECT = shared_state.AGENTS_PROJECT
 # `_orphan_signals` already does for other agents' worktrees via WORKSPACES_ROOT, never through
 # AgentState/STATE_ROOT (those are per-process by design, not meant to reach another agent).
 # TA_PIPELINE_STATE_DIR overrides the whole thing for tests or a host where the layout diverges.
-# The worktree name "pipeline" is fixed by automation.toml and survives redeploy: provision.py
-# hard-resets each worktree's CODE to origin/main on every run but never touches the gitignored
-# state/ dir underneath it.
+# The worktree name "pipeline" is fixed by automation.toml and survives redeploy: `secretary
+# upgrade` fast-forwards each worktree's CODE to origin/main on every run but never touches the
+# gitignored state/ dir underneath it.
 def resolve_pipeline_state_dir() -> Path:
     """Recomputed on every call (not baked into a constant at import time) so tests can patch
     WORKSPACES_ROOT and see this follow, the same way _orphan_signals already does."""
