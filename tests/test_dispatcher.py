@@ -1856,6 +1856,28 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("P1: use a time ceiling, not the terminal title", doc)
         self.assertNotIn("stale finding", doc)  # only the latest red
 
+    def test_review_verdict_request_id_is_distinct_per_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "description": "body",
+                "workspace": {"base_branch": "main"},
+            }
+            first = host._review_prompt(task, "attempt-1", 3)
+            later = host._review_prompt(task, "attempt-1", 7)
+
+        def rid(text: str, kind: str) -> str:
+            start = text.index(f"--kind {kind} --request-id ") + len(f"--kind {kind} --request-id ")
+            return text[start:].split()[0]
+
+        # Same attempt, different review round: the verdict request-id must differ, or a second
+        # round's verdict is idempotently deduped against the first and never registers, leaving
+        # the dispatcher waiting for a verdict forever.
+        self.assertNotEqual(rid(first, "red"), rid(later, "red"))
+        self.assertNotEqual(rid(first, "green"), rid(later, "green"))
+
     def test_complete_green_publishes_branch_and_fast_forwards_checkout(self) -> None:
         from types import SimpleNamespace
 

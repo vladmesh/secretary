@@ -256,7 +256,7 @@ class CommandHostRuntime:
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
         review_file = Path(record.workspace) / "REVIEW.md"
-        self._write_prompt(review_file, self._review_prompt(task, record.attempt_id))
+        self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
         return self._launch(
             record.workspace,
             f"{task['ref']} review",
@@ -485,9 +485,13 @@ class CommandHostRuntime:
         ]
         return "\n".join(sections)
 
-    def _review_prompt(self, task: dict[str, Any], attempt_id: str) -> str:
-        green_request = _attempt_request_id(attempt_id, "review-green", task["ref"])
-        red_request = _attempt_request_id(attempt_id, "review-red", task["ref"])
+    def _review_prompt(self, task: dict[str, Any], attempt_id: str, review_baseline: int = 0) -> str:
+        # review_baseline discriminates the request-id per review round: a rework reuses the same
+        # attempt_id, so without it a second round's verdict is idempotently deduped against the
+        # first and never registers, leaving the dispatcher waiting for a verdict forever.
+        round_key = str(review_baseline)
+        green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], round_key)
+        red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], round_key)
         return "\n".join([
             f"# Review {task['ref']}",
             "",
