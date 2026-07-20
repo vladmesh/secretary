@@ -96,6 +96,27 @@ def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
 
 
+RUNTIME_TAILS = ("secretary-data",)
+
+
+def _durability_dirt(porcelain: str) -> list[str]:
+    """Porcelain lines that count against durability.
+
+    Untracked runtime tails are dropped: they belong to the secretary installation,
+    not to the worker's project, and a worker cannot commit its way out of them.
+    """
+    dirt: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("?? "):
+            path = line[3:].strip().strip('"').rstrip("/")
+            if path in RUNTIME_TAILS or any(path.startswith(f"{tail}/") for tail in RUNTIME_TAILS):
+                continue
+        dirt.append(line)
+    return dirt
+
+
 class InstanceCatalog:
     def __init__(self, instance_path: Path) -> None:
         report = validate_instance(instance_path)
@@ -294,7 +315,7 @@ class CommandHostRuntime:
             ["git", "-C", str(workspace), "status", "--porcelain"],
             "git status",
         )
-        if completed.stdout.strip():
+        if _durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
 
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:

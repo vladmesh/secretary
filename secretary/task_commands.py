@@ -13,6 +13,37 @@ from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
+def _add_data_dir_args(parser) -> None:
+    """Data dir is pinned to the installation, not to the process CWD.
+
+    A worker runs the task protocol from its own project workspace; a CWD-relative
+    default would drop the audit trail into that workspace and leave it dirty.
+    """
+    parser.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR"))
+    parser.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+    )
+
+
+def resolve_data_dir(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "data_dir", None)
+    if explicit:
+        return str(Path(explicit).expanduser())
+    instance = Path(getattr(args, "instance", None) or DEFAULT_INSTANCE).expanduser()
+    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
+    try:
+        loaded = load_config(instance_file)
+    except ConfigError as exc:
+        raise TaskError("usage", f"cannot resolve data dir from {instance_file}: {exc}; pass --data-dir", 2) from None
+    data_dir = loaded.get("data_dir") if isinstance(loaded, dict) else None
+    if not isinstance(data_dir, str) or not data_dir:
+        raise TaskError("usage", f"{instance_file} has no usable data_dir; pass --data-dir", 2)
+    resolved = Path(data_dir).expanduser()
+    return str(resolved if resolved.is_absolute() else instance_file.parent / resolved)
+
+
 def add_task_subcommands(subparsers) -> None:
     task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
     task_subcommands = task.add_subparsers(dest="task_command")
@@ -30,13 +61,8 @@ def add_task_subcommands(subparsers) -> None:
     task_create = task_subcommands.add_parser("create")
     task_create.add_argument("--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro"))
     task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
-    task_create.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
+    _add_data_dir_args(task_create)
     task_create.add_argument("--request-id")
-    task_create.add_argument(
-        "--instance",
-        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
-    )
     task_create.add_argument("--project", required=True)
     task_create.add_argument("--type", required=True, choices=("code", "research"))
     task_create.add_argument("--title", required=True)
@@ -67,7 +93,7 @@ def add_task_subcommands(subparsers) -> None:
             choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro"),
         )
         command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
-        command.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
+        _add_data_dir_args(command)
         command.add_argument("--request-id")
         command.add_argument("--body-file")
         if name == "report":
@@ -82,7 +108,7 @@ def add_task_subcommands(subparsers) -> None:
     task_claim.add_argument("--ref", required=True)
     task_claim.add_argument("--role", required=True, choices=("dispatcher",))
     task_claim.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
-    task_claim.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
+    _add_data_dir_args(task_claim)
     task_claim.add_argument("--request-id")
     task_claim.add_argument("--worker", required=True)
     task_claim.add_argument("--resolved-head", default="")
@@ -92,10 +118,10 @@ def add_task_subcommands(subparsers) -> None:
     task_claim.add_argument("--cap", type=int, default=3)
     task_claim.set_defaults(handler=run_task_claim)
     reconcile_audit = task_subcommands.add_parser("reconcile-audit")
-    reconcile_audit.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
+    _add_data_dir_args(reconcile_audit)
     reconcile_audit.set_defaults(handler=run_task_reconcile_audit)
     verify_audit = task_subcommands.add_parser("verify-audit")
-    verify_audit.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR", "secretary-data"))
+    _add_data_dir_args(verify_audit)
     verify_audit.set_defaults(handler=run_task_verify_audit)
     task.set_defaults(handler=not_implemented_task)
 
@@ -136,7 +162,8 @@ def _read_body(path: str | None) -> str:
 def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
     try:
         body = _read_body(getattr(args, "body_file", None) or getattr(args, "reason_file", None))
-        result = operation(TaskWriter(KanboardClient(), data_dir=args.data_dir), body, args.actor or args.role)
+        writer = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args))
+        result = operation(writer, body, args.actor or args.role)
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -152,7 +179,7 @@ def run_task_create(args: argparse.Namespace) -> int:
     try:
         _validate_codex_mode_for_create(args)
         description = _read_body(args.body_file) if args.body_file else args.description
-        writer = TaskWriter(KanboardClient(), data_dir=args.data_dir)
+        writer = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args))
         result = writer.create(
             role=args.role,
             actor=args.actor or args.role,
@@ -211,7 +238,7 @@ def run_task_claim(args: argparse.Namespace) -> int:
 
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
     try:
-        repaired, unresolved = TaskWriter(KanboardClient(), data_dir=args.data_dir).reconcile()
+        repaired, unresolved = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args)).reconcile()
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -220,7 +247,11 @@ def run_task_reconcile_audit(args: argparse.Namespace) -> int:
 
 
 def run_task_verify_audit(args: argparse.Namespace) -> int:
-    status = TaskAudit(args.data_dir).status()
+    try:
+        status = TaskAudit(resolve_data_dir(args)).status()
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
     print(json.dumps(status, sort_keys=True, separators=(",", ":")))
     return 0 if status["ok"] else 1
 

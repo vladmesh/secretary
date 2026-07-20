@@ -56,6 +56,12 @@ Worker, reviewer и retro могут создавать только Ideas; PO �
 append-only pending audit event, затем сверяется с live board и только после этого считается
 committed. Unresolved pending write блокирует согласованный export и backup до `reconcile-audit`.
 
+Audit trail всегда пишется в data dir установки: `--data-dir`, иначе `SECRETARY_DATA_DIR`, иначе
+`data_dir` из instance config (`--instance` / `SECRETARY_INSTANCE`). Относительный `data_dir`
+резолвится от instance file, не от CWD, поэтому вызов из воркспейса чужого проекта не оставляет
+там `secretary-data/`. Если data dir не резолвится, команда падает с usage error вместо записи
+рядом с процессом.
+
 ## Production dispatcher
 
 Production runtime запускается одним tick или постоянным loop:

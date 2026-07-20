@@ -2026,6 +2026,70 @@ class HeadPromptTests(unittest.TestCase):
             self.assertIn("(no heredoc, no mktemp, no echo pipeline)", doc)
 
 
+class WorkerDurabilityTests(unittest.TestCase):
+    """verify_worker_result runs against a real git worktree.
+
+    A worker cannot commit a runtime tail the secretary CLI dropped into its workspace, so an
+    untracked `secretary-data/` must not read as uncommitted work (secretary-652)."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "worker@example.invalid"],
+            ["config", "user.name", "worker"],
+        ):
+            subprocess.run(["git", "-C", str(self.workspace), *args], check=True, capture_output=True)
+        (self.workspace / "code.py").write_text("print(1)\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.workspace), "commit", "-qm", "work"], check=True, capture_output=True
+        )
+        self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.record = DispatcherRecord(
+            worker="secretary-652-w1",
+            workspace=str(self.workspace),
+            handle="",
+            head="head",
+            review_head="review-head",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="working",
+            claimed_at=0.0,
+        )
+
+    def test_clean_commit_passes(self) -> None:
+        self.assertIsNone(self.host.verify_worker_result({}, self.record))
+
+    def test_audit_tail_from_the_task_cli_does_not_block_the_card(self) -> None:
+        board = self.workspace / "secretary-data" / "board"
+        board.mkdir(parents=True)
+        (board / "events.ndjson").write_text("{}\n", encoding="utf-8")
+        (board / ".audit.lock").write_text("", encoding="utf-8")
+        self.assertIsNone(self.host.verify_worker_result({}, self.record))
+
+    def test_real_uncommitted_work_still_blocks(self) -> None:
+        (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
+        with self.assertRaises(HostError):
+            self.host.verify_worker_result({}, self.record)
+
+    def test_other_untracked_files_still_block(self) -> None:
+        (self.workspace / "scratch.py").write_text("print(3)\n", encoding="utf-8")
+        with self.assertRaises(HostError):
+            self.host.verify_worker_result({}, self.record)
+
+    def test_tracked_secretary_data_still_blocks(self) -> None:
+        nested = self.workspace / "secretary-data-notes.md"
+        nested.write_text("prefix collision, not the runtime tail\n", encoding="utf-8")
+        with self.assertRaises(HostError):
+            self.host.verify_worker_result({}, self.record)
+
+
 class WaitWatchdogTests(unittest.TestCase):
     def setUp(self) -> None:
         _clear_env(
