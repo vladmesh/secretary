@@ -683,7 +683,11 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
     openai-sub died at the shell prompt within a minute and the dead-handle watchdog blocked the
     card — twice). Whole chain red -> no spawn this tick, the card waits in Validate."""
     project = card.get("project") or ""
-    spec = ops.show_card(ref).get("description", "")
+    # One read for both the spec and the comment history: the reviewer prompt carries the card's
+    # history itself, so a red round's findings and any PO amendment of the spec reach the next
+    # round's fresh head instead of depending on it deciding to fetch them (secretary-660).
+    card_view = ops.show_card(ref)
+    spec = card_view.get("description", "")
     review_title = naming.reviewer_title(naming.card_id(ref), card.get("title") or ref)
     preferred = _card_review_head(card)
     review_head = health.resolve_head(preferred, statuses)
@@ -696,7 +700,8 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
         base = worker.resolve_base_branch(project, card.get("base_branch") or "")
         review_md = reviewer.build_task(card, ref, pr, spec, base,
                                         branch=contrib[0] if contrib else None,
-                                        head_sha=contrib[1] if contrib else None)
+                                        head_sha=contrib[1] if contrib else None,
+                                        comments=card_view.get("comments") or [])
         ws, handle = worker.spawn_reviewer(
             project, _review_id(card), base, review_md, review_title,
             naming.worker_branch(ref), naming.reviewer_branch(ref),

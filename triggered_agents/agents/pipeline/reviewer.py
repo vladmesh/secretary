@@ -23,11 +23,128 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from . import naming
+from . import card_comments, model, naming, worker
 
 THERMO_SKILL = Path(os.environ.get(
     "TA_THERMO_SKILL",
     str(Path.home() / ".claude/skills/thermo-nuclear-code-quality-review/SKILL.md")))
+
+# Prior rounds of validation on this same card: the reviewer's own verdicts and the dispatcher's
+# note when a red one sent the card back for rework. These three are what makes round N aware that
+# round N-1 happened at all.
+_ROUND_MARKERS = (model.MARKER_REVIEW_GREEN, model.MARKER_REVIEW_RED, model.MARKER_REVIEW_RETURN)
+
+# The history is capped on two axes at once, because it grows on two axes at once: a card collects
+# many comments, and single comments (CI log dumps, full worker reports) run to tens of kilobytes.
+# A count cap alone still lets one log sheet swallow the prompt; a length cap alone still lets forty
+# short comments bury the spec. Caps are per-section since the sections are not equally valuable —
+# spec clarifications and prior verdicts are the reason for showing history at all, so they get
+# their own budget instead of competing with chatter for the tail of one shared list. Everything is
+# a tail: the newest comments are the ones that describe the state under review. `pipeline show`
+# stays the escape hatch for anything clipped.
+_SPEC_NOTE_LIMIT = 5     # same budget taskdoc gives the worker's operator context
+_ROUND_LIMIT = 6         # ~3 red rounds, each a verdict plus the dispatcher's return note
+_HISTORY_LIMIT = 10
+_COMMENT_CHARS = 2000
+
+
+def _clip(body: str) -> str:
+    if len(body) <= _COMMENT_CHARS:
+        return body
+    return (body[:_COMMENT_CHARS].rstrip()
+            + f"\n\n… обрезано, ещё {len(body) - _COMMENT_CHARS} символов "
+              "(полный текст — в `pipeline show`)")
+
+
+def _parse(comments: list[dict]) -> list[tuple[str, str, str]]:
+    """Card comments as (stamp, marker, body), scrubbed and clipped. Scrubbing runs here rather
+    than at the section level so no path into the prompt can skip it: a comment body is board text
+    that a worker or a CI log may have carried a token into, and REVIEW.md is written to disk in
+    the reviewer's workspace."""
+    out = []
+    for c in comments or []:
+        marker, body = card_comments.split_marker(worker.scrub_secrets((c.get("text") or "").strip()))
+        if not body:
+            continue
+        out.append((card_comments.format_ts(c.get("ts")), marker, _clip(body)))
+    return out
+
+
+def _entries(picked: list[tuple[str, str, str]]) -> list[str]:
+    lines = []
+    for ts, marker, body in picked:
+        lines.append(f"### {ts}" + (f" [{marker}]" if marker else ""))
+        lines.append("")
+        lines.append(body)
+        lines.append("")
+    return lines
+
+
+def _spec_notes(parsed: list[tuple[str, str, str]]) -> list[str]:
+    """PO/secretary/steward comments, rendered right under the spec. The card description is not
+    editable in this pipeline (`pipeline update` has no description flag), so a comment is the only
+    way the PO can amend a spec after creation — which makes these strictly newer than the text
+    above them, and the reviewer has to be told that rather than left to guess which wins."""
+    picked = [p for p in parsed if p[1] in card_comments.OPERATOR_MARKERS]
+    if not picked:
+        return []
+    dropped = len(picked) - _SPEC_NOTE_LIMIT
+    lines = [
+        "### Уточнения спеки комментариями",
+        "",
+        "Описание карточки выше после создания не редактируется, поэтому PO уточняет спеку "
+        "комментарием. Эти комментарии новее описания: где они расходятся, criterion задаёт "
+        "комментарий, а описание считается устаревшим в этой части. Прямые указания ревьюеру "
+        "здесь тоже обязательны к исполнению.",
+        "",
+    ]
+    if dropped > 0:
+        lines += [f"(последние {_SPEC_NOTE_LIMIT} из {len(picked)}; остальные — в `pipeline show`)", ""]
+    return lines + _entries(picked[-_SPEC_NOTE_LIMIT:])
+
+
+def _rounds(parsed: list[tuple[str, str, str]]) -> list[str]:
+    """Verdicts of earlier review rounds on this same card, plus the dispatcher's return notes.
+
+    Without this a red verdict is amnesic by construction: `_review_red` returns the card to In
+    progress and the next Validate entry spawns a brand-new head with a brand-new prompt, so round
+    N sees the worker's answer to round N-1's finding with no idea a finding existed. On
+    codegen_orchestrator-646 that cost a real miss — round 1 flagged a collision risk in a slug
+    rule, the worker replaced the rule, and round 2 read a description saying one thing and code
+    saying another, then passed it green as if the gap were nothing."""
+    picked = [p for p in parsed if p[1] in _ROUND_MARKERS]
+    if not picked:
+        return []
+    dropped = len(picked) - _ROUND_LIMIT
+    lines = [
+        "## Прошлые раунды ревью этой карточки",
+        "",
+        "Эта карточка уже проходила ревью — ниже вердикты прошлых раундов и причины возвратов "
+        "диспетчера. Это НЕ описание текущего кода: воркер работал уже после них. Для каждой "
+        "прошлой находки реши, закрыта она в текущем состоянии или нет. И если текущий код "
+        "расходится со спекой именно потому, что так потребовал прошлый раунд, — это не новый "
+        "дефект, а расхождение спеки с кодом: зафиксируй его явно в вердикте, не пропусти молча "
+        "и не выдавай за находку.",
+        "",
+    ]
+    if dropped > 0:
+        lines += [f"(последние {_ROUND_LIMIT} из {len(picked)}; остальные — в `pipeline show`)", ""]
+    return lines + _entries(picked[-_ROUND_LIMIT:])
+
+
+def _history(parsed: list[tuple[str, str, str]]) -> list[str]:
+    """Everything else on the card, newest tail first-class: worker reports, CI verdicts, blocked
+    notes. The comments already rendered as spec notes or prior rounds are left out so the two
+    sections that matter most are not diluted by their own duplicates."""
+    shown = card_comments.OPERATOR_MARKERS | set(_ROUND_MARKERS)
+    picked = [p for p in parsed if p[1] not in shown]
+    if not picked:
+        return []
+    dropped = len(picked) - _HISTORY_LIMIT
+    lines = ["## Остальная история карточки", ""]
+    if dropped > 0:
+        lines += [f"(последние {_HISTORY_LIMIT} из {len(picked)}; остальные — в `pipeline show`)", ""]
+    return lines + _entries(picked[-_HISTORY_LIMIT:])
 
 
 def _quality_lens() -> str:
@@ -42,20 +159,26 @@ def _quality_lens() -> str:
 
 
 def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str,
-              branch: str | None = None, head_sha: str | None = None) -> str:
+              branch: str | None = None, head_sha: str | None = None,
+              comments: list[dict] | None = None) -> str:
     """REVIEW.md for the reviewer head: what to review, the three lenses, the blocking semantics,
     and how to emit the verdict + Идеи cards through board-CLI. `spec` is the card description.
     `pr` is the card's PR link — or None for a contrib (fork) card, which has no PR in this
     pipeline by definition (a human opens it against upstream from the pushed branch afterward);
     `branch`/`head_sha` then point at what to review instead (the worker's own report:done
-    protocol line, validate._contrib_ref)."""
+    protocol line, validate._contrib_ref). `comments` is the card's comment list (ops.show_card),
+    rendered into the prompt: the reviewer must not depend on choosing to go fetch its own history
+    (see _rounds and _spec_notes)."""
     project = card.get("project", "?")
+    parsed = _parse(comments or [])
     review_branch = naming.reviewer_branch(ref)
     if pr:
         what_to_read = [
             f"PR карточки: {pr}",
-            f"Отчёт воркера (report:done) — на карточке: `python3 -m triggered_agents pipeline "
-            f"show --ref {ref}`, роль не нужна. В нём заявленные живые проверки (см. ниже).",
+            f"Отчёт воркера (report:done) и вся история карточки вклеены ниже, отдельными "
+            f"разделами — читай их там, а не догадывайся сходить за ними. В отчёте — заявленные "
+            f"живые проверки (см. ниже). За полным текстом того, что помечено обрезанным: "
+            f"`python3 -m triggered_agents pipeline show --ref {ref}`, роль не нужна.",
             f"База проекта: `{base_branch}`.",
             f"Воркспейс уже стоит на состоянии PR — своя ветка `{review_branch}` заведена от головы PR "
             "при подъёме, чекаутить/переключать ветку не нужно. Тебе доступен весь репо и полный PR, "
@@ -70,8 +193,10 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
         what_to_read = [
             f"Contrib-карточка (форк): PR в этом пайплайне не открывается — ветку в форк для "
             f"upstream-автора готовит человек. Ветка воркера: `{branch}`, голова: `{head_sha}`.",
-            f"Отчёт воркера (report:done) — на карточке: `python3 -m triggered_agents pipeline "
-            f"show --ref {ref}`, роль не нужна. В нём заявленные живые проверки (см. ниже).",
+            f"Отчёт воркера (report:done) и вся история карточки вклеены ниже, отдельными "
+            f"разделами — читай их там, а не догадывайся сходить за ними. В отчёте — заявленные "
+            f"живые проверки (см. ниже). За полным текстом того, что помечено обрезанным: "
+            f"`python3 -m triggered_agents pipeline show --ref {ref}`, роль не нужна.",
             f"База проекта: `{base_branch}`.",
             f"Воркспейс уже стоит на состоянии этой ветки — своя ветка `{review_branch}` заведена от "
             "той же головы при подъёме, чекаутить/переключать ветку не нужно. Тебе доступен весь "
@@ -100,6 +225,8 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
         "",
         spec or "(описание карточки пустое)",
         "",
+        *_spec_notes(parsed),
+        *_rounds(parsed),
         "## Три линзы (все обязательны)",
         "",
         "### 1. Спека-комплаенс",
@@ -124,6 +251,7 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
         "### 3. Качество кода (thermo-nuclear)",
         _quality_lens(),
         "",
+        *_history(parsed),
         "## Живые проверки из отчёта воркера",
         "",
         "Зелёный вердикт теперь сам достаточен для автомержа — ручной вычитки человека после "

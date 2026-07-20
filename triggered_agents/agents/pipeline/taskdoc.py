@@ -1,22 +1,7 @@
 """Render the one-time TASK.md handed to a pipeline worker."""
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
-
-from . import heads, naming, task_protocol, worker
-
-
-_COMMENT_MARKER_RE = re.compile(r"^\[([^\]]+)\]\n?(.*)\Z", re.DOTALL)
-_OPERATOR_MARKERS = {"po", "secretary", "steward", "steward:blocked-done"}
-
-
-def _format_comment_ts(ts) -> str:
-    """A comment's `date_creation` (unix seconds, from Kanboard) as a readable UTC stamp."""
-    try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    except (TypeError, ValueError):
-        return str(ts) if ts else "?"
+from . import card_comments, heads, naming, task_protocol, worker
 
 
 def _metadata(card: dict, base: str) -> list[str]:
@@ -42,7 +27,7 @@ def _history(comments: list[dict]) -> list[str]:
         return []
     lines = ["## История", ""]
     for c in comments:
-        lines.append(f"### {_format_comment_ts(c.get('ts'))}")
+        lines.append(f"### {card_comments.format_ts(c.get('ts'))}")
         lines.append("")
         lines.append((c.get("text") or "").strip())
         lines.append("")
@@ -52,17 +37,12 @@ def _history(comments: list[dict]) -> list[str]:
 def _operator_context(comments: list[dict], limit: int = 5) -> list[str]:
     picked = []
     for c in comments:
-        text = (c.get("text") or "").strip()
-        m = _COMMENT_MARKER_RE.match(text)
-        if not m:
+        marker, body = card_comments.split_marker((c.get("text") or "").strip())
+        if marker not in card_comments.OPERATOR_MARKERS:
             continue
-        marker = m.group(1)
-        if marker not in _OPERATOR_MARKERS:
-            continue
-        body = m.group(2).strip()
         if not body:
             continue
-        picked.append((_format_comment_ts(c.get("ts")), marker, body))
+        picked.append((card_comments.format_ts(c.get("ts")), marker, body))
     if not picked:
         return []
     lines = ["## Операторский контекст", ""]
