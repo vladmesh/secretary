@@ -751,6 +751,37 @@ class TaskWriter:
                 raise _CommittedWriteError() from exc
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
 
+    def archive(
+        self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
+    ) -> dict[str, Any]:
+        self._role(role, {"po"})
+        if not reason.strip():
+            raise TaskError("validation", "archive requires a non-empty reason", 2)
+
+        def mutation(task: dict[str, Any]) -> Any:
+            self._check_archivable(task)
+            try:
+                self.client.call(
+                    "createComment",
+                    task_id=_task_number(task),
+                    user_id=0,
+                    content=f"[archive]\n{reason}",
+                )
+                if not self.client.call("closeTask", task_id=_task_number(task)):
+                    raise TaskError("backend_error", "Kanboard rejected the archive", 1)
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+
+        return self._write(
+            "archived",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"reason_sha256": _digest(reason)},
+            mutation,
+        )
+
     def restore_card(
         self,
         *,
@@ -870,6 +901,9 @@ class TaskWriter:
         if event.get("kind") == "restored":
             self._finish_pending_restore(event, payload)
             return
+        if event.get("kind") == "archived":
+            self._finish_pending_archive(event)
+            return
         if event.get("kind") == "restored_comment":
             from secretary.task_restore import finish_pending_restore_comment
 
@@ -915,6 +949,24 @@ class TaskWriter:
         if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
+    def _finish_pending_archive(self, event: dict[str, Any]) -> None:
+        """Complete an archive whose comment or close committed before the reply was lost."""
+        ref = str(event.get("ref") or "")
+        if not ref:
+            raise TaskError("backend_error", "pending archive is missing its task ref", 1)
+        board_id, _, _ = self.reader._board()
+        raw = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
+        if not isinstance(raw, dict):
+            raise TaskError("not_found", "task was not found", 2)
+        if _task_is_active(raw):
+            task = self.reader.show(ref)
+            self._check_archivable(task)
+            if not self.client.call("closeTask", task_id=_task_number(task)):
+                raise TaskError("backend_error", "pending archive remains incomplete", 1)
+        raw = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
+        if isinstance(raw, dict) and _task_is_active(raw):
+            raise TaskError("backend_error", "pending archive remains incomplete", 1)
+
     def _finish_pending_restore(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
         from secretary.task_restore import finish_pending_restore
 
@@ -950,6 +1002,14 @@ class TaskWriter:
     def _role(role: str, allowed: set[str]) -> None:
         if role not in allowed:
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+
+    @staticmethod
+    def _check_archivable(task: dict[str, Any]) -> None:
+        state = task["state"]
+        if state in {"in_progress", "validate"}:
+            raise TaskError("live_work", "archive refuses a card with live worker or reviewer work", 3)
+        if task["claim"]["worker"] is not None:
+            raise TaskError("live_work", "archive refuses a card with an active claim", 3)
 
 
 def _text(value: Any) -> str:
@@ -1025,6 +1085,14 @@ def _is_steward_report(task: dict[str, Any]) -> bool:
 def _matches_optional(expected: Any, actual: Any) -> bool:
     expected_text = _text(expected)
     return not expected_text or actual == expected_text
+
+
+def _task_is_active(task: dict[str, Any]) -> bool:
+    active = task.get("is_active", task.get("status", 1))
+    try:
+        return int(active) != 0
+    except (TypeError, ValueError):
+        return True
 
 
 def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:

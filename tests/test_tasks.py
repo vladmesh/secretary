@@ -44,6 +44,11 @@ class FakeKanboard:
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
+            if params.get("status_id") == 1:
+                return [
+                    task for task in self.tasks
+                    if int(task.get("is_active", task.get("status", 1)) or 0) != 0
+                ]
             return self.tasks
         if method == "getTaskByReference":
             return next((task for task in self.tasks if task["reference"] == params["reference"]), None)
@@ -149,6 +154,31 @@ class TaskCliTests(unittest.TestCase):
         self.assertEqual(error["code"], "validation")
         self.assertIn("requires a Codex worker head", error["message"])
 
+    def test_archive_cli_reads_reason_file_and_closes_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            reason = root / "reason.md"
+            reason.write_text("backlog cleanup\n", encoding="utf-8")
+            client = WriteKanboard()
+            client.metadata[12]["claim"] = ""
+            output, errors = io.StringIO(), io.StringIO()
+            with mock.patch("secretary.task_commands.KanboardClient", return_value=client), \
+                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = main([
+                    "task", "archive",
+                    "--role", "po",
+                    "--ref", "secretary-468",
+                    "--data-dir", str(data_dir),
+                    "--reason-file", str(reason),
+                    "--request-id", "archive-cli",
+                ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue())["action"], "archived")
+        self.assertEqual(client.tasks[0]["is_active"], 0)
+
 
 class KanboardClientTests(unittest.TestCase):
     def test_rpc_error_is_sanitized(self) -> None:
@@ -169,6 +199,7 @@ class WriteKanboard(FakeKanboard):
     fail_metadata = False
     fail_move = False
     fail_update = False
+    fail_close = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -252,6 +283,14 @@ class WriteKanboard(FakeKanboard):
                 raise TaskError("backend_error", "Kanboard rejected the metadata write", 1)
             self.metadata[int(params["task_id"])].update(params["values"])
             return True
+        if method == "closeTask":
+            self.calls.append((method, params))
+            if self.fail_close:
+                raise TaskError("backend_error", "Kanboard rejected the archive", 1)
+            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
+            task["is_active"] = 0
+            task["date_modification"] = "1720000300"
+            return True
         return super().call(method, **params)
 
 
@@ -289,6 +328,98 @@ class TaskWriterTests(unittest.TestCase):
         self.client.fail_comments = True
         with self.assertRaisesRegex(TaskError, "rejected"):
             self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_archive_is_po_only_and_requires_reason(self) -> None:
+        with self.assertRaisesRegex(TaskError, "not permitted") as raised:
+            self.writer.archive(
+                role="worker", actor="w", reference="secretary-468", reason="cleanup"
+            )
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
+        with self.assertRaisesRegex(TaskError, "non-empty reason") as raised:
+            self.writer.archive(
+                role="po", actor="operator", reference="secretary-468", reason=" "
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
+    def test_archive_refuses_live_work_or_active_claim(self) -> None:
+        with self.assertRaisesRegex(TaskError, "active claim") as raised:
+            self.writer.archive(
+                role="po", actor="operator", reference="secretary-468", reason="cleanup"
+            )
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
+        self.client.metadata[12]["claim"] = ""
+        self.client.tasks[0]["column_id"] = 4
+        with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
+            self.writer.archive(
+                role="po", actor="operator", reference="secretary-468", reason="cleanup"
+            )
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
+    def test_archive_closes_card_and_writes_audit(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+
+        result = self.writer.archive(
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            reason="backlog cleanup",
+            request_id="archive-once",
+        )
+
+        self.assertEqual(result["action"], "archived")
+        self.assertEqual(self.client.tasks[0]["is_active"], 0)
+        self.assertEqual(
+            [call[0] for call in self.client.calls if call[0] in {"createComment", "closeTask"}],
+            ["createComment", "closeTask"],
+        )
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            event = json.loads(events.readline())
+        self.assertEqual(event["kind"], "archived")
+        self.assertEqual(event["payload"].keys(), {"reason_sha256"})
+        self.assertNotIn("secretary-468", [task["ref"] for task in self.writer.reader.list()])
+
+    def test_archive_retry_after_lost_close_reply_does_not_close_twice(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        self.client.fail_close = True
+        original_close = self.client.call
+
+        def close_then_lose(method: str, **params: object) -> object:
+            if method == "closeTask":
+                self.client.fail_close = False
+                original_close(method, **params)
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+            return original_close(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=close_then_lose):
+            with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+                self.writer.archive(
+                    role="po",
+                    actor="operator",
+                    reference="secretary-468",
+                    reason="backlog cleanup",
+                    request_id="archive-retry",
+                )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        closes = len([call for call in self.client.calls if call[0] == "closeTask"])
+
+        result = self.writer.archive(
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            reason="backlog cleanup",
+            request_id="archive-retry",
+        )
+
+        self.assertEqual(result["action"], "archived")
+        self.assertEqual(closes, len([call for call in self.client.calls if call[0] == "closeTask"]))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_pending_is_visible_and_reconciles_without_backend_retry(self) -> None:

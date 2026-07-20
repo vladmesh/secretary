@@ -181,6 +181,16 @@ class ExportCardsTests(unittest.TestCase):
 
         self.assertEqual(json.loads(json.dumps(cards)), cards)
 
+    def test_closed_non_done_card_does_not_satisfy_dependency(self):
+        def fake_call(method, **params):
+            if method == "getColumns":
+                return [{"id": 2, "title": "Ready"}, {"id": 6, "title": "Done"}]
+            raise AssertionError(method)
+
+        with mock.patch.object(ops, "call", side_effect=fake_call):
+            self.assertFalse(ops._is_done({"column_id": 2, "is_active": 0}, 1))
+            self.assertTrue(ops._is_done({"column_id": 6, "is_active": 0}, 1))
+
 
 if __name__ == "__main__":
     unittest.main()

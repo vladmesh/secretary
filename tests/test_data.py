@@ -335,7 +335,7 @@ class ExportTests(unittest.TestCase):
         self.assertIsNone(summary["raw_active_task_count"])
         self.assertEqual(summary["card_count"], 1)
 
-    def test_export_board_fails_when_raw_count_disagrees(self):
+    def test_export_board_records_stale_raw_count_without_failing(self):
         def fake_run(command, **_kwargs):
             return subprocess_completed(json.dumps([]))
 
@@ -351,8 +351,11 @@ class ExportTests(unittest.TestCase):
                 conn.execute("insert into projects (id, name) values (1, 'Pipeline')")
                 conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1)")
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                with self.assertRaisesRegex(RuntimeError, "board export count mismatch"):
-                    export_board(data_dir, command=["pipeline"])
+                export_board(data_dir, command=["pipeline"])
+            summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(summary["card_count"], 0)
+        self.assertEqual(summary["raw_active_task_count"], 2)
 
     def test_export_board_preserves_previous_snapshot_on_publish_error(self):
         cards_by_run = [

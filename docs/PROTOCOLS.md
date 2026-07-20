@@ -46,11 +46,20 @@ python3 -m secretary task list --project PROJECT
 python3 -m secretary task show --ref PROJECT-N
 python3 -m secretary task create --role po --project PROJECT --type code \
   --title TITLE --state ready --head codex-extra --codex-mode exec
+python3 -m secretary task archive --role po --ref PROJECT-N \
+  --reason-file REASON.md --request-id REQUEST_ID
 ```
 
 `create` принимает `--description` или `--body-file`, dependency, workspace и routing fields.
 Worker, reviewer и retro могут создавать только Ideas; PO выбирает Ready. `--codex-mode` допустим
 только для worker profile с adapter `codex`. Без override launch mode берётся из head profile.
+
+`archive` закрывает карточку в backend и убирает её из обычных active list/export без удаления
+истории Kanboard. Операция только для PO, требует непустую причину, пишет append-only audit и
+поддерживает идемпотентный retry/reconcile через `--request-id`. Архивировать можно только карточку
+без live work: In progress/Validate и карточки с активным claim отклоняются. Закрытая карточка из
+Done остаётся выполненной зависимостью; закрытая карточка из другой колонки не считается Done и не
+разблокирует `blocked_by`.
 
 Все write-команды проходят role guards и transition checks. Mutation сначала получает
 append-only pending audit event, затем сверяется с live board и только после этого считается

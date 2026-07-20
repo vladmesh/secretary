@@ -235,11 +235,12 @@ def _get_by_ref(reference: str) -> dict:
 
 
 def _is_done(task: dict, pid: int) -> bool:
-    """A card counts as done when it sits in the Done column or has been closed."""
-    if _column_title(pid, int(task["column_id"])) == "Done":
-        return True
-    active = task.get("is_active", task.get("status"))
-    return active is not None and int(active) == 0
+    """A card counts as done only if its last board column is Done.
+
+    Retention closes old Done cards in Kanboard. PO archive may close cards from other columns,
+    but that is not task completion and must not unblock successors.
+    """
+    return _column_title(pid, int(task["column_id"])) == "Done"
 
 
 def _blocked_by_chain(pid: int, ref: str) -> set[str]:

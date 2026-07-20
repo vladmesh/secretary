@@ -192,12 +192,6 @@ def export_board(
         board_dir,
         board_name=os.environ.get("TA_PIPELINE_BOARD", "Pipeline"),
     )
-    if raw_active_task_count is not None and raw_active_task_count != len(normalized):
-        raise RuntimeError(
-            "board export count mismatch: "
-            f"pipeline={len(normalized)} raw_active={raw_active_task_count}"
-        )
-
     summary = {
         "version": 1,
         "source": "triggered_agents pipeline",

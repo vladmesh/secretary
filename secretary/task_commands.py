@@ -84,6 +84,7 @@ def add_task_subcommands(subparsers) -> None:
         ("report", run_task_report),
         ("verdict", run_task_verdict),
         ("move", run_task_move),
+        ("archive", run_task_archive),
     ):
         command = task_subcommands.add_parser(name)
         command.add_argument("--ref", required=True)
@@ -102,6 +103,8 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "move":
             command.add_argument("--to", required=True, choices=("ideas", "ready", "in_progress", "validate", "blocked", "done"))
+            command.add_argument("--reason-file")
+        if name == "archive":
             command.add_argument("--reason-file")
         command.set_defaults(handler=handler)
     task_claim = task_subcommands.add_parser("claim")
@@ -216,6 +219,10 @@ def run_task_verdict(args: argparse.Namespace) -> int:
 
 def run_task_move(args: argparse.Namespace) -> int:
     return _run_task_write(args, lambda writer, body, actor: writer.move(role=args.role, actor=actor, reference=args.ref, target=args.to, reason=body, request_id=args.request_id))
+
+
+def run_task_archive(args: argparse.Namespace) -> int:
+    return _run_task_write(args, lambda writer, body, actor: writer.archive(role=args.role, actor=actor, reference=args.ref, reason=body, request_id=args.request_id))
 
 
 def run_task_claim(args: argparse.Namespace) -> int:
