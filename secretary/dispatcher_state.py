@@ -39,6 +39,15 @@ class DispatcherRecord:
     # rollup first went non-terminal, driving the pending watchdog.
     gate_state: str = ""
     gate_pending_since: float = 0.0
+    # Reviewer pane (secretary-651). The reviewer runs in its own split pane inside the worker's
+    # worktree, so its terminal handle must be tracked apart from `handle` (the worker's) or
+    # stopping one takes down the other and recovery cannot tell them apart. review_leaf is the
+    # pane's leafId: `terminal list` can hand back a different handle alias for the same pty, so
+    # the leaf is the stable token to re-find the pane by. review_commit pins the checkout the
+    # reviewer was pointed at; the merge gate refuses a verdict once HEAD has moved off it.
+    review_handle: str = ""
+    review_leaf: str = ""
+    review_commit: str = ""
     # Wait watchdogs (secretary-654): when the current wait for a worker report / review
     # verdict started, and how many times that wait has already respawned its head. Both
     # reset whenever the card enters a fresh wait of that kind.
@@ -57,7 +66,10 @@ class DispatcherRecord:
             "head": self.head,
             "attempt_id": self.attempt_id,
             "review_baseline": self.review_baseline,
+            "review_commit": self.review_commit,
+            "review_handle": self.review_handle,
             "review_head": self.review_head,
+            "review_leaf": self.review_leaf,
             "review_respawns": self.review_respawns,
             "review_waiting_since": self.review_waiting_since,
             "state": self.state,
@@ -82,6 +94,9 @@ class DispatcherRecord:
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
+            review_handle=str(payload.get("review_handle") or ""),
+            review_leaf=str(payload.get("review_leaf") or ""),
+            review_commit=str(payload.get("review_commit") or ""),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),

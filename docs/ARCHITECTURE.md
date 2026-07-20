@@ -49,8 +49,13 @@ Kanboard является текущим live task store. Все поддерж�
 разрешает routing, создаёт worker/reviewer lifecycle и сверяет board, workspace, report и review
 state перед переходами.
 
-Orca является текущим session manager и live terminal UI. Launch и cleanup ещё зависят от его
-конкретного API; целевой session protocol остаётся roadmap milestone. Head-specific render и
+Orca является текущим session manager и live terminal UI. Одна карточка занимает один worktree:
+воркер получает свой терминал, ревьюер запускается отдельной split-панелью в том же worktree, и оба
+handle хранятся в dispatcher state порознь. Split, а не второй `terminal create`, потому что на
+headless-серве созданный терминал приходит фоновой поверхностью и в уже открытом на клиенте
+worktree не материализуется. На старте ревью голова воркера гасится, а её коммит запоминается:
+merge-gate не принимает green-вердикт, если checkout с тех пор уехал. Launch и cleanup ещё зависят
+от конкретного API Orca; целевой session protocol остаётся roadmap milestone. Head-specific render и
 delivery локализованы в adapters, но текущий public contract ещё не является стабильным plugin API.
 
 ## Memory plane

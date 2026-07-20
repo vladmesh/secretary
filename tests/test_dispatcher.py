@@ -31,6 +31,7 @@ from secretary.dispatcher import (
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from secretary.dispatcher_types import ReviewLaunch, review_pane_label
 from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
@@ -182,6 +183,12 @@ class FakeHost:
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
         self.gate_error: Exception | None = None
+        # Reviewer pane bookkeeping (secretary-651): which handle each review was split off, which
+        # reviewer panes were closed on their own, and the commit the checkout reports. `commit` is
+        # what start_review pins; reassign it to model a checkout that moved under a green verdict.
+        self.split_from: list[str] = []
+        self.stopped_reviews: list[str] = []
+        self.commit = "c0ffee1234567890"
 
     def prepare_worker(
         self,
@@ -203,12 +210,19 @@ class FakeHost:
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
         }
 
-    def start_review(self, task: dict, record) -> str:
+    def start_review(self, task: dict, record) -> ReviewLaunch:
         self.calls.append("start_review")
         if self.fail_review_error is not None:
             raise self.fail_review_error
         self.reviews.append(task["ref"])
-        return f"review:{task['ref']}"
+        # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
+        # pinning the commit the reviewer judges.
+        self.split_from.append(record.handle)
+        return ReviewLaunch(
+            handle=f"review:{task['ref']}",
+            leaf=f"leaf:{task['ref']}",
+            commit=self.commit,
+        )
 
     def restart_worker(self, task: dict, record) -> str:
         self.calls.append("restart_worker")
@@ -252,6 +266,15 @@ class FakeHost:
     def stop(self, record) -> None:
         self.calls.append("stop")
         self.stopped.append(record.worker)
+
+    def stop_review(self, record) -> None:
+        self.calls.append("stop_review")
+        if record.review_handle:
+            self.stopped_reviews.append(record.review_handle)
+
+    def head_commit(self, record) -> str:
+        self.calls.append("head_commit")
+        return self.commit
 
     def teardown(self, record) -> None:
         self.calls.append("teardown")
@@ -1699,7 +1722,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(relaunched["action"], "rework-started")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        self.assertEqual(
+            self.host.stopped_reviews,
+            ["review:secretary-510-pilot"],
+            "a red verdict must end the reviewer's pane",
+        )
+        self.assertEqual(
+            self.host.stopped, [], "a red verdict must not stop the whole worktree's terminals"
+        )
         self.assertEqual(self.host.torn_down, [], "rework must reuse the workspace, not tear it down")
 
         self.writer.report(
@@ -1713,6 +1743,146 @@ class DispatcherRuntimeTests(unittest.TestCase):
         advanced = self.runtime.tick(self.selector)
 
         self.assertEqual(advanced["to"], "validate")
+
+    def _record_json(self) -> dict:
+        return self.runtime.state.load()["records"]["secretary-510-pilot"]
+
+    def test_review_persists_the_reviewer_pane_apart_from_the_worker_handle(self) -> None:
+        """secretary-651: both heads of a card live in one worktree, so one `handle` field cannot
+        address them. Stopping the reviewer used to mean stopping whatever `handle` last pointed
+        at, and after a launch that was the reviewer's own pane."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        record = self._record_json()
+        self.assertEqual(record["review_handle"], "review:secretary-510-pilot")
+        self.assertEqual(record["review_leaf"], "leaf:secretary-510-pilot")
+        self.assertEqual(record["review_commit"], self.host.commit)
+        self.assertNotEqual(record["review_handle"], record["handle"])
+        self.assertEqual(
+            self.host.split_from,
+            ["term:secretary-510-pilot-pilot"],
+            "the reviewer pane must be split off the worker's own pane",
+        )
+
+    def test_interrupted_review_tick_reuses_the_existing_pane(self) -> None:
+        """A tick killed between the launch and its verdict leaves the card in review_starting with
+        the pane already up. Recovery must find that pane and wait, not split a second reviewer into
+        the worktree next to the first."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["state"] = "review_starting"
+        self.runtime.state.save(payload)
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"], "a second reviewer was started")
+        self.assertEqual(self._record_json()["state"], "reviewing")
+
+    def test_interrupted_review_tick_restarts_a_pane_that_did_not_survive(self) -> None:
+        """The mirror case: the record says review_starting but no reviewer pane is up, so the
+        launch has to be redone rather than waited on forever."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["state"] = "review_starting"
+        self.runtime.state.save(payload)
+        self.host.review_running_result = False
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-restarted")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
+
+    def test_red_verdict_clears_the_reviewer_pane_from_the_record(self) -> None:
+        """The workspace comes back to the worker, so a stale reviewer handle left on the record
+        would make the next round's stop close a pane that is no longer the reviewer's."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix it",
+            request_id="review-red-pane",
+        )
+
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+
+        record = self._record_json()
+        self.assertEqual(record["review_handle"], "")
+        self.assertEqual(record["review_leaf"], "")
+        self.assertEqual(record["review_commit"], "")
+        self.assertEqual(record["handle"], "rework:secretary-510-pilot")
+        self.assertEqual(self.host.torn_down, [], "the checkout must survive a red verdict")
+
+    def test_green_verdict_for_a_moved_checkout_is_not_merged(self) -> None:
+        """The reviewer judged one commit; if the checkout has moved on, that verdict says nothing
+        about what would land. The card goes back to the worker instead of merging unreviewed work."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.host.commit = "0000000000000000"
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="looks good",
+            request_id="review-green-drifted",
+        )
+
+        bounced = self.runtime.tick(self.selector)
+
+        self.assertEqual(bounced["action"], "review-freeze-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.completed, [], "a verdict for another code state must not merge")
+        self.assertEqual(self.host.torn_down, [])
+        self.assertIn("другому состоянию кода", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_green_verdict_for_the_reviewed_checkout_merges_and_tears_down(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="looks good",
+            request_id="review-green-pinned",
+        )
+
+        done = self.runtime.tick(self.selector)
+
+        self.assertEqual(done["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+        self.assertEqual(self.host.torn_down, ["secretary-510-pilot-pilot"])
+
+    def test_review_bringup_failure_blocks_without_destroying_the_workspace(self) -> None:
+        """A split that fails must not park the card in `reviewing` with no reviewer behind it, and
+        must leave the worker's checkout alone — it is the only copy of the work."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
+
+        blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "host review failed")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertIn("review bring-up failed", task["comments"][-1]["body"])
+        self.assertNotIn("secretary-510-pilot", self.runtime.state.load()["records"])
+        self.assertEqual(self.host.torn_down, [], "a failed reviewer must not remove the checkout")
 
     def _reviewer_red_request_id(self) -> str:
         """The red request-id the dispatcher actually hands the reviewer, taken from the prompt
@@ -2856,3 +3026,279 @@ class DispatcherGateTests(unittest.TestCase):
         # a legacy commit status still counts
         self.assertEqual(_rollup([{"state": "success"}])[0], "SUCCESS")
         self.assertEqual(_rollup([{"state": "failure"}])[0], "FAILURE")
+
+
+class ReviewCatalog(FakeCatalog):
+    """FakeCatalog plus the head-launch surface the real bring-up path calls into."""
+
+    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+        return None
+
+    def head_launch(
+        self,
+        head: str,
+        prompt_file: str,
+        *,
+        workspace: str,
+        role: str,
+        codex_mode: str | None = None,
+        launch_prompt: str | None = None,
+    ):
+        from secretary.dispatcher_launcher import HeadLaunch
+
+        return HeadLaunch(f"run-{role}", prompt_after_start=False)
+
+
+class RecordingReviewHost(CommandHostRuntime):
+    """CommandHostRuntime with the orca CLI and git stubbed, so the reviewer bring-up runs for
+    real: anchor pick, split, label, worker freeze, pinned commit."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        terminals: list[dict] | None = None,
+        fail_ops: set[str] | None = None,
+    ) -> None:
+        super().__init__(ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.calls: list[list[str]] = []
+        self.fail_ops = fail_ops or set()
+        self.terminals = [
+            {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}
+        ] if terminals is None else terminals
+
+    def _run_json(self, args: list[str]) -> dict:
+        self.calls.append(args)
+        op = args[2] if args[:2] == ["orca", "terminal"] else ""
+        if op in self.fail_ops:
+            raise HostError(f"orca terminal {op} failed")
+        if op == "list":
+            return {"terminals": self.terminals}
+        if op == "split":
+            # The new pane joins the worktree's inventory, which is how the caller resolves its
+            # leafId afterwards.
+            self.terminals.append(
+                {"handle": "term-review", "leafId": "leaf-review", "title": None, "connected": True}
+            )
+            return {"split": {"handle": "term-review", "tabId": "tab-1", "paneRuntimeId": -1}}
+        if op == "create":
+            return {"terminal": {"handle": "term-created"}}
+        return {}
+
+    def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
+        self.calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="deadbeefcafe0000\n", stderr="")
+
+    def ops(self) -> list[str]:
+        return [call[2] for call in self.calls if call[:2] == ["orca", "terminal"]]
+
+    def call_for(self, op: str) -> list[str]:
+        return next(call for call in self.calls if call[:3] == ["orca", "terminal", op])
+
+
+class ReviewPaneTests(unittest.TestCase):
+    """secretary-651: the reviewer runs in a visible split pane of the worker's own worktree."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        _clear_env(self, "SECRETARY_DISPATCHER_REVIEW_COMMAND")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        self.task = {
+            "ref": "secretary-651",
+            "project": "secretary",
+            "description": "spec",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _record(self, handle: str = "term-worker") -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-651-w",
+            workspace=str(self.workspace),
+            handle=handle,
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="review_starting",
+            claimed_at=0.0,
+        )
+
+    def test_reviewer_is_split_off_the_worker_pane_and_labelled(self) -> None:
+        host = RecordingReviewHost(self.root)
+
+        launch = host.start_review(self.task, self._record())
+
+        split = host.call_for("split")
+        self.assertEqual(split[split.index("--terminal") + 1], "term-worker")
+        self.assertIn("--command", split)
+        rename = host.call_for("rename")
+        self.assertEqual(rename[rename.index("--terminal") + 1], "term-review")
+        self.assertEqual(rename[rename.index("--title") + 1], review_pane_label("secretary-651"))
+        self.assertEqual(launch.handle, "term-review")
+        self.assertEqual(launch.leaf, "leaf-review")
+        self.assertEqual(launch.commit, "deadbeefcafe0000")
+        self.assertNotIn("create", host.ops(), "the reviewer must not open its own terminal tab")
+        self.assertFalse(
+            [call for call in host.calls if "worktree" in call and "create" in call],
+            "the reviewer must reuse the worker's worktree, never make its own",
+        )
+
+    def test_reviewer_pane_carries_the_reference_and_the_role(self) -> None:
+        host = RecordingReviewHost(self.root)
+
+        host.start_review(self.task, self._record())
+
+        label = host.call_for("rename")[host.call_for("rename").index("--title") + 1]
+        self.assertIn("secretary-651", label)
+        self.assertIn("reviewer", label)
+
+    def test_worker_pane_is_shut_down_once_the_reviewer_is_up(self) -> None:
+        """Nothing else stops the worker head from editing the checkout mid-review."""
+        host = RecordingReviewHost(self.root)
+
+        host.start_review(self.task, self._record())
+
+        closed = host.call_for("close")
+        self.assertEqual(closed[closed.index("--terminal") + 1], "term-worker")
+        self.assertLess(host.ops().index("split"), host.ops().index("close"), "split needs a live pane")
+
+    def test_reviewer_falls_back_to_its_own_terminal_without_a_live_pane(self) -> None:
+        """A worktree whose panes all died still has to get its card reviewed; a background
+        terminal is less visible than a split but better than a card parked forever."""
+        host = RecordingReviewHost(self.root, terminals=[])
+
+        launch = host.start_review(self.task, self._record(handle=""))
+
+        self.assertEqual(launch.handle, "term-created")
+        self.assertNotIn("split", host.ops())
+
+    def test_dead_worker_pane_is_not_used_as_the_split_anchor(self) -> None:
+        host = RecordingReviewHost(
+            self.root,
+            terminals=[
+                {"handle": "term-worker", "leafId": "leaf-worker", "connected": False},
+                {"handle": "term-other", "leafId": "leaf-other", "connected": True},
+            ],
+        )
+
+        host.start_review(self.task, self._record())
+
+        split = host.call_for("split")
+        self.assertEqual(split[split.index("--terminal") + 1], "term-other")
+
+    def test_split_failure_raises_and_leaves_the_worker_pane_alone(self) -> None:
+        host = RecordingReviewHost(self.root, fail_ops={"split"})
+
+        with self.assertRaises(HostError):
+            host.start_review(self.task, self._record())
+
+        self.assertNotIn("close", host.ops(), "a failed reviewer must not kill the worker head")
+
+    def test_label_failure_closes_the_new_pane(self) -> None:
+        """Half a bring-up is worse than none: an unlabelled pane is indistinguishable from the
+        worker's, and the card would go to Blocked with a live reviewer still running in it."""
+        host = RecordingReviewHost(self.root, fail_ops={"rename"})
+
+        with self.assertRaises(HostError):
+            host.start_review(self.task, self._record())
+
+        closed = host.call_for("close")
+        self.assertEqual(closed[closed.index("--terminal") + 1], "term-review")
+
+    def test_stop_review_closes_only_the_reviewer_pane(self) -> None:
+        host = RecordingReviewHost(self.root)
+        record = self._record()
+        record.review_handle = "term-review"
+
+        host.stop_review(record)
+
+        self.assertEqual(host.ops(), ["close"])
+        self.assertEqual(host.call_for("close")[host.call_for("close").index("--terminal") + 1], "term-review")
+
+
+class ReviewLivenessTests(unittest.TestCase):
+    """Which pane counts as "the reviewer" for lifecycle checks."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        self.task = {"ref": "secretary-651", "project": "secretary", "routing": {}}
+
+    def _host(self, terminals: list[dict]) -> RecordingReviewHost:
+        return RecordingReviewHost(self.root, terminals=terminals)
+
+    def _record(self, **fields) -> DispatcherRecord:
+        record = DispatcherRecord(
+            worker="secretary-651-w",
+            workspace=str(self.workspace),
+            handle="term-worker",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="reviewing",
+            claimed_at=0.0,
+        )
+        for name, value in fields.items():
+            setattr(record, name, value)
+        return record
+
+    def test_persisted_handle_survives_the_heads_own_title_rewrite(self) -> None:
+        """A codex head overwrites the terminal title with its own OSC sequence seconds after
+        launch. A title-only check then reads the live reviewer as gone and splits a second one."""
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "title": "codex", "connected": True},
+        ])
+
+        self.assertTrue(host.review_running(self.task, self._record(review_handle="term-review")))
+
+    def test_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
+        """`terminal list` can answer with a different handle alias for the same pty, so the leaf
+        is the token that survives it."""
+        host = self._host([
+            {"handle": "term-alias", "leafId": "leaf-review", "title": "codex", "connected": True},
+        ])
+
+        record = self._record(review_handle="term-review", review_leaf="leaf-review")
+        self.assertTrue(host.review_running(self.task, record))
+
+    def test_disconnected_reviewer_pane_is_not_running(self) -> None:
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "connected": False},
+        ])
+
+        self.assertFalse(host.review_running(self.task, self._record(review_handle="term-review")))
+
+    def test_worker_pane_is_never_mistaken_for_the_reviewer(self) -> None:
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True},
+        ])
+
+        self.assertFalse(host.review_running(self.task, self._record(review_handle="term-review")))
+
+    def test_label_finds_an_orphan_pane_when_no_handle_was_persisted(self) -> None:
+        """The tick that split the pane died before writing the handle to state, so the label is
+        all that is left to recognise it by — and a duplicate reviewer is the cost of missing it."""
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 reviewer", "connected": True},
+        ])
+
+        self.assertTrue(host.review_running(self.task, self._record()))
+
+    def test_label_fallback_still_matches_a_pre_651_reviewer(self) -> None:
+        """A card already in review when the dispatcher upgraded must not get a second reviewer."""
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 review", "connected": True},
+        ])
+
+        self.assertTrue(host.review_running(self.task, self._record()))

@@ -19,6 +19,31 @@ class HostError(Exception):
 
 
 @dataclass(frozen=True)
+class ReviewLaunch:
+    """What a reviewer bring-up hands back to the runtime: the pane the reviewer runs in and the
+    commit its checkout was pinned at once the worker head was shut down."""
+
+    handle: str
+    leaf: str = ""
+    commit: str = ""
+
+
+def review_pane_label(reference: str) -> str:
+    """Stable human-readable label for the reviewer pane. Carries the card reference and the role
+    so an operator can tell the two panes of one worktree apart in the Orca client. Lifecycle
+    checks key off the persisted handle, not this label: a head overwrites the terminal title with
+    its own OSC sequence seconds after launch, and a title-only check would then read the reviewer
+    as gone (or as the worker)."""
+    return f"{reference} reviewer"
+
+
+def legacy_review_pane_label(reference: str) -> str:
+    """Pre-651 reviewer title. Still matched when re-finding an orphaned pane so a card that was
+    already in review when the dispatcher upgraded does not get a second reviewer."""
+    return f"{reference} review"
+
+
+@dataclass(frozen=True)
 class PilotSelector:
     reference: str
 

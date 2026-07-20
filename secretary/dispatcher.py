@@ -49,6 +49,7 @@ from secretary.dispatcher_production import (
 )
 from secretary.dispatcher_review import (
     command_review_running as _command_review_running,
+    end_review_pane as _end_review_pane,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
@@ -74,7 +75,13 @@ from secretary.dispatcher_state import (
 )
 from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
-from secretary.dispatcher_types import DispatcherError, HostError, PilotSelector
+from secretary.dispatcher_types import (
+    DispatcherError,
+    HostError,
+    PilotSelector,
+    ReviewLaunch,
+    review_pane_label,
+)
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -265,7 +272,14 @@ class CommandHostRuntime:
             launch_prompt=self._worker_launch_prompt(),
         )
 
-    def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+    def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
+        """Bring the reviewer up as a second pane inside the worker's own worktree.
+
+        The pane is split off a live pane there rather than created as a new terminal: a plain
+        `terminal create` on a headless serve lands as a background surface a client that already
+        has the worktree open never materialises, so the operator would have no reviewer to watch.
+        Once the reviewer has its own pane the worker head is shut down and the commit it left is
+        pinned, so the reviewer judges a checkout nothing else is still editing."""
         if not record.workspace:
             raise HostError("review workspace is unavailable")
         workspace = Path(record.workspace)
@@ -276,17 +290,45 @@ class CommandHostRuntime:
         review_file = Path(record.workspace) / "REVIEW.md"
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
         self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
-        return self._launch(
+        handle = self._launch(
             record.workspace,
-            f"{task['ref']} review",
+            review_pane_label(task["ref"]),
             record.review_head,
             "REVIEW.md",
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
+            split_from=self._split_anchor(record),
+        )
+        self._freeze_worker(record)
+        return ReviewLaunch(
+            handle=handle,
+            leaf=self._pane_leaf(record.workspace, handle),
+            commit=self.head_commit(record),
         )
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
+
+    def stop_review(self, record: DispatcherRecord) -> None:
+        """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
+        which on a red verdict means killing the checkout's terminals the worker is about to get
+        back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone."""
+        if self.mode == "noop" or not record.review_handle:
+            return
+        _close_tui_terminal(record.review_handle, run_json=self._run_json)
+
+    def head_commit(self, record: DispatcherRecord) -> str:
+        """Commit the workspace checkout currently sits on, or "" when it cannot be read. Pinned
+        at review start and re-read at merge time so a verdict can be tied to a code state."""
+        if self.mode == "noop" or not record.workspace:
+            return ""
+        try:
+            completed = self._run(
+                ["git", "-C", record.workspace, "rev-parse", "HEAD"], "review head sha"
+            )
+        except HostError:
+            return ""
+        return completed.stdout.strip()
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)
@@ -408,6 +450,7 @@ class CommandHostRuntime:
         env_name: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
+        split_from: str = "",
     ) -> str:
         if self.mode == "noop":
             return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
@@ -425,17 +468,10 @@ class CommandHostRuntime:
                 launch_prompt=launch_prompt,
             )
             command = launch.command
-        result = self._run_json([
-            "orca", "terminal", "create",
-            "--worktree", f"path:{workspace}",
-            "--title", title,
-            "--command", command,
-            "--json",
-        ])
-        terminal = result.get("terminal") if isinstance(result.get("terminal"), dict) else result
-        handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
-        if not isinstance(handle, str) or not handle:
-            raise HostError("orca did not return a terminal handle")
+        if split_from:
+            handle = self._split_pane(split_from, title, command)
+        else:
+            handle = self._create_terminal(workspace, title, command)
         if launch and launch.prompt_after_start:
             try:
                 _deliver_tui_prompt(
@@ -448,6 +484,91 @@ class CommandHostRuntime:
                 _close_tui_terminal(handle, run_json=self._run_json)
                 raise
         return handle
+
+    def _create_terminal(self, workspace: str, title: str, command: str) -> str:
+        result = self._run_json([
+            "orca", "terminal", "create",
+            "--worktree", f"path:{workspace}",
+            "--title", title,
+            "--command", command,
+            "--json",
+        ])
+        terminal = result.get("terminal") if isinstance(result.get("terminal"), dict) else result
+        handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
+        if not isinstance(handle, str) or not handle:
+            raise HostError("orca did not return a terminal handle")
+        return handle
+
+    def _split_pane(self, split_from: str, title: str, command: str) -> str:
+        """Run `command` in a new pane beside an existing one. `terminal split` takes no --title,
+        so the label goes on afterwards; a label that will not stick is a failed bring-up rather
+        than an unlabelled pane, because the operator has no other way to tell the panes apart."""
+        result = self._run_json([
+            "orca", "terminal", "split",
+            "--terminal", split_from,
+            "--direction", "vertical",
+            "--command", command,
+            "--json",
+        ])
+        split = result.get("split") if isinstance(result.get("split"), dict) else result
+        handle = split.get("handle") if isinstance(split, dict) else None
+        if not isinstance(handle, str) or not handle:
+            raise HostError("orca did not return a split terminal handle")
+        try:
+            self._run_json([
+                "orca", "terminal", "rename",
+                "--terminal", handle,
+                "--title", title,
+                "--json",
+            ])
+        except HostError:
+            _close_tui_terminal(handle, run_json=self._run_json)
+            raise
+        return handle
+
+    def _split_anchor(self, record: DispatcherRecord) -> str:
+        """Pane to split the reviewer off. The worker's own pane when it is still connected, so
+        both heads of a card end up in one tab; otherwise any live pane in the same worktree.
+        Empty when the worktree has no live pane left — the caller then falls back to creating a
+        terminal, which is less visible but still gets the card reviewed."""
+        terminals = self._worktree_terminals(record.workspace)
+        connected = [
+            terminal for terminal in terminals if terminal.get("connected") is not False
+        ]
+        for terminal in connected:
+            if record.handle and terminal.get("handle") == record.handle:
+                return record.handle
+        return str(connected[0].get("handle") or "") if connected else ""
+
+    def _pane_leaf(self, workspace: str, handle: str) -> str:
+        for terminal in self._worktree_terminals(workspace):
+            if terminal.get("handle") == handle:
+                return str(terminal.get("leafId") or "")
+        return ""
+
+    def _worktree_terminals(self, workspace: str) -> list[dict[str, Any]]:
+        """Terminal inventory for a worktree, or [] when it cannot be read. Callers use it to pick
+        a pane, never to decide a head is dead, so an unreadable inventory degrades into a weaker
+        choice rather than a failed tick."""
+        if self.mode == "noop" or not workspace:
+            return []
+        try:
+            data = self._run_json([
+                "orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"
+            ])
+        except HostError:
+            return []
+        payload = data.get("result") if isinstance(data.get("result"), dict) else data
+        terminals = payload.get("terminals") if isinstance(payload, dict) else []
+        return [terminal for terminal in terminals if isinstance(terminal, dict)] if isinstance(terminals, list) else []
+
+    def _freeze_worker(self, record: DispatcherRecord) -> None:
+        """Shut the worker head down now that the reviewer is up. Nothing else stops the worker
+        from editing the checkout mid-review, which would leave the verdict describing a tree that
+        no longer exists. The workspace itself is untouched: a red verdict hands it straight back."""
+        if self.mode == "noop" or not record.handle:
+            return
+        _close_tui_terminal(record.handle, run_json=self._run_json)
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
@@ -1092,7 +1213,10 @@ class DispatcherRuntime:
         if marker == "review:green":
             return self._finish_green(task, record, records, payload, attempt_id)
         if marker == "review:red":
-            self.host.stop(record)
+            # Only the reviewer's lifecycle ends here. A full `stop` would take the worktree's
+            # terminals down wholesale, and the same checkout is about to be handed back to a
+            # fresh worker head for rework — it is never re-created from base.
+            _end_review_pane(self.host, record)
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -1223,8 +1347,9 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
-        self.host.stop(record)
         if kind == "review":
+            # Only the reviewer is stalled; its pane goes and the workspace stays.
+            _end_review_pane(self.host, record)
             # One bring-up path for the reviewer: the same helper the normal launch and the
             # recovery path use, so its error handling can't drift from theirs.
             outcome = _start_review(self, task, records, record, attempt_id, action="review-respawned")
@@ -1232,6 +1357,7 @@ class DispatcherRuntime:
                 self._save_records(payload, records)
                 return outcome
         else:
+            self.host.stop(record)
             try:
                 record.handle = self.host.restart_worker(task, record)
             except Exception as exc:
@@ -1372,6 +1498,9 @@ class DispatcherRuntime:
         body = f"Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
         if log:
             body += f"\nХвост:\n```\n{log}\n```"
+        # No-op unless a reviewer pane is up; when one is, drop it before the worker head comes
+        # back so no stale reviewer handle survives into the rework round.
+        _end_review_pane(self.host, record)
         self.host.stop(record)
         self.writer.move(
             role="dispatcher",
@@ -1456,6 +1585,11 @@ class DispatcherRuntime:
         """Green review verdict. Re-run the mechanical gate right before merging so a non-green
         CI/local gate never lands: green merges, red bounces back to the worker, pending waits."""
         ref = task["ref"]
+        drift = self._review_drift(record)
+        if drift:
+            return self._gate_red_to_worker(
+                task, record, records, payload, attempt_id, GateResult("red", drift), phase="review-freeze"
+            )
         try:
             result = self.host.gate_check(task, record)
         except HostError as exc:
@@ -1505,6 +1639,22 @@ class DispatcherRuntime:
         )
         records.pop(ref, None)
         return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+
+    def _review_drift(self, record: DispatcherRecord) -> str:
+        """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes
+        one code state; merging a different one lands work nobody reviewed. Returns the operator
+        message for the bounce, or "" when the states match (or when neither can be read — an
+        unreadable workspace is the gate's failure to report, not a silent bounce)."""
+        if not record.review_commit:
+            return ""
+        current = self.host.head_commit(record)
+        if not current or current == record.review_commit:
+            return ""
+        return (
+            f"Ревью выдано для коммита `{record.review_commit[:12]}`, а рабочая копия сейчас на "
+            f"`{current[:12]}`: вердикт относится к другому состоянию кода. Карточка возвращена "
+            f"в In progress — доработай и отчитайся заново."
+        )
 
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         state = self.production_state if payload.get("mode") == "production" else self.state
