@@ -175,23 +175,20 @@ def export_board(
     if not audit["ok"]:
         raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
 
-    cards = _pipeline_json(["list"], pipeline_worktree=pipeline_worktree, command=command)
+    # One `pipeline export` instead of a `show` per card: the checkpoint writer runs this on
+    # every dispatcher tick under `tick_lock`, and the per-card path cost a subprocess and five
+    # API round trips each (~66s on a 200-card board, longer than the tick itself).
+    cards = _pipeline_json(["export"], pipeline_worktree=pipeline_worktree, command=command)
     if not isinstance(cards, list):
-        raise RuntimeError("pipeline list did not return a card list")
+        raise RuntimeError("pipeline export did not return a card list")
 
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
-        reference = str(card.get("reference") or "")
-        if not reference:
+        if not isinstance(card, dict):
+            raise RuntimeError("pipeline export returned an invalid card")
+        if not str(card.get("reference") or ""):
             continue
-        shown = _pipeline_json(
-            ["show", "--ref", reference],
-            pipeline_worktree=pipeline_worktree,
-            command=command,
-        )
-        if not isinstance(shown, dict):
-            raise RuntimeError(f"pipeline show returned invalid payload for {reference}")
-        normalized.append(normalize_board_card(card, shown))
+        normalized.append(normalize_board_card(card, card))
 
     raw_active_task_count = _latest_raw_active_task_count(
         board_dir,
@@ -230,6 +227,8 @@ def export_board(
 
 
 def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) -> dict[str, Any]:
+    """Checkpoint record for one card. `pipeline export` carries both views, so the export
+    path passes the same payload twice; the list/show pair stays for callers holding both."""
     metadata = shown_card.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}

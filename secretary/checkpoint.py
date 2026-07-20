@@ -23,6 +23,7 @@ from secretary._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
     ensure_dir as _ensure_dir,
     publish_component_entries as _publish_component_entries,
+    remove_path as _remove_path,
     write_text_atomic as _write_text_atomic,
 )
 from secretary.data import (
@@ -147,6 +148,7 @@ class CheckpointWriter:
             validate(staging)
             _scan_for_secrets(staging, staged, component)
             _publish_component_entries(staging, destination, list(staged), f"checkpoint {component}")
+            _drop_vanished(destination, entries, staged)
         except RuntimeError as exc:
             _cleanup_staging_dir(staging)
             raise CheckpointBlocked(str(exc)) from None
@@ -247,6 +249,26 @@ class CheckpointWriter:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             raise CheckpointBlocked(f"{label} failed: {detail[-1] if detail else 'git error'}")
         return result
+
+
+def _drop_vanished(destination: Path, entries: tuple[str, ...], staged: tuple[str, ...]) -> None:
+    """An optional entry the source no longer has must leave the checkpoint too.
+
+    Otherwise a once-written `events.ndjson` would stay in `state/board` forever and keep
+    getting committed as if it were current.
+    """
+    for entry in entries:
+        if entry in staged:
+            continue
+        stale = destination / entry
+        if not stale.exists():
+            continue
+        try:
+            _remove_path(stale)
+        except OSError as exc:
+            raise CheckpointBlocked(
+                f"could not drop stale {destination.name}/{entry}: {exc}"
+            ) from None
 
 
 def _scan_for_secrets(staging: Path, staged: tuple[str, ...], component: str) -> None:

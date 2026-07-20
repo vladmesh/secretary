@@ -190,6 +190,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_show = sub.add_parser("show")
     p_show.add_argument("--ref", required=True)
 
+    sub.add_parser("export")   # whole board with descriptions/metadata/comments, one call
+
     return parser
 
 
@@ -250,6 +252,8 @@ def main(argv=None) -> int:
             return _emit(ops.list_cards(column=args.column, project=args.project))
         if args.cmd == "show":
             return _emit(ops.show_card(args.ref))
+        if args.cmd == "export":
+            return _emit(ops.export_cards())
 
         if args.cmd == "create":
             if not _need_role(role, ("po", "steward", "worker")):

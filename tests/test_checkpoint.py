@@ -118,6 +118,17 @@ class CheckpointWriterTests(unittest.TestCase):
             git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit
         )
 
+    def test_optional_entry_that_vanished_from_the_source_leaves_the_checkpoint(self):
+        self.write()
+        self.assertIn("state/board/events.ndjson", self.head_files())
+
+        (self.data_dir / "board" / "events.ndjson").unlink()
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+        self.assertNotIn("state/board/events.ndjson", self.head_files())
+        self.assertIn("state/board/cards.ndjson", self.head_files())
+
     def test_derived_board_dump_is_not_part_of_the_checkpoint(self):
         self.write()
 

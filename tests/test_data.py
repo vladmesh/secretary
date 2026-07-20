@@ -241,32 +241,23 @@ class ExportTests(unittest.TestCase):
 
         def fake_run(command, **_kwargs):
             calls.append(command)
-            if command[-1] == "list":
-                stdout = json.dumps(
+            return subprocess_completed(
+                json.dumps(
                     [
                         {
                             "id": 1,
                             "reference": "secretary-353",
                             "title": "Export",
+                            "description": "spec",
                             "column": "Ready",
                             "swimlane": "secretary",
                             "position": 1,
+                            "metadata": {"project": "secretary"},
+                            "comments": [{"ts": "10", "text": "[po]\nbody"}],
                         }
                     ]
                 )
-            else:
-                stdout = json.dumps(
-                    {
-                        "id": 1,
-                        "reference": "secretary-353",
-                        "title": "Export",
-                        "description": "spec",
-                        "column": "Ready",
-                        "metadata": {"project": "secretary"},
-                        "comments": [{"ts": "10", "text": "[po]\nbody"}],
-                    }
-                )
-            return subprocess_completed(stdout)
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -279,28 +270,20 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(first.count, 1)
         self.assertEqual(second.count, 1)
         self.assertEqual(first_payload, second_payload)
-        self.assertEqual(len(calls), 4)
+        # Один `pipeline export` на экспорт: писатель бежит под tick_lock, поэтому вызов
+        # на карточку сюда возвращаться не должен.
+        self.assertEqual([command[-1] for command in calls], ["export", "export"])
 
     def test_export_board_records_matching_active_raw_count_when_dump_exists(self):
         def fake_run(command, **_kwargs):
-            if command[-1] == "list":
-                stdout = json.dumps(
+            return subprocess_completed(
+                json.dumps(
                     [
                         {"id": 1, "reference": "secretary-1", "title": "One"},
                         {"id": 2, "reference": "secretary-2", "title": "Two"},
                     ]
                 )
-            else:
-                stdout = json.dumps(
-                    {
-                        "id": 1,
-                        "reference": command[-1],
-                        "title": command[-1],
-                        "metadata": {},
-                        "comments": [],
-                    }
-                )
-            return subprocess_completed(stdout)
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -323,19 +306,9 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_skips_raw_count_when_board_project_missing(self):
         def fake_run(command, **_kwargs):
-            if command[-1] == "list":
-                stdout = json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}])
-            else:
-                stdout = json.dumps(
-                    {
-                        "id": 1,
-                        "reference": command[-1],
-                        "title": command[-1],
-                        "metadata": {},
-                        "comments": [],
-                    }
-                )
-            return subprocess_completed(stdout)
+            return subprocess_completed(
+                json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}])
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -361,11 +334,7 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_fails_when_raw_count_disagrees(self):
         def fake_run(command, **_kwargs):
-            if command[-1] == "list":
-                stdout = json.dumps([])
-            else:
-                stdout = json.dumps({})
-            return subprocess_completed(stdout)
+            return subprocess_completed(json.dumps([]))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -394,19 +363,8 @@ class ExportTests(unittest.TestCase):
 
         def fake_run(command, **_kwargs):
             nonlocal run_index
-            if command[-1] == "list":
-                stdout = json.dumps(cards_by_run[run_index])
-                run_index += 1
-            else:
-                stdout = json.dumps(
-                    {
-                        "id": 1,
-                        "reference": command[-1],
-                        "title": command[-1],
-                        "metadata": {},
-                        "comments": [],
-                    }
-                )
+            stdout = json.dumps(cards_by_run[run_index])
+            run_index += 1
             return subprocess_completed(stdout)
 
         with tempfile.TemporaryDirectory() as tmpdir:

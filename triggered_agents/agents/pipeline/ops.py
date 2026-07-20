@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import time
 
-from ...runtime.kanboard import KanboardError, call
+from ...runtime.kanboard import KanboardError, call, call_batch
 from . import heads, model, naming, worker
 from .state import STATE
 
@@ -727,8 +727,9 @@ def feedback(reference: str, body: str) -> dict:
     return out
 
 
-def _card_view(pid: int, task: dict, cols: dict, lanes: dict) -> dict:
-    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
+def _card_view(pid: int, task: dict, cols: dict, lanes: dict, meta: dict | None = None) -> dict:
+    if meta is None:
+        meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
     worker_head = _worker_head_view(meta)
     review_head = _review_head_view(meta)
     try:
@@ -774,6 +775,39 @@ def list_cards(column: str | None = None, project: str | None = None) -> list[di
         if project and view["project"] != project:
             continue
         out.append(view)
+    return out
+
+
+def export_cards() -> list[dict]:
+    """Every active card in one pass: the list view plus description, metadata and comments.
+
+    Same per-card surface as `show_card`, but for the whole board. The checkpoint writer needs
+    all of it on every dispatcher tick, and a `show_card` per card costs five API round trips
+    (plus an interpreter start, when the caller drives the CLI). Here the board-wide reads
+    happen once and the per-task metadata and comments go out as a single batched request.
+    """
+    pid = board_id()
+    cols = {int(c["id"]): c["title"] for c in call("getColumns", project_id=pid) or []}
+    lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
+    tasks = call("getAllTasks", project_id=pid, status_id=1) or []
+    batched = call_batch(
+        [(method, {"task_id": int(t["id"])})
+         for t in tasks
+         for method in ("getTaskMetadata", "getAllComments")]
+    )
+    out = []
+    for index, task in enumerate(tasks):
+        meta = batched[index * 2] or {}
+        comments = batched[index * 2 + 1] or []
+        out.append({
+            **_card_view(pid, task, cols, lanes, meta),
+            "description": task.get("description", "") or "",
+            "metadata": meta,
+            "comments": [
+                {"ts": c.get("date_creation", ""), "text": c.get("comment", "")}
+                for c in comments
+            ],
+        })
     return out
 
 
