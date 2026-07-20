@@ -97,8 +97,8 @@ force-push. Перед пушем `ls-remote` сверяет тип remote: ес
 висит в `status` и `doctor`, автоматика ничего не переписывает. Если причина была в interleaving
 green publish и checkpoint, следующий dispatcher tick сам сведёт локальный instance checkout, а
 checkpoint pusher сразу перепроверит diverged-состояние и погасит алярм fast-forward-only. Ручной
-разбор нужен только когда remote
-содержит чужую историю, которую dispatcher не может получить обычным merge:
+разбор нужен, когда remote содержит историю, которой нет ни в reviewed branch, ни в локальном
+checkpoint checkout:
 
 ```bash
 git -C INSTANCE fetch origin
@@ -164,13 +164,15 @@ python3 -m secretary backup verify ARCHIVE.tar [--strict]
 3. Teardown воркспейса: dispatcher останавливает терминалы worktree (worker, ревьюер и их
    дочерние процессы) и удаляет worktree через `orca worktree rm`.
 
-Для private instance repo publish идёт под тем же writer lock, что и checkpoint. Перед push
-dispatcher подтягивает `origin/main` в worker-ветку, а после успешного publish мёржит `origin/main`
-в локальный checkout instance repo. Поэтому checkpoint-коммит, появившийся между preflight и
-publish, сохраняется обычным merge-коммитом вместе с feature commit. Если тик упал после remote
-publish, но до локального merge, следующий тик повторяет Done-путь идемпотентно: push видит уже
-опубликованный результат, локальный checkout догоняется merge-коммитом, и карточка завершается без
-ручного вмешательства.
+Для private instance repo publish идёт под тем же writer lock, что и checkpoint. Dispatcher
+публикует только reviewed branch и локально известную checkpoint-историю: remote tip должен быть
+предком worker-ветки или локального instance checkout. Чужая remote-история остаётся ручным
+runbook case, без авто-мёржа в green-карточку. После успешного publish dispatcher мёржит
+`origin/main` в локальный checkout instance repo. Поэтому checkpoint-коммит, появившийся между
+preflight и publish, сохраняется обычным merge-коммитом вместе с feature commit. Если тик упал
+после remote publish, но до локального merge, следующий тик повторяет Done-путь идемпотентно:
+push видит уже опубликованный результат, локальный checkout догоняется merge-коммитом, и карточка
+завершается без ручного вмешательства.
 
 Teardown выполняется только на этом Done-пути. При `review:red` (rework) воркспейс и его ветка
 остаются нетронутыми, чтобы worker мог продолжить в том же worktree.

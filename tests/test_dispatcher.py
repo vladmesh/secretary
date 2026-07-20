@@ -2909,6 +2909,34 @@ class DispatcherLauncherTests(unittest.TestCase):
             self.assertEqual(git(instance, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
             self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
 
+    def test_instance_repo_merge_preserves_checkpoint_already_pushed_to_remote(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+            checkpoint = _commit_file(instance, "state/runs/runs.ndjson", "checkpoint\n", "checkpoint")
+            git(instance, "push", "--quiet", "origin", "main")
+            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            host = CommandHostRuntime(
+                _InstanceRepoCatalog(instance),
+                root,
+                mode="real",
+            )
+
+            host.complete_green(
+                {"ref": "secretary-669", "project": "secretary_instance"},
+                SimpleNamespace(workspace=str(workspace)),
+            )
+
+            remote_head = git(remote, "rev-parse", "refs/heads/main")
+            local_head = git(instance, "rev-parse", "HEAD")
+            self.assertEqual(local_head, remote_head)
+            self.assertTrue(_is_ancestor(remote, checkpoint, remote_head))
+            self.assertTrue(_is_ancestor(remote, feature, remote_head))
+            self.assertEqual(git(remote, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
+            self.assertEqual(git(remote, "show", "HEAD:result.txt"), "green result")
+
     def test_instance_publish_recovery_rejects_linear_unreviewed_descendant(self) -> None:
         from types import SimpleNamespace
 
@@ -2932,6 +2960,35 @@ class DispatcherLauncherTests(unittest.TestCase):
             )
 
             self.assertFalse(recovered)
+
+    def test_instance_repo_publish_rejects_foreign_remote_history(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+            foreign = root / "foreign"
+            git(root, "clone", "--quiet", str(remote), str(foreign))
+            _configure_git_user(foreign)
+            foreign_commit = _commit_file(foreign, "foreign.txt", "not reviewed\n", "foreign")
+            git(foreign, "push", "--quiet", "origin", "main")
+            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            host = CommandHostRuntime(
+                _InstanceRepoCatalog(instance),
+                root,
+                mode="real",
+            )
+
+            with self.assertRaisesRegex(HostError, "unreviewed remote history"):
+                host.complete_green(
+                    {"ref": "secretary-669", "project": "secretary_instance"},
+                    SimpleNamespace(workspace=str(workspace)),
+                )
+
+            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), foreign_commit)
+            self.assertFalse(_is_ancestor(remote, feature, foreign_commit))
+            self.assertFalse((instance / "foreign.txt").exists())
+            self.assertFalse((instance / "result.txt").exists())
 
     def test_finish_green_recovers_after_worker_side_checkpoint_merge_was_published(self) -> None:
         from types import SimpleNamespace

@@ -437,26 +437,46 @@ class CommandHostRuntime:
     ) -> None:
         """Publish an instance-repo card without racing checkpoint commits.
 
-        Checkpoints are normal local commits in the instance repo. If one lands
-        after review preflight, a strict local fast-forward would reject the
-        already-published feature. Merge the checkpoint history and the reviewed
-        branch under the shared writer lock; the checkpoint pusher later sends
-        that merge commit fast-forward-only.
+        Checkpoints are normal local commits in the instance repo. If one was
+        already pushed, fold only the local checkout's known checkpoint history
+        into the reviewed branch. A remote tip that is neither in the reviewed
+        branch nor in the local checkpoint history is true foreign divergence.
         """
         with state_repo.state_repo_lock(repo):
             self._run(["git", "-C", record.workspace, "fetch", "origin", base], "merge preflight fetch")
-            self._run(
-                [
-                    "git",
-                    *state_repo.commit_identity(Path(record.workspace)),
-                    "-C",
-                    record.workspace,
-                    "merge",
-                    "--no-edit",
-                    f"origin/{base}",
-                ],
-                "merge preflight sync",
-            )
+            branch_head = self._run(
+                ["git", "-C", record.workspace, "rev-parse", branch],
+                "merge preflight branch head",
+            ).stdout.strip()
+            local_head = self._run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                "merge preflight local head",
+            ).stdout.strip()
+            remote_head = self._run(
+                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
+                "merge preflight remote head",
+            ).stdout.strip()
+            if not self._commit_is_ancestor(record.workspace, remote_head, branch_head):
+                if not self._commit_is_ancestor(str(repo), remote_head, local_head):
+                    raise HostError(
+                        f"merge preflight failed: origin/{base} contains unreviewed remote history"
+                    )
+                self._run(
+                    ["git", "-C", record.workspace, "fetch", str(repo), "HEAD"],
+                    "merge preflight fetch local checkpoint",
+                )
+                self._run(
+                    [
+                        "git",
+                        *state_repo.commit_identity(Path(record.workspace)),
+                        "-C",
+                        record.workspace,
+                        "merge",
+                        "--no-edit",
+                        "FETCH_HEAD",
+                    ],
+                    "merge preflight checkpoint sync",
+                )
             self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
             self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
             self._run(
@@ -471,6 +491,16 @@ class CommandHostRuntime:
                 ],
                 "post-merge reconcile",
             )
+
+    def _commit_is_ancestor(self, repo: str, ancestor: str, descendant: str) -> bool:
+        try:
+            self._run(
+                ["git", "-C", repo, "merge-base", "--is-ancestor", ancestor, descendant],
+                "merge ancestry check",
+            )
+        except HostError:
+            return False
+        return True
 
     def _merge_github_pr(self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str) -> None:
         """Land a github-CI project through its PR. gh honours branch protection and refuses to
