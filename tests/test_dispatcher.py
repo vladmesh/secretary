@@ -314,7 +314,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.data_dir = Path(self.tmpdir.name)
         self.board = FakeKanboard()
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
-        self.writer = TaskWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
+        # workspace is pinned off the repo checkout: these tests stand in for a worker
+        # report, and the done gate would otherwise read this repo's own working tree.
+        self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.host = FakeHost(self.data_dir / "workspaces")
         self.legacy_pause = FakeLegacyPause()
         self.runtime = DispatcherRuntime(

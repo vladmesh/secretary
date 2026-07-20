@@ -8,11 +8,13 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 import urllib.error
 import urllib.request
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -28,6 +30,44 @@ class TaskError(Exception):
 
 class _CommittedWriteError(Exception):
     """A later step failed after a Kanboard mutation was committed."""
+
+
+RUNTIME_TAILS = ("secretary-data",)
+
+
+def durability_dirt(porcelain: str) -> list[str]:
+    """Porcelain lines that count against durability.
+
+    Untracked runtime tails are dropped: they belong to the secretary installation,
+    not to the worker's project, and a worker cannot commit its way out of them.
+    """
+    dirt: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("?? "):
+            path = line[3:].strip().strip('"').rstrip("/")
+            if path in RUNTIME_TAILS or any(path.startswith(f"{tail}/") for tail in RUNTIME_TAILS):
+                continue
+        dirt.append(line)
+    return dirt
+
+
+def workspace_dirt(workspace: str | os.PathLike[str]) -> list[str]:
+    """Uncommitted work in a checkout, or nothing when it is not a git checkout."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+    return durability_dirt(completed.stdout)
 
 
 _STATE_BY_COLUMN = {
@@ -347,10 +387,17 @@ class TaskAudit:
 class TaskWriter:
     """Protocol writes, role guards and normalized audit events."""
 
-    def __init__(self, client: KanboardClient, *, data_dir: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        client: KanboardClient,
+        *,
+        data_dir: str | os.PathLike[str],
+        workspace: str | os.PathLike[str] | None = None,
+    ) -> None:
         self.client = client
         self.reader = TaskReader(client)
         self.audit = TaskAudit(data_dir)
+        self.workspace = Path(workspace) if workspace is not None else None
 
     def create(
         self,
@@ -568,10 +615,35 @@ class TaskWriter:
         self._role(role, _COMMENT_ROLES)
         return self._write("commented", role, actor, reference, request_id, {"marker": role, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"))
 
+    def _require_committed_workspace(self) -> None:
+        """Refuse a done report from a dirty checkout.
+
+        The worker runs the protocol from its own workspace, so CWD is that checkout.
+        Failing here lets the worker commit and retry inside the same session instead of
+        learning from the dispatcher that its card went to blocked.
+        """
+        if self.workspace is not None:
+            workspace: Path = self.workspace
+        else:
+            try:
+                workspace = Path.cwd()
+            except OSError:
+                return
+        dirt = workspace_dirt(workspace)
+        if not dirt:
+            return
+        shown = [line[3:].strip().strip('"') for line in dirt[:10]]
+        files = ", ".join(shown)
+        if len(dirt) > len(shown):
+            files += f", +{len(dirt) - len(shown)} more"
+        raise TaskError("uncommitted", f"workspace has uncommitted changes: {files}; commit them and retry", 3)
+
     def report(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"worker"})
         if kind not in {"done", "blocked"} or (kind == "blocked" and not body.strip()):
             raise TaskError("validation", "blocked reports require a non-empty body", 2)
+        if kind == "done":
+            self._require_committed_workspace()
         marker = f"report:{kind}"
         return self._write("reported", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
 

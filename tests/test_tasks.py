@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -717,3 +718,86 @@ class TaskWriterTests(unittest.TestCase):
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
             export_board(Path(self.tmpdir.name), command=["pipeline"])
+
+
+class ReportDurabilityGateTests(unittest.TestCase):
+    """`report --kind done` refuses to run from a dirty workspace (secretary-653).
+
+    The gate lives in the worker's own session so it can commit and retry, instead of
+    learning from the dispatcher post-factum that the card went to blocked."""
+
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.workspace = Path(self.tmpdir.name) / "workspace"
+        self.workspace.mkdir()
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "worker@example.invalid"],
+            ["config", "user.name", "worker"],
+        ):
+            subprocess.run(["git", "-C", str(self.workspace), *args], check=True, capture_output=True)
+        (self.workspace / "code.py").write_text("print(1)\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.workspace), "commit", "-qm", "work"], check=True, capture_output=True
+        )
+        self.writer = TaskWriter(
+            self.client,  # type: ignore[arg-type]
+            data_dir=str(Path(self.tmpdir.name) / "data"),
+            workspace=str(self.workspace),
+        )
+
+    def _report(self, kind: str, body: str = "ready") -> dict:
+        return self.writer.report(role="worker", actor="w", reference="secretary-468", kind=kind, body=body)
+
+    def test_clean_workspace_reports_done(self) -> None:
+        self.assertEqual(self._report("done")["action"], "reported")
+
+    def test_dirty_workspace_is_refused_without_touching_the_board(self) -> None:
+        (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
+        with self.assertRaises(TaskError) as caught:
+            self._report("done")
+        self.assertEqual(caught.exception.code, "uncommitted")
+        self.assertNotEqual(caught.exception.exit_code, 0)
+        self.assertIn("code.py", caught.exception.message)
+        self.assertIn("commit", caught.exception.message)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_untracked_file_is_refused(self) -> None:
+        (self.workspace / "scratch.py").write_text("print(3)\n", encoding="utf-8")
+        with self.assertRaises(TaskError) as caught:
+            self._report("done")
+        self.assertEqual(caught.exception.code, "uncommitted")
+        self.assertIn("scratch.py", caught.exception.message)
+
+    def test_runtime_audit_tail_does_not_block_done(self) -> None:
+        board = self.workspace / "secretary-data" / "board"
+        board.mkdir(parents=True)
+        (board / "events.ndjson").write_text("{}\n", encoding="utf-8")
+        self.assertEqual(self._report("done")["action"], "reported")
+
+    def test_blocked_report_is_not_gated(self) -> None:
+        (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
+        self.assertEqual(self._report("blocked", body="stuck on the adapter")["action"], "reported")
+
+    def test_non_git_workspace_is_not_gated(self) -> None:
+        plain = Path(self.tmpdir.name) / "plain"
+        plain.mkdir()
+        writer = TaskWriter(
+            self.client,  # type: ignore[arg-type]
+            data_dir=str(Path(self.tmpdir.name) / "data"),
+            workspace=str(plain),
+        )
+        result = writer.report(role="worker", actor="w", reference="secretary-468", kind="done", body="ok")
+        self.assertEqual(result["action"], "reported")
+
+    def test_cwd_is_the_default_workspace(self) -> None:
+        writer = TaskWriter(self.client, data_dir=str(Path(self.tmpdir.name) / "data"))  # type: ignore[arg-type]
+        (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
+        with mock.patch("secretary.tasks.Path.cwd", return_value=self.workspace):
+            with self.assertRaises(TaskError) as caught:
+                writer.report(role="worker", actor="w", reference="secretary-468", kind="done", body="ok")
+        self.assertEqual(caught.exception.code, "uncommitted")

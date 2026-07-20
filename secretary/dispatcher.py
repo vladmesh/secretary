@@ -75,7 +75,14 @@ from secretary.dispatcher_state import (
 from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import DispatcherError, HostError, PilotSelector
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import (
+    KanboardClient,
+    TaskAudit,
+    TaskError,
+    TaskReader,
+    TaskWriter,
+    durability_dirt,
+)
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -94,27 +101,6 @@ def default_data_dir(instance_path: Path) -> Path:
 
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
-
-
-RUNTIME_TAILS = ("secretary-data",)
-
-
-def _durability_dirt(porcelain: str) -> list[str]:
-    """Porcelain lines that count against durability.
-
-    Untracked runtime tails are dropped: they belong to the secretary installation,
-    not to the worker's project, and a worker cannot commit its way out of them.
-    """
-    dirt: list[str] = []
-    for line in porcelain.splitlines():
-        if not line.strip():
-            continue
-        if line.startswith("?? "):
-            path = line[3:].strip().strip('"').rstrip("/")
-            if path in RUNTIME_TAILS or any(path.startswith(f"{tail}/") for tail in RUNTIME_TAILS):
-                continue
-        dirt.append(line)
-    return dirt
 
 
 class InstanceCatalog:
@@ -315,7 +301,7 @@ class CommandHostRuntime:
             ["git", "-C", str(workspace), "status", "--porcelain"],
             "git status",
         )
-        if _durability_dirt(completed.stdout):
+        if durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
 
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:

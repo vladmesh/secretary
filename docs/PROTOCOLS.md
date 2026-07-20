@@ -56,6 +56,12 @@ Worker, reviewer и retro могут создавать только Ideas; PO �
 append-only pending audit event, затем сверяется с live board и только после этого считается
 committed. Unresolved pending write блокирует согласованный export и backup до `reconcile-audit`.
 
+`report --kind done` перед любой записью проверяет `git status --porcelain` воркспейса воркера
+(CWD процесса) и отказывает с `uncommitted`, если там есть незакоммиченные изменения: воркер
+чинит это в своей же сессии, а не узнаёт постфактум из blocked. Untracked runtime tail
+(`secretary-data/`) не считается за грязь, `--kind blocked` не гейтится (WIP допустим), а
+пост-фактум чек диспетчера остаётся как defense-in-depth.
+
 Audit trail всегда пишется в data dir установки: `--data-dir`, иначе `SECRETARY_DATA_DIR`, иначе
 `data_dir` из instance config (`--instance` / `SECRETARY_INSTANCE`). Относительный `data_dir`
 резолвится от instance file, не от CWD, поэтому вызов из воркспейса чужого проекта не оставляет
