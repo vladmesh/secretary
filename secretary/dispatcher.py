@@ -46,7 +46,6 @@ from secretary.dispatcher_production import (
 )
 from secretary.dispatcher_review import (
     command_review_running as _command_review_running,
-    command_worker_running as _command_worker_running,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
@@ -55,7 +54,6 @@ from secretary.dispatcher_watchdog import (
     WORKER_REPORT_STALL_SECONDS,
     reset_wait as _reset_wait,
     wait_outcome as _wait_outcome,
-    wait_probe_due as _wait_probe_due,
 )
 from secretary.dispatcher_state import (
     CutoverState,
@@ -276,9 +274,6 @@ class CommandHostRuntime:
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
-
-    def worker_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        return _command_worker_running(self, task, record)
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)
@@ -1147,9 +1142,9 @@ class DispatcherRuntime:
         kind: str,
     ) -> dict[str, Any] | None:
         """Watch an open-ended wait (kind "worker" or "review"). Returns None to keep waiting,
-        or a tick outcome once the head is gone or the wait blew its ceiling: one respawn,
-        then Blocked. Without this a head that died before posting parks the card forever."""
-        probe = self.host.review_running if kind == "review" else self.host.worker_running
+        or a tick outcome once the wait blew its ceiling: one respawn, then Blocked. Without
+        this a head that died before posting parks the card forever. The ceiling is the only
+        input on purpose; see dispatcher_watchdog for why no liveness probe is trustworthy."""
         stall = REVIEW_VERDICT_STALL_SECONDS if kind == "review" else WORKER_REPORT_STALL_SECONDS
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         now = time.time()
@@ -1157,18 +1152,9 @@ class DispatcherRuntime:
             setattr(record, f"{kind}_waiting_since", now)
             self._save_records(payload, records)
             return None
-        running: bool | None = None
-        if _wait_probe_due(waiting_since, now):
-            try:
-                running = probe(task, record)
-            except Exception:
-                # An inventory failure says nothing about the head; the stall ceiling still
-                # covers this wait, so keep waiting rather than respawn on a flaky probe.
-                running = None
         outcome = _wait_outcome(
             waiting_since=waiting_since,
             now=now,
-            running=running,
             stall_seconds=stall,
             respawns=int(getattr(record, f"{kind}_respawns") or 0),
         )

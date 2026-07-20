@@ -32,7 +32,7 @@ from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_SECONDS,
-    WAIT_LIVENESS_GRACE_SECONDS,
+    WORKER_REPORT_STALL_SECONDS,
     wait_outcome,
 )
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
@@ -165,9 +165,6 @@ class FakeHost:
         # None keeps the default "a review started in this process is live"; set a bool to model a
         # reviewer terminal that died after launch, which is what recovery actually has to detect.
         self.review_running_result: bool | None = None
-        # Same knobs for the worker terminal, which the report watchdog probes.
-        self.worker_running_error: Exception | None = None
-        self.worker_running_result: bool | None = None
         # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
@@ -214,14 +211,6 @@ class FakeHost:
         if self.review_running_result is not None:
             return self.review_running_result
         return task["ref"] in self.reviews
-
-    def worker_running(self, task: dict, record) -> bool:
-        self.calls.append("worker_running")
-        if self.worker_running_error is not None:
-            raise self.worker_running_error
-        if self.worker_running_result is not None:
-            return self.worker_running_result
-        return task["ref"] in self.prepared
 
     def verify_worker_result(self, task: dict, record) -> None:
         self.calls.append("verify_worker_result")
@@ -1076,17 +1065,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         waiting = self.runtime.tick(self.selector)
         self.assertEqual(waiting["action"], "waiting-review-verdict")
 
-        # The reviewer head exited without registering a verdict (secretary-637). The wait is
-        # only minutes old, well inside the stall ceiling: liveness alone must end it.
-        self.host.review_running_result = False
-        self._rewind_wait("review", seconds=600.0)
+        # The reviewer head exited without registering a verdict (secretary-637), or is up but
+        # wedged. Either way nothing lands and the ceiling ends the wait.
+        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS + 60)
         respawned = self.runtime.tick(self.selector)
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
 
-        self._rewind_wait("review", seconds=600.0)
+        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS + 60)
         escalated = self.runtime.tick(self.selector)
 
         self.assertEqual(escalated["to"], "blocked")
@@ -1099,40 +1087,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.runtime.tick(self.selector)
 
-        self.host.review_running_result = True
-        self._rewind_wait("review", seconds=3600.0)
+        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS - 60)
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
-    def test_live_but_wedged_reviewer_is_respawned_past_the_stall_ceiling(self) -> None:
-        """The terminal is still up, so liveness says nothing; the ceiling ends the wait anyway."""
+    def test_live_head_that_overwrote_its_terminal_title_is_not_treated_as_dead(self) -> None:
+        """secretary-654: heads replace the launch title with their own OSC sequence, so the
+        terminal-title probe reports a healthy reviewer as gone. The watchdog must never ask."""
         self.start_pilot()
         self._run_worker_to_validate()
         self.runtime.tick(self.selector)
         self.runtime.tick(self.selector)
 
-        self.host.review_running_result = True
-        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS + 60)
-        respawned = self.runtime.tick(self.selector)
-
-        self.assertEqual(respawned["action"], "review-respawned")
-        self.assertEqual(len(self.host.reviews), 2)
-
-    def test_reviewer_inventory_failure_does_not_respawn(self) -> None:
-        """A failed orca probe is not evidence the head is gone: keep waiting on the ceiling."""
-        self.start_pilot()
-        self._run_worker_to_validate()
-        self.runtime.tick(self.selector)
-        self.runtime.tick(self.selector)
-
-        self.host.review_running_error = HostError("orca terminal list failed")
-        self._rewind_wait("review", seconds=3600.0)
+        self.host.review_running_result = False
+        self.host.calls.clear()
+        self._rewind_wait("review", seconds=REVIEW_VERDICT_STALL_SECONDS - 60)
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
-        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"], "healthy reviewer was killed")
+        self.assertNotIn("review_running", self.host.calls, "watchdog must not probe liveness")
 
     def test_dead_worker_is_respawned_once_then_escalated(self) -> None:
         self.start_pilot()
@@ -1142,15 +1118,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(waiting["action"], "waiting-worker-report")
 
         # The rework worker never came up / died before reporting (secretary-649).
-        self.host.worker_running_result = False
-        self._rewind_wait("worker", seconds=600.0)
+        self._rewind_wait("worker", seconds=WORKER_REPORT_STALL_SECONDS + 60)
         respawned = self.runtime.tick(self.selector)
 
         self.assertEqual(respawned["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
-        self._rewind_wait("worker", seconds=600.0)
+        self._rewind_wait("worker", seconds=WORKER_REPORT_STALL_SECONDS + 60)
         escalated = self.runtime.tick(self.selector)
 
         self.assertEqual(escalated["to"], "blocked")
@@ -1701,34 +1676,18 @@ class HeadPromptTests(unittest.TestCase):
 
 
 class WaitWatchdogTests(unittest.TestCase):
-    def test_unknown_liveness_inside_the_ceiling_keeps_waiting(self) -> None:
-        outcome = wait_outcome(
-            waiting_since=0.0, now=60.0, running=None, stall_seconds=7200, respawns=0
-        )
+    def test_inside_the_ceiling_keeps_waiting(self) -> None:
+        outcome = wait_outcome(waiting_since=0.0, now=7199.0, stall_seconds=7200, respawns=0)
 
         self.assertEqual(outcome, "wait")
 
-    def test_dead_head_inside_the_grace_window_keeps_waiting(self) -> None:
-        """A terminal takes a moment to appear in orca's inventory after launch."""
-        outcome = wait_outcome(
-            waiting_since=0.0,
-            now=WAIT_LIVENESS_GRACE_SECONDS - 1,
-            running=False,
-            stall_seconds=7200,
-            respawns=0,
-        )
-
-        self.assertEqual(outcome, "wait")
-
-    def test_dead_head_past_the_grace_window_respawns_once_then_escalates(self) -> None:
-        now = WAIT_LIVENESS_GRACE_SECONDS + 1
-
+    def test_past_the_ceiling_respawns_once_then_escalates(self) -> None:
         self.assertEqual(
-            wait_outcome(waiting_since=0.0, now=now, running=False, stall_seconds=7200, respawns=0),
+            wait_outcome(waiting_since=0.0, now=7201.0, stall_seconds=7200, respawns=0),
             "respawn",
         )
         self.assertEqual(
-            wait_outcome(waiting_since=0.0, now=now, running=False, stall_seconds=7200, respawns=1),
+            wait_outcome(waiting_since=0.0, now=7201.0, stall_seconds=7200, respawns=1),
             "escalate",
         )
 
