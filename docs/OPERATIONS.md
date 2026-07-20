@@ -94,7 +94,10 @@ force-push. Перед пушем `ls-remote` сверяет тип remote: ес
 локальные коммиты идут, причина и растущий lag видны, следующее окно ретраит.
 
 `remote diverged` — на remote есть коммиты, которых нет локально. Пуш останавливается, алярм
-висит в `status` и `doctor`, автоматика ничего не переписывает. Разбор ручной:
+висит в `status` и `doctor`, автоматика ничего не переписывает. Если причина была в interleaving
+green publish и checkpoint, следующий dispatcher tick сам сведёт локальный instance checkout, а
+следующее push-окно погасит алярм fast-forward-only. Ручной разбор нужен только когда remote
+содержит чужую историю, которую dispatcher не может получить обычным merge:
 
 ```bash
 git -C INSTANCE fetch origin
@@ -159,6 +162,14 @@ python3 -m secretary backup verify ARCHIVE.tar [--strict]
    собственный checkout, из которого работает.
 3. Teardown воркспейса: dispatcher останавливает терминалы worktree (worker, ревьюер и их
    дочерние процессы) и удаляет worktree через `orca worktree rm`.
+
+Для private instance repo publish идёт под тем же writer lock, что и checkpoint. Перед push
+dispatcher подтягивает `origin/main` в worker-ветку, а после успешного publish мёржит `origin/main`
+в локальный checkout instance repo. Поэтому checkpoint-коммит, появившийся между preflight и
+publish, сохраняется обычным merge-коммитом вместе с feature commit. Если тик упал после remote
+publish, но до локального merge, следующий тик повторяет Done-путь идемпотентно: push видит уже
+опубликованный результат, локальный checkout догоняется merge-коммитом, и карточка завершается без
+ручного вмешательства.
 
 Teardown выполняется только на этом Done-пути. При `review:red` (rework) воркспейс и его ветка
 остаются нетронутыми, чтобы worker мог продолжить в том же worktree.

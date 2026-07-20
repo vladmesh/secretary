@@ -12,7 +12,7 @@ from unittest import mock
 
 from secretary import role_env
 from secretary._fsutil import try_file_lock
-from secretary.checkpoint import CheckpointResult
+from secretary.checkpoint import CheckpointPusher, CheckpointResult
 from secretary.dispatcher import (
     CommandHostRuntime,
     CutoverState,
@@ -2788,6 +2788,69 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertFalse(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
+    def test_instance_repo_merge_preserves_local_checkpoint_commit(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+            checkpoint = _commit_file(instance, "state/board/cards.ndjson", "checkpoint\n", "checkpoint")
+            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            host = CommandHostRuntime(
+                _InstanceRepoCatalog(instance),
+                root,
+                mode="real",
+            )
+
+            host.complete_green(
+                {"ref": "secretary-669", "project": "secretary_instance"},
+                SimpleNamespace(workspace=str(workspace)),
+            )
+
+            local_head = git(instance, "rev-parse", "HEAD")
+            self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
+            self.assertTrue(_is_ancestor(instance, feature, local_head))
+            self.assertEqual(git(instance, "show", "HEAD:state/board/cards.ndjson"), "checkpoint")
+            self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
+            # The merge commit is local until the checkpoint pusher's next ff-only window.
+            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), feature)
+
+            state = CheckpointPusher(instance, interval_seconds=0).push(
+                {"status": "diverged", "remote_diverged": True, "failures": 2}
+            )
+
+            self.assertEqual(state["status"], "pushed")
+            self.assertFalse(state["remote_diverged"])
+            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), local_head)
+            self.assertEqual(git(remote, "show", "HEAD:state/board/cards.ndjson"), "checkpoint")
+            self.assertEqual(git(remote, "show", "HEAD:result.txt"), "green result")
+
+    def test_instance_repo_merge_recovers_after_remote_publish_before_local_checkout(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, instance, workspace = _instance_repo_fixture(root, "secretary-669")
+            checkpoint = _commit_file(instance, "state/runs/runs.ndjson", "checkpoint\n", "checkpoint")
+            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
+            git(workspace, "push", "origin", "pipeline/secretary-669:main")
+            host = CommandHostRuntime(
+                _InstanceRepoCatalog(instance),
+                root,
+                mode="real",
+            )
+
+            host.complete_green(
+                {"ref": "secretary-669", "project": "secretary_instance"},
+                SimpleNamespace(workspace=str(workspace)),
+            )
+
+            local_head = git(instance, "rev-parse", "HEAD")
+            self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
+            self.assertTrue(_is_ancestor(instance, feature, local_head))
+            self.assertEqual(git(instance, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
+            self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
+
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
@@ -2869,6 +2932,61 @@ class GitBranchHost(CommandHostRuntime):
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)
         return f"test:{head}"
+
+
+class _InstanceRepoCatalog:
+    def __init__(self, instance_dir: Path) -> None:
+        self.instance_dir = instance_dir
+
+    def binding(self, project: str) -> dict:
+        return {"repo": str(self.instance_dir), "default_branch": "main"}
+
+    def default_branch(self, project: str, override: str | None) -> str:
+        return override or "main"
+
+    def adapter(self, project: str) -> dict:
+        return {}
+
+
+def _instance_repo_fixture(root: Path, ref: str) -> tuple[Path, Path, Path]:
+    remote = root / "remote.git"
+    instance = root / "secretary-instance"
+    workspace = root / "workspace"
+    git(root, "init", "--quiet", "--bare", "--initial-branch", "main", str(remote))
+    git(root, "clone", "--quiet", str(remote), str(instance))
+    _configure_git_user(instance)
+    _commit_file(instance, "README.md", "seed\n", "seed")
+    git(instance, "push", "--quiet", "origin", "main")
+    git(root, "clone", "--quiet", str(remote), str(workspace))
+    _configure_git_user(workspace)
+    git(workspace, "checkout", "--quiet", "-b", _legacy_worker_branch(ref))
+    return remote, instance, workspace
+
+
+def _configure_git_user(repo: Path) -> None:
+    git(repo, "config", "user.name", "Test User")
+    git(repo, "config", "user.email", "test@example.invalid")
+
+
+def _commit_file(repo: Path, relative: str, text: str, message: str) -> str:
+    path = repo / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    git(repo, "add", relative)
+    git(repo, "commit", "--quiet", "-m", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def git(cwd: Path, *args: str) -> str:

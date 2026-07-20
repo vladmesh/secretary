@@ -4,8 +4,9 @@ Contract: docs/RECOVERY.md, sections "Layout", "Каденция и RPO", "Write
 "Валидационный гейт", "Failure и divergence", "Observability". The writer
 regenerates the normalized board and runs exports, validates the snapshot, and
 commits `state/board` and `state/runs` into the private repo. It runs at the end
-of a dispatcher tick under `tick_lock`, so it needs no concurrency model of its
-own. The pusher runs on the same tick but on its own 30-minute window, and
+of a dispatcher tick under `tick_lock`, and also takes the instance repo writer
+lock so checkpoint writes cannot overlap a green-card publish against the same
+checkout. The pusher runs on the same tick but on its own 30-minute window, and
 `checkpoint_snapshot` turns both into the freshness view `status` and `doctor`
 print.
 
@@ -113,7 +114,8 @@ class CheckpointWriter:
 
     def write(self) -> CheckpointResult:
         try:
-            return self._write()
+            with state_repo.state_repo_lock(self.instance_dir):
+                return self._write()
         except CheckpointBlocked as exc:
             return CheckpointResult(status="blocked", reason=str(exc))
 
@@ -198,10 +200,7 @@ class CheckpointWriter:
         return tuple(staged)
 
     def _commit(self, *, board_cards: int, run_records: int) -> CheckpointResult:
-        # The memory writer commits into the same repo on its own pathspec; the
-        # lock keeps the two out of each other's index.
-        with state_repo.state_repo_lock(self.instance_dir):
-            return self._commit_locked(board_cards=board_cards, run_records=run_records)
+        return self._commit_locked(board_cards=board_cards, run_records=run_records)
 
     def _commit_locked(self, *, board_cards: int, run_records: int) -> CheckpointResult:
         pathspec = ["--", *STAGED_PATHSPEC]
@@ -323,27 +322,28 @@ class CheckpointPusher:
 
     def _attempt(self) -> PushOutcome:
         try:
-            branch = self._branch()
-            if not branch:
-                return PushOutcome("skipped", "instance repo has no checked-out branch")
-            if not self._has_remote():
-                return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
-            head = self._git(["rev-parse", "HEAD"], "checkpoint head").strip()
-            remote_head = self._remote_head(branch)
-            if remote_head and remote_head == head:
-                return PushOutcome("unchanged", commit=head)
-            if remote_head and not self._fast_forward(remote_head, head):
-                return PushOutcome(
-                    "diverged",
-                    f"remote {self.remote}/{branch} is at {remote_head[:12]}, "
-                    "which the checkpoint history does not contain",
+            with state_repo.state_repo_lock(self.instance_dir):
+                branch = self._branch()
+                if not branch:
+                    return PushOutcome("skipped", "instance repo has no checked-out branch")
+                if not self._has_remote():
+                    return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
+                head = self._git(["rev-parse", "HEAD"], "checkpoint head").strip()
+                remote_head = self._remote_head(branch)
+                if remote_head and remote_head == head:
+                    return PushOutcome("unchanged", commit=head)
+                if remote_head and not self._fast_forward(remote_head, head):
+                    return PushOutcome(
+                        "diverged",
+                        f"remote {self.remote}/{branch} is at {remote_head[:12]}, "
+                        "which the checkpoint history does not contain",
+                    )
+                self._git(
+                    ["push", "--quiet", self.remote, f"HEAD:refs/heads/{branch}"],
+                    "checkpoint push",
+                    timeout=PUSH_TIMEOUT_SECONDS,
                 )
-            self._git(
-                ["push", "--quiet", self.remote, f"HEAD:refs/heads/{branch}"],
-                "checkpoint push",
-                timeout=PUSH_TIMEOUT_SECONDS,
-            )
-            return PushOutcome("pushed", commit=head)
+                return PushOutcome("pushed", commit=head)
         except _GitFailure as exc:
             # The remote can move between the probe and the push. Git rejects the
             # non-ff itself; read that rejection as the divergence it is.

@@ -14,6 +14,7 @@ import yaml
 from secretary._fsutil import file_lock, write_text_atomic
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import validate_instance
+from secretary import state_repo
 from secretary.dispatcher_launcher import (
     HeadLaunch,
     HeadLaunchError,
@@ -108,6 +109,13 @@ def default_data_dir(instance_path: Path) -> Path:
 
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
+
+
+def _same_repo(first: Path, second: Path) -> bool:
+    try:
+        return first.expanduser().resolve() == second.expanduser().resolve()
+    except OSError:
+        return first.expanduser().absolute() == second.expanduser().absolute()
 
 
 class InstanceCatalog:
@@ -363,6 +371,9 @@ class CommandHostRuntime:
             self._merge_github_pr(task, record, branch, base)
             return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
+        if _same_repo(repo, Path(getattr(self.catalog, "instance_dir"))):
+            self._complete_green_instance_repo(record, branch, base, repo)
+            return
         # Publish the reviewed branch as main (a non-fast-forward push is rejected, never
         # force-landed), then fast-forward the project's own checkout. The dispatcher runs
         # from the secretary checkout, so this is how a merged self-modification reaches the
@@ -370,6 +381,28 @@ class CommandHostRuntime:
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
+
+    def _complete_green_instance_repo(
+        self,
+        record: DispatcherRecord,
+        branch: str,
+        base: str,
+        repo: Path,
+    ) -> None:
+        """Publish an instance-repo card without racing checkpoint commits.
+
+        Checkpoints are normal local commits in the instance repo. If one lands
+        after review preflight, a strict local fast-forward would reject the
+        already-published feature. Merge the checkpoint history and the reviewed
+        branch under the shared writer lock; the checkpoint pusher later sends
+        that merge commit fast-forward-only.
+        """
+        with state_repo.state_repo_lock(repo):
+            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "merge preflight fetch")
+            self._run(["git", "-C", record.workspace, "merge", "--no-edit", f"origin/{base}"], "merge preflight sync")
+            self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
+            self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+            self._run(["git", "-C", str(repo), "merge", "--no-edit", f"origin/{base}"], "post-merge reconcile")
 
     def _merge_github_pr(self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str) -> None:
         """Land a github-CI project through its PR. gh honours branch protection and refuses to
