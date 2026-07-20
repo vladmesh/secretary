@@ -67,6 +67,17 @@ python3 -m secretary data raw-kanboard-dump --instance INSTANCE \
 только transcript inventory. `raw-kanboard-dump` создаёт timestamped raw dump через `docker cp`,
 не пишет в live container и не использует Kanboard API.
 
+## Checkpoint writer
+
+Каждый production-тик под `tick_lock` в конце регенерирует board и runs exports, проверяет
+снапшот и коммитит `state/board` и `state/runs` в приватный репозиторий инстанса
+(контракт — `docs/RECOVERY.md`). Стейджится только этот pathspec, ручные правки конфига
+коммит не затрагивает. Гейт fail-closed: pending task audit, расхождение счётчиков
+`export.json` с числом строк или найденный секрет блокируют коммит, причина уходит в
+`checkpoint` в state диспетчера, следующий тик ретраит. Без изменений `state/` коммита нет.
+
+Memory facts и push на remote писатель пока не трогает, это отдельные карточки.
+
 ## Текущий archive backup
 
 ```bash

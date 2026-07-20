@@ -109,15 +109,38 @@ def production_tick(runtime: Any) -> dict[str, Any]:
                     outcomes.append(ready_outcome)
 
         runtime.production_state.put_records(payload, records)
+        checkpoint = _write_checkpoint(runtime)
+        if checkpoint is not None:
+            payload["checkpoint"] = checkpoint
         payload["last_tick_finished_at"] = now_rfc3339()
         runtime.production_state.save(payload)
-        return {
+        result = {
             "status": "ok" if not errors else "degraded",
             "step": "production-tick",
             "owner": runtime.owner,
             "actions": outcomes,
             "errors": errors,
         }
+        if checkpoint is not None:
+            result["checkpoint"] = checkpoint
+        return result
+
+
+def _write_checkpoint(runtime: Any) -> dict[str, Any] | None:
+    """Commit the normalized `state/` snapshot at the end of the tick.
+
+    The gate is fail-closed on the checkpoint, not on the tick: a blocked
+    snapshot leaves its reason in state and the next tick retries.
+    """
+    writer = getattr(runtime, "checkpoint", None)
+    if writer is None:
+        return None
+    try:
+        result = writer.write().to_json()
+    except Exception as exc:
+        result = {"status": "blocked", "reason": f"{type(exc).__name__}: {exc}"}
+    result["at"] = now_rfc3339()
+    return result
 
 
 class ProbeAbort(Exception):

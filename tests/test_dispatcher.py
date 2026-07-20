@@ -12,6 +12,7 @@ from unittest import mock
 
 from secretary import role_env
 from secretary._fsutil import try_file_lock
+from secretary.checkpoint import CheckpointResult
 from secretary.dispatcher import (
     CommandHostRuntime,
     CutoverState,
@@ -258,6 +259,18 @@ class FakeHost:
         self.torn_down.append(record.worker)
 
 
+class FakeCheckpoint:
+    def __init__(self, outcome: CheckpointResult | Exception) -> None:
+        self.outcome = outcome
+        self.calls = 0
+
+    def write(self) -> CheckpointResult:
+        self.calls += 1
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
 class FakeLegacyPause:
     def __init__(self) -> None:
         self.sufficient = True
@@ -395,6 +408,43 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         self.assertEqual(payload["mode"], "production")
         self.assertEqual(list(payload["records"]), ["secretary-510-pilot"])
+
+    def test_production_tick_writes_the_checkpoint_at_the_end(self) -> None:
+        self.commit_cutover()
+        self.runtime.checkpoint = FakeCheckpoint(
+            CheckpointResult(status="committed", commit="abc123", board_cards=2)
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["checkpoint"]["status"], "committed")
+        self.assertEqual(result["checkpoint"]["commit"], "abc123")
+        payload = self.runtime.production_state.load()
+        self.assertEqual(payload["checkpoint"]["commit"], "abc123")
+
+    def test_blocked_checkpoint_does_not_fail_the_tick(self) -> None:
+        self.commit_cutover()
+        self.runtime.checkpoint = FakeCheckpoint(
+            CheckpointResult(status="blocked", reason="secret detected in state/board/cards.ndjson")
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["actions"][0]["step"], "claim")
+        self.assertEqual(result["checkpoint"]["status"], "blocked")
+        self.assertIn("secret detected", result["checkpoint"]["reason"])
+
+    def test_checkpoint_crash_is_contained_in_the_tick_result(self) -> None:
+        self.commit_cutover()
+        self.runtime.checkpoint = FakeCheckpoint(RuntimeError("git is gone"))
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["checkpoint"]["status"], "blocked")
+        self.assertIn("git is gone", result["checkpoint"]["reason"])
 
     def test_production_tick_repeat_does_not_launch_second_workspace(self) -> None:
         self.commit_cutover()
