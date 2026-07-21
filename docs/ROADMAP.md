@@ -6,14 +6,23 @@ Roadmap описывает последовательность продукто
 
 ## Текущий baseline
 
-На рабочем VPS `secretary` уже владеет production dispatcher, memory service, фоновой
-автоматизацией и backup runtime. Task lifecycle, worker/reviewer loop, memory journal, onboarding,
-host planning и archive restore доказаны кодом и эксплуатацией. Off-host restore дошёл до загрузки
-production embedding model; target с 1.9 GiB RAM оказался недостаточным.
+На рабочем VPS `secretary` уже владеет production dispatcher, memory service и Git-backed
+checkpoint. Task lifecycle, worker/reviewer loop, memory journal, onboarding, host planning и
+checkpoint recovery primitives доказаны кодом и эксплуатацией. Checkpoint проходит validation,
+коммитится на production-тике и отправляется ff-only с RPO до 30 минут; publish изменений instance
+repo, checkpoint writer и pusher сериализованы одним writer lock.
 
-Продукт пока нельзя развернуть с нуля одной поддержанной командой. Instance, host resources,
-Kanboard, Orca, credentials, units и расписания всё ещё требуют ручных переходов. Текущая
-переносимость доказана как набор компонентов, но не оформлена в пользовательский delivery flow.
+Фоновые роли материализуются из продуктового канона: packaged units и `automation.toml` управляют
+curator, steward и retro, их timers и Orca automations без ручного копирования generated files.
+Live instance содержит переносимый desired config для materializer. Archive backup, offsite и
+backup timer выведены из основного recovery-контракта; archive остался только ручным optional cold
+archive.
+
+Продукт пока нельзя развернуть или восстановить с нуля одной поддержанной командой. Не хватает
+верхнеуровневого install/recover flow, который создаёт installation user, private remote и data
+plane, ставит Kanboard и Orca, принимает credentials, применяет materializer и доказывает parity на
+чистом target. Существующая установка всё ещё требует контролируемого adopt/apply для части live
+resources. Компоненты переносимы, но пользовательский delivery flow не завершён.
 
 ## Milestone 1. Автоматическая новая установка
 
@@ -34,13 +43,27 @@ install secretary
   -> status
 ```
 
+### Уже реализовано
+
+- Product materializer идемпотентно планирует и применяет packaged services/timers включённых
+  компонентов.
+- Skills, units и Orca automations фоновых ролей выводятся из product root и `automation.toml`;
+  повторный прогон сохраняет стабильные automation id и unit names.
+- Существующие role worktrees синхронизируются, но создание отсутствующих worktrees остаётся частью
+  незавершённого clean-host flow.
+- `doctor` и verify materializer'а показывают отсутствующие либо drifted host resources.
+
+Milestone остаётся открытым до появления поддержанной bootstrap-команды и clean-host E2E без
+заранее подготовленных checkout'ов, board и Orca state.
+
 ### Acceptance gate
 
 - Поддержанный Ubuntu/Debian host не содержит заранее подготовленных `/home/dev`, checkout'ов,
   board или Orca state.
 - Все host paths и resource names выводятся из instance и обнаруженного host context.
-- Bundled Kanboard, Orca, memory, dispatcher, curator, steward, retro и schedules поднимаются без
-  ручного копирования units и редактирования generated files.
+- Installer ставит и настраивает bundled Kanboard и Orca без заранее подготовленного runtime.
+- Memory, dispatcher, curator, steward, retro и schedules поднимаются materializer'ом без ручного
+  копирования units и редактирования generated files.
 - Повторный apply идемпотентен, а существующий installation user вызывает явный adopt/recover gate.
 - Установка без голов является валидным и наблюдаемым состоянием.
 
@@ -53,10 +76,10 @@ install secretary
 
 ### Outcome
 
-Приватный instance repository становится автоматическим durable checkpoint конфигурации и
-нормализованного состояния. Основной recovery path не требует отдельного S3 bucket или backup
-host. После dry-run проверки restore-from-git archive backup, offsite и backup-таймер выведены из
-основного пути; archive остаётся ручной переходной страховкой, а не вторым равноправным контрактом.
+Приватный instance repository используется как автоматический durable checkpoint конфигурации и
+нормализованного состояния. Recovery contract не требует отдельного S3 bucket или backup host.
+Archive backup, offsite и backup timer выведены из основного пути; archive остаётся ручным
+optional cold archive, а не вторым равноправным контрактом.
 
 ### Пользовательский путь
 
@@ -67,6 +90,20 @@ install secretary
   -> rebuild derived state
   -> status
 ```
+
+### Уже реализовано
+
+- Checkpoint содержит переносимый config/state canon, валидируется до commit и пишется только при
+  изменениях.
+- Push идёт ff-only раз в 30 минут. Failure и настоящая remote divergence не останавливают работу,
+  но остаются fail-closed для checkpoint и видны через `status`/`doctor` вместе с lag.
+- Параллельные feature publish и checkpoint commits сериализованы. Ожидаемое interleaving
+  восстанавливается автоматически, а чужая remote history остаётся ручной divergence.
+- Derived state исключён из checkpoint; archive/offsite больше не участвуют в основном UX и
+  doctor gates.
+
+Milestone остаётся открытым до поддержанного recover-from-private-remote flow и destructive-loss
+parity на чистом втором target.
 
 ### Acceptance gate
 
@@ -79,10 +116,12 @@ install secretary
 - После подтверждённой parity основной UX и документация больше не требуют archive bundle/offsite
   transport.
 
-### Decision gates
+### Зафиксированные решения
 
-- Допустимый recovery point objective и checkpoint cadence.
-- Нужен ли позднее optional cold archive для raw transcripts и artifacts.
+- RPO составляет не более 30 минут; checkpoint push использует отдельное 30-минутное окно поверх
+  production tick.
+- Cold archive для raw transcripts и artifacts допустим только как ручная опция, без timer,
+  offsite transport и влияния на recovery readiness.
 
 ## Milestone 3. Подключение голов и explainable routing
 
