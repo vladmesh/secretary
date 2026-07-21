@@ -325,6 +325,8 @@ class RestoreTests(unittest.TestCase):
             root = Path(tmpdir)
             data_dir = root / "secretary-data"
             instance = _write_instance_to(root / "instance", "test", data_dir, host=True)
+            with (instance / "instance.yaml").open("a", encoding="utf-8") as stream:
+                stream.write("  foreign_units:\n    - secretary-supervisor.timer\n")
             bootstrap_empty(instance)
             card = _restore_card()
             (data_dir / "board" / "cards.json").write_text(
@@ -348,14 +350,16 @@ class RestoreTests(unittest.TestCase):
             )
             fixture = root / "host"
             fixture.mkdir()
+            live_units = {resource.name for resource in desired if resource.kind == "unit"}
+            live_units.add("secretary-supervisor.timer")
             (fixture / "units.txt").write_text(
-                "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
+                "\n".join(sorted(live_units)), encoding="utf-8"
             )
             self.assertEqual(main([
                 "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
             ]), 0)
 
-            inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+            inventory = HostInventory(units=live_units)
             source = mock.Mock()
             source.collect.return_value = CollectResult(inventory=inventory)
             with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):

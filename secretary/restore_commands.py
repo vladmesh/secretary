@@ -20,6 +20,7 @@ from secretary.host import (
     LiveHostSource,
     build_expectations,
     build_plan,
+    foreign_units,
     load_managed_manifest,
     plan_changes,
     plan_input_errors,
@@ -102,7 +103,13 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         _print_json({"ok": False, "action": "restore-reconcile", "error": str(exc)})
         return 2
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
-    changes = plan_changes(build_plan(report.instance, report.bindings), collected.inventory, load_managed_manifest(data_dir / "host-managed.json"), prefix)
+    changes = plan_changes(
+        build_plan(report.instance, report.bindings),
+        collected.inventory,
+        load_managed_manifest(data_dir / "host-managed.json"),
+        prefix,
+        foreign_units(report.host),
+    )
     if not changes or any(change.action != "unchanged" for change in changes):
         _print_json({"ok": False, "action": "restore-reconcile", "error": "managed reconcile has not been applied"})
         return 1
