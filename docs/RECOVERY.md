@@ -5,10 +5,10 @@ checkpoint конфигурации и переносимого состояни
 продукта, доступа к этому репозиторию и ручного повторного ввода не хранимых в нём credentials.
 Отдельный bundle/S3 не является обязательной частью основного пути.
 
-Документ задаёт целевой контракт. Реализация writer, installer и recovery workflow остаётся за
-отдельными карточками. Archive backup, offsite-перенос и backup-таймер уже выведены из основного
-пути (см. [Переход и parity](#переход-и-parity)); git-checkpoint — единственный recovery contract,
-архив остаётся максимум переходной страховкой.
+Writer, memory flatten и remote push реализованы. Поддержанный clean-host installer и цельный
+recovery workflow остаются отдельными milestone. Archive backup, offsite-перенос и backup-таймер
+выведены из основного пути (см. [Переход и parity](#переход-и-parity)); git-checkpoint является
+единственным recovery contract, архив остаётся только ручным optional cold archive.
 
 ## Топология
 
@@ -157,27 +157,24 @@ Parity gate, критерий ухода с архива на git: recovery из
 продукт, clone, ручной `runtime.env`, `bootstrap --empty`, `restore-board`, `memory reindex`,
 `reconcile`, `doctor` зелёный, счётчики board/memory/runs совпадают с источником.
 
-Статус: в текущем процессе разработки пайплайна cutover агрессивный, без долгого параллельного
-периода. После одной dry-run проверки restore-from-git из основного пути выведены:
+Production cutover выполнен без долгого параллельного периода. Memory facts перенесены в private
+instance repo, memory service читает новый канон, а scheduled archive units сняты. Из основного пути
+выведены:
 
 1. archive backup create/verify как обязательная часть контракта — остаётся ручным опциональным
    инструментом (`secretary backup create`), не recovery-контрактом;
 2. offsite-перенос (`pull-backups-offsite.sh`) и его doctor-гейт — удалены;
 3. backup-таймер (`secretary-backup.service`/`.timer`) и archive-age doctor-проверка — удалены.
 
-git-checkpoint — единственный recovery contract. Optional cold archive для сырых transcripts и
-artifacts остаётся будущим решением.
+git-checkpoint является единственным recovery contract. Ручной cold archive сохраняется для сырья
+и совместимости, без timer, offsite transport и doctor gate.
 
 ## Реализационная нарезка
 
-1. Дизайн-контракт (этот документ).
-2. Выпилить sops/age из install/reconcile/backup path. Секреты остаются только в host
-   `runtime.env`.
-3. Checkpoint writer: влить `state/` в приватный репозиторий, flatten memory, хук на тике
-   (validate, `git add state/`, commit on-change), отдельный 30-минутный push, lag в `status`/`doctor`.
-4. Вывести archive/offsite из основного пути после dry-run восстановления из git (готово).
-5. Fresh install и recovery path (`install -> clone -> runtime.env -> rebuild -> status`),
-   карточки под Milestone 1/2.
+1. Готово: дизайн-контракт, отказ от sops/age, checkpoint writer, memory flatten, 30-минутный push
+   и вывод archive/offsite из основного пути.
+2. Осталось: fresh install и recovery path
+   (`install -> clone -> runtime.env -> rebuild -> status`) под Milestone 1/2.
 
 ## Acceptance gate
 
@@ -187,13 +184,12 @@ artifacts остаётся будущим решением.
 - Определены cadence, атомарная validation/commit/push, поведение при push failure и remote
   divergence, наблюдаемый RPO/lag.
 - Описаны пути fresh install и recovery из приватного remote без обязательного S3.
-- Encrypted archives обозначены переходной страховкой до parity, не вторым равноправным контрактом.
-- Есть поэтапная нарезка и проверяемый parity gate для перехода, без реализации миграции в этой
-  карточке.
+- Ручные archives обозначены optional cold storage, не вторым recovery contract.
+- Есть поэтапная нарезка и проверяемый parity gate для оставшегося clean-host recovery flow.
 
 ## Out of scope
 
-- Реализация checkpoint writer, installer и recovery workflow.
+- Реализация поддержанного clean-host installer и цельного recovery workflow.
 - Перенос конфигурации в control-plane database.
 - Автоматизация provider credentials, `.env` и авторизации голов.
 - Обязательный S3 transport, полный архив transcripts/artifacts, публичный plugin API.

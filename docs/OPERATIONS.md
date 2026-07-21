@@ -3,8 +3,9 @@
 ## Текущее состояние
 
 Live ownership принадлежит `secretary`: production dispatcher, memory daemon и systemd timers
-работают из product checkout. `secretary-instance` хранит installation config, `secretary-data`
-хранит mutable data. Legacy checkouts и units удалены.
+работают из product checkout. `secretary-instance` хранит installation config и переносимый
+checkpoint, `secretary-data` хранит локальный mutable/derived runtime state. Legacy checkouts и
+units удалены.
 
 Живой `doctor`, memory parity и task read/write были проверены после cutover.
 Исторический журнал процедуры доступен в Git history и не является действующим runbook.
@@ -62,10 +63,11 @@ python3 -m secretary data raw-kanboard-dump --instance INSTANCE \
   [--container cp-kanboard] [--source-path /var/www/app/data]
 ```
 
-`data init` создаёт layout и manifest, включая локальный Git journal memory facts. `data export`
-пишет нормализованные board, memory, run и transcript exports; без `--copy-transcripts` сохраняется
-только transcript inventory. `raw-kanboard-dump` создаёт timestamped raw dump через `docker cp`,
-не пишет в live container и не использует Kanboard API.
+`data init` создаёт локальный layout и manifest. Канон memory facts находится в
+`INSTANCE/state/memory/facts`; в data dir остаются его derived export/index. `data export` пишет
+нормализованные board, memory, run и transcript exports; без `--copy-transcripts` сохраняется только
+transcript inventory. `raw-kanboard-dump` создаёт timestamped raw dump через `docker cp`, не пишет
+в live container и не использует Kanboard API.
 
 ## Checkpoint writer
 
@@ -80,7 +82,9 @@ Board регенерируется одним `pipeline export`: доска це
 комментарии всех карточек — одним batched JSON-RPC запросом. Экспорт на 200 карточек занимает
 около секунды, так что тик остаётся 60-секундным.
 
-Memory facts писатель пока не трогает, это отдельная карточка.
+Memory writer независимо коммитит `state/memory` при `propose/commit/supersede`. Его pathspec не
+пересекается с tick-writer, а общий instance-repo lock сериализует оба writer'а и publish reviewed
+изменений instance repo.
 
 ## Checkpoint push
 
@@ -148,8 +152,8 @@ python3 -m secretary backup verify ARCHIVE.tar [--strict]
 
 `create` пишет обычный tar в `backups/` (`core`, `full`, `both`), без шифрования. `verify`
 возвращает `0` при успехе, `1` для findings или strict warnings, `2` для недоступного archive.
-Восстановление из такого архива по-прежнему доступно через `secretary restore ARCHIVE.tar`, но это
-переходная страховка, а не основной путь.
+Восстановление из такого архива по-прежнему доступно через `secretary restore ARCHIVE.tar` для
+совместимости. Архив не является recovery contract и не влияет на `doctor` или readiness.
 
 ## Авто-мёрж зелёных карточек
 

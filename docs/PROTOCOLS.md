@@ -1,7 +1,8 @@
 # Протоколы secretary
 
 `--instance` принимает каталог instance или прямой путь к `instance.yaml`. Instance задаёт
-конфигурацию установки, а `secretary-data` хранит изменяемое состояние.
+конфигурацию установки и хранит переносимый checkpoint в `state/`; `secretary-data` хранит
+локальное mutable/derived runtime state.
 
 ## Проверка и host ownership
 
@@ -63,7 +64,8 @@ Done остаётся выполненной зависимостью; закр�
 
 Все write-команды проходят role guards и transition checks. Mutation сначала получает
 append-only pending audit event, затем сверяется с live board и только после этого считается
-committed. Unresolved pending write блокирует согласованный export и backup до `reconcile-audit`.
+committed. Unresolved pending write блокирует согласованный export и recovery checkpoint до
+`reconcile-audit`.
 
 `report --kind done` перед любой записью проверяет `git status --porcelain` воркспейса воркера
 (CWD процесса) и отказывает с `uncommitted`, если там есть незакоммиченные изменения: воркер

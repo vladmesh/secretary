@@ -231,9 +231,10 @@ def log_search(query: str, k: int, results: list,
 
 
 # ── Canon → index (daemon-owned reindex) ──────────────────────────────────────
-# The default source is secretary-data/memory/facts. Prefer the atomically
-# published export.ndjson snapshot; rollback to the old panelmem-kb repo is one
-# setting, MEMORY_CANON_ROOT=/home/dev/panelmem-kb/memory, and then we read HEAD.
+# The production canon is the private instance repo's state/memory/facts.
+# Prefer the atomically published export.ndjson snapshot; rollback to the old
+# panelmem-kb repo is one setting, MEMORY_CANON_ROOT=/home/dev/panelmem-kb/memory,
+# and then we read HEAD.
 
 
 def scope_for_relative(path: Path) -> str:

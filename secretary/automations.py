@@ -201,10 +201,15 @@ def _spec_argv(spec: AutomationSpec) -> list[str]:
     argv = [
         "--prompt", spec.prompt,
         "--provider", spec.provider,
-        "--repo", f"path:{spec.repo}",
-        "--workspace", f"path:{spec.workspace}",
-        "--workspace-mode", spec.workspace_mode,
     ]
+    # Orca selectors are mutually exclusive. An existing workspace already
+    # identifies its repository, while a new-per-run automation needs the repo
+    # from which Orca will create a workspace.
+    if spec.workspace_mode == "existing":
+        argv += ["--workspace", f"path:{spec.workspace}"]
+    else:
+        argv += ["--repo", f"path:{spec.repo}"]
+    argv += ["--workspace-mode", spec.workspace_mode]
     if spec.precheck:
         argv += ["--precheck", spec.precheck]
     if spec.trigger:

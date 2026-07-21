@@ -12,6 +12,10 @@ checkpoint recovery primitives доказаны кодом и эксплуата
 коммитится на production-тике и отправляется ff-only с RPO до 30 минут; publish изменений instance
 repo, checkpoint writer и pusher сериализованы одним writer lock.
 
+Нормализованные board/runs и канон memory facts находятся в `secretary-instance/state/`. Локальный
+`secretary-data` хранит mutable/derived runtime state и пересоздаваемый memory index, отдельным
+recovery-репозиторием не является.
+
 Фоновые роли материализуются из продуктового канона: packaged units и `automation.toml` управляют
 curator, steward и retro, их timers и Orca automations без ручного копирования generated files.
 Live instance содержит переносимый desired config для materializer. Archive backup, offsite и

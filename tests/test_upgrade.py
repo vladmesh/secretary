@@ -383,6 +383,7 @@ class AutomationSpecTests(unittest.TestCase):
         argv = repoint_argv(self.spec(), change.automation_id)
         self.assertIn("--id", argv)
         self.assertIn("path:/home/dev/orca/workspaces/secretary/steward", argv)
+        self.assertNotIn("--repo", argv)
         self.assertIn("--disabled", argv)
         self.assertIn("--reuse-session", argv)
 
@@ -397,6 +398,12 @@ class AutomationSpecTests(unittest.TestCase):
     def test_a_missing_automation_is_a_create(self):
         change = plan_automations([self.spec()], [])[0]
         self.assertEqual((change.action, change.automation_id), ("create", ""))
+
+    def test_new_per_run_uses_repo_instead_of_workspace_selector(self):
+        argv = create_argv(self.spec(workspace_mode="new-per-run"))
+        self.assertIn("--repo", argv)
+        self.assertIn("path:/home/dev/secretary", argv)
+        self.assertNotIn("--workspace", argv)
 
     def test_shipped_specs_skip_the_deterministic_dispatcher(self):
         specs = {spec.name: spec for spec in load_specs(upgrade.default_product_root())}

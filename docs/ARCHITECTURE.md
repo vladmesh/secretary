@@ -11,8 +11,8 @@ Legacy runtime repositories и units удалены.
 
 ```text
 secretary                 продукт: CLI, runtime, схемы, тесты, generic skills
-secretary-instance        приватная конфигурация одной установки
-secretary-data            изменяемые board, memory, runs, transcripts и backups
+secretary-instance        приватные config и переносимый recovery checkpoint одной установки
+secretary-data            локальный mutable/derived runtime data plane
 ```
 
 Product repository не хранит bindings реальных проектов, credentials, карточки или host-local
@@ -21,12 +21,13 @@ state. Instance содержит persona, project bindings, adapters, policies �
 git checkpoint или archive payload. Структурированный реестр проектов живёт только в
 `secretary-instance/projects/`.
 
-`secretary-data` хранит mutable runtime state. Memory facts внутри него ведутся Git-журналом;
-остальные компоненты экспортируются в нормализованном виде. SQLite/vector index, worktrees,
-терминалы и generated host resources считаются производными.
+`secretary-instance/state/` хранит нормализованный recovery-канон: board, runs и memory facts.
+`secretary-data` остаётся локальным рабочим data plane для task audit, dispatcher state, derived
+exports/index, search log, raw dumps, transcripts и artifacts. SQLite/vector index, worktrees,
+терминалы и generated host resources считаются производными и в checkpoint не входят.
 
-Git-backed recovery checkpoint описан в [Recovery](RECOVERY.md). Archive/data restore остаётся
-переходной страховкой до parity и не является вторым источником secret state.
+Git-backed recovery checkpoint описан в [Recovery](RECOVERY.md). Ручной cold archive остаётся
+необязательным инструментом для сырья и совместимости, но не участвует в recovery readiness.
 
 ## Runtime flow
 
@@ -60,10 +61,11 @@ delivery локализованы в adapters, но текущий public contra
 
 ## Memory plane
 
-Facts лежат как markdown records в `secretary-data/memory/facts`. Куратор является writer-ролью и
-пишет через `secretary memory propose/commit/supersede`; другие головы читают через MCP.
-`export.ndjson` и SQLite/vector index восстанавливаются из журнала. Только один index writer может
-публиковать производное состояние одновременно.
+Facts лежат как markdown records в `secretary-instance/state/memory/facts`. Куратор является
+writer-ролью и пишет через `secretary memory propose/commit/supersede`; протокол коммитит только
+`state/memory` под общим instance-repo writer lock. Другие головы читают через MCP. `export.ndjson`
+и SQLite/vector index в `secretary-data/memory/` восстанавливаются из канона. Только один index
+writer может публиковать производное состояние одновременно.
 
 Embedding model загружается локально. В production-проверке startup достигал примерно 1.9 GiB RSS;
 отдельный target с 1.9 GiB общей RAM не смог выполнить live rebuild. Точный поддерживаемый minimum

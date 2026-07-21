@@ -5,8 +5,9 @@ VPS. The repository contains the CLI, task and memory protocols, dispatcher runt
 schemas and generic skills.
 
 The current production installation runs from this product repository. Private installation
-configuration lives in `secretary-instance`; mutable runtime state lives in `secretary-data`.
-Productization now focuses on turning the proven setup into an automated install and recovery path.
+configuration and the portable Git-backed recovery checkpoint live in `secretary-instance`;
+local mutable and derived runtime state lives in `secretary-data`. Productization now focuses on
+turning the proven setup into an automated install and recovery path.
 
 ## Documentation
 

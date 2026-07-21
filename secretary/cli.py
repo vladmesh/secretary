@@ -320,7 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_subcommands = memory.add_subparsers(dest="memory_command")
     memory_import = memory_subcommands.add_parser(
         "import",
-        help="seed or sync secretary-data/memory/facts from panelmem-kb",
+        help="seed or sync instance state/memory/facts from panelmem-kb",
     )
     memory_import.add_argument("--instance", required=True)
     memory_import.add_argument("--data-dir")
@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     memory_verify = memory_subcommands.add_parser(
         "verify",
-        help="verify secretary-data/memory journal, export and index parity",
+        help="verify instance memory canon, derived export and index parity",
     )
     memory_verify.add_argument("--instance", required=True)
     memory_verify.add_argument("--data-dir")
