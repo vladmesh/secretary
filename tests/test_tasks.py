@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
@@ -248,8 +249,9 @@ class WriteKanboard(FakeKanboard):
             if self.fail_update:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
             task = next(task for task in self.tasks if int(task["id"]) == int(params["id"]))
-            if "reference" in params:
-                task["reference"] = params["reference"]
+            for field in ("reference", "title", "description"):
+                if field in params:
+                    task[field] = params[field]
             task["date_modification"] = "1720000201"
             return True
         if method == "moveTaskPosition":
@@ -329,6 +331,60 @@ class TaskWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "rejected"):
             self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_edit_is_po_only_and_requires_a_change(self) -> None:
+        with self.assertRaisesRegex(TaskError, "not permitted") as raised:
+            self.writer.edit(role="worker", actor="w", reference="secretary-468", description="new spec")
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertEqual(self.client.calls, [])
+
+        with self.assertRaisesRegex(TaskError, "requires a new") as raised:
+            self.writer.edit(role="po", actor="operator", reference="secretary-468")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self.client.calls, [])
+
+    def test_edit_refuses_active_states(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        with self.assertRaisesRegex(TaskError, "Ideas, Ready or Blocked") as raised:
+            self.writer.edit(role="po", actor="operator", reference="secretary-468", description="new spec")
+        self.assertEqual(raised.exception.code, "edit_forbidden")
+        self.assertFalse(any(call[0] == "updateTask" for call in self.client.calls))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_edit_updates_spec_and_routing_and_writes_audit(self) -> None:
+        old_description = str(self.client.tasks[0]["description"])
+
+        result = self.writer.edit(
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            description="revised spec",
+            head="codex-terra",
+            review_head="claude-opus",
+            request_id="edit-once",
+        )
+
+        self.assertEqual(result["action"], "edited")
+        self.assertEqual(result["task"]["description"], "revised spec")
+        update = next(params for method, params in self.client.calls if method == "updateTask")
+        self.assertEqual(update, {"id": 12, "description": "revised spec"})
+        metadata = next(params for method, params in self.client.calls if method == "saveTaskMetadata")
+        self.assertEqual(metadata["values"], {"head": "codex-terra", "review_head": "claude-opus"})
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            event = json.loads(events.readline())
+        self.assertEqual(event["kind"], "edited")
+        payload = event["payload"]
+        self.assertEqual(payload["description_sha256"], hashlib.sha256(b"revised spec").hexdigest())
+        self.assertEqual(payload["description_sha256_was"], hashlib.sha256(old_description.encode()).hexdigest())
+        self.assertIsNone(payload["title_sha256"])
+        self.assertEqual(payload["head"], "codex-terra")
+        self.assertEqual(payload["review_head"], "claude-opus")
+
+    def test_edit_retry_does_not_repeat_backend_write(self) -> None:
+        first = self.writer.edit(role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit")
+        second = self.writer.edit(role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit")
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "updateTask"]), 1)
 
     def test_archive_is_po_only_and_requires_reason(self) -> None:
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:

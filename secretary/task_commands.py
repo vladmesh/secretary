@@ -107,6 +107,18 @@ def add_task_subcommands(subparsers) -> None:
         if name == "archive":
             command.add_argument("--reason-file")
         command.set_defaults(handler=handler)
+    task_edit = task_subcommands.add_parser("edit")
+    task_edit.add_argument("--ref", required=True)
+    task_edit.add_argument("--role", required=True, choices=("po",))
+    task_edit.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(task_edit)
+    task_edit.add_argument("--request-id")
+    task_edit.add_argument("--title")
+    task_edit.add_argument("--description")
+    task_edit.add_argument("--body-file", help="file with the full replacement description")
+    task_edit.add_argument("--head")
+    task_edit.add_argument("--review-head")
+    task_edit.set_defaults(handler=run_task_edit)
     task_claim = task_subcommands.add_parser("claim")
     task_claim.add_argument("--ref", required=True)
     task_claim.add_argument("--role", required=True, choices=("dispatcher",))
@@ -200,6 +212,27 @@ def run_task_create(args: argparse.Namespace) -> int:
             complexity=args.complexity,
             family_preference=args.family_preference,
             codex_launch_mode=args.codex_mode,
+            request_id=args.request_id,
+        )
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def run_task_edit(args: argparse.Namespace) -> int:
+    try:
+        description = _read_body(args.body_file) if args.body_file else args.description
+        writer = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args))
+        result = writer.edit(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            title=args.title,
+            description=description,
+            head=args.head,
+            review_head=args.review_head,
             request_id=args.request_id,
         )
     except TaskError as exc:

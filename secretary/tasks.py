@@ -91,6 +91,8 @@ _CODEX_LAUNCH_MODES = {"exec", "tui"}
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro"}
 _COMMENT_ROLES = _ROLES
 _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro"}
+_EDIT_ROLES = {"po"}
+_EDITABLE_STATES = {"ideas", "ready", "blocked"}
 _STATES = ("ideas", "ready", "in_progress", "validate", "blocked", "done")
 _TRANSITIONS = {
     # PO is the human operator and may move a card between any two states.
@@ -751,6 +753,72 @@ class TaskWriter:
             except Exception as exc:
                 raise _CommittedWriteError() from exc
         return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
+
+    def edit(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        title: str | None = None,
+        description: str | None = None,
+        head: str | None = None,
+        review_head: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Revise a card's spec in place instead of piling corrections into comments.
+
+        The audit event chains old and new content digests; full text history is
+        recoverable from the Git checkpoint of `state/board/cards.ndjson`. Cards with
+        an active attempt (In progress / Validate) are not editable: the running head
+        works from a TASK.md snapshot, so a mid-flight revision must go through
+        preempt/requeue, not a silent spec swap.
+        """
+        self._role(role, _EDIT_ROLES)
+        if title is not None and not title.strip():
+            raise TaskError("validation", "edit title must be non-empty", 2)
+        if title is None and description is None and head is None and review_head is None:
+            raise TaskError("validation", "edit requires a new title, description, head or review head", 2)
+        current = self.reader.show(reference)
+        payload = {
+            "title_sha256": _digest(title.strip()) if title is not None else None,
+            "title_sha256_was": _digest(current["title"]) if title is not None else None,
+            "description_sha256": _digest(description) if description is not None else None,
+            "description_sha256_was": _digest(current["description"]) if description is not None else None,
+            "head": head.strip() or None if head is not None else None,
+            "head_was": current["routing"]["head_override"] if head is not None else None,
+            "review_head": review_head.strip() or None if review_head is not None else None,
+            "review_head_was": current["routing"]["review_head_override"] if review_head is not None else None,
+        }
+
+        def mutation(task: dict[str, Any]) -> Any:
+            if task["state"] not in _EDITABLE_STATES:
+                raise TaskError("edit_forbidden", "edit requires an Ideas, Ready or Blocked card", 3)
+            number = _task_number(task)
+            update: dict[str, Any] = {}
+            if title is not None:
+                update["title"] = title.strip()
+            if description is not None:
+                update["description"] = description
+            committed = False
+            if update:
+                if not self.client.call("updateTask", id=number, **update):
+                    raise TaskError("backend_error", "Kanboard rejected the write", 1)
+                committed = True
+            values = {}
+            if head is not None:
+                values["head"] = head.strip()
+            if review_head is not None:
+                values["review_head"] = review_head.strip()
+            if values:
+                try:
+                    self.client.call("saveTaskMetadata", task_id=number, values=values)
+                except Exception as exc:
+                    if committed:
+                        raise _CommittedWriteError() from exc
+                    raise
+
+        return self._write("edited", role, actor, reference, request_id, payload, mutation)
 
     def archive(
         self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None

@@ -49,6 +49,8 @@ python3 -m secretary task create --role po --project PROJECT --type code \
   --title TITLE --state ready --head codex-extra --codex-mode exec
 python3 -m secretary task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
+python3 -m secretary task edit --role po --ref PROJECT-N \
+  --body-file SPEC.md --head codex-terra --review-head claude-opus
 ```
 
 `create` принимает `--description` или `--body-file`, dependency, workspace и routing fields.
@@ -61,6 +63,13 @@ Worker, reviewer и retro могут создавать только Ideas; PO �
 без live work: In progress/Validate и карточки с активным claim отклоняются. Закрытая карточка из
 Done остаётся выполненной зависимостью; закрытая карточка из другой колонки не считается Done и не
 разблокирует `blocked_by`.
+
+`edit` заменяет спеку карточки на месте: `--title`, `--description`/`--body-file` (полный новый
+текст, не дифф), `--head`, `--review-head`. Только для PO и только в Ideas/Ready/Blocked: у
+активной карточки воркер работает со снапшотом TASK.md, поэтому правка на лету идёт через
+preempt/requeue, а не через тихую подмену. Audit event `edited` хранит старый и новый digest;
+полный текст прошлых версий восстанавливается из git-истории `state/board/cards.ndjson` в
+checkpoint. Комменты остаются диалогом попытки, спека живёт только в description.
 
 Все write-команды проходят role guards и transition checks. Mutation сначала получает
 append-only pending audit event, затем сверяется с live board и только после этого считается
