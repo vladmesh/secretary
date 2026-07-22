@@ -48,7 +48,7 @@ effort = "default"
 fallback = []
 
 # Explicit model profiles mirror the visible catalog returned by
-# `CODEX_HOME=/home/dev/.config/orca/codex-runtime-home/home codex debug models` (2026-07-12).
+# `CODEX_HOME=/home/dev/.config/orca/codex-runtime-home/home codex debug models` (2026-07-23).
 # Keep `codex` above as the stable default/compatibility id; these entries add explicit per-card
 # choices, including the equivalent `codex-terra` id.
 [profiles.codex-sol]
@@ -94,18 +94,18 @@ effort = "default"
 fallback = []
 
 [profiles.codex-high]
-# Same model, explicit high reasoning for harder implementation/debug cards.
+# Terra with explicit high reasoning for harder implementation/debug cards.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "high"
 fallback = []
 
 [profiles.codex-extra]
-# Same model, extra reasoning (Codex CLI value: xhigh) for pipeline/core/system changes.
+# Terra with extra reasoning (Codex CLI value: xhigh) for pipeline/core/system changes.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "extra"
 fallback = []
 
@@ -114,7 +114,7 @@ fallback = []
 # the TUI, waits for Orca `tui-idle`, then sends the task prompt into that live session.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "default"
 codex_mode = "tui"
 fallback = []
@@ -122,7 +122,7 @@ fallback = []
 [profiles.codex-high-tui]
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "high"
 codex_mode = "tui"
 fallback = []
@@ -130,16 +130,16 @@ fallback = []
 [profiles.codex-extra-tui]
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "extra"
 codex_mode = "tui"
 fallback = []
 
 [profiles.codex-reviewer]
-# Layer-3 reviewer: prefer Codex extra, keep the previous claude-opus reviewer as second priority.
+# Layer-3 reviewer: prefer Terra xhigh, keep claude-opus as second priority.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "extra"
 fallback = ["claude-opus"]
 
@@ -148,35 +148,35 @@ fallback = ["claude-opus"]
 # remains the one-shot rollback profile.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "extra"
 codex_mode = "tui"
 fallback = ["claude-opus"]
 
 [profiles.codex-curator]
-# Curator is critical memory infrastructure. Prefer Codex extra, then fall back to the same bare
+# Curator is critical memory infrastructure. Prefer Terra xhigh, then fall back to the same bare
 # Claude invocation it used before it had a head profile.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "extra"
 fallback = ["claude-default"]
 
 [profiles.codex-steward]
-# Steward is the safety watcher. Prefer Codex extra, then keep the exact previous steward chain:
+# Steward is the safety watcher. Prefer Terra xhigh, then keep the previous steward chain:
 # claude-fable -> claude-opus -> hermes.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "extra"
 fallback = ["claude-fable"]
 
 [profiles.codex-retro]
-# Retro is reflective and less urgent than steward/curator: high effort is enough, with the old
+# Retro is reflective and less urgent than steward/curator: Terra high is enough, with the old
 # bare Claude runtime as backup if the OpenAI subscription is red.
 resource = "openai-sub"
 adapter = "codex"
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "high"
 fallback = ["claude-default"]
 
@@ -223,3 +223,13 @@ adapter = "hermes"
 model = "openai/gpt-5.5"
 provider = "openrouter"
 fallback = []
+
+[role_defaults]
+# Installation snapshots are generated from this table together with resources/profiles. Keeping
+# role routing in the same source prevents the production dispatcher and triggered-agents from
+# selecting different generations.
+new_card = "codex"
+reviewer = "codex-reviewer"
+curator = "codex-curator"
+steward = "codex-steward"
+retro = "codex-retro"

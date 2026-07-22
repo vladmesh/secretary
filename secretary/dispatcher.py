@@ -83,6 +83,7 @@ from secretary.dispatcher_types import (
     ReviewLaunch,
     review_pane_label,
 )
+from secretary.head_registry import HeadRegistryConfigError, assert_snapshot_current
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -131,7 +132,13 @@ class InstanceCatalog:
             for binding in report.bindings
             if isinstance(binding, dict) and binding.get("enabled") is True
         }
-        self._heads = self._load_optional_yaml(self.instance_dir / "heads" / "heads.yaml")
+        try:
+            self._heads = assert_snapshot_current(
+                self.instance_path,
+                Path(__file__).resolve().parents[1],
+            )
+        except HeadRegistryConfigError as exc:
+            raise DispatcherError("invalid_heads", str(exc), 2) from None
 
     def binding(self, project: str) -> dict[str, Any]:
         binding = self.bindings.get(project) or self.bindings.get(project.replace("_", "-"))
@@ -161,15 +168,19 @@ class InstanceCatalog:
 
     def worker_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("head_override")
-        if requested:
-            return str(requested)
-        return str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
+        head = str(requested) if requested else str(
+            self._heads.get("role_defaults", {}).get("new_card") or "codex"
+        )
+        self._head_profile(head)
+        return head
 
     def review_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("review_head_override")
-        if requested:
-            return str(requested)
-        return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+        head = str(requested) if requested else str(
+            self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
+        )
+        self._head_profile(head)
+        return head
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
         return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
@@ -212,8 +223,12 @@ class InstanceCatalog:
             raise HostError(str(exc)) from None
 
     def _head_profile(self, head: str) -> dict[str, Any]:
-        profile = self._heads.get("profiles", {}).get(head, {})
-        return profile if isinstance(profile, dict) else {}
+        profiles = self._heads.get("profiles", {})
+        profile = profiles.get(head) if isinstance(profiles, dict) else None
+        if not isinstance(profile, dict):
+            known = ", ".join(sorted(profiles)) if isinstance(profiles, dict) else ""
+            raise HostError(f"unknown head {head!r} (known: {known or '(none)'})")
+        return profile
 
     @staticmethod
     def _load_optional_yaml(path: Path) -> dict[str, Any]:

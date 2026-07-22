@@ -32,6 +32,7 @@ from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
+from secretary.head_registry import canonical_heads
 from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
@@ -2483,6 +2484,34 @@ class LegacyPauseProbeTests(unittest.TestCase):
 
 
 class DispatcherLauncherTests(unittest.TestCase):
+    def test_explicit_codex_terra_card_uses_terra_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+            task = {"routing": {"head_override": "codex-terra"}}
+
+            head = catalog.worker_head(task)  # type: ignore[attr-defined]
+            command = catalog.head_command(  # type: ignore[attr-defined]
+                head,
+                "TASK.md",
+                workspace=str(workspace),
+                role="worker",
+            )
+
+        self.assertEqual(head, "codex-terra")
+        self.assertIn("-m gpt-5.6-terra", command)
+
+    def test_unknown_explicit_head_is_rejected_before_claim(self) -> None:
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+
+        with self.assertRaisesRegex(HostError, "unknown head 'codex-does-not-exist'"):
+            catalog.worker_head(  # type: ignore[attr-defined]
+                {"routing": {"head_override": "codex-does-not-exist"}}
+            )
+
     def test_codex_command_uses_unattended_profile_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"

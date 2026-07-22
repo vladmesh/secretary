@@ -21,6 +21,8 @@ CODEX_EFFORTS = {
     "high": "high",
     "extra": "xhigh",
     "xhigh": "xhigh",
+    "max": "max",
+    "ultra": "ultra",
 }
 CODEX_LAUNCH_MODES = {"exec", "tui"}
 

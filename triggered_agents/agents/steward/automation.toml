@@ -10,7 +10,7 @@ skill = "/steward"        # automation prompt = skill invocation (skill lives in
 provider = "claude"
 reuse_session = true
 # heads.toml profile (triggered_agents/agents/pipeline/heads.toml): codex-steward uses Codex
-# gpt-5.5 extra first, then falls back to the previous steward chain (claude-fable -> claude-opus
+# GPT-5.6 Terra xhigh first, then falls back to the previous steward chain (claude-fable -> claude-opus
 # -> hermes). runtime/dispatch.py resolves this through pipeline.health/heads the same way a
 # worker/reviewer head is resolved at claim time.
 head = "codex-steward"

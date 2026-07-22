@@ -47,6 +47,12 @@ from secretary.host_apply import (
     apply_host,
     resolve_packaged,
 )
+from secretary.head_registry import (
+    HeadRegistryConfigError,
+    assert_snapshot_current,
+    materialize_snapshot,
+    snapshot_path,
+)
 
 MEMORY_COMPONENT = "memory"
 # A pull that touches any of these can change what the long-running memory
@@ -219,6 +225,23 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
     return StepResult("role-skills", "changed", f"synced {pending} skill copies")
 
 
+def step_head_registry(context: UpgradeContext) -> StepResult:
+    """Keep the private installation snapshot derived from the product registry."""
+    target = snapshot_path(context.instance_path)
+    try:
+        changed = materialize_snapshot(
+            context.instance_path,
+            context.product_root,
+            dry_run=context.dry_run,
+        )
+    except HeadRegistryConfigError as exc:
+        return StepResult("head-registry", "failed", str(exc))
+    if not changed:
+        return StepResult("head-registry", "unchanged", f"{target} matches product canon")
+    verb = "would regenerate" if context.dry_run else "regenerated"
+    return StepResult("head-registry", "changed", f"{verb} {target}")
+
+
 def desired_role_worktrees(product_root: Path) -> list[Path]:
     """Every derived role worktree shipped by this product, present or absent."""
     root = workspaces_root() / "secretary"
@@ -382,12 +405,17 @@ def step_verify(context: UpgradeContext) -> StepResult:
     audit = role_skills.audit()
     if not audit["ok"]:
         return StepResult("verify", "failed", "role skills are still out of sync")
+    try:
+        assert_snapshot_current(context.instance_path, context.product_root)
+    except HeadRegistryConfigError as exc:
+        return StepResult("verify", "failed", str(exc))
     return StepResult("verify", "unchanged", "host reconciled and role skills in sync")
 
 
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_dependencies,
+    step_head_registry,
     step_role_skills,
     step_worktrees,
     step_host,

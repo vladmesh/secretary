@@ -29,6 +29,12 @@ from secretary.host import (
     strict_manifest,
 )
 from secretary.host_apply import ApplyInputs, HostCommandError, apply_host
+from secretary.head_registry import (
+    HeadRegistryConfigError,
+    assert_snapshot_current,
+    canonical_heads,
+    load_snapshot,
+)
 
 UNIT_PREFIX = "secretary-"
 
@@ -512,6 +518,55 @@ class UpgradeStepTests(unittest.TestCase):
         result = upgrade.step_dependencies(context)
 
         self.assertIn(result.status, {"unchanged", "skipped"})
+
+    def test_head_registry_step_materializes_the_product_canon_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            result = upgrade.step_head_registry(context)
+            again = upgrade.step_head_registry(context)
+
+            self.assertEqual(result.status, "changed")
+            self.assertEqual(again.status, "unchanged")
+            self.assertEqual(load_snapshot(instance), canonical_heads(context.product_root))
+            self.assertEqual(load_snapshot(instance)["profiles"]["codex-terra"]["model"], "gpt-5.6-terra")
+
+    def test_head_registry_dry_run_reports_drift_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True)
+
+            result = upgrade.step_head_registry(context)
+
+            self.assertEqual(result.status, "changed")
+            self.assertFalse((instance / "heads" / "heads.yaml").exists())
+
+    def test_stale_head_snapshot_fails_the_dispatcher_guard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            (instance / "heads").mkdir()
+            (instance / "heads" / "heads.yaml").write_text(
+                "profiles:\n  codex:\n    model: gpt-5.5\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(HeadRegistryConfigError, "is stale"):
+                assert_snapshot_current(instance, upgrade.default_product_root())
+
+    def test_product_profiles_have_no_gpt_5_5_pin_except_openrouter_hermes(self):
+        profiles = canonical_heads(upgrade.default_product_root())["profiles"]
+
+        stale = {
+            name: profile.get("model")
+            for name, profile in profiles.items()
+            if name != "hermes" and profile.get("model") == "gpt-5.5"
+        }
+        self.assertEqual(stale, {})
+        self.assertEqual(profiles["codex-reviewer"]["model"], "gpt-5.6-terra")
 
     def test_missing_role_worktrees_are_recreated_from_product_head(self):
         with tempfile.TemporaryDirectory() as tmpdir:
