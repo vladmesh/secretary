@@ -219,24 +219,49 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
     return StepResult("role-skills", "changed", f"synced {pending} skill copies")
 
 
-def role_worktrees(product_root: Path) -> list[Path]:
-    """The role worktrees this product ships an agent for, as they exist on disk."""
+def desired_role_worktrees(product_root: Path) -> list[Path]:
+    """Every derived role worktree shipped by this product, present or absent."""
     root = workspaces_root() / "secretary"
     agents = product_root / "triggered_agents" / "agents"
     try:
         names = sorted(entry.name for entry in agents.iterdir() if (entry / "automation.toml").is_file())
     except OSError:
         return []
-    return [root / name for name in names if (root / name / ".git").exists()]
+    return [root / name for name in names]
+
+
+def role_worktrees(product_root: Path) -> list[Path]:
+    """Compatibility view of the role worktrees which already exist."""
+    return [path for path in desired_role_worktrees(product_root) if (path / ".git").exists()]
 
 
 def step_worktrees(context: UpgradeContext) -> StepResult:
-    worktrees = role_worktrees(context.product_root)
+    worktrees = desired_role_worktrees(context.product_root)
     if not worktrees:
-        return StepResult("role-worktrees", "skipped", "no role worktree on this host")
+        return StepResult("role-worktrees", "skipped", "the product ships no role worktrees")
+    created: list[str] = []
     moved: list[str] = []
     stuck: list[str] = []
     for worktree in worktrees:
+        if not (worktree / ".git").exists():
+            if worktree.exists() and any(worktree.iterdir()):
+                stuck.append(f"{worktree.name}: target exists and is not a managed worktree")
+                continue
+            if context.dry_run:
+                created.append(worktree.name)
+                continue
+            try:
+                worktree.parent.mkdir(parents=True, exist_ok=True)
+                _git(
+                    context.product_root,
+                    ["worktree", "add", "--detach", str(worktree), "HEAD"],
+                    timeout=300,
+                )
+            except (GitError, OSError) as exc:
+                stuck.append(f"{worktree.name}: {exc}")
+                continue
+            created.append(worktree.name)
+            continue
         try:
             if context.dry_run:
                 head = _git(worktree, ["rev-parse", "HEAD"])
@@ -252,9 +277,14 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
             moved.append(worktree.name)
     if stuck:
         return StepResult("role-worktrees", "failed", "; ".join(stuck))
-    if not moved:
+    if not moved and not created:
         return StepResult("role-worktrees", "unchanged", f"{len(worktrees)} worktrees current")
-    return StepResult("role-worktrees", "changed", ", ".join(moved))
+    details = []
+    if created:
+        details.append("created " + ", ".join(created))
+    if moved:
+        details.append("updated " + ", ".join(moved))
+    return StepResult("role-worktrees", "changed", "; ".join(details))
 
 
 def step_host(context: UpgradeContext) -> StepResult:

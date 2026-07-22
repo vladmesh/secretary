@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from secretary import upgrade
 from secretary.automations import (
@@ -509,6 +512,34 @@ class UpgradeStepTests(unittest.TestCase):
         result = upgrade.step_dependencies(context)
 
         self.assertIn(result.status, {"unchanged", "skipped"})
+
+    def test_missing_role_worktrees_are_recreated_from_product_head(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            product = root / "product"
+            product.mkdir()
+            agent = product / "triggered_agents" / "agents" / "curator"
+            agent.mkdir(parents=True)
+            (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(product), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(product), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(product), "commit", "-m", "product"], check=True,
+                           capture_output=True)
+            subprocess.run(["git", "-C", str(product), "remote", "add", "origin", str(product)], check=True)
+
+            with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "workspaces")}):
+                result = upgrade.step_worktrees(self.context(FakeUnitInstaller(), product_root=product))
+                again = upgrade.step_worktrees(self.context(FakeUnitInstaller(), product_root=product))
+
+            worktree = root / "workspaces" / "secretary" / "curator"
+            self.assertEqual(result.status, "changed")
+            self.assertTrue((worktree / ".git").is_file())
+            self.assertEqual(again.status, "unchanged")
 
 
 class CommandSurfaceTests(unittest.TestCase):

@@ -6,8 +6,8 @@ schemas and generic skills.
 
 The current production installation runs from this product repository. Private installation
 configuration and the portable Git-backed recovery checkpoint live in `secretary-instance`;
-local mutable and derived runtime state lives in `secretary-data`. Productization now focuses on
-turning the proven setup into an automated install and recovery path.
+local mutable and derived runtime state lives in `secretary-data`. The supported Git-backed
+install/recovery path is documented in [Recovery](docs/RECOVERY.md).
 
 ## Documentation
 
@@ -25,5 +25,5 @@ python3 -m secretary task list --project secretary
 ```
 
 Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available
-with `python3 -m pip install '.[memory]'`. A supported clean-host installer is tracked in the
-Roadmap.
+with `python3 -m pip install '.[memory]'`. `secretary install` and `secretary recover` require an
+already installed Kanboard and Orca runtime.

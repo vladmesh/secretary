@@ -5,10 +5,10 @@ checkpoint конфигурации и переносимого состояни
 продукта, доступа к этому репозиторию и ручного повторного ввода не хранимых в нём credentials.
 Отдельный bundle/S3 не является обязательной частью основного пути.
 
-Writer, memory flatten и remote push реализованы. Поддержанный clean-host installer и цельный
-recovery workflow остаются отдельными milestone. Archive backup, offsite-перенос и backup-таймер
-выведены из основного пути (см. [Переход и parity](#переход-и-parity)); git-checkpoint является
-единственным recovery contract, архив остаётся только ручным optional cold archive.
+Writer, memory flatten, remote push и цельный recover-from-remote flow реализованы. Archive backup,
+offsite-перенос и backup-таймер выведены из основного пути (см. [Переход и parity](#переход-и-parity));
+git-checkpoint является единственным recovery contract, архив остаётся только ручным optional cold
+archive.
 
 ## Топология
 
@@ -140,22 +140,58 @@ Security boundary: доверенный single-user host. Board и memory энд
 
 ## Fresh install и recovery
 
-```text
-install secretary
-  -> clone приватного репозитория
-  -> заполнить runtime.env (credentials, вручную)
-  -> rebuild derived state (restore-board, memory reindex, reconcile)
-  -> status
+Сначала установить продукт с memory extra, Kanboard и Orca. Package transport и поддерживаемая
+версия Orca пока остаются decision gate Milestone 1, поэтому `secretary install` их не ставит и
+fail-closed проверяет оба runtime до изменения live state.
+
+На чистом target первый запуск клонирует приватный checkpoint и останавливается на ручном вводе
+секретов:
+
+```bash
+python3 -m pip install '.[memory]'
+secretary install \
+  --instance-remote git@github.com:OWNER/secretary-instance.git \
+  --instance-dir /home/dev/secretary-instance \
+  --installation-user dev
+
+sudo -u dev install -m 0600 /dev/null /home/dev/secretary-instance/runtime.env
+$EDITOR /home/dev/secretary-instance/runtime.env
+secretary recover \
+  --instance-remote git@github.com:OWNER/secretary-instance.git \
+  --instance-dir /home/dev/secretary-instance \
+  --installation-user dev
 ```
 
-Recovery пересоздаёт live board, vector index и host resources из checkpoint. S3 или отдельный
-backup host не требуются. Головы подключаются после bootstrap отдельно.
+`runtime.env` должен быть gitignored, обычным файлом с mode `0600` и содержать как минимум
+`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`. Flow не печатает значения и не добавляет
+файл в Git.
+
+`recover` выполняет одну поддержанную последовательность:
+
+1. Проверяет remote/checkout, credentials, доступность Kanboard и установленный Orca.
+2. Материализует `state/board` и `state/runs` из checkpoint в новый local data plane. Из
+   `cards.ndjson` строится производный `cards.json`; счётчики проверяются до live writes.
+3. Идемпотентно импортирует доску и пересобирает `memory/export.ndjson` и `memory/index.sqlite` из
+   `state/memory/facts`.
+4. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
+   регистрирует Orca resources и применяет automations.
+5. Проверяет restore status. Головы подключаются после bootstrap отдельно (Milestone 3).
+
+Повторный `secretary recover` безопасен: checkout fast-forward-only, board restore сверяет parity,
+memory index строится заново, materializer на втором проходе не имеет изменений. Терминалы,
+worktrees, vector index, generated units и host caches из remote не копируются. S3 и отдельный
+backup host не требуются.
+
+Fresh mode не принимает существующего installation user или checkout. Он отказывает с явным
+выбором `--recover` для этой же установки либо отдельного adopt workflow для живого хоста. Recover
+не перезаписывает dirty checkout, другой remote, произвольный непустой data target или unowned host
+resource. Полный adopt существующего live host в этот flow не входит.
 
 ## Переход и parity
 
-Parity gate, критерий ухода с архива на git: recovery из приватного репозитория. Установить
-продукт, clone, ручной `runtime.env`, `bootstrap --empty`, `restore-board`, `memory reindex`,
-`reconcile`, `doctor` зелёный, счётчики board/memory/runs совпадают с источником.
+Parity gate ухода с архива на git закрыт clean-host recovery из приватного репозитория: установка
+продукта, clone, ручной `runtime.env`, `secretary recover`, зелёный status, совпадающие счётчики
+board/memory/runs. Clean-host тест начинает без checkout, board, index, worktrees и Orca state.
 
 Production cutover выполнен без долгого параллельного периода. Memory facts перенесены в private
 instance repo, memory service читает новый канон, а scheduled archive units сняты. Из основного пути
@@ -173,8 +209,8 @@ git-checkpoint является единственным recovery contract. Ру
 
 1. Готово: дизайн-контракт, отказ от sops/age, checkpoint writer, memory flatten, 30-минутный push
    и вывод archive/offsite из основного пути.
-2. Осталось: fresh install и recovery path
-   (`install -> clone -> runtime.env -> rebuild -> status`) под Milestone 1/2.
+2. Готово: fresh install и recovery path
+   (`install -> clone -> runtime.env -> rebuild -> status`) для Git-backed Milestone 2.
 
 ## Acceptance gate
 
@@ -189,7 +225,7 @@ git-checkpoint является единственным recovery contract. Ру
 
 ## Out of scope
 
-- Реализация поддержанного clean-host installer и цельного recovery workflow.
+- Bundled package transport и установка Kanboard/Orca на голый host.
 - Перенос конфигурации в control-plane database.
 - Автоматизация provider credentials, `.env` и авторизации голов.
 - Обязательный S3 transport, полный архив transcripts/artifacts, публичный plugin API.

@@ -18,9 +18,9 @@ python3 -m pip install '.[memory]'
 python3 -m unittest
 ```
 
-Первый вариант ставит CLI, второй добавляет memory runtime. Эти команды проверяют checkout и пока
-не устанавливают unit, не создают Kanboard/Orca и не применяют host resources. Поддержанный
-автоматический installer является первым milestone [Roadmap](ROADMAP.md).
+Первый вариант ставит CLI, второй добавляет memory runtime. Bundled package transport Kanboard/Orca
+остаётся decision gate первого milestone; готовый runtime применяется через `secretary install` /
+`secretary recover` по [Recovery](RECOVERY.md).
 
 Для проверки действующей установки использовать `doctor`, `reconcile plan` и `memory verify` по
 контракту из [Protocols](PROTOCOLS.md).
@@ -125,20 +125,16 @@ finding на `remote diverged`, на заблокированный гейт и 
 `runtime.env` переносится вручную.
 
 ```bash
-# install secretary; git clone <instance_remote>; заполнить runtime.env вручную
-python3 -m secretary bootstrap --empty --instance INSTANCE
-python3 -m secretary restore-board --instance INSTANCE
-python3 -m secretary memory reindex --instance INSTANCE
-python3 -m secretary reconcile apply --instance INSTANCE
-python3 -m secretary restore-reconcile --instance INSTANCE
-python3 -m secretary doctor --instance INSTANCE
+secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
+# заполнить INSTANCE/runtime.env и chmod 0600
+secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
 ```
 
-`bootstrap --empty` создаёт пустой data-layout, дальше board import, memory reindex и host reconcile
-идут отдельными стадиями. Board восстанавливается из `state/board` checkpoint, memory index
-пересобирается из canon `state/memory/facts`. Vector index является derived state и в canon не
-входит. До завершения стадий `doctor` держит restore findings; на выходе счётчики board/memory/runs
-совпадают с источником.
+Первая команда клонирует remote и останавливается до появления host-only credentials. Вторая
+единым идемпотентным flow материализует checkpoint, восстанавливает board, пересобирает memory index,
+role worktrees и host resources, затем проверяет status. Низкоуровневые `bootstrap --empty`,
+`restore-board`, `memory reindex`, `reconcile apply` и `restore-reconcile` остаются диагностическими
+примитивами, а не основным runbook.
 
 ## Опциональный cold archive
 

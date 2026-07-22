@@ -57,6 +57,7 @@ from secretary.session import run_shell
 from secretary.task_commands import add_task_subcommands
 from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
+from secretary.installation import add_install_commands
 
 
 PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
@@ -107,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(handler=run_doctor)
 
     add_upgrade_command(subparsers)
+    add_install_commands(subparsers)
     add_role_skills_subcommands(subparsers)
 
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")

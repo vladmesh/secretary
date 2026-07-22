@@ -22,11 +22,11 @@ Live instance содержит переносимый desired config для mate
 backup timer выведены из основного recovery-контракта; archive остался только ручным optional cold
 archive.
 
-Продукт пока нельзя развернуть или восстановить с нуля одной поддержанной командой. Не хватает
-верхнеуровневого install/recover flow, который создаёт installation user, private remote и data
-plane, ставит Kanboard и Orca, принимает credentials, применяет materializer и доказывает parity на
-чистом target. Существующая установка всё ещё требует контролируемого adopt/apply для части live
-resources. Компоненты переносимы, но пользовательский delivery flow не завершён.
+Продукт восстанавливает installation user, config/state и local data plane из private remote одной
+поддержанной последовательностью `install` / `recover`. Flow принимает host-only credentials,
+пересобирает board, memory index, role worktrees и применяет materializer на чистом target.
+Bundled package transport Kanboard/Orca и полный adopt существующего live host остаются открытыми
+частями Milestone 1.
 
 ## Milestone 1. Автоматическая новая установка
 
@@ -106,8 +106,8 @@ install secretary
 - Derived state исключён из checkpoint; archive/offsite больше не участвуют в основном UX и
   doctor gates.
 
-Milestone остаётся открытым до поддержанного recover-from-private-remote flow и destructive-loss
-parity на чистом втором target.
+Поддержанный recover-from-private-remote flow и destructive-loss parity на чистом втором target
+реализованы. Milestone 2 закрыт; дальнейшие package и live-adopt задачи принадлежат Milestone 1.
 
 ### Acceptance gate
 
