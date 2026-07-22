@@ -159,6 +159,68 @@ class InstallationTests(unittest.TestCase):
             )
             self.assertFalse((target / "state" / "memory" / "index.sqlite").exists())
 
+    def test_recover_dry_run_validates_checkpoint_without_materializing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source"
+            target = root / "target"
+            data = root / "data"
+            source.mkdir()
+            _checkpoint(source, data)
+            materialize_checkpoint(source, data)
+            before = {
+                path.relative_to(data): path.read_bytes()
+                for path in data.rglob("*")
+                if path.is_file()
+            }
+            _git(source, "init")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            _git(source, "add", ".")
+            _git(source, "commit", "-m", "checkpoint")
+            subprocess.run(
+                ["git", "clone", str(source), str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            runtime = target / "runtime.env"
+            runtime.write_text(
+                "KANBOARD_URL=http://127.0.0.1/jsonrpc.php\n"
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=test\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o600)
+
+            with (
+                mock.patch("secretary.installation.check_prerequisites"),
+                mock.patch("secretary.installation.import_normalized_board") as board,
+                mock.patch("secretary.installation.rebuild_memory_index") as memory,
+                mock.patch("secretary.installation.materialize_host") as host,
+                mock.patch("secretary.installation.mark_reconcile_applied") as reconcile,
+            ):
+                code, output = self._cli([
+                    "recover",
+                    "--instance-remote", str(source),
+                    "--instance-dir", str(target),
+                    "--installation-user", getpass.getuser(),
+                    "--dry-run",
+                ])
+
+            self.assertEqual(code, 0, output)
+            self.assertIn("would-change checkpoint", output)
+            self.assertIn("preview made no recovery changes", output)
+            after = {
+                path.relative_to(data): path.read_bytes()
+                for path in data.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+            board.assert_not_called()
+            memory.assert_not_called()
+            host.assert_not_called()
+            reconcile.assert_not_called()
+
     def test_existing_checkout_requires_explicit_recovery_choice(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -243,8 +243,10 @@ def _valid_existing_layout(data_dir: Path) -> bool:
     return actual == manifest_for(data_dir)
 
 
-def materialize_checkpoint(instance_dir: Path, data_dir: Path) -> tuple[int, int]:
-    """Publish normalized checkpoint files into a newly derived local layout."""
+def materialize_checkpoint(
+    instance_dir: Path, data_dir: Path, *, dry_run: bool = False,
+) -> tuple[int, int]:
+    """Validate the checkpoint and optionally publish it into the local layout."""
     if data_dir.exists() and any(data_dir.iterdir()):
         if not _valid_existing_layout(data_dir):
             raise InstallError(
@@ -294,6 +296,9 @@ def materialize_checkpoint(instance_dir: Path, data_dir: Path) -> tuple[int, int
         raise InstallError("private checkpoint claim count does not match claims.json")
     if not isinstance(watermark_entries, list) or run_export.get("watermark_count") != len(watermark_entries):
         raise InstallError("private checkpoint watermark count does not match watermarks.json")
+
+    if dry_run:
+        return len(cards), run_count
 
     if not data_dir.exists() or not any(data_dir.iterdir()):
         init_layout(data_dir)
@@ -365,11 +370,17 @@ def install(args: argparse.Namespace) -> InstallResult:
         _ensure_installation_user(args.installation_user, recovery=recovery, dry_run=args.dry_run)
         result.add(
             "installation-user",
-            "unchanged" if recovery else "changed",
+            "unchanged" if recovery else ("would-change" if args.dry_run else "changed"),
             args.installation_user,
         )
         detail = _clone_or_reuse(args.instance_remote, target, recovery=recovery, dry_run=args.dry_run)
-        result.add("instance-checkout", "unchanged" if detail.startswith("reused") else "changed", detail)
+        result.add(
+            "instance-checkout",
+            "unchanged" if detail.startswith("reused") else (
+                "would-change" if args.dry_run else "changed"
+            ),
+            detail,
+        )
         if detail.startswith("cloned"):
             _set_installation_owner(target, args.installation_user)
         if args.dry_run and not target.exists():
@@ -384,7 +395,18 @@ def install(args: argparse.Namespace) -> InstallResult:
             if not report.ok:
                 raise InstallError("invalid cloned instance: " + "; ".join(map(str, report.errors)))
             data_dir = Path(report.instance["data_dir"]).expanduser().resolve()
-            cards, runs = materialize_checkpoint(target, data_dir)
+            cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
+            if args.dry_run:
+                result.add(
+                    "checkpoint",
+                    "would-change",
+                    f"would materialize {cards} board card(s), {runs} run record(s)",
+                )
+                result.add("board", "would-change", f"would restore {cards} card(s) and verify parity")
+                result.add("memory", "would-change", "would rebuild the index from checkpoint facts")
+                result.add("host", "would-change", "would run the host materializer")
+                result.add("status", "skipped", "preview made no recovery changes")
+                return result
             _set_installation_owner(data_dir, args.installation_user)
             result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
             restored = import_normalized_board(data_dir)

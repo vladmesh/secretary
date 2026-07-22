@@ -182,6 +182,10 @@ memory index строится заново, materializer на втором пр�
 worktrees, vector index, generated units и host caches из remote не копируются. S3 и отдельный
 backup host не требуются.
 
+`secretary recover --dry-run` проверяет checkout, credentials, runtime prerequisites и целостность
+checkpoint, затем печатает шаги как `would-change`. Preview не пишет local data plane, не меняет
+доску, не запускает memory reindex и host materializer.
+
 Fresh mode не принимает существующего installation user или checkout. Он отказывает с явным
 выбором `--recover` для этой же установки либо отдельного adopt workflow для живого хоста. Recover
 не перезаписывает dirty checkout, другой remote, произвольный непустой data target или unowned host
