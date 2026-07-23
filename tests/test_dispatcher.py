@@ -1477,6 +1477,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
 
     def test_blocked_rework_returned_to_ready_reuses_its_workspace(self) -> None:
+        """A failed rework launch must not turn a preserved checkout into a fresh branch.
+
+        This models the outage path: the reviewer and worker workspace remain, the rework launch
+        fails, then an operator moves the card back from Blocked to Ready for a new attempt.
+        """
         self.start_pilot()
         self._run_worker_to_validate()
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")

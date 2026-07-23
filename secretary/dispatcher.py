@@ -256,7 +256,8 @@ class CommandHostRuntime:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
         workspace = self.restore_workspace(task, worker_id)
-        if Path(workspace).exists():
+        reused = Path(workspace).exists()
+        if reused:
             self._validate_resumable_workspace(task, workspace)
         else:
             workspace = self._create_workspace(project, worker_id, base)
@@ -274,7 +275,7 @@ class CommandHostRuntime:
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
         )
-        return {"workspace": workspace, "handle": handle, "base_branch": base}
+        return {"workspace": workspace, "handle": handle, "base_branch": base, "reused": str(reused).lower()}
 
     def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Launch rework in the existing workspace without recreating its branch."""
@@ -596,7 +597,12 @@ class CommandHostRuntime:
         return path
 
     def _validate_resumable_workspace(self, task: dict[str, Any], workspace: str) -> None:
-        """Accept only the registered project worktree on this card's worker branch."""
+        """Accept only the registered project worktree on this card's worker branch.
+
+        A Blocked card can be returned to Ready after an infrastructure outage. Its old checkout is
+        valuable state, including commits and WIP, but a path merely happening to exist must never
+        be adopted as a dispatcher workspace.
+        """
         if self.mode == "noop":
             return
         path = Path(workspace)
@@ -1211,6 +1217,10 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
+        # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
+        # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
+        # before claiming so its worker report command cannot collide with the old report either.
         retry_after_block = any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
