@@ -21,6 +21,8 @@ from secretary.installation import (
     check_prerequisites,
     install,
     materialize_checkpoint,
+    provision_codex_home,
+    provision_project_checkouts,
 )
 
 
@@ -71,6 +73,51 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_missing_project_checkout_is_cloned_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "remote.git"
+            target = root / "projects" / "demo"
+            source.mkdir()
+            _git(source, "init", "-b", "main")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            (source / "README.md").write_text("demo\n", encoding="utf-8")
+            _git(source, "add", ".")
+            _git(source, "commit", "-m", "initial")
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(remote)],
+                check=True, capture_output=True, text=True,
+            )
+            binding = {
+                "id": "demo", "repo": str(target), "remote": str(remote),
+                "default_branch": "main",
+            }
+
+            self.assertEqual(provision_project_checkouts([binding], None), 1)
+            self.assertEqual(provision_project_checkouts([binding], None), 0)
+            self.assertEqual((target / "README.md").read_text(encoding="utf-8"), "demo\n")
+
+    def test_codex_home_seeds_only_missing_non_secret_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = root / "product"
+            source = product / "packaging" / "codex-home"
+            source.mkdir(parents=True)
+            (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+            (source / "config.toml").write_text("model = 'test'\n", encoding="utf-8")
+            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
+            with (
+                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.installation._set_installation_owner"),
+            ):
+                self.assertEqual(provision_codex_home(product, "dev"), 2)
+                target = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
+                (target / "config.toml").write_text("operator state\n", encoding="utf-8")
+                self.assertEqual(provision_codex_home(product, "dev"), 0)
+            self.assertEqual((target / "config.toml").read_text(encoding="utf-8"), "operator state\n")
+
     def test_root_checks_orca_as_installation_user(self):
         with (
             mock.patch("secretary.installation.os.geteuid", return_value=0),

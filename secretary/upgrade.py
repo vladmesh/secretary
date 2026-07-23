@@ -92,6 +92,7 @@ class UpgradeContext:
     changed_paths: tuple[str, ...] = ()
     code_changed: bool = False
     unit_changed: bool = False
+    runtime_user: str | None = None
 
 
 @dataclass
@@ -314,7 +315,11 @@ def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
     packaged = resolve_packaged(report.instance, context.product_root / "packaging" / "systemd")
     expected = build_expectations(report.bindings, report.host)
-    source = FixtureHostSource(context.host_fixture) if context.host_fixture else LiveHostSource()
+    source = (
+        FixtureHostSource(context.host_fixture)
+        if context.host_fixture
+        else LiveHostSource(orca_user=context.runtime_user)
+    )
     collected = source.collect(expected)
     if collected.errors:
         reasons = "; ".join(f"{kind}: {reason}" for kind, reason in sorted(collected.errors.items()))

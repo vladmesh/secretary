@@ -123,8 +123,10 @@ fast-forward. Force-push и перезапись истории запрещен
 
 ## Секреты
 
-sops/age не используется. Секреты живут только в host `runtime.env` (права `0600`, в `.gitignore`),
-в checkpoint не входят никогда.
+sops/age не используется. Host `runtime.env` имеет права `0600`, не входит в checkpoint и
+содержит только машинно-сгенерированные `KANBOARD_URL`, `KANBOARD_API_USER` и
+`KANBOARD_API_TOKEN`. Доступ к GitHub и интерактивные логины голов остаются в password
+manager оператора и не копируются на хост продуктом.
 
 Security boundary: доверенный single-user host. Board и memory эндпоинты слушают loopback.
 Внешние токены (GitHub, providers) прикрыты host access control, `.gitignore` и секрет-сканом
@@ -171,7 +173,9 @@ sudo secretary install \
    `cards.ndjson` строится производный `cards.json`; счётчики проверяются до live writes.
 3. Идемпотентно импортирует доску и пересобирает `memory/export.ndjson` и `memory/index.sqlite` из
    `state/memory/facts`.
-4. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
+4. Клонирует отсутствующие project checkouts по `remote` из registry и создаёт
+   не-секретные `AGENTS.md` и `config.toml` в managed CODEX_HOME. OAuth остаётся ручным.
+5. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
    регистрирует Orca resources и применяет automations.
 5. Проверяет restore status. Головы подключаются после bootstrap отдельно (Milestone 3).
 

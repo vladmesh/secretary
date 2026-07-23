@@ -4,10 +4,10 @@
 сносит сервер под ноль и восстанавливает установку из приватного instance remote парой
 команд. Карточки, память и проекты возвращаются; derived state пересобирается.
 
-Статус: drill НЕ готов к прогону на проде, пока открыты secretary-680 (project checkouts + CODEX_HOME) и secretary-681
-(runtime.env cleanup). Шаги, закрываемые этими карточками, помечены. Первый прогон
-только на одноразовом хосте (LXC-контейнер или дешёвый VPS), прод после зелёного
-одноразового прогона.
+Первый прогон выполняется на одноразовом хосте. Для пересборки
+`intfloat/multilingual-e5-large` нужно не менее 4 ГБ RAM либо достаточный swap; на
+маленьком 2-гигабайтном VPS memory reindex можно вынести из инфраструктурного smoke,
+но перед production wipe его надо проверить на хосте подходящего размера.
 
 ## Что оператор держит вне сервера
 
@@ -44,8 +44,8 @@ manager оператора:
 
 ## Восстановление
 
-Порядок команд для свежей сессии. После recover остаётся ручной только подготовка
-project checkouts и managed CODEX_HOME до закрытия secretary-680.
+Порядок команд для свежей сессии. Project checkouts и не-секретная часть managed
+CODEX_HOME восстанавливаются автоматически.
 
 1. Базовый хост: ssh-доступ root/sudo, `apt install git python3.12 python3.12-venv`.
    Опционально Claude Code для оператора.
@@ -87,9 +87,8 @@ project checkouts и managed CODEX_HOME до закрытия secretary-680.
      --installation-user dev
    ```
 
-   Возвращает board, runs, memory facts + index, юниты, role worktrees, automations.
-   До secretary-680 руками: клонировать project checkouts из registry и собрать
-   managed CODEX_HOME. После 680 это делает recover.
+   Возвращает board, runs, memory facts + index, project checkouts, managed
+   CODEX_HOME, юниты, role worktrees и automations.
 8. Головы: `codex login`, `claude` (логин), `gh auth login`. Интерактивные внешние
    шаги, остаются ручными по контракту (Milestone 3 сделает их управляемыми, не
    автоматическими).

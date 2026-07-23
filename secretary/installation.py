@@ -353,7 +353,12 @@ def materialize_checkpoint(
     return len(cards), run_count
 
 
-def materialize_host(instance: Path, product_root: Path, host_fixture: Path | None = None):
+def materialize_host(
+    instance: Path,
+    product_root: Path,
+    host_fixture: Path | None = None,
+    installation_user: str | None = None,
+):
     report = validate_instance(instance)
     if not report.ok:
         raise InstallError("invalid instance config: " + "; ".join(map(str, report.errors)))
@@ -363,17 +368,82 @@ def materialize_host(instance: Path, product_root: Path, host_fixture: Path | No
         base_branch="main",
         dry_run=False,
         units=SystemdUnitInstaller(),
-        orca=LiveOrcaRegistrar(),
+        orca=LiveOrcaRegistrar(installation_user),
         automations=OrcaAutomationClient(),
         host_fixture=host_fixture,
         pull=False,
         report=report,
+        runtime_user=installation_user,
     )
     result = run_steps(context)
     if not result.ok:
         failed = result.steps[-1]
         raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
     return result
+
+
+def provision_project_checkouts(
+    bindings: list[dict[str, object]], installation_user: str | None,
+) -> int:
+    """Clone missing registered checkouts without touching an existing path."""
+    cloned = 0
+    for binding in bindings:
+        raw_target = binding.get("repo")
+        if not isinstance(raw_target, str) or not raw_target:
+            raise InstallError("project registry entry has no checkout path")
+        target = Path(raw_target).expanduser()
+        if target.exists():
+            if not target.is_dir() or not (target / ".git").exists():
+                raise InstallError(f"project checkout target is not a Git repository: {target}")
+            continue
+        remote = binding.get("remote")
+        if not isinstance(remote, str) or not remote:
+            raise InstallError(
+                f"project {binding.get('id')!s} is missing its recovery remote"
+            )
+        branch = binding.get("default_branch")
+        if not isinstance(branch, str) or not branch:
+            raise InstallError("project registry entry has no default branch")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f".{target.name}.clone-", dir=target.parent
+        ) as temporary:
+            staging = Path(temporary) / "checkout"
+            _run(
+                [
+                    "git", "clone", "--branch", branch, "--single-branch", "--",
+                    remote, str(staging),
+                ],
+                label=f"clone project {binding.get('id')!s}",
+                timeout=600,
+            )
+            os.replace(staging, target)
+        _set_installation_owner(target, installation_user)
+        cloned += 1
+    return cloned
+
+
+def provision_codex_home(product_root: Path, installation_user: str | None) -> int:
+    """Seed non-secret Codex runtime files while preserving login state."""
+    if not installation_user:
+        return 0
+    account = pwd.getpwnam(installation_user)
+    target = Path(account.pw_dir) / ".config" / "orca" / "codex-runtime-home" / "home"
+    source = product_root / "packaging" / "codex-home"
+    changed = 0
+    for name in ("AGENTS.md", "config.toml"):
+        destination = target / name
+        if destination.exists():
+            continue
+        try:
+            contents = (source / name).read_text(encoding="utf-8")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(destination, contents)
+        except (OSError, RuntimeError) as exc:
+            raise InstallError(f"could not provision managed CODEX_HOME: {exc}") from None
+        changed += 1
+    _set_installation_owner(target, installation_user)
+    return changed
 
 
 def install(args: argparse.Namespace) -> InstallResult:
@@ -449,10 +519,18 @@ def install(args: argparse.Namespace) -> InstallResult:
                 if args.product_root
                 else default_product_root()
             )
+            cloned = provision_project_checkouts(report.bindings, args.installation_user)
+            seeded = provision_codex_home(product_root, args.installation_user)
+            result.add(
+                "runtime",
+                "changed" if cloned or seeded else "unchanged",
+                f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
+            )
             host_result = materialize_host(
                 target,
                 product_root,
                 Path(args.host_fixture).expanduser().resolve() if args.host_fixture else None,
+                args.installation_user,
             )
             mark_reconcile_applied(data_dir)
             if not recovery:

@@ -112,6 +112,9 @@ class RestoreTests(unittest.TestCase):
             client = _EmptyWriteKanboard()
 
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            # A recovery retry rematerializes canonical events.ndjson, which does
+            # not contain the derived restore audit records from the failed host.
+            (data_dir / "board" / "events.ndjson").write_text("", encoding="utf-8")
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
 
             self.assertEqual(len(client.tasks), 1)
@@ -142,6 +145,33 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
+
+    def test_default_reindex_keeps_the_model_cache_out_of_tmp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            init_layout(data_dir)
+            instance = _write_instance_to(root / "instance", "test", data_dir)
+            _seed_instance_facts(instance, {"global/one.md": "fact\n"})
+            embed = object()
+            memory_service = mock.Mock()
+            memory_service.build_document_embedder.return_value = embed
+            memory_reindex = mock.Mock()
+            memory_reindex.rebuild.return_value = {"parity": {"indexed": 1}}
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "secretary.memory_service": memory_service,
+                    "secretary.memory_reindex": memory_reindex,
+                },
+            ):
+                self.assertEqual(rebuild_memory_index(data_dir, instance), 1)
+
+            memory_service.build_document_embedder.assert_called_once_with(
+                restore_module.DEFAULT_MEMORY_MODEL,
+                data_dir / "memory" / ".fastembed-cache",
+            )
+            self.assertIs(memory_reindex.rebuild.call_args.kwargs["document_embed"], embed)
 
     def test_board_restore_orders_positions_within_each_column_and_swimlane(self):
         with tempfile.TemporaryDirectory() as tmpdir:

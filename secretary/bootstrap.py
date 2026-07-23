@@ -69,8 +69,20 @@ def _project_lanes(instance: Path) -> set[str]:
             item = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):
             raise BootstrapError(f"could not read project registry entry {path.name}") from None
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
-            lanes.add(item["id"])
+        if isinstance(item, dict):
+            lane = item.get("orca_binding") or item.get("id")
+            if isinstance(lane, str) and lane:
+                lanes.add(lane)
+    cards = instance / "state" / "board" / "cards.ndjson"
+    if cards.is_file():
+        try:
+            for raw in cards.read_text(encoding="utf-8").splitlines():
+                card = yaml.safe_load(raw)
+                lane = card.get("swimlane") if isinstance(card, dict) else None
+                if isinstance(lane, str) and lane:
+                    lanes.add(lane)
+        except (OSError, yaml.YAMLError):
+            raise BootstrapError("could not read checkpoint board swimlanes") from None
     return lanes
 
 

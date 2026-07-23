@@ -3203,7 +3203,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertEqual(env["BOARD_ROLE"], "worker")
         self.assertEqual(env["KANBOARD_API_TOKEN"], "board-token")
-        self.assertEqual(env["TA_CODEX_MODE"], "exec")
+        self.assertNotIn("TA_CODEX_MODE", env)
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)

@@ -412,14 +412,24 @@ def canon_signature() -> tuple:
     raise RuntimeError(f"canon snapshot unavailable: no {CANON_EXPORT} and {CANON} is not in git")
 
 
-def build_document_embedder(model: str):
+def build_document_embedder(model: str, cache_dir: str | Path | None = None):
     """Return a normalized document embedder for an explicit model."""
-    embedding_model = TextEmbedding(model_name=model)
+    embedding_model = TextEmbedding(
+        model_name=model,
+        cache_dir=str(cache_dir) if cache_dir is not None else None,
+    )
 
-    def embed(text: str) -> np.ndarray:
-        return _unit(list(embedding_model.embed([text]))[0])
+    class DocumentEmbedder:
+        def __call__(self, text: str) -> np.ndarray:
+            return self.embed_many([text])[0]
 
-    return embed
+        def embed_many(self, texts: list[str]) -> list[np.ndarray]:
+            return [
+                _unit(vector)
+                for vector in embedding_model.embed(texts, batch_size=2)
+            ]
+
+    return DocumentEmbedder()
 
 
 def fact_content_hash(fact: dict) -> str:
@@ -446,7 +456,17 @@ def indexed_fact_count(path: str | Path | None = None) -> int:
 
 def write_index(facts: list[dict], target: Path, model: str, dim: int, document_embed) -> int:
     """Write a complete index to a temporary file, then atomically publish it."""
-    rows = [(fact, document_embed(fact["text"])) for fact in facts]
+    embed_many = getattr(document_embed, "embed_many", None)
+    vectors = (
+        embed_many([fact["text"] for fact in facts])
+        if callable(embed_many)
+        else [document_embed(fact["text"]) for fact in facts]
+    )
+    if len(vectors) != len(facts):
+        raise RuntimeError(
+            f"embedder returned {len(vectors)} vectors for {len(facts)} facts"
+        )
+    rows = list(zip(facts, vectors))
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     os.close(fd)

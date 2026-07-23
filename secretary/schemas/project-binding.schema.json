@@ -15,7 +15,12 @@
     "repo": {
       "type": "string",
       "minLength": 1,
-      "description": "Path or URL of the project repo."
+      "description": "Absolute checkout path on the managed host."
+    },
+    "remote": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Git remote used to recreate a missing checkout."
     },
     "orca_binding": {
       "type": "string",

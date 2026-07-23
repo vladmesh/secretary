@@ -66,17 +66,31 @@ class BootstrapBoardTests(unittest.TestCase):
             projects = instance / "projects"
             projects.mkdir()
             (projects / "api.yaml").write_text("id: api\n", encoding="utf-8")
-            (projects / "web.yaml").write_text("id: web\n", encoding="utf-8")
+            (projects / "web.yaml").write_text(
+                "id: web\norca_binding: web_runtime\n", encoding="utf-8"
+            )
+            board_state = instance / "state" / "board"
+            board_state.mkdir(parents=True)
+            (board_state / "cards.ndjson").write_text(
+                '{"reference":"retired-1","swimlane":"retired_project"}\n',
+                encoding="utf-8",
+            )
             board = Board()
 
             self.assertEqual(ensure_pipeline_board(instance, client=board), 7)
             self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-            self.assertEqual([lane["name"] for lane in board.lanes], ["api", "web"])
+            self.assertEqual(
+                [lane["name"] for lane in board.lanes],
+                ["api", "retired_project", "web_runtime"],
+            )
             calls = len(board.calls)
 
             self.assertEqual(ensure_pipeline_board(instance, client=board), 7)
             self.assertEqual(len(board.calls), calls + 3)
-            self.assertEqual([lane["name"] for lane in board.lanes], ["api", "web"])
+            self.assertEqual(
+                [lane["name"] for lane in board.lanes],
+                ["api", "retired_project", "web_runtime"],
+            )
 
     def test_removes_surplus_columns_with_supported_method(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
