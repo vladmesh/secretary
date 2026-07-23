@@ -29,11 +29,14 @@ from secretary.config import validate_instance
 
 
 def add_restore_subcommands(subparsers) -> None:
-    bootstrap = subparsers.add_parser("bootstrap", help="create a new empty secretary-data target")
-    bootstrap.add_argument("--empty", action="store_true", required=True)
-    bootstrap.add_argument("--instance", required=True)
+    bootstrap = subparsers.add_parser("bootstrap", help="bootstrap a host or create an empty secretary-data target")
+    bootstrap.add_argument("--empty", action="store_true", help="create an empty secretary-data target")
+    bootstrap.add_argument("--instance", help="instance for --empty")
+    bootstrap.add_argument("--instance-remote", help="private instance remote for host bootstrap")
+    bootstrap.add_argument("--instance-dir", help="local instance checkout for host bootstrap")
+    bootstrap.add_argument("--installation-user", help="dedicated OS account for host bootstrap")
     bootstrap.add_argument("--dry-run", action="store_true")
-    bootstrap.set_defaults(handler=run_bootstrap_empty)
+    bootstrap.set_defaults(handler=run_bootstrap)
 
     restore = subparsers.add_parser("restore", help="restore secretary-data from an archive")
     restore.add_argument("archive")
@@ -49,7 +52,17 @@ def add_restore_subcommands(subparsers) -> None:
     reconcile.add_argument("--instance", required=True)
     reconcile.set_defaults(handler=run_restore_reconcile)
 
-def run_bootstrap_empty(args: argparse.Namespace) -> int:
+def run_bootstrap(args: argparse.Namespace) -> int:
+    if not args.empty:
+        required = (args.instance_remote, args.instance_dir, args.installation_user)
+        if not all(required):
+            _print_json({"ok": False, "action": "bootstrap", "error": "host bootstrap requires --instance-remote, --instance-dir and --installation-user"})
+            return 2
+        from secretary.bootstrap import bootstrap as bootstrap_host
+        return bootstrap_host(args)
+    if not args.instance:
+        _print_json({"ok": False, "action": "bootstrap", "error": "--empty requires --instance"})
+        return 2
     try:
         plan = bootstrap_empty(Path(args.instance), dry_run=args.dry_run)
     except RestoreError as exc:

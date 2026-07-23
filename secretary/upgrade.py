@@ -92,6 +92,7 @@ class UpgradeContext:
     changed_paths: tuple[str, ...] = ()
     code_changed: bool = False
     unit_changed: bool = False
+    runtime_user: str | None = None
 
 
 @dataclass
@@ -122,7 +123,8 @@ class GitError(RuntimeError):
 def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=timeout
+            ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=timeout,
         )
     except FileNotFoundError:
         raise GitError("git not found") from None
@@ -314,7 +316,11 @@ def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
     packaged = resolve_packaged(report.instance, context.product_root / "packaging" / "systemd")
     expected = build_expectations(report.bindings, report.host)
-    source = FixtureHostSource(context.host_fixture) if context.host_fixture else LiveHostSource()
+    source = (
+        FixtureHostSource(context.host_fixture)
+        if context.host_fixture
+        else LiveHostSource(orca_user=context.runtime_user)
+    )
     collected = source.collect(expected)
     if collected.errors:
         reasons = "; ".join(f"{kind}: {reason}" for kind, reason in sorted(collected.errors.items()))
@@ -416,8 +422,8 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_dependencies,
     step_head_registry,
-    step_role_skills,
     step_worktrees,
+    step_role_skills,
     step_host,
     step_automations,
     step_memory,

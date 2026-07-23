@@ -4,11 +4,10 @@
 сносит сервер под ноль и восстанавливает установку из приватного instance remote парой
 команд. Карточки, память и проекты возвращаются; derived state пересобирается.
 
-Статус: drill НЕ готов к прогону на проде, пока открыты secretary-679 (bootstrap
-Kanboard/Orca), secretary-680 (project checkouts + CODEX_HOME) и secretary-681
-(runtime.env cleanup). Шаги, закрываемые этими карточками, помечены. Первый прогон
-только на одноразовом хосте (LXC-контейнер или дешёвый VPS), прод после зелёного
-одноразового прогона.
+Первый прогон выполняется на одноразовом хосте. Для пересборки
+`intfloat/multilingual-e5-large` нужно не менее 4 ГБ RAM либо достаточный swap; на
+маленьком 2-гигабайтном VPS memory reindex можно вынести из инфраструктурного smoke,
+но перед production wipe его надо проверить на хосте подходящего размера.
 
 ## Что оператор держит вне сервера
 
@@ -39,49 +38,58 @@ manager оператора:
 
 ## Вайп
 
-Переустановка ОС из панели хостинга (поддержанный Ubuntu/Debian) либо снос всего
+Переустановка ОС из панели хостинга (поддержанный Ubuntu 24.04) либо снос всего
 содержимого. После этого на хосте нет ни пользователя dev, ни чекаутов, ни Kanboard,
 ни Orca, ни systemd-юнитов.
 
 ## Восстановление
 
-Порядок команд для свежей сессии. Шаги 3 и 6 частично ручные до закрытия карточек.
+Порядок команд для свежей сессии. Project checkouts и не-секретная часть managed
+CODEX_HOME восстанавливаются автоматически.
 
 1. Базовый хост: ssh-доступ root/sudo, `apt install git python3.12 python3.12-venv`.
    Опционально Claude Code для оператора.
 2. GitHub-доступ: `ssh-keygen`, добавить deploy key к `secretary-instance` и
    project-репозиториям (или PAT в git credential store). Ручной шаг, автоматизации
    не будет: это и есть человеческий секрет.
-3. Kanboard + Orca: до secretary-679 ставятся руками (Kanboard с доской Pipeline,
-   колонки Идеи/Ready/In progress/Validate/Blocked/Done, swimlanes по проектам,
-   API-юзер; Orca поддержанной версии). После 679: один bootstrap-шаг, kanboard-креды
-   генерятся и пишутся в runtime.env машиной.
-4. Продукт:
+3. Продукт: клонировать secretary и поставить CLI с memory extra:
 
    ```bash
    git clone https://github.com/vladmesh/secretary.git ~/secretary
    cd ~/secretary && python3 -m pip install '.[memory]'
-   secretary install \
-     --instance-remote git@github.com:vladmesh/secretary-instance.git \
-     --instance-dir /home/dev/secretary-instance \
-     --installation-user dev
    ```
 
-5. runtime.env: после 679+681 файл создаёт bootstrap, человек не вводит ничего.
-   До того: `install -m 0600` и заполнить KANBOARD_* руками (см. RECOVERY.md).
-6. Recover:
+4. Kanboard + Orca: на Ubuntu 24.04 bootstrap ставит pinned Kanboard в Docker и
+   pinned Orca AppImage, запускает и проверяет Docker и Orca service, генерирует API
+   token в `runtime.env` и создаёт Pipeline с колонками и swimlanes из project registry:
 
    ```bash
-   secretary recover \
+   sudo secretary bootstrap \
+     --instance-remote git@github.com:vladmesh/secretary-instance.git \
+     --instance-dir /home/dev/secretary-instance --installation-user dev
+   ```
+5. Install:
+
+   ```bash
+   sudo secretary install \
      --instance-remote git@github.com:vladmesh/secretary-instance.git \
      --instance-dir /home/dev/secretary-instance \
      --installation-user dev
    ```
 
-   Возвращает board, runs, memory facts + index, юниты, role worktrees, automations.
-   До secretary-680 руками: клонировать project checkouts из registry и собрать
-   managed CODEX_HOME. После 680 это делает recover.
-7. Головы: `codex login`, `claude` (логин), `gh auth login`. Интерактивные внешние
+6. runtime.env создаёт bootstrap. Человек не вводит `KANBOARD_*`.
+7. Recover:
+
+   ```bash
+   sudo secretary recover \
+     --instance-remote git@github.com:vladmesh/secretary-instance.git \
+     --instance-dir /home/dev/secretary-instance \
+     --installation-user dev
+   ```
+
+   Возвращает board, runs, memory facts + index, project checkouts, managed
+   CODEX_HOME, юниты, role worktrees и automations.
+8. Головы: `codex login`, `claude` (логин), `gh auth login`. Интерактивные внешние
    шаги, остаются ручными по контракту (Milestone 3 сделает их управляемыми, не
    автоматическими).
 

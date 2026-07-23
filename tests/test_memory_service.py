@@ -95,6 +95,26 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
             self.update()
         self.assertEqual(self.rows(), before)
 
+    def test_git_snapshot_marks_every_command_safe_for_root_recovery(self):
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if "rev-parse" in command:
+                return mock.Mock(returncode=0, stdout=str(self.root) + "\n")
+            if "ls-tree" in command:
+                return mock.Mock(stdout=b"facts/example.md\0")
+            if "show" in command:
+                return mock.Mock(stdout="# example\n")
+            raise AssertionError(command)
+
+        with mock.patch.object(memory_service.subprocess, "run", side_effect=run):
+            facts = memory_service.load_git_head_snapshot(self.canon)
+
+        self.assertEqual(len(facts), 1)
+        for command in commands:
+            self.assertEqual(command[:3], ["git", "-c", "safe.directory=*"])
+
     def test_bootstrap_reconciles_compatible_index_without_full_rebuild(self):
         self.write_export([("global/a", "alpha")])
         self.update()

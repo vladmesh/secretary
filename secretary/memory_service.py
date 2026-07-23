@@ -330,9 +330,17 @@ def load_export_snapshot(path: Path) -> list[dict]:
     return facts
 
 
+def _git(path: Path, *args: str) -> list[str]:
+    """Build a Git command safe for a root recovery over an owned checkout."""
+    # Recovery intentionally runs as root while bootstrap gives the instance
+    # checkout to the installation user.  Git must trust that checkout for every
+    # read in the canon snapshot, not merely for the initial clone/fetch.
+    return ["git", "-c", "safe.directory=*", "-C", str(path), *args]
+
+
 def git_repo_root(path: Path) -> Path | None:
     proc = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        _git(path, "rev-parse", "--show-toplevel"),
         check=False,
         text=True,
         stdout=subprocess.PIPE,
@@ -349,7 +357,7 @@ def load_git_head_snapshot(path: Path) -> list[dict]:
         raise RuntimeError(f"canon snapshot unavailable: {path} is not a git worktree")
     prefix = path.resolve().relative_to(root.resolve())
     proc = subprocess.run(
-        ["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", str(prefix)],
+        _git(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", str(prefix)),
         check=True,
         stdout=subprocess.PIPE,
     )
@@ -362,7 +370,7 @@ def load_git_head_snapshot(path: Path) -> list[dict]:
             continue
         rel = Path(repo_rel).relative_to(prefix)
         show = subprocess.run(
-            ["git", "-C", str(root), "show", f"HEAD:{repo_rel}"],
+            _git(root, "show", f"HEAD:{repo_rel}"),
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -393,7 +401,7 @@ def canon_signature() -> tuple:
     root = git_repo_root(CANON) if CANON.is_dir() else None
     if root is not None:
         proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            _git(root, "rev-parse", "HEAD"),
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -404,14 +412,24 @@ def canon_signature() -> tuple:
     raise RuntimeError(f"canon snapshot unavailable: no {CANON_EXPORT} and {CANON} is not in git")
 
 
-def build_document_embedder(model: str):
+def build_document_embedder(model: str, cache_dir: str | Path | None = None):
     """Return a normalized document embedder for an explicit model."""
-    embedding_model = TextEmbedding(model_name=model)
+    embedding_model = TextEmbedding(
+        model_name=model,
+        cache_dir=str(cache_dir) if cache_dir is not None else None,
+    )
 
-    def embed(text: str) -> np.ndarray:
-        return _unit(list(embedding_model.embed([text]))[0])
+    class DocumentEmbedder:
+        def __call__(self, text: str) -> np.ndarray:
+            return self.embed_many([text])[0]
 
-    return embed
+        def embed_many(self, texts: list[str]) -> list[np.ndarray]:
+            return [
+                _unit(vector)
+                for vector in embedding_model.embed(texts, batch_size=2)
+            ]
+
+    return DocumentEmbedder()
 
 
 def fact_content_hash(fact: dict) -> str:
@@ -438,7 +456,17 @@ def indexed_fact_count(path: str | Path | None = None) -> int:
 
 def write_index(facts: list[dict], target: Path, model: str, dim: int, document_embed) -> int:
     """Write a complete index to a temporary file, then atomically publish it."""
-    rows = [(fact, document_embed(fact["text"])) for fact in facts]
+    embed_many = getattr(document_embed, "embed_many", None)
+    vectors = (
+        embed_many([fact["text"] for fact in facts])
+        if callable(embed_many)
+        else [document_embed(fact["text"]) for fact in facts]
+    )
+    if len(vectors) != len(facts):
+        raise RuntimeError(
+            f"embedder returned {len(vectors)} vectors for {len(facts)} facts"
+        )
+    rows = list(zip(facts, vectors))
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     os.close(fd)

@@ -4,6 +4,8 @@ import contextlib
 import getpass
 import io
 import json
+import os
+import pwd
 import subprocess
 import tempfile
 import unittest
@@ -12,7 +14,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.cli import main
-from secretary.installation import InstallError, _ensure_installation_user, materialize_checkpoint
+from secretary.installation import (
+    InstallError,
+    _clone_or_reuse,
+    _ensure_installation_user,
+    check_prerequisites,
+    install,
+    materialize_checkpoint,
+    provision_codex_home,
+    provision_project_checkouts,
+)
 
 
 CARD = {
@@ -62,9 +73,153 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_missing_project_checkout_is_cloned_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "remote.git"
+            target = root / "projects" / "demo"
+            source.mkdir()
+            _git(source, "init", "-b", "main")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            (source / "README.md").write_text("demo\n", encoding="utf-8")
+            _git(source, "add", ".")
+            _git(source, "commit", "-m", "initial")
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(remote)],
+                check=True, capture_output=True, text=True,
+            )
+            binding = {
+                "id": "demo", "repo": str(target), "remote": str(remote),
+                "default_branch": "main",
+            }
+
+            self.assertEqual(provision_project_checkouts([binding], None), 1)
+            self.assertEqual(provision_project_checkouts([binding], None), 0)
+            self.assertEqual((target / "README.md").read_text(encoding="utf-8"), "demo\n")
+
+    def test_codex_home_seeds_only_missing_non_secret_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = root / "product"
+            source = product / "packaging" / "codex-home"
+            source.mkdir(parents=True)
+            (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+            (source / "config.toml").write_text("model = 'test'\n", encoding="utf-8")
+            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
+            with (
+                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.installation._set_installation_owner"),
+            ):
+                self.assertEqual(provision_codex_home(product, "dev"), 2)
+                target = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
+                (target / "config.toml").write_text("operator state\n", encoding="utf-8")
+                self.assertEqual(provision_codex_home(product, "dev"), 0)
+            self.assertEqual((target / "config.toml").read_text(encoding="utf-8"), "operator state\n")
+
+    def test_root_checks_orca_as_installation_user(self):
+        with (
+            mock.patch("secretary.installation.os.geteuid", return_value=0),
+            mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
+            mock.patch("secretary.installation._run") as run,
+            mock.patch("secretary.installation.KanboardClient"),
+            mock.patch("secretary.installation.TaskReader") as reader,
+        ):
+            check_prerequisites("dev")
+
+        self.assertIn(
+            ["runuser", "--user", "dev", "--", "orca", "--version"],
+            [call.args[0] for call in run.call_args_list],
+        )
+        reader.return_value.list.assert_called_once()
+
+    def test_existing_runtime_env_is_not_a_bootstrap_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            (target / ".git").mkdir(parents=True)
+            (target / "runtime.env").write_text("KANBOARD_API_TOKEN=existing\n", encoding="utf-8")
+
+            with mock.patch("secretary.installation._run", return_value="remote"):
+                with self.assertRaisesRegex(InstallError, "choose --recover"):
+                    _clone_or_reuse("remote", target, recovery=False, dry_run=True)
+
+            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            with mock.patch("secretary.installation._run", side_effect=("remote", "")):
+                self.assertEqual(
+                    _clone_or_reuse("remote", target, recovery=False, dry_run=True),
+                    "reused checkpoint checkout",
+                )
+
+    def test_reused_checkout_marks_its_path_safe_for_root_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            (target / ".git").mkdir(parents=True)
+            with mock.patch("secretary.installation._run", side_effect=("remote", "")) as run:
+                self.assertEqual(
+                    _clone_or_reuse("remote", target, recovery=True, dry_run=True),
+                    "reused checkpoint checkout",
+                )
+
+            for call in run.call_args_list:
+                command = call.args[0]
+                self.assertEqual(command[:4], ["git", "-c", f"safe.directory={target}", "-C"])
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires a root clean-host fixture")
+    def test_root_can_reuse_a_checkout_owned_by_installation_user(self):
+        try:
+            account = pwd.getpwnam("nobody")
+        except KeyError:
+            self.skipTest("fixture has no nobody user")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "remote.git"
+            target = root / "instance"
+            source.mkdir()
+            _git(source, "init")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            (source / "checkpoint").write_text("ok\n", encoding="utf-8")
+            _git(source, "add", ".")
+            _git(source, "commit", "-m", "checkpoint")
+            subprocess.run(["git", "clone", "--bare", str(source), str(remote)], check=True)
+            subprocess.run(["git", "clone", str(remote), str(target)], check=True)
+            for path in (target, *target.rglob("*")):
+                os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+
+            self.assertEqual(
+                _clone_or_reuse(str(remote), target, recovery=True, dry_run=True),
+                "reused checkpoint checkout",
+            )
+
     def test_existing_installation_user_requires_recover_or_adopt_choice(self):
         with self.assertRaisesRegex(InstallError, "choose --recover.*adopt"):
             _ensure_installation_user(getpass.getuser(), recovery=False, dry_run=False)
+
+    def test_bootstrap_stamp_allows_the_existing_user_for_first_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            target.mkdir()
+            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            args = SimpleNamespace(
+                instance_dir=str(target), instance_remote="remote",
+                installation_user=getpass.getuser(), recover=False, adopt=False,
+                dry_run=False, runtime_env=None,
+            )
+            with (
+                mock.patch("secretary.installation._ensure_installation_user") as ensure_user,
+                mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
+                mock.patch(
+                    "secretary.installation._read_runtime_env",
+                    side_effect=InstallError("stop after user check"),
+                ),
+            ):
+                result = install(args)
+
+            ensure_user.assert_called_once_with(getpass.getuser(), recovery=True, dry_run=False)
+            self.assertFalse(result.ok)
+            self.assertIn("stop after user check", result.steps[-1].detail)
 
     def test_checkpoint_materialization_builds_local_json_and_never_copies_derived_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,8 +300,9 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
                 mock.patch("secretary.installation.materialize_host", return_value=host),
                 mock.patch("secretary.installation.restore_findings", return_value=[]),
+                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
-            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
 

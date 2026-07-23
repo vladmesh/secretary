@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,10 +83,16 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
                     position=_restore_position(card), swimlane=str(card.get("swimlane") or ""),
                     request_id=f"restore-card:{card['reference']}",
                 )
+                live_comments = Counter(
+                    str(comment.get("body") or "")
+                    for comment in reader.show(card["reference"]).get("comments", [])
+                )
                 occurrences: dict[str, int] = {}
                 for index, comment in enumerate(_restore_comments(card)):
                     occurrence = occurrences.get(comment, 0)
                     occurrences[comment] = occurrence + 1
+                    if live_comments[comment] > occurrence:
+                        continue
                     writer.restore_comment(
                         reference=card["reference"], body=comment, occurrence=occurrence,
                         request_id=f"restore-comment:{card['reference']}:{index}",
@@ -148,13 +155,18 @@ def rebuild_memory_index(
             count = int(result["parity"]["indexed"])
         else:
             from .memory_reindex import rebuild
+            from .memory_service import build_document_embedder
 
+            selected_model = model or DEFAULT_MEMORY_MODEL
             result = rebuild(
                 facts_dir,
                 memory_dir / "export.ndjson",
                 memory_dir / "index.sqlite",
-                model or DEFAULT_MEMORY_MODEL,
+                selected_model,
                 dim or DEFAULT_MEMORY_DIM,
+                document_embed=build_document_embedder(
+                    selected_model, memory_dir / ".fastembed-cache"
+                ),
             )
             count = int(result["parity"]["indexed"])
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:

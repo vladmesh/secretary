@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -588,6 +589,9 @@ class LiveHostSource(HostSource):
     # Cap each host probe so a hung systemctl or orca cannot wedge doctor.
     timeout_seconds = 10
 
+    def __init__(self, orca_user: str | None = None):
+        self.orca_user = orca_user
+
     def collect(self, expected: Expectations) -> CollectResult:
         inventory = HostInventory()
         errors: dict[str, str] = {}
@@ -667,7 +671,7 @@ class LiveHostSource(HostSource):
         return ""
 
     def _orca_repos(self) -> tuple[set[str], str]:
-        result = self._run(["orca", "repo", "list"])
+        result = self._run(self._orca_command(["orca", "repo", "list"]))
         if not result.ran:
             return set(), result.reason
         if result.returncode != 0:
@@ -688,7 +692,7 @@ class LiveHostSource(HostSource):
         ``plan``. JSON output lets us compare the registered path with the
         explicit binding without reading project files or secrets.
         """
-        result = self._run(["orca", "repo", "list", "--json"])
+        result = self._run(self._orca_command(["orca", "repo", "list", "--json"]))
         if not result.ran:
             return {}, result.reason
         if result.returncode != 0:
@@ -718,6 +722,11 @@ class LiveHostSource(HostSource):
                 return {}, "orca returned duplicate registration names"
             paths[name] = normalized
         return paths, ""
+
+    def _orca_command(self, command: list[str]) -> list[str]:
+        if os.geteuid() == 0 and self.orca_user:
+            return ["runuser", "--user", self.orca_user, "--", *command]
+        return command
 
     def _run(self, cmd: list[str]) -> _CmdResult:
         tool = cmd[0]

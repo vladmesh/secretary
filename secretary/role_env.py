@@ -13,7 +13,7 @@ RUNTIME_ENV = Path(
     os.environ.get("SECRETARY_RUNTIME_ENV_FILE", "/home/dev/secretary-instance/runtime.env")
 )
 BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
-NONSECRET_ENV = ("TA_CODEX_MODE", "SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
+NONSECRET_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),

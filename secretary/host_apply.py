@@ -183,8 +183,13 @@ class OrcaRegistrar(ABC):
 class LiveOrcaRegistrar(OrcaRegistrar):
     timeout_seconds = 60
 
+    def __init__(self, user: str | None = None):
+        self.user = user
+
     def add(self, name: str, repo: str) -> None:
         argv = ["orca", "repo", "add", "--path", repo]
+        if self.user:
+            argv = ["runuser", "--user", self.user, "--", *argv]
         try:
             result = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_seconds)
         except FileNotFoundError:

@@ -74,7 +74,9 @@ class InstallResult:
         return "\n".join(lines)
 
 
-def _run(argv: list[str], *, label: str, timeout: int = 120) -> str:
+def _run(
+    argv: list[str], *, label: str, timeout: int = 120, cwd: Path | None = None,
+) -> str:
     environment = dict(os.environ)
     environment.setdefault("GIT_TERMINAL_PROMPT", "0")
     environment.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
@@ -85,6 +87,7 @@ def _run(argv: list[str], *, label: str, timeout: int = 120) -> str:
             text=True,
             timeout=timeout,
             env=environment,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except FileNotFoundError:
         raise InstallError(f"{label}: command not found") from None
@@ -143,19 +146,26 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
             f"target {target} is not empty; choose --recover for the same instance or use the "
             "separate adopt workflow, no files were overwritten"
         )
-    origin = _run(["git", "-C", str(target), "remote", "get-url", "origin"], label="inspect instance remote")
+    # bootstrap leaves the checkout with the dedicated installation user.  Later
+    # recovery commands may be started from a root shell, for which Git otherwise
+    # rejects the deliberately foreign-owned checkout as dubious ownership.
+    git = ["git", "-c", f"safe.directory={target}", "-C", str(target)]
+    origin = _run([*git, "remote", "get-url", "origin"], label="inspect instance remote")
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
     if not recovery:
-        raise InstallError(
-            f"target {target} already contains an installation; choose --recover or use the "
-            "separate adopt workflow"
-        )
-    if _run(["git", "-C", str(target), "status", "--porcelain"], label="inspect instance checkout"):
+        # Only a checkout explicitly prepared by `bootstrap` may continue into its
+        # first install. runtime.env alone is normal state of every live installation.
+        if not (target / ".secretary-bootstrap").is_file():
+            raise InstallError(
+                f"target {target} already contains an installation; choose --recover or use the "
+                "separate adopt workflow"
+            )
+    if _run([*git, "status", "--porcelain"], label="inspect instance checkout"):
         raise InstallError("instance checkout has local changes; recovery will not overwrite them")
     if not dry_run:
-        _run(["git", "-C", str(target), "fetch", "--quiet", "origin"], label="fetch instance remote")
-        _run(["git", "-C", str(target), "merge", "--ff-only", "@{u}"], label="fast-forward instance checkout")
+        _run([*git, "fetch", "--quiet", "origin"], label="fetch instance remote")
+        _run([*git, "merge", "--ff-only", "@{u}"], label="fast-forward instance checkout")
     return "reused checkpoint checkout"
 
 
@@ -178,7 +188,8 @@ def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str
     if relative is not None:
         try:
             ignored = subprocess.run(
-                ["git", "-C", str(instance_dir), "check-ignore", "--quiet", "--", str(relative)],
+                ["git", "-c", f"safe.directory={instance_dir}", "-C", str(instance_dir),
+                 "check-ignore", "--quiet", "--", str(relative)],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -223,12 +234,18 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def check_prerequisites() -> None:
+def check_prerequisites(installation_user: str | None = None) -> None:
     if shutil.which("orca") is None:
         raise InstallError(
             "Orca is not installed; install a supported Orca runtime before secretary recovery"
         )
-    _run(["orca", "--version"], label="inspect Orca")
+    # The pinned Electron AppImage deliberately refuses to start as root.  The
+    # installation command is allowed to run as root, but its CLI probe must
+    # have the same uid as the service it is checking.
+    if os.geteuid() == 0 and installation_user:
+        _run(["runuser", "--user", installation_user, "--", "orca", "--version"], label="inspect Orca")
+    else:
+        _run(["orca", "--version"], label="inspect Orca")
     try:
         TaskReader(KanboardClient()).list()
     except TaskError as exc:
@@ -336,7 +353,12 @@ def materialize_checkpoint(
     return len(cards), run_count
 
 
-def materialize_host(instance: Path, product_root: Path, host_fixture: Path | None = None):
+def materialize_host(
+    instance: Path,
+    product_root: Path,
+    host_fixture: Path | None = None,
+    installation_user: str | None = None,
+):
     report = validate_instance(instance)
     if not report.ok:
         raise InstallError("invalid instance config: " + "; ".join(map(str, report.errors)))
@@ -346,17 +368,84 @@ def materialize_host(instance: Path, product_root: Path, host_fixture: Path | No
         base_branch="main",
         dry_run=False,
         units=SystemdUnitInstaller(),
-        orca=LiveOrcaRegistrar(),
-        automations=OrcaAutomationClient(),
+        orca=LiveOrcaRegistrar(installation_user),
+        automations=OrcaAutomationClient(installation_user),
         host_fixture=host_fixture,
         pull=False,
         report=report,
+        runtime_user=installation_user,
     )
-    result = run_steps(context)
+    home = pwd.getpwnam(installation_user).pw_dir if installation_user else None
+    with _runtime_environment({"HOME": home} if home else {}):
+        result = run_steps(context)
     if not result.ok:
         failed = result.steps[-1]
         raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
     return result
+
+
+def provision_project_checkouts(
+    bindings: list[dict[str, object]], installation_user: str | None,
+) -> int:
+    """Clone missing registered checkouts without touching an existing path."""
+    cloned = 0
+    for binding in bindings:
+        raw_target = binding.get("repo")
+        if not isinstance(raw_target, str) or not raw_target:
+            raise InstallError("project registry entry has no checkout path")
+        target = Path(raw_target).expanduser()
+        if target.exists():
+            if not target.is_dir() or not (target / ".git").exists():
+                raise InstallError(f"project checkout target is not a Git repository: {target}")
+            continue
+        remote = binding.get("remote")
+        if not isinstance(remote, str) or not remote:
+            raise InstallError(
+                f"project {binding.get('id')!s} is missing its recovery remote"
+            )
+        branch = binding.get("default_branch")
+        if not isinstance(branch, str) or not branch:
+            raise InstallError("project registry entry has no default branch")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f".{target.name}.clone-", dir=target.parent
+        ) as temporary:
+            staging = Path(temporary) / "checkout"
+            _run(
+                [
+                    "git", "clone", "--branch", branch, "--single-branch", "--",
+                    remote, str(staging),
+                ],
+                label=f"clone project {binding.get('id')!s}",
+                timeout=600,
+            )
+            os.replace(staging, target)
+        _set_installation_owner(target, installation_user)
+        cloned += 1
+    return cloned
+
+
+def provision_codex_home(product_root: Path, installation_user: str | None) -> int:
+    """Seed non-secret Codex runtime files while preserving login state."""
+    if not installation_user:
+        return 0
+    account = pwd.getpwnam(installation_user)
+    target = Path(account.pw_dir) / ".config" / "orca" / "codex-runtime-home" / "home"
+    source = product_root / "packaging" / "codex-home"
+    changed = 0
+    for name in ("AGENTS.md", "config.toml"):
+        destination = target / name
+        if destination.exists():
+            continue
+        try:
+            contents = (source / name).read_text(encoding="utf-8")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(destination, contents)
+        except (OSError, RuntimeError) as exc:
+            raise InstallError(f"could not provision managed CODEX_HOME: {exc}") from None
+        changed += 1
+    _set_installation_owner(target, installation_user)
+    return changed
 
 
 def install(args: argparse.Namespace) -> InstallResult:
@@ -367,10 +456,20 @@ def install(args: argparse.Namespace) -> InstallResult:
         result.add("mode", "failed", "full live-host adoption is not supported by this flow")
         return result
     try:
-        _ensure_installation_user(args.installation_user, recovery=recovery, dry_run=args.dry_run)
+        # bootstrap creates this user before the first install. Its stamp is also
+        # checked by _clone_or_reuse, so it is the narrow exception to the usual
+        # refusal to touch an existing installation user.
+        bootstrap_checkout = (target / ".secretary-bootstrap").is_file()
+        _ensure_installation_user(
+            args.installation_user,
+            recovery=recovery or bootstrap_checkout,
+            dry_run=args.dry_run,
+        )
         result.add(
             "installation-user",
-            "unchanged" if recovery else ("would-change" if args.dry_run else "changed"),
+            "unchanged" if recovery or bootstrap_checkout else (
+                "would-change" if args.dry_run else "changed"
+            ),
             args.installation_user,
         )
         detail = _clone_or_reuse(args.instance_remote, target, recovery=recovery, dry_run=args.dry_run)
@@ -389,7 +488,7 @@ def install(args: argparse.Namespace) -> InstallResult:
         values = _read_runtime_env(target, args.runtime_env)
         result.add("runtime-env", "unchanged", "credentials loaded from host-only file")
         with _runtime_environment(values):
-            check_prerequisites()
+            check_prerequisites(args.installation_user)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
             report = validate_instance(target)
             if not report.ok:
@@ -409,6 +508,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 return result
             _set_installation_owner(data_dir, args.installation_user)
             result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
+            # The checkpoint only contains cards. The board itself is derived host
+            # state and must exist before restore can prove card parity.
+            from secretary.bootstrap import ensure_pipeline_board
+            ensure_pipeline_board(target)
             restored = import_normalized_board(data_dir)
             result.add("board", "changed", f"{restored} card(s) at parity")
             count = rebuild_memory_index(data_dir, target)
@@ -418,10 +521,18 @@ def install(args: argparse.Namespace) -> InstallResult:
                 if args.product_root
                 else default_product_root()
             )
+            cloned = provision_project_checkouts(report.bindings, args.installation_user)
+            seeded = provision_codex_home(product_root, args.installation_user)
+            result.add(
+                "runtime",
+                "changed" if cloned or seeded else "unchanged",
+                f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
+            )
             host_result = materialize_host(
                 target,
                 product_root,
                 Path(args.host_fixture).expanduser().resolve() if args.host_fixture else None,
+                args.installation_user,
             )
             mark_reconcile_applied(data_dir)
             changed = sum(step.status == "changed" for step in host_result.steps)
@@ -433,8 +544,11 @@ def install(args: argparse.Namespace) -> InstallResult:
             findings = restore_findings(data_dir)
             if findings:
                 raise InstallError("status findings: " + "; ".join(findings))
+            if not recovery:
+                (target / ".secretary-bootstrap").unlink(missing_ok=True)
             result.add("status", "unchanged", "board, memory and operational configuration are ready")
             _set_installation_owner(data_dir, args.installation_user)
+            _set_installation_owner(target, args.installation_user)
     except (InstallError, RestoreError, RuntimeError) as exc:
         result.add("install", "failed", str(exc))
     return result
