@@ -167,6 +167,7 @@ def _install_platform(*, dry_run: bool) -> None:
         # dependencies on the one supported host release, not merely FUSE.
         packages = [
             "curl", "fuse", "libnss3", "libgtk-3-0t64", "libgbm1", "libasound2t64",
+            "xvfb",
         ]
         if needs_docker:
             packages.append("docker.io")

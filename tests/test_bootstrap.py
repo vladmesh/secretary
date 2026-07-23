@@ -127,7 +127,7 @@ class BootstrapBoardTests(unittest.TestCase):
         self.assertIn(
             [
                 "apt-get", "install", "--yes", "curl", "fuse", "libnss3", "libgtk-3-0t64",
-                "libgbm1", "libasound2t64", "docker.io", "docker-compose-v2",
+                "libgbm1", "libasound2t64", "xvfb", "docker.io", "docker-compose-v2",
             ],
             [call.args[0] for call in run.call_args_list],
         )
