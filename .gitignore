@@ -8,3 +8,6 @@ dist/
 # Live operational state written by the board/task CLI; never a git repo.
 secretary-data/
 runtime.env
+
+# Runtime state under role worktrees, for example secretary/pipeline/state.
+/state/
