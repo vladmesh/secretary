@@ -252,6 +252,7 @@ class CommandHostRuntime:
         head: str,
         *,
         attempt_id: str = "",
+        require_existing_workspace: bool = False,
     ) -> dict[str, str]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
@@ -260,6 +261,8 @@ class CommandHostRuntime:
         if reused:
             self._validate_resumable_workspace(task, workspace)
         else:
+            if require_existing_workspace:
+                raise HostError("resume workspace is missing")
             workspace = self._create_workspace(project, worker_id, base)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
@@ -1273,7 +1276,13 @@ class DispatcherRuntime:
         )
         records[ref] = record
         self._save_records(payload, records)
-        return self._launch_worker_after_claim(claimed, record, records, payload)
+        return self._launch_worker_after_claim(
+            claimed,
+            record,
+            records,
+            payload,
+            require_existing_workspace=retry_after_block,
+        )
 
     def _launch_worker_after_claim(
         self,
@@ -1281,6 +1290,8 @@ class DispatcherRuntime:
         record: DispatcherRecord,
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
+        *,
+        require_existing_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = claimed["ref"]
         mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
@@ -1314,6 +1325,7 @@ class DispatcherRuntime:
                 record.worker,
                 record.head,
                 attempt_id=record.attempt_id,
+                require_existing_workspace=require_existing_workspace,
             )
         except HostError as exc:
             self.writer.move(

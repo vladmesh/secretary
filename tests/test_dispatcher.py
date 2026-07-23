@@ -208,6 +208,7 @@ class FakeHost:
         head: str,
         *,
         attempt_id: str = "",
+        require_existing_workspace: bool = False,
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         if self.fail_prepare_reason:
@@ -3346,6 +3347,28 @@ class WorkspaceResumeTests(unittest.TestCase):
             self.assertIn("updated task description", task_doc)
             self.assertIn("latest finding", task_doc)
             self.assertIn("attempt-retry", task_doc)
+
+    def test_prepare_worker_refuses_missing_workspace_when_resuming(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspaces"
+            host = GitBranchHost(root)
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "description": "updated task description",
+                "workspace": {"base_branch": "main"},
+            }
+
+            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
+                with self.assertRaisesRegex(HostError, "resume workspace is missing"):
+                    host.prepare_worker(
+                        task,
+                        "secretary-510-pilot-pilot",
+                        "codex",
+                        attempt_id="attempt-retry",
+                        require_existing_workspace=True,
+                    )
 
 
 class _InstanceRepoCatalog:
