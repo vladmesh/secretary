@@ -144,27 +144,25 @@ Security boundary: доверенный single-user host. Board и memory энд
 Kanboard и Orca, генерирует `runtime.env` и создаёт Pipeline. `secretary install` их не ставит и
 fail-closed проверяет оба runtime до изменения live state.
 
-На чистом target первый запуск клонирует приватный checkpoint и останавливается на ручном вводе
-секретов:
+На чистом хосте сначала bootstrap создаёт checkout, локальный `runtime.env` с mode `0600` и
+Pipeline без ручного ввода Kanboard credentials:
 
 ```bash
 python3 -m pip install '.[memory]'
-secretary install \
+sudo secretary bootstrap \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir /home/dev/secretary-instance \
   --installation-user dev
 
-sudo -u dev install -m 0600 /dev/null /home/dev/secretary-instance/runtime.env
-$EDITOR /home/dev/secretary-instance/runtime.env
-secretary recover \
+secretary install \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir /home/dev/secretary-instance \
   --installation-user dev
 ```
 
-`runtime.env` должен быть gitignored, обычным файлом с mode `0600` и содержать как минимум
-`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`. Flow не печатает значения и не добавляет
-файл в Git.
+`runtime.env` остаётся gitignored обычным файлом с mode `0600` и содержит как минимум
+`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`. Bootstrap генерирует его и не печатает
+значения и не добавляет файл в Git.
 
 `recover` выполняет одну поддержанную последовательность:
 

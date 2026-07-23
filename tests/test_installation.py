@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.cli import main
-from secretary.installation import InstallError, _ensure_installation_user, materialize_checkpoint
+from secretary.installation import InstallError, _clone_or_reuse, _ensure_installation_user, materialize_checkpoint
 
 
 CARD = {
@@ -62,6 +62,23 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_existing_runtime_env_is_not_a_bootstrap_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            (target / ".git").mkdir(parents=True)
+            (target / "runtime.env").write_text("KANBOARD_API_TOKEN=existing\n", encoding="utf-8")
+
+            with mock.patch("secretary.installation._run", return_value="remote"):
+                with self.assertRaisesRegex(InstallError, "choose --recover"):
+                    _clone_or_reuse("remote", target, recovery=False, dry_run=True)
+
+            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            with mock.patch("secretary.installation._run", side_effect=("remote", "")):
+                self.assertEqual(
+                    _clone_or_reuse("remote", target, recovery=False, dry_run=True),
+                    "reused checkpoint checkout",
+                )
+
     def test_existing_installation_user_requires_recover_or_adopt_choice(self):
         with self.assertRaisesRegex(InstallError, "choose --recover.*adopt"):
             _ensure_installation_user(getpass.getuser(), recovery=False, dry_run=False)

@@ -147,12 +147,9 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
     if not recovery:
-        # `bootstrap` clones the checkpoint solely to discover the project registry and
-        # writes the ignored derived runtime.env.  A clean bootstrap checkout is safe to
-        # continue through the first install; every other existing checkout still needs
-        # the explicit recovery/adopt decision.
-        runtime = target / "runtime.env"
-        if not runtime.is_file() or runtime.is_symlink():
+        # Only a checkout explicitly prepared by `bootstrap` may continue into its
+        # first install. runtime.env alone is normal state of every live installation.
+        if not (target / ".secretary-bootstrap").is_file():
             raise InstallError(
                 f"target {target} already contains an installation; choose --recover or use the "
                 "separate adopt workflow"
@@ -434,6 +431,8 @@ def install(args: argparse.Namespace) -> InstallResult:
                 Path(args.host_fixture).expanduser().resolve() if args.host_fixture else None,
             )
             mark_reconcile_applied(data_dir)
+            if not recovery:
+                (target / ".secretary-bootstrap").unlink(missing_ok=True)
             changed = sum(step.status == "changed" for step in host_result.steps)
             result.add(
                 "host",

@@ -9,16 +9,11 @@ task protocol requires.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import secrets
 import shutil
-import stat
-import subprocess
 import time
 from pathlib import Path
-from typing import Any
-
 import yaml
 
 from secretary._fsutil import write_text_atomic
@@ -33,6 +28,7 @@ ORCA_APPIMAGE_URL = (
     f"{ORCA_VERSION}/orca-linux.AppImage"
 )
 PIPELINE_COLUMNS = ("Идеи", "Ready", "In progress", "Validate", "Blocked", "Done")
+BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
 class BootstrapError(RuntimeError):
@@ -87,10 +83,10 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):
                 if index < len(columns) and isinstance(columns[index], dict) and columns[index].get("id"):
-                    api.call("updateColumn", id=int(columns[index]["id"]), title=title)
+                    api.call("updateColumn", column_id=int(columns[index]["id"]), title=title)
                 else:
-                    api.call("createColumn", project_id=board_id, title=title)
-            # A fresh Kanboard project has three defaults. Remove any surplus only while empty.
+                    api.call("addColumn", project_id=board_id, title=title)
+            # Kanboard 1.2.46 creates four defaults. Remove surplus only while empty.
             for column in columns[len(PIPELINE_COLUMNS):]:
                 if isinstance(column, dict) and column.get("id"):
                     api.call("removeColumn", column_id=int(column["id"]))
@@ -100,7 +96,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             if isinstance(lane, dict) and isinstance(lane.get("name"), str)
         }
         for name in sorted(_project_lanes(instance) - known):
-            api.call("createSwimlane", project_id=board_id, name=name)
+            api.call("addSwimlane", project_id=board_id, name=name)
         return board_id
     except TaskError as exc:
         raise BootstrapError(exc.message) from None
@@ -128,7 +124,7 @@ def _compose_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(path, """services:
   kanboard:
-    image: kanboard/kanboard:v1.2.46
+    image: ${KANBOARD_IMAGE}
     restart: unless-stopped
     ports:
       - 127.0.0.1:8080:80
@@ -202,6 +198,17 @@ def _wait_for_kanboard(values: dict[str, str], *, timeout: int = 90) -> None:
             time.sleep(1)
 
 
+def _mark_bootstrap_checkout(target: Path) -> None:
+    """Mark the one clean checkout that may proceed through its first install."""
+    stamp = target / BOOTSTRAP_STAMP
+    write_text_atomic(stamp, "created by secretary bootstrap\n")
+    exclude = target / ".git" / "info" / "exclude"
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    entry = f"/{BOOTSTRAP_STAMP}\n"
+    if entry not in existing.splitlines(keepends=True):
+        write_text_atomic(exclude, existing + ("" if not existing or existing.endswith("\n") else "\n") + entry)
+
+
 def bootstrap(args: argparse.Namespace) -> int:
     target = Path(args.instance_dir).expanduser().resolve()
     runtime = target / "runtime.env"
@@ -212,35 +219,23 @@ def bootstrap(args: argparse.Namespace) -> int:
         _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
         values = _runtime_values(runtime)
         values.setdefault("KANBOARD_URL", "http://127.0.0.1:8080/jsonrpc.php")
-        values.setdefault("KANBOARD_API_USER", "admin")
+        # Kanboard's supported application-token API authenticates as `jsonrpc`.
+        # It avoids trying to mutate admin credentials through an API that cannot do so.
+        values.setdefault("KANBOARD_API_USER", "jsonrpc")
         values.setdefault("KANBOARD_API_TOKEN", secrets.token_urlsafe(32))
-        values.setdefault("KANBOARD_ADMIN_PASSWORD", secrets.token_urlsafe(32))
-        values.setdefault("KANBOARD_BOOTSTRAP_TOKEN", secrets.token_urlsafe(32))
+        values["KANBOARD_IMAGE"] = KANBOARD_IMAGE
         if not args.dry_run:
             _write_runtime(runtime, values)
+            _mark_bootstrap_checkout(target)
             _install_platform(dry_run=False)
             _start_orca_service(args.installation_user)
-            compose = target / ".secretary" / "kanboard-compose.yml"
+            compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)
             _run(["docker", "compose", "--env-file", str(runtime), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)
             _wait_for_kanboard(values)
-            admin = KanboardClient({"KANBOARD_URL": values["KANBOARD_URL"], "KANBOARD_API_USER": "jsonrpc", "KANBOARD_API_TOKEN": values["KANBOARD_BOOTSTRAP_TOKEN"]})
-            user = admin.call("getUserByName", username="admin")
-            if not isinstance(user, dict) or not user.get("id"):
-                raise BootstrapError("Kanboard admin account is unavailable")
-            admin.call("updateUser", id=int(user["id"]), password=values["KANBOARD_ADMIN_PASSWORD"], api_token=values["KANBOARD_API_TOKEN"])
             ensure_pipeline_board(target, client=KanboardClient(values))
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, TaskError, OSError) as exc:
         print(f"secretary bootstrap\nstatus: failed: {exc}")
         return 1
-
-
-def add_bootstrap_command(subparsers: Any) -> None:
-    parser = subparsers.add_parser("bootstrap", help="install pinned Kanboard and Orca prerequisites")
-    parser.add_argument("--instance-remote", required=True)
-    parser.add_argument("--instance-dir", required=True)
-    parser.add_argument("--installation-user", required=True)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.set_defaults(handler=bootstrap)
