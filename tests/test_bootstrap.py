@@ -116,6 +116,7 @@ class BootstrapBoardTests(unittest.TestCase):
             mock.patch("secretary.bootstrap._docker_compose_available", return_value=False),
             mock.patch("secretary.bootstrap._compose_package", return_value="docker-compose-v2"),
             mock.patch("secretary.bootstrap._ensure_docker_ready"),
+            mock.patch("secretary.bootstrap._install_orca") as install_orca,
             mock.patch("secretary.bootstrap._run") as run,
             mock.patch("secretary.bootstrap.write_text_atomic"),
             mock.patch("secretary.bootstrap.Path.mkdir"),
@@ -130,6 +131,7 @@ class BootstrapBoardTests(unittest.TestCase):
             ],
             [call.args[0] for call in run.call_args_list],
         )
+        install_orca.assert_called_once_with()
 
     def test_host_contract_accepts_only_ubuntu_2404(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

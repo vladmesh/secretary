@@ -14,6 +14,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 import yaml
@@ -179,13 +180,43 @@ def _install_platform(*, dry_run: bool) -> None:
     if needs_orca:
         if os.geteuid() != 0:
             raise BootstrapError("Orca is absent; rerun bootstrap as root")
-        target = Path("/opt/secretary/orca-linux.AppImage")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _run(["curl", "--fail", "--location", "--output", str(target), ORCA_APPIMAGE_URL], label="download pinned Orca", timeout=300)
-        target.chmod(0o755)
-        wrapper = Path("/usr/local/bin/orca")
-        write_text_atomic(wrapper, f"#!/bin/sh\nexec {target} \"$@\"\n")
-        wrapper.chmod(0o755)
+        _install_orca()
+
+
+def _install_orca() -> None:
+    """Extract the AppImage and expose its Node-mode CLI launcher."""
+    parent = Path("/opt/secretary")
+    image = parent / f"orca-{ORCA_VERSION}.AppImage"
+    install_root = parent / "orca"
+    parent.mkdir(parents=True, exist_ok=True)
+    if install_root.exists():
+        raise BootstrapError(f"incomplete Orca installation exists at {install_root}")
+    _run(
+        ["curl", "--fail", "--location", "--output", str(image), ORCA_APPIMAGE_URL],
+        label="download pinned Orca",
+        timeout=300,
+    )
+    image.chmod(0o755)
+    with tempfile.TemporaryDirectory(prefix=".orca-extract-", dir=parent) as staging_raw:
+        staging = Path(staging_raw)
+        _run(
+            [str(image), "--appimage-extract"],
+            label="extract pinned Orca",
+            timeout=300,
+            cwd=staging,
+        )
+        extracted = staging / "squashfs-root"
+        cli = extracted / "resources" / "bin" / "orca-ide"
+        sandbox = extracted / "chrome-sandbox"
+        if not cli.is_file() or not sandbox.is_file():
+            raise BootstrapError("pinned Orca AppImage has an unsupported layout")
+        _run(["chmod", "-R", "a+rX", str(extracted)], label="set Orca runtime permissions")
+        os.chown(sandbox, 0, 0)
+        sandbox.chmod(0o4755)
+        os.replace(extracted, install_root)
+    wrapper = Path("/usr/local/bin/orca")
+    wrapper.unlink(missing_ok=True)
+    wrapper.symlink_to(install_root / "resources" / "bin" / "orca-ide")
 
 
 def _compose_package() -> str:
@@ -245,9 +276,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 User={user}
+Group={user}
+WorkingDirectory=/home/{user}
+Environment=HOME=/home/{user}
 ExecStart=/usr/local/bin/orca serve --port 6768 --pairing-address 127.0.0.1
 Restart=always
 RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target

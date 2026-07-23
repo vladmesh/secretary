@@ -74,7 +74,9 @@ class InstallResult:
         return "\n".join(lines)
 
 
-def _run(argv: list[str], *, label: str, timeout: int = 120) -> str:
+def _run(
+    argv: list[str], *, label: str, timeout: int = 120, cwd: Path | None = None,
+) -> str:
     environment = dict(os.environ)
     environment.setdefault("GIT_TERMINAL_PROMPT", "0")
     environment.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
@@ -85,6 +87,7 @@ def _run(argv: list[str], *, label: str, timeout: int = 120) -> str:
             text=True,
             timeout=timeout,
             env=environment,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except FileNotFoundError:
         raise InstallError(f"{label}: command not found") from None
