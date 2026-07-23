@@ -18,6 +18,13 @@ Fixture нельзя сочетать с `--offline`. Exit code `0` означа
 `1` означает findings или warnings с `--strict`, `2` означает невалидный input либо недоступный
 inventory. Без `--strict` warnings сами по себе остаются зелёными.
 
+Live parity выводится из того же desired state, что и `reconcile`: каждый project checkout
+сверяется по нормализованному полному пути из binding, включая путь вне `projects_root`; сам
+`projects_root` нужен для поиска неуправляемых checkout. Проверяются unit-файлы, Orca registration
+и требуемое enabled/active состояние долгоживущих service и timer. Отсутствующий ресурс или
+нездоровый required runtime state даёт finding и code `1`; oneshot service может быть inactive.
+`foreign_units` исключены из managed parity и не считаются conflict.
+
 ```bash
 python3 -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
 python3 -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--yes]

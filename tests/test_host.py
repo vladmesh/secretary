@@ -19,6 +19,7 @@ from secretary.host import (
     LiveHostSource,
     _CmdResult as CmdResult,
     build_expectations,
+    build_doctor_expectations,
     build_plan,
     inventory,
     plan_input_errors,
@@ -49,6 +50,22 @@ def snapshot(root: Path) -> dict[str, tuple[float, int]]:
 
 
 class ExpectationTests(unittest.TestCase):
+    def test_doctor_uses_exact_checkout_paths_and_canonical_resources(self):
+        instance = {"host": {"projects_root": "/srv/projects", "unit_prefix": "secretary-"}}
+        bindings = [
+            {"id": "outside", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"},
+        ]
+        expected = build_doctor_expectations(instance, bindings)
+        self.assertEqual(expected.projects, {"/opt/checkouts/widget"})
+        self.assertIn("secretary-dispatcher-production.timer", expected.units)
+        self.assertEqual(expected.orca_repos, {"widget"})
+
+    def test_doctor_runtime_expectations_distinguish_service_and_timer(self):
+        expected = build_doctor_expectations({"host": {"unit_prefix": "secretary-"}}, [])
+        self.assertEqual(expected.unit_runtime["secretary-memory.service"], (True, True))
+        self.assertEqual(expected.unit_runtime["secretary-curator.timer"], (True, True))
+        self.assertNotIn("secretary-curator.service", expected.unit_runtime)
+
     def test_project_name_from_repo_path(self):
         exp = build_expectations(
             [{"id": "an-id", "repo": "/srv/projects/on-disk-name"}], {}
@@ -89,6 +106,11 @@ class ExpectationTests(unittest.TestCase):
         self.assertEqual(result["units"].matched, ["u"])
         self.assertEqual(result["orca repos"].missing_on_host, ["r2"])
         self.assertEqual(result["orca repos"].unmanaged_on_host, ["r3"])
+
+    def test_foreign_unit_is_not_an_unmanaged_conflict(self):
+        expected = Expectations(units={"secretary-memory.service"}, foreign_units={"secretary-other.service"})
+        result = inventory(expected, HostInventory(units={"secretary-memory.service", "secretary-other.service"}))
+        self.assertEqual(result["units"].unmanaged_on_host, [])
 
 
 class FixtureSourceTests(unittest.TestCase):
@@ -663,6 +685,25 @@ class LiveSourceErrorTests(unittest.TestCase):
         self.assertEqual(diff["units"].missing_on_host, [])
         self.assertEqual(diff["units"].unmanaged_on_host, ["secretary-pipeline.timer"])
 
+    def test_runtime_probe_records_enabled_and_active_states(self):
+        class RuntimeHost(LiveHostSource):
+            def _run(self, cmd):
+                if cmd[1] == "list-unit-files":
+                    return _cmd(stdout="secretary-memory.service enabled enabled\n")
+                if cmd[1] == "is-enabled":
+                    return _cmd(returncode=1, stdout="disabled\n")
+                if cmd[1] == "is-active":
+                    return _cmd(returncode=3, stdout="failed\n")
+                return _cmd(stdout="")
+
+        expected = Expectations(
+            units={"secretary-memory.service"}, unit_prefix="secretary-",
+            unit_runtime={"secretary-memory.service": (True, True)},
+        )
+        result = RuntimeHost().collect(expected)
+        self.assertEqual(result.errors, {})
+        self.assertEqual(result.inventory.unit_states["secretary-memory.service"], ("disabled", "failed"))
+
     def test_systemctl_stderr_is_a_failure(self):
         host = self._host(
             {
@@ -738,6 +779,21 @@ class LiveSourceErrorTests(unittest.TestCase):
         self.assertNotIn(secret, reason)
         self.assertIn("host.projects_root", reason)
 
+    def test_projects_outside_root_are_checked_by_exact_path(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside" / "same-name"
+            outside.parent.mkdir()
+            inside = root / "projects" / "same-name"
+            inside.mkdir(parents=True)
+            expected = Expectations(projects={str(outside)}, projects_root=str(root / "projects"))
+            actual, reason = LiveHostSource()._projects(expected)
+        self.assertEqual(reason, "")
+        self.assertNotIn(str(outside), actual)
+        self.assertIn(str(inside), actual)
+
     def test_run_reports_missing_binary(self):
         result = LiveHostSource()._run(["definitely-no-such-binary-xyz"])
         self.assertFalse(result.ran)
@@ -769,7 +825,13 @@ class DoctorHostCliTests(unittest.TestCase):
             "offsite:\n"
             "  instance_remote: git@example.invalid:x/y.git\n"
             "host:\n"
-            "  unit_prefix: secretary-\n",
+            "  unit_prefix: secretary-\n"
+            "  components:\n"
+            "    curator: {enabled: false}\n"
+            "    memory: {enabled: false}\n"
+            "    retro: {enabled: false}\n"
+            "    steward: {enabled: false}\n"
+            "    steward-deep-sweep: {enabled: false}\n",
             encoding="utf-8",
         )
         return instance, data
@@ -805,7 +867,7 @@ class DoctorHostCliTests(unittest.TestCase):
                 "doctor", "--dry-run", "--instance", str(instance), "--host-fixture", str(fixture),
             ])
 
-        self.assertEqual(code, 0, output)
+        self.assertEqual(code, 1, output)
         self.assertIn("state: pilot-only", output)
         self.assertNotIn("dispatcher findings", output)
 
@@ -920,20 +982,69 @@ class DoctorHostCliTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(code, 0, output)
+        self.assertEqual(code, 1, output)
         self.assertIn("host inventory: read-only", output)
         # projects
-        self.assertIn("projects:\n  matched: example-project", output)
+        self.assertIn("projects:\n  matched: /srv/projects/example-project", output)
         self.assertIn("unmanaged-on-host: stray-project", output)
         # units: one of each outcome, full unit file names
-        self.assertIn("units:\n  matched: secretary-pipeline.service", output)
-        self.assertIn("missing-on-host: secretary-curator.timer", output)
-        self.assertIn("unmanaged-on-host: secretary-retro.timer", output)
+        self.assertIn("units:\n  matched: (none)", output)
+        self.assertIn("missing-on-host: secretary-curator.service", output)
+        self.assertIn("secretary-retro.timer", output)
         # orca repos
-        self.assertIn("orca repos:\n  matched: example-project, secretary", output)
-        self.assertIn("missing-on-host: secretary-instance", output)
-        self.assertIn("unmanaged-on-host: extra-repo", output)
-        self.assertIn("status: ok", output)
+        self.assertIn("orca repos:\n  matched: (none)", output)
+        self.assertIn("extra-repo", output)
+        self.assertIn("status: findings", output)
+
+    def test_doctor_reports_missing_canonical_resources_and_runtime_drift(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            data = root / "data"
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: doctor\ndata_dir: " + str(data) + "\noffsite:\n"
+                "  instance_remote: git@example.invalid:x/y\nhost:\n"
+                "  projects_root: " + str(root) + "\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            projects = root / "projects"
+            projects.mkdir()
+            (projects / "demo.yaml").write_text(
+                "id: demo\nrepo: " + str(repo)
+                + "\nenabled: true\norca_binding: demo\nadapter: demo\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            fixture.mkdir()
+            (fixture / "projects.txt").write_text(str(repo) + "\n", encoding="utf-8")
+            (fixture / "units.txt").write_text("secretary-memory.service\n", encoding="utf-8")
+
+            code, output = run_cli(["doctor", "--instance", str(instance), "--host-fixture", str(fixture)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("missing-on-host: demo", output)
+        self.assertIn("secretary-dispatcher-production.service", output)
+
+    def test_doctor_fails_for_required_inactive_service(self):
+        expected = build_doctor_expectations(
+            {"host": {"unit_prefix": "secretary-"}}, []
+        )
+
+        class HealthyFilesFailedRuntime:
+            def collect(self, ignored):
+                states = {name: ("enabled", "active") for name in expected.unit_runtime}
+                states["secretary-memory.service"] = ("enabled", "failed")
+                return CollectResult(HostInventory(units=expected.units, unit_states=states), {})
+
+        with unittest.mock.patch.object(cli, "LiveHostSource", return_value=HealthyFilesFailedRuntime()):
+            code, output = run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("secretary-memory.service: expected active, got failed", output)
 
     def test_without_host_flag_no_inventory(self):
         code, output = run_cli(
@@ -982,7 +1093,7 @@ class DoctorHostCliTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertEqual(snapshot(HOST_FIXTURE), before_fixture)
         self.assertEqual(snapshot(EXAMPLE_INSTANCE), before_instance)
 
@@ -1096,7 +1207,7 @@ class DoctorHostCliTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(code, 0, output)
+        self.assertEqual(code, 1, output)
         self.assertNotIn(secret, output)
         self.assertIn("host inventory: read-only", output)
 

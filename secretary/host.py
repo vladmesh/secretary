@@ -63,6 +63,7 @@ class PackagedUnit:
     path: Path
     digest: str
     installable: bool
+    oneshot: bool
 
 
 def default_packaging_root() -> Path:
@@ -104,6 +105,7 @@ def load_packaged_units(root: Path, prefix: str) -> list[PackagedUnit]:
                 # Only a unit with [Install] can be enabled; the rest are pulled
                 # in by a timer's Unit= and enabling them would fail.
                 installable=b"[Install]" in payload,
+                oneshot=b"Type=oneshot" in payload,
             )
         )
     return units
@@ -395,6 +397,7 @@ class HostInventory:
     projects: set[str] = field(default_factory=set)
     units: set[str] = field(default_factory=set)
     orca_repos: set[str] = field(default_factory=set)
+    unit_states: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -406,6 +409,8 @@ class Expectations:
     orca_repos: set[str] = field(default_factory=set)
     unit_prefix: str = ""
     projects_root: str = ""
+    foreign_units: set[str] = field(default_factory=set)
+    unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -467,6 +472,43 @@ def build_expectations(bindings: Iterable[dict[str, Any]], host: dict[str, Any])
     )
 
 
+def _normalized_repo_path(repo: str) -> str:
+    return str(Path(repo).expanduser().resolve(strict=False))
+
+
+def build_doctor_expectations(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> Expectations:
+    """Derive doctor parity from reconcile's canonical desired state."""
+    bindings = list(bindings)
+    host = instance.get("host", {}) if isinstance(instance, dict) else {}
+    host = host if isinstance(host, dict) else {}
+    projects = {
+        _normalized_repo_path(binding["repo"])
+        for binding in bindings
+        if isinstance(binding, dict) and isinstance(binding.get("repo"), str)
+        and Path(binding["repo"]).expanduser().is_absolute()
+    }
+    desired = build_plan(instance, bindings)
+    units = {resource.name for resource in desired if resource.kind == "unit"}
+    prefix = host.get("unit_prefix", "") if isinstance(host.get("unit_prefix"), str) else ""
+    packaged = {unit.name: unit for unit in load_packaged_units(default_packaging_root(), prefix)}
+    runtime: dict[str, tuple[bool, bool]] = {}
+    for name in units:
+        unit = packaged.get(name)
+        if name.endswith(".timer"):
+            runtime[name] = (True, True)
+        elif unit is None or not unit.oneshot:
+            runtime[name] = (True, True)
+    return Expectations(
+        projects=projects,
+        units=units,
+        orca_repos={resource.name for resource in desired if resource.kind == "orca"},
+        unit_prefix=prefix,
+        projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
+        foreign_units=foreign_units(host),
+        unit_runtime=runtime,
+    )
+
+
 def _diff(expected: set[str], actual: set[str]) -> KindDiff:
     return KindDiff(
         matched=sorted(expected & actual),
@@ -479,7 +521,7 @@ def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDi
     """Compare expectations against a host inventory, one KindDiff per kind."""
     return {
         "projects": _diff(expected.projects, actual.projects),
-        "units": _diff(expected.units, actual.units),
+        "units": _diff(expected.units, actual.units - expected.foreign_units),
         "orca repos": _diff(expected.orca_repos, actual.orca_repos),
     }
 
@@ -530,12 +572,19 @@ class FixtureHostSource(HostSource):
         except OSError:
             return set(), "fixture host file is unreadable"
 
-    def _projects(self) -> tuple[set[str], str]:
+    def _projects(self, expected: Expectations) -> tuple[set[str], str]:
         try:
+            paths, error = self._lines("projects.txt")
+            if error or paths:
+                return {_normalized_repo_path(path) for path in paths}, error
             projects_dir = self.root / "projects"
             if not projects_dir.is_dir():
                 return set(), ""
-            return _names_from_dir(projects_dir), ""
+            names = _names_from_dir(projects_dir)
+            # Legacy fixtures have names only. Exact paths can be recorded in
+            # projects.txt, one absolute checkout path per line.
+            by_name = {Path(path).name: path for path in expected.projects}
+            return {by_name.get(name, name) for name in names}, ""
         except OSError:
             return set(), "fixture projects directory is unreadable"
 
@@ -549,7 +598,7 @@ class FixtureHostSource(HostSource):
                 inventory=HostInventory(),
                 errors={kind: reason for kind in KINDS},
             )
-        projects, project_error = self._projects()
+        projects, project_error = self._projects(expected)
         units, unit_error = self._lines("units.txt")
         repos, repo_error = self._lines("orca-repos.txt")
         errors = {
@@ -600,41 +649,39 @@ class LiveHostSource(HostSource):
         if reason:
             errors["projects"] = reason
         else:
-            inventory = HostInventory(projects, inventory.units, inventory.orca_repos)
+            inventory = HostInventory(projects, inventory.units, inventory.orca_repos, inventory.unit_states)
 
-        units, reason = self._units(expected)
+        units, unit_states, reason = self._units(expected)
         if reason:
             errors["units"] = reason
         else:
-            inventory = HostInventory(inventory.projects, units, inventory.orca_repos)
+            inventory = HostInventory(inventory.projects, units, inventory.orca_repos, unit_states)
 
         repos, reason = self._orca_repos()
         if reason:
             errors["orca repos"] = reason
         else:
-            inventory = HostInventory(inventory.projects, inventory.units, repos)
+            inventory = HostInventory(inventory.projects, inventory.units, repos, inventory.unit_states)
 
         return CollectResult(inventory=inventory, errors=errors)
 
     def _projects(self, expected: Expectations) -> tuple[set[str], str]:
         root = expected.projects_root
+        actual = {project for project in expected.projects if Path(project).is_dir()}
         if not root:
-            # No declared projects to place means nothing to inspect; declared
-            # projects with no root is an inspection gap, not an empty host.
-            if expected.projects:
-                return set(), "host.projects_root not set"
-            return set(), ""
-        path = Path(root)
+            return (actual, "host.projects_root not set") if expected.projects else (actual, "")
+        path = Path(root).expanduser()
         if not path.is_dir():
             # Never echo the configured value: it comes from private instance
             # config and could carry a secret-like path. Name the field only.
             return set(), "host.projects_root is not a directory"
         try:
-            return _names_from_dir(path), ""
+            actual.update(str(entry.resolve(strict=False)) for entry in path.iterdir() if entry.is_dir())
+            return actual, ""
         except OSError:
             return set(), "host.projects_root is not readable"
 
-    def _units(self, expected: Expectations) -> tuple[set[str], str]:
+    def _units(self, expected: Expectations) -> tuple[set[str], dict[str, tuple[str, str]], str]:
         prefix = expected.unit_prefix
         if not prefix:
             # unmanaged-on-host can only be computed by enumerating a namespace.
@@ -642,19 +689,30 @@ class LiveHostSource(HostSource):
             # ones and silently miss every undescribed host unit, so we refuse
             # to emit a diff that cannot include unmanaged-on-host.
             if expected.units:
-                return set(), "host.unit_prefix is required to compute unmanaged-on-host"
-            return set(), ""
+                return set(), {}, "host.unit_prefix is required to compute unmanaged-on-host"
+            return set(), {}, ""
         result = self._run(["systemctl", "list-unit-files", "--no-legend", f"{prefix}*"])
         reason = self._systemctl_error(result)
         if reason:
-            return set(), reason
+            return set(), {}, reason
         names: set[str] = set()
         for line in result.stdout.splitlines():
             fields = line.split()
             token = fields[0] if fields else ""
             if token.startswith(prefix):
                 names.add(token)
-        return names, ""
+        states: dict[str, tuple[str, str]] = {}
+        for name in expected.unit_runtime:
+            if name not in names:
+                continue
+            enabled = self._run(["systemctl", "is-enabled", name])
+            active = self._run(["systemctl", "is-active", name])
+            if not enabled.ran or not active.ran:
+                return set(), {}, enabled.reason or active.reason
+            if enabled.stderr.strip() or active.stderr.strip():
+                return set(), {}, "systemctl runtime status unavailable"
+            states[name] = (enabled.stdout.strip() or "disabled", active.stdout.strip() or "inactive")
+        return names, states, ""
 
     @staticmethod
     def _systemctl_error(result: _CmdResult) -> str:

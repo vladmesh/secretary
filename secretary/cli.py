@@ -31,7 +31,7 @@ from secretary.host import (
     FixtureHostSource,
     KindDiff,
     LiveHostSource,
-    build_expectations,
+    build_doctor_expectations,
     build_plan,
     inventory,
     load_managed_manifest,
@@ -408,10 +408,11 @@ def run_doctor(args: argparse.Namespace) -> int:
     restore_problems = print_restore_status(report)
 
     host_incomplete = False
+    host_findings = False
     collected_host: CollectResult | None = None
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     if inspect_host:
-        host_incomplete, collected_host = print_host_inventory(report, args)
+        host_incomplete, host_findings, collected_host = print_host_inventory(report, args)
 
     print_background_automations(inspect=inspect_host)
 
@@ -423,6 +424,9 @@ def run_doctor(args: argparse.Namespace) -> int:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
         return 1 if args.dry_run else 2
+    if host_findings:
+        print("status: findings")
+        return 1
     if dispatcher_findings:
         print("status: findings")
         return 1
@@ -977,7 +981,7 @@ def run_backup_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, CollectResult]:
+def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, bool, CollectResult]:
     """Print the read-only host inventory: matched / missing / unmanaged per kind.
 
     Returns True if any kind could not be inspected (reported as unavailable).
@@ -987,7 +991,7 @@ def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, Collec
     else:
         source = LiveHostSource()
 
-    expected = build_expectations(report.bindings, report.host)
+    expected = build_doctor_expectations(report.instance, report.bindings)
     collected = source.collect(expected)
     diffs = inventory(expected, collected.inventory)
 
@@ -1000,7 +1004,13 @@ def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, Collec
             print(f"  unavailable: {reason}")
         else:
             _print_kind(kind, diffs[kind])
-    return bool(collected.errors), collected
+    parity_findings = any(
+        diff.missing_on_host or diff.unmanaged_on_host
+        for kind, diff in diffs.items()
+        if kind not in collected.errors
+    )
+    runtime_findings = _print_unit_runtime(expected, collected)
+    return bool(collected.errors), parity_findings or runtime_findings, collected
 
 
 def _print_kind(kind: str, diff: KindDiff) -> None:
@@ -1008,6 +1018,27 @@ def _print_kind(kind: str, diff: KindDiff) -> None:
     print(f"  matched: {_join(diff.matched)}")
     print(f"  missing-on-host: {_join(diff.missing_on_host)}")
     print(f"  unmanaged-on-host: {_join(diff.unmanaged_on_host)}")
+
+
+def _print_unit_runtime(expected, collected: CollectResult) -> bool:
+    """Report required enabled/active state separately from unit-file parity."""
+    if "units" in collected.errors:
+        return False
+    findings: list[str] = []
+    for name, (need_enabled, need_active) in sorted(expected.unit_runtime.items()):
+        state = collected.inventory.unit_states.get(name)
+        if state is None:
+            continue  # Missing unit file is already printed by the parity diff.
+        enabled, active = state
+        if need_enabled and enabled != "enabled":
+            findings.append(f"{name}: expected enabled, got {enabled}")
+        if need_active and active != "active":
+            findings.append(f"{name}: expected active, got {active}")
+    if findings:
+        print("unit runtime findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return bool(findings)
 
 
 def print_background_automations(*, inspect: bool) -> None:
