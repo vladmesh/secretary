@@ -785,7 +785,9 @@ class CommandHostRuntime:
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
             return
-        self._run(["git", "-C", workspace, "branch", "-M", branch], "git branch")
+        # A fresh worktree may start on the base branch, but the target name must never be
+        # force-updated. In particular, a preserved checkout elsewhere can already own it.
+        self._run(["git", "-C", workspace, "branch", "-m", branch], "git branch")
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)

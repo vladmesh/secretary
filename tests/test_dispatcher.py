@@ -174,6 +174,7 @@ class FakeHost:
         # the workspace before teardown removes it).
         self.calls: list[str] = []
         self.prepared: list[str] = []
+        self.prepare_requires_existing: list[bool] = []
         self.reviews: list[str] = []
         self.stopped: list[str] = []
         self.torn_down: list[str] = []
@@ -211,6 +212,7 @@ class FakeHost:
         require_existing_workspace: bool = False,
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
+        self.prepare_requires_existing.append(require_existing_workspace)
         if self.fail_prepare_reason:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
@@ -1515,6 +1517,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(restarted["status"], "ok", restarted)
         self.assertEqual(restarted["workspace"], original_workspace)
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertEqual(self.host.prepare_requires_existing, [False, True])
         self.assertNotEqual(restarted["attempt_id"], original_attempt)
         self.assertNotEqual(
             _attempt_request_id(original_attempt, "worker-report-done", "secretary-510-pilot", "0"),
@@ -3302,6 +3305,16 @@ class GitBranchHost(CommandHostRuntime):
 
 
 class WorkspaceResumeTests(unittest.TestCase):
+    def test_fresh_workspace_branch_rename_is_not_forced(self) -> None:
+        host = GitBranchHost(Path("/tmp"))
+        with mock.patch.object(host, "_run") as run:
+            host._set_worker_branch("/workspace", "pipeline/secretary-510-pilot")
+
+        run.assert_called_once_with(
+            ["git", "-C", "/workspace", "branch", "-m", "pipeline/secretary-510-pilot"],
+            "git branch",
+        )
+
     def test_prepare_worker_reuses_registered_branch_without_touching_commit_or_wip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
