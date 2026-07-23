@@ -76,6 +76,7 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation.os.geteuid", return_value=0),
             mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
             mock.patch("secretary.installation._run") as run,
+            mock.patch("secretary.installation.KanboardClient"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
             check_prerequisites("dev")
