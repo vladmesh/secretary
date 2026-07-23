@@ -1476,6 +1476,45 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(stalled["action"], "review-respawned")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
 
+    def test_blocked_rework_returned_to_ready_reuses_its_workspace(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix this",
+            request_id="review-red-preserved-workspace",
+        )
+        original_workspace = self.runtime.state.load()["records"]["secretary-510-pilot"]["workspace"]
+        original_attempt = self.runtime.state.load()["records"]["secretary-510-pilot"]["attempt_id"]
+        self.host.fail_restart_reason = "terminal service unavailable"
+        blocked = self.runtime.tick(self.selector)
+        self.assertEqual(blocked["reason"], "rework bring-up failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="retry after outage",
+            request_id="po-requeue-preserved-workspace",
+        )
+        self.host.fail_restart_reason = ""
+        restarted = self.runtime.tick(self.selector)
+
+        self.assertEqual(restarted["status"], "ok", restarted)
+        self.assertEqual(restarted["workspace"], original_workspace)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertNotEqual(restarted["attempt_id"], original_attempt)
+        self.assertNotEqual(
+            _attempt_request_id(original_attempt, "worker-report-done", "secretary-510-pilot", "0"),
+            _attempt_request_id(restarted["attempt_id"], "worker-report-done", "secretary-510-pilot", "0"),
+        )
+
     def test_worker_report_clears_the_worker_wait_watchdog(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)
@@ -3254,6 +3293,54 @@ class GitBranchHost(CommandHostRuntime):
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)
         return f"test:{head}"
+
+
+class WorkspaceResumeTests(unittest.TestCase):
+    def test_prepare_worker_reuses_registered_branch_without_touching_commit_or_wip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            workspace_root = root / "workspaces"
+            worker = "secretary-510-pilot-pilot"
+            workspace = workspace_root / "secretary" / worker
+            repo.mkdir()
+            git(repo, "init", "--initial-branch", "main")
+            _configure_git_user(repo)
+            (repo / "README.md").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "base")
+            workspace.parent.mkdir(parents=True)
+            git(repo, "worktree", "add", "-b", _legacy_worker_branch("secretary-510-pilot"), str(workspace))
+            _configure_git_user(workspace)
+            commit = _commit_file(workspace, "kept.py", "commit = True\n", "preserved commit")
+            (workspace / "wip.py").write_text("uncommitted = True\n", encoding="utf-8")
+            git(workspace, "add", "wip.py")
+            git(workspace, "config", "core.excludesFile", str(root / "exclude"))
+            (root / "exclude").write_text("TASK.md\n", encoding="utf-8")
+
+            class Catalog(FakeCatalog):
+                def binding(self, project: str) -> dict:
+                    return {"repo": str(repo), "default_branch": "main"}
+
+            host = GitBranchHost(root)
+            host.catalog = Catalog()  # type: ignore[assignment]
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "description": "updated task description",
+                "comments": [{"marker": "review:red", "body": "[review:red]\nlatest finding"}],
+                "workspace": {"base_branch": "main"},
+            }
+            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
+                result = host.prepare_worker(task, worker, "codex", attempt_id="attempt-retry")
+
+            self.assertEqual(result["workspace"], str(workspace))
+            self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
+            self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
+            task_doc = (workspace / "TASK.md").read_text(encoding="utf-8")
+            self.assertIn("updated task description", task_doc)
+            self.assertIn("latest finding", task_doc)
+            self.assertIn("attempt-retry", task_doc)
 
 
 class _InstanceRepoCatalog:

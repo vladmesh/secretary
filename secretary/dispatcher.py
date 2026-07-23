@@ -255,9 +255,13 @@ class CommandHostRuntime:
     ) -> dict[str, str]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
-        workspace = self._create_workspace(project, worker_id, base)
-        self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
-        self._run_setup(project, workspace)
+        workspace = self.restore_workspace(task, worker_id)
+        if Path(workspace).exists():
+            self._validate_resumable_workspace(task, workspace)
+        else:
+            workspace = self._create_workspace(project, worker_id, base)
+            self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
+            self._run_setup(project, workspace)
         self._clear_body_file("report", task["ref"], 0)
         self._write_prompt(Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id))
         handle = self._launch(
@@ -590,6 +594,43 @@ class CommandHostRuntime:
         if not isinstance(path, str) or not path:
             raise HostError("orca did not return a workspace path")
         return path
+
+    def _validate_resumable_workspace(self, task: dict[str, Any], workspace: str) -> None:
+        """Accept only the registered project worktree on this card's worker branch."""
+        if self.mode == "noop":
+            return
+        path = Path(workspace)
+        if not path.is_dir():
+            raise HostError("resume workspace is not a directory")
+        try:
+            top_level = self._run(
+                ["git", "-C", workspace, "rev-parse", "--show-toplevel"], "resume workspace git check"
+            ).stdout.strip()
+        except HostError as exc:
+            raise HostError("resume workspace is not a git worktree") from exc
+        if not _same_repo(Path(top_level), path):
+            raise HostError("resume workspace git root does not match its expected path")
+        branch = self._run(
+            ["git", "-C", workspace, "branch", "--show-current"], "resume workspace branch check"
+        ).stdout.strip()
+        expected_branch = _legacy_worker_branch(task["ref"])
+        if branch != expected_branch:
+            raise HostError(
+                f"resume workspace is on branch {branch or '(detached)'}, expected {expected_branch}"
+            )
+        repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
+        if not repo.is_dir():
+            raise HostError("resume project repo is unavailable")
+        listing = self._run(
+            ["git", "-C", str(repo), "worktree", "list", "--porcelain"], "resume workspace ownership check"
+        ).stdout
+        registered = {
+            line.removeprefix("worktree ").strip()
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        }
+        if not any(_same_repo(Path(candidate), path) for candidate in registered):
+            raise HostError("resume workspace is not a registered worktree of the project repo")
 
     def _run_setup(self, project: str, workspace: str) -> None:
         if self.mode == "noop":
@@ -1170,6 +1211,29 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        retry_after_block = any(
+            self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
+            for action in (
+                "bringup-blocked",
+                "worker-result-blocked",
+                "worker-blocked",
+                "worker-respawn-blocked",
+                "worker-wait-stall",
+                "rework-blocked",
+                "gate-blocked",
+                "gate-red-blocked",
+                "gate-pending-stall",
+                "merge-gate-blocked",
+                "merge-blocked",
+                "review-blocked",
+                "review-inventory-blocked",
+                "review-wait-stall",
+            )
+        )
+        if retry_after_block:
+            attempt_id = _new_attempt_id()
+            _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
+            payload["attempt_id"] = attempt_id
         head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
