@@ -369,13 +369,15 @@ def materialize_host(
         dry_run=False,
         units=SystemdUnitInstaller(),
         orca=LiveOrcaRegistrar(installation_user),
-        automations=OrcaAutomationClient(),
+        automations=OrcaAutomationClient(installation_user),
         host_fixture=host_fixture,
         pull=False,
         report=report,
         runtime_user=installation_user,
     )
-    result = run_steps(context)
+    home = pwd.getpwnam(installation_user).pw_dir if installation_user else None
+    with _runtime_environment({"HOME": home} if home else {}):
+        result = run_steps(context)
     if not result.ok:
         failed = result.steps[-1]
         raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
@@ -533,8 +535,6 @@ def install(args: argparse.Namespace) -> InstallResult:
                 args.installation_user,
             )
             mark_reconcile_applied(data_dir)
-            if not recovery:
-                (target / ".secretary-bootstrap").unlink(missing_ok=True)
             changed = sum(step.status == "changed" for step in host_result.steps)
             result.add(
                 "host",
@@ -544,6 +544,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             findings = restore_findings(data_dir)
             if findings:
                 raise InstallError("status findings: " + "; ".join(findings))
+            if not recovery:
+                (target / ".secretary-bootstrap").unlink(missing_ok=True)
             result.add("status", "unchanged", "board, memory and operational configuration are ready")
             _set_installation_owner(data_dir, args.installation_user)
             _set_installation_owner(target, args.installation_user)

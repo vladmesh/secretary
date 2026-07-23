@@ -123,7 +123,8 @@ class GitError(RuntimeError):
 def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=timeout
+            ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=timeout,
         )
     except FileNotFoundError:
         raise GitError("git not found") from None
@@ -421,8 +422,8 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_dependencies,
     step_head_registry,
-    step_role_skills,
     step_worktrees,
+    step_role_skills,
     step_host,
     step_automations,
     step_memory,

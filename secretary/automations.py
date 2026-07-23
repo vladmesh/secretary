@@ -224,6 +224,9 @@ class OrcaAutomationClient:
 
     timeout_seconds = 60
 
+    def __init__(self, user: str | None = None):
+        self.user = user
+
     def list(self) -> list[dict[str, Any]]:
         result = self._run(["orca", "automations", "list", "--json"], "list automations")
         try:
@@ -239,6 +242,8 @@ class OrcaAutomationClient:
         self._run(argv, label)
 
     def _run(self, argv: list[str], label: str) -> str:
+        if self.user:
+            argv = ["runuser", "--user", self.user, "--", *argv]
         try:
             result = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_seconds)
         except FileNotFoundError:
