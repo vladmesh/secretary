@@ -56,8 +56,14 @@ from .validate import (  # noqa: F401
 )
 
 CARDS_FILE = STATE.dir / "cards.json"
+ORPHAN_SWEEP_FILE = STATE.dir / "orphan_sweep.json"
 WATCHDOG_SECONDS = int(os.environ.get("TA_WATCHDOG_SECONDS", "1200"))
 WORKER_CAP = int(os.environ.get("TA_WORKER_CAP", "3"))
+ORPHAN_GRACE_SECONDS = int(os.environ.get("TA_ORPHAN_GRACE_SECONDS", "1800"))
+ORPHAN_SWEEP_INTERVAL_S = int(os.environ.get("TA_ORPHAN_SWEEP_INTERVAL_S", "600"))
+# These are durable agent worktrees, not card workspaces.  Keep this in sync with the roles
+# provisioned by _ff_agent_worktrees until their provisioning has one shared source of truth.
+_DURABLE_AGENT_WORKSPACES = frozenset({"curator", "retro", "steward", "pipeline"})
 # Head-technical watchdog retry budget (_watchdog_retry): a card's In-progress silence gets this
 # many free requeues before a terminal Blocked — first the same head again, then the next green
 # head along its heads.toml fallback chain. Env-technical (provision/smoke) and semantic (report
@@ -324,6 +330,166 @@ def _reconcile(records: dict) -> bool:
             STATE.log_run("reconcile", reference=ref, worker=c["claim"], column=column)
             changed = True
     return changed
+
+
+def _real_workspace_path(workspace: str | os.PathLike[str]) -> str:
+    return os.path.realpath(os.fspath(workspace))
+
+
+def _orphan_sweep_due(now: float) -> bool:
+    """Whether the disk and Blocked-card sweep may run on this tick."""
+    try:
+        mark = json.loads(ORPHAN_SWEEP_FILE.read_text(encoding="utf-8"))
+        last_sweep = float(mark.get("last_sweep", 0))
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        last_sweep = 0
+    return now - last_sweep >= ORPHAN_SWEEP_INTERVAL_S
+
+
+def _save_orphan_sweep_watermark(now: float) -> None:
+    STATE.ensure_dir()
+    tmp = ORPHAN_SWEEP_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"last_sweep": now}), encoding="utf-8")
+    tmp.replace(ORPHAN_SWEEP_FILE)
+
+
+def _blocked_workspace_prefixes(blocked_cards: list[dict]) -> tuple[str, ...]:
+    """Prefixes that conservatively protect a Blocked card with a missing claim.
+
+    Old workspaces included the full reference and current ones begin with its numeric card id.
+    This is only a safety fallback for a card whose authoritative claim is empty; orphan
+    identification itself is the protected-path exclusion below, never a name-format match.
+    """
+    prefixes = []
+    for card in blocked_cards:
+        if card.get("claim"):
+            continue
+        reference = card.get("reference") or ""
+        if not reference:
+            continue
+        prefixes.extend((reference, naming.card_id(reference)))
+    return tuple(prefixes)
+
+
+def _matches_workspace_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == prefix or name.startswith(f"{prefix}-") for prefix in prefixes)
+
+
+def _protected_orphan_paths(records: dict, blocked_cards: list[dict]) -> tuple[set[str], tuple[str, ...]]:
+    """Absolute real paths that an orphan sweep must leave untouched."""
+    protected = set()
+    for rec in records.values():
+        for key in ("workspace", "review_ws"):
+            workspace = rec.get(key)
+            if workspace:
+                protected.add(_real_workspace_path(workspace))
+
+    for card in blocked_cards:
+        claim = card.get("claim") or ""
+        if claim:
+            protected.add(_real_workspace_path(worker.workspace_path(card.get("project") or "", claim)))
+
+    # A hard-pause exclude names a record, not a raw path.  It is redundant for a healthy record,
+    # but keeps the explicit operator exemption authoritative if the surrounding state is unusual.
+    pause_state = pause_flag.load()
+    for ref in pause_state.get("excluded_worker") or []:
+        workspace = (records.get(ref) or {}).get("workspace")
+        if workspace:
+            protected.update(_pause_excluded_workspaces([workspace]))
+            protected.add(_real_workspace_path(workspace))
+    return protected, _blocked_workspace_prefixes(blocked_cards)
+
+
+def _reap_orphan_workspaces(records: dict) -> bool:
+    """Best-effort sweep of old untracked task workspaces.
+
+    Reconciliation runs immediately before this function, so records are the complete live set
+    for In-progress and Validate cards.  Blocked cards intentionally have no records and are
+    protected from their board claim instead.  The sweep never infers orphanhood from a workspace
+    name, which lets it remove historical Orca-generated names too.
+    """
+    now = time.time()
+    if not _orphan_sweep_due(now):
+        return False
+
+    try:
+        blocked_cards = ops.list_cards(column="Blocked")
+    except Exception as e:  # noqa: BLE001 -- a failed board read must not make a workspace unsafe
+        STATE.log_run("reap-orphan-summary", result="blocked-cards-failed", level="warn",
+                      error=worker.scrub_secrets(str(e)))
+        return False
+
+    protected, blocked_prefixes = _protected_orphan_paths(records, blocked_cards)
+    candidates = reaped = skipped_grace = 0
+    root = worker.WORKSPACES_ROOT
+    try:
+        project_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+    except OSError as e:
+        STATE.log_run("reap-orphan-summary", result="workspace-list-failed", level="warn",
+                      error=worker.scrub_secrets(str(e)))
+        return False
+
+    for project_dir in project_dirs:
+        if project_dir.name == "secretary":
+            durable_names = _DURABLE_AGENT_WORKSPACES
+        else:
+            durable_names = frozenset()
+        try:
+            workspaces = sorted(path for path in project_dir.iterdir() if path.is_dir())
+        except OSError as e:
+            STATE.log_run("reap-orphan-summary", result="project-list-failed", level="warn",
+                          project=project_dir.name, error=worker.scrub_secrets(str(e)))
+            continue
+        for workspace in workspaces:
+            workspace_path = _real_workspace_path(workspace)
+            if (workspace.name in durable_names or workspace_path in protected
+                    or _matches_workspace_prefix(workspace.name, blocked_prefixes)):
+                continue
+            candidates += 1
+            try:
+                age_s = max(0, int(now - workspace.stat().st_mtime))
+            except OSError as e:
+                STATE.log_run("reap-orphan", workspace=str(workspace), project=project_dir.name,
+                              result="stat-failed", level="warn",
+                              error=worker.scrub_secrets(str(e)))
+                continue
+            if age_s < ORPHAN_GRACE_SECONDS:
+                skipped_grace += 1
+                continue
+
+            result = "reaped"
+            error = ""
+            try:
+                worker.teardown(str(workspace))
+            except Exception as e:  # noqa: BLE001 -- one dead workspace cannot abort a tick
+                result = "teardown-failed"
+                error = worker.scrub_secrets(str(e))
+            try:
+                worker.prune_worktrees(project_dir.name)
+            except Exception as e:  # noqa: BLE001 -- pruning is hygiene, not a sweep precondition
+                if result == "reaped":
+                    result = "prune-failed"
+                error = worker.scrub_secrets(str(e))
+
+            removed = not workspace.exists()
+            if removed:
+                reaped += 1
+            elif result == "reaped":
+                result = "teardown-incomplete"
+            fields = {"workspace": str(workspace), "project": project_dir.name,
+                      "age_s": age_s, "ref": "", "result": result}
+            if error:
+                fields.update({"level": "warn", "error": error})
+            STATE.log_run("reap-orphan", **fields)
+
+    try:
+        _save_orphan_sweep_watermark(now)
+    except OSError as e:
+        STATE.log_run("reap-orphan-summary", result="watermark-failed", level="warn",
+                      error=worker.scrub_secrets(str(e)))
+    STATE.log_run("reap-orphan-summary", candidates=candidates, reaped=reaped,
+                  skipped_grace=skipped_grace)
+    return False
 
 
 def _advance(records: dict, statuses: dict[str, str]) -> bool:
@@ -782,6 +948,7 @@ def tick() -> int:
             STATE.log_run("head-health", result="error", level="warn", error=worker.scrub_secrets(str(e)))
             statuses = {}
         changed = _reconcile(records)
+        _reap_orphan_workspaces(records)
         changed = _advance(records, statuses) or changed
         changed = validate.run(records, WATCHDOG_SECONDS, _save_cards, statuses,
                                _refresh_worker_task) or changed

@@ -140,6 +140,15 @@ def project_root(project: str) -> Path:
     return home if home.is_dir() else p
 
 
+def prune_worktrees(project: str) -> None:
+    """Drop stale git worktree administration entries for one project's repository.
+
+    Callers remove the worktree through :func:`teardown` first.  Keeping the prune here means
+    they use the same bounded git wrapper as the rest of the worker lifecycle.
+    """
+    _git_ok(project_root(project), ["worktree", "prune"])
+
+
 def _load_manifest(project: str) -> dict:
     """workspace.toml лукап цепочкой: сначала в самом репо проекта (project_root), иначе
     центральный манифест <MANIFEST_DIR>/<project>.toml для контриб-проектов, которые не коммитят
