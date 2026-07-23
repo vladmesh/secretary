@@ -145,8 +145,9 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
                 mock.patch("secretary.installation.materialize_host", return_value=host),
                 mock.patch("secretary.installation.restore_findings", return_value=[]),
+                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
-            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
 

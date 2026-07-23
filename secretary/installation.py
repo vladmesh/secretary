@@ -147,10 +147,16 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
     if not recovery:
-        raise InstallError(
-            f"target {target} already contains an installation; choose --recover or use the "
-            "separate adopt workflow"
-        )
+        # `bootstrap` clones the checkpoint solely to discover the project registry and
+        # writes the ignored derived runtime.env.  A clean bootstrap checkout is safe to
+        # continue through the first install; every other existing checkout still needs
+        # the explicit recovery/adopt decision.
+        runtime = target / "runtime.env"
+        if not runtime.is_file() or runtime.is_symlink():
+            raise InstallError(
+                f"target {target} already contains an installation; choose --recover or use the "
+                "separate adopt workflow"
+            )
     if _run(["git", "-C", str(target), "status", "--porcelain"], label="inspect instance checkout"):
         raise InstallError("instance checkout has local changes; recovery will not overwrite them")
     if not dry_run:
@@ -409,6 +415,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 return result
             _set_installation_owner(data_dir, args.installation_user)
             result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
+            # The checkpoint only contains cards. The board itself is derived host
+            # state and must exist before restore can prove card parity.
+            from secretary.bootstrap import ensure_pipeline_board
+            ensure_pipeline_board(target)
             restored = import_normalized_board(data_dir)
             result.add("board", "changed", f"{restored} card(s) at parity")
             count = rebuild_memory_index(data_dir, target)

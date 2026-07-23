@@ -52,10 +52,15 @@ manager оператора:
 2. GitHub-доступ: `ssh-keygen`, добавить deploy key к `secretary-instance` и
    project-репозиториям (или PAT в git credential store). Ручной шаг, автоматизации
    не будет: это и есть человеческий секрет.
-3. Kanboard + Orca: до secretary-679 ставятся руками (Kanboard с доской Pipeline,
-   колонки Идеи/Ready/In progress/Validate/Blocked/Done, swimlanes по проектам,
-   API-юзер; Orca поддержанной версии). После 679: один bootstrap-шаг, kanboard-креды
-   генерятся и пишутся в runtime.env машиной.
+3. Kanboard + Orca: bootstrap ставит pinned Kanboard в Docker и pinned Orca AppImage,
+   генерирует admin/API credentials в `runtime.env` и создаёт Pipeline с колонками и
+   swimlanes из project registry:
+
+   ```bash
+   sudo secretary bootstrap \
+     --instance-remote git@github.com:vladmesh/secretary-instance.git \
+     --instance-dir /home/dev/secretary-instance --installation-user dev
+   ```
 4. Продукт:
 
    ```bash
@@ -67,8 +72,7 @@ manager оператора:
      --installation-user dev
    ```
 
-5. runtime.env: после 679+681 файл создаёт bootstrap, человек не вводит ничего.
-   До того: `install -m 0600` и заполнить KANBOARD_* руками (см. RECOVERY.md).
+5. runtime.env создаёт bootstrap. Человек не вводит `KANBOARD_*`.
 6. Recover:
 
    ```bash

@@ -140,8 +140,8 @@ Security boundary: доверенный single-user host. Board и memory энд
 
 ## Fresh install и recovery
 
-Сначала установить продукт с memory extra, Kanboard и Orca. Package transport и поддерживаемая
-версия Orca пока остаются decision gate Milestone 1, поэтому `secretary install` их не ставит и
+Сначала установить продукт с memory extra. `secretary bootstrap` на Ubuntu/Debian ставит pinned
+Kanboard и Orca, генерирует `runtime.env` и создаёт Pipeline. `secretary install` их не ставит и
 fail-closed проверяет оба runtime до изменения live state.
 
 На чистом target первый запуск клонирует приватный checkpoint и останавливается на ручном вводе

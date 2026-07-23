@@ -25,5 +25,14 @@ python3 -m secretary task list --project secretary
 ```
 
 Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available
-with `python3 -m pip install '.[memory]'`. `secretary install` and `secretary recover` require an
-already installed Kanboard and Orca runtime.
+with `python3 -m pip install '.[memory]'`. On a supported Ubuntu or Debian host, bootstrap the
+derived Kanboard and Orca runtime before install:
+
+```bash
+sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
+secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
+secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
+```
+
+Bootstrap pins Kanboard and Orca transports, generates the local Kanboard credentials in
+`INSTANCE/runtime.env` with mode `0600`, and creates the Pipeline board from the instance registry.
