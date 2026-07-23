@@ -39,6 +39,7 @@ class Board:
         if method == "getColumns":
             return self.columns
         if method == "getAllTasks":
+            # Kanboard's default is open cards; status_id=0 selects closed.
             return []
         if method == "updateColumn":
             for column in self.columns:
@@ -101,7 +102,7 @@ class BootstrapBoardTests(unittest.TestCase):
 
             def closed_cards(method: str, **params: object) -> object:
                 if method == "getAllTasks":
-                    self.assertNotIn("status_id", params)
+                    self.assertEqual(params.get("status_id"), 0)
                     return [{"id": 3, "is_active": 0}]
                 return Board.call(board, method, **params)
 

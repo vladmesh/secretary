@@ -85,10 +85,10 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
         if titles != list(PIPELINE_COLUMNS):
-            # getAllTasks without a status filter includes closed cards too.  A
-            # column removal moves its cards to the trash, so any existing card
-            # makes an incompatible schema a fail-closed condition.
-            tasks = api.call("getAllTasks", project_id=board_id) or []
+            # Kanboard defaults getAllTasks to open cards.  status_id=0 asks
+            # for closed cards, which must count too: removing a column moves
+            # every card it contains to the trash.
+            tasks = api.call("getAllTasks", project_id=board_id, status_id=0) or []
             if tasks:
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):
