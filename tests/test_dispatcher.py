@@ -3383,6 +3383,42 @@ class WorkspaceResumeTests(unittest.TestCase):
                         require_existing_workspace=True,
                     )
 
+    def test_prepare_worker_refuses_resumed_workspace_on_a_different_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            workspace_root = root / "workspaces"
+            workspace = workspace_root / "secretary" / "secretary-510-pilot-pilot"
+            repo.mkdir()
+            git(repo, "init", "--initial-branch", "main")
+            _configure_git_user(repo)
+            (repo / "README.md").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "base")
+            workspace.parent.mkdir(parents=True)
+            git(repo, "worktree", "add", "-b", "foreign-branch", str(workspace))
+
+            class Catalog(FakeCatalog):
+                def binding(self, project: str) -> dict:
+                    return {"repo": str(repo), "default_branch": "main"}
+
+            host = GitBranchHost(root)
+            host.catalog = Catalog()  # type: ignore[assignment]
+            task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "workspace": {"base_branch": "main"},
+            }
+            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
+                with self.assertRaisesRegex(HostError, "resume workspace is on branch foreign-branch"):
+                    host.prepare_worker(
+                        task,
+                        "secretary-510-pilot-pilot",
+                        "codex",
+                        attempt_id="attempt-retry",
+                        require_existing_workspace=True,
+                    )
+
 
 class _InstanceRepoCatalog:
     def __init__(self, instance_dir: Path) -> None:
