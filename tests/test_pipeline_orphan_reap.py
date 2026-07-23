@@ -108,6 +108,19 @@ class OrphanWorkspaceReapTests(unittest.TestCase):
         self.mock_teardown.assert_not_called()
         self.assertTrue(blocked.exists())
 
+    def test_preserves_blocked_card_reviewer_workspace(self) -> None:
+        worker_workspace = self._workspace("secretary", "637-checkpoint-writer")
+        reviewer_workspace = self._workspace("secretary", "review-637-checkpoint-writer-2")
+        dispatcher.ops.list_cards.return_value = [{
+            "reference": "secretary-637", "project": "secretary", "claim": "637-checkpoint-writer",
+        }]
+
+        dispatcher._reap_orphan_workspaces({})
+
+        self.mock_teardown.assert_not_called()
+        self.assertTrue(worker_workspace.exists())
+        self.assertTrue(reviewer_workspace.exists())
+
     def test_teardown_failure_does_not_stop_later_orphans(self) -> None:
         first = self._workspace("project-a", "first")
         second = self._workspace("project-a", "second")

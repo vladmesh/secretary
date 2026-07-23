@@ -353,29 +353,40 @@ def _save_orphan_sweep_watermark(now: float) -> None:
     tmp.replace(ORPHAN_SWEEP_FILE)
 
 
-def _blocked_workspace_prefixes(blocked_cards: list[dict]) -> tuple[str, ...]:
-    """Prefixes that conservatively protect a Blocked card with a missing claim.
+def _blocked_workspace_prefixes(blocked_cards: list[dict]) -> tuple[tuple[str, str], ...]:
+    """Project-scoped prefixes that conservatively protect Blocked card workspaces.
 
-    Old workspaces included the full reference and current ones begin with its numeric card id.
-    This is only a safety fallback for a card whose authoritative claim is empty; orphan
-    identification itself is the protected-path exclusion below, never a name-format match.
+    A Blocked card deliberately has no record, including when its reviewer died and left its
+    separate reviewer worktree for investigation.  The claim gives the worker path exactly, but
+    cannot reconstruct a deduped reviewer name.  Protect both historical reference-based and
+    current numeric-id worker/reviewer prefixes, including ``-2``/``-3`` dedupe suffixes.
+    Orphan identification itself remains protected-path exclusion, never a name-format match.
     """
-    prefixes = []
+    prefixes: list[tuple[str, str]] = []
     for card in blocked_cards:
-        if card.get("claim"):
-            continue
         reference = card.get("reference") or ""
         if not reference:
             continue
-        prefixes.extend((reference, naming.card_id(reference)))
+        project = card.get("project") or ""
+        card_id = naming.card_id(reference)
+        prefixes.extend((
+            (project, reference),
+            (project, card_id),
+            (project, f"review-{reference}"),
+            (project, f"review-{card_id}"),
+        ))
     return tuple(prefixes)
 
 
-def _matches_workspace_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
-    return any(name == prefix or name.startswith(f"{prefix}-") for prefix in prefixes)
+def _matches_workspace_prefix(project: str, name: str,
+                              prefixes: tuple[tuple[str, str], ...]) -> bool:
+    return any((not prefix_project or project == prefix_project)
+               and (name == prefix or name.startswith(f"{prefix}-"))
+               for prefix_project, prefix in prefixes)
 
 
-def _protected_orphan_paths(records: dict, blocked_cards: list[dict]) -> tuple[set[str], tuple[str, ...]]:
+def _protected_orphan_paths(records: dict, blocked_cards: list[dict]) -> tuple[
+        set[str], tuple[tuple[str, str], ...]]:
     """Absolute real paths that an orphan sweep must leave untouched."""
     protected = set()
     for rec in records.values():
@@ -443,7 +454,7 @@ def _reap_orphan_workspaces(records: dict) -> bool:
         for workspace in workspaces:
             workspace_path = _real_workspace_path(workspace)
             if (workspace.name in durable_names or workspace_path in protected
-                    or _matches_workspace_prefix(workspace.name, blocked_prefixes)):
+                    or _matches_workspace_prefix(project_dir.name, workspace.name, blocked_prefixes)):
                 continue
             candidates += 1
             try:
