@@ -554,7 +554,7 @@ class FixtureHostSource(HostSource):
 
     Layout under ``root``::
 
-        projects/<name>/     one directory per project repo on the host
+        projects/<name>/     one directory per project repo on the fixture host
         units.txt            one systemd unit name per line
         orca-repos.txt       one Orca repo name per line
 
@@ -591,11 +591,10 @@ class FixtureHostSource(HostSource):
             projects_dir = self.root / "projects"
             if not projects_dir.is_dir():
                 return set(), ""
-            names = _names_from_dir(projects_dir)
-            # Legacy fixtures have names only. Exact paths can be recorded in
-            # projects.txt, one absolute checkout path per line.
-            by_name = {Path(path).name: path for path in expected.projects}
-            return {by_name.get(name, name) for name in names}, ""
+            # Legacy fixtures model checkouts beneath their own root. Their
+            # directory names are observed host facts, not aliases for an
+            # expected binding with the same basename.
+            return {_normalized_repo_path(str(projects_dir / name)) for name in _names_from_dir(projects_dir)}, ""
         except OSError:
             return set(), "fixture projects directory is unreadable"
 

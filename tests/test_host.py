@@ -114,15 +114,25 @@ class ExpectationTests(unittest.TestCase):
 
 
 class FixtureSourceTests(unittest.TestCase):
-    def test_collect_reads_names_only(self):
+    def test_collect_reads_project_paths(self):
         source = FixtureHostSource(HOST_FIXTURE)
         result = source.collect(Expectations())
         self.assertEqual(result.errors, {})
         actual = result.inventory
-        self.assertEqual(actual.projects, {"example-project", "stray-project"})
+        self.assertEqual(actual.projects, {"/srv/projects/example-project", "/srv/projects/stray-project"})
         # Full unit file names, exactly as systemctl list-unit-files prints them.
         self.assertEqual(actual.units, {"secretary-pipeline.service", "secretary-retro.timer"})
         self.assertEqual(actual.orca_repos, {"example-project", "secretary", "extra-repo"})
+
+    def test_legacy_project_directories_keep_fixture_paths(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkout = root / "projects" / "same-name"
+            checkout.mkdir(parents=True)
+            result = FixtureHostSource(root).collect(Expectations(projects={"/outside/same-name"}))
+        self.assertEqual(result.inventory.projects, {str(checkout)})
 
     def test_missing_per_kind_files_yield_empty_sets(self):
         # An existing root with no unit/repo files and no projects dir is a
@@ -1008,7 +1018,7 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("host inventory: read-only", output)
         # projects
         self.assertIn("projects:\n  matched: /srv/projects/example-project", output)
-        self.assertIn("unmanaged-on-host: stray-project", output)
+        self.assertIn("unmanaged-on-host: /srv/projects/stray-project", output)
         # units: one of each outcome, full unit file names
         self.assertIn("units:\n  matched: (none)", output)
         self.assertIn("missing-on-host: secretary-curator.service", output)
@@ -1050,6 +1060,37 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("missing-on-host: demo", output)
         self.assertIn("secretary-dispatcher-production.service", output)
+
+    def test_doctor_fixture_does_not_match_checkout_by_basename(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside" / "same-name"
+            outside.parent.mkdir()
+            projects_root = root / "projects"
+            projects_root.mkdir()
+            data = root / "data"
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: doctor\ndata_dir: " + str(data) + "\noffsite:\n"
+                "  instance_remote: git@example.invalid:x/y\nhost:\n"
+                "  projects_root: " + str(projects_root) + "\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            (projects_root / "demo.yaml").write_text(
+                "id: demo\nrepo: " + str(outside)
+                + "\nenabled: true\norca_binding: demo\nadapter: demo\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+            fixture = root / "host"
+            (fixture / "projects" / "same-name").mkdir(parents=True)
+
+            code, output = run_cli(["doctor", "--instance", str(instance), "--host-fixture", str(fixture)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("missing-on-host: " + str(outside), output)
+        self.assertIn("unmanaged-on-host: " + str(fixture / "projects" / "same-name"), output)
 
     def test_doctor_fails_for_required_inactive_service(self):
         expected = build_doctor_expectations(

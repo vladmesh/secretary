@@ -1,0 +1,2 @@
+/srv/projects/example-project
+/srv/projects/stray-project

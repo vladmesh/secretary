@@ -24,7 +24,9 @@ Live parity выводится из того же desired state, что и `reco
 checkout делает inventory projects unavailable и даёт code `2`, а не `missing-on-host`. Проверяются unit-файлы, Orca registration
 и требуемое enabled/active состояние долгоживущих service и timer. Отсутствующий ресурс или
 нездоровый required runtime state даёт finding и code `1`; oneshot service может быть inactive.
-`foreign_units` исключены из managed parity и не считаются conflict.
+`foreign_units` исключены из managed parity и не считаются conflict. В fixture полный путь checkout
+задаётся строкой в `projects.txt`; старый каталог `projects/<name>` означает checkout именно под
+корнем fixture, а не binding с таким же basename.
 
 ```bash
 python3 -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
