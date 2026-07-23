@@ -4,6 +4,8 @@ import contextlib
 import getpass
 import io
 import json
+import os
+import pwd
 import subprocess
 import tempfile
 import unittest
@@ -84,6 +86,48 @@ class InstallationTests(unittest.TestCase):
                     _clone_or_reuse("remote", target, recovery=False, dry_run=True),
                     "reused checkpoint checkout",
                 )
+
+    def test_reused_checkout_marks_its_path_safe_for_root_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            (target / ".git").mkdir(parents=True)
+            with mock.patch("secretary.installation._run", side_effect=("remote", "")) as run:
+                self.assertEqual(
+                    _clone_or_reuse("remote", target, recovery=True, dry_run=True),
+                    "reused checkpoint checkout",
+                )
+
+            for call in run.call_args_list:
+                command = call.args[0]
+                self.assertEqual(command[:4], ["git", "-c", f"safe.directory={target}", "-C"])
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires a root clean-host fixture")
+    def test_root_can_reuse_a_checkout_owned_by_installation_user(self):
+        try:
+            account = pwd.getpwnam("nobody")
+        except KeyError:
+            self.skipTest("fixture has no nobody user")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "remote.git"
+            target = root / "instance"
+            source.mkdir()
+            _git(source, "init")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            (source / "checkpoint").write_text("ok\n", encoding="utf-8")
+            _git(source, "add", ".")
+            _git(source, "commit", "-m", "checkpoint")
+            subprocess.run(["git", "clone", "--bare", str(source), str(remote)], check=True)
+            subprocess.run(["git", "clone", str(remote), str(target)], check=True)
+            for path in (target, *target.rglob("*")):
+                os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+
+            self.assertEqual(
+                _clone_or_reuse(str(remote), target, recovery=True, dry_run=True),
+                "reused checkpoint checkout",
+            )
 
     def test_existing_installation_user_requires_recover_or_adopt_choice(self):
         with self.assertRaisesRegex(InstallError, "choose --recover.*adopt"):

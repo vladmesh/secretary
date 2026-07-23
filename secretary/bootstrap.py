@@ -12,6 +12,7 @@ import argparse
 import os
 import secrets
 import shutil
+import subprocess
 import time
 from pathlib import Path
 import yaml
@@ -84,7 +85,10 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
         if titles != list(PIPELINE_COLUMNS):
-            tasks = api.call("getAllTasks", project_id=board_id, status_id=1) or []
+            # getAllTasks without a status filter includes closed cards too.  A
+            # column removal moves its cards to the trash, so any existing card
+            # makes an incompatible schema a fail-closed condition.
+            tasks = api.call("getAllTasks", project_id=board_id) or []
             if tasks:
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):
@@ -147,13 +151,23 @@ volumes:
 def _install_platform(*, dry_run: bool) -> None:
     if dry_run:
         return
-    _host_supported()
-    if shutil.which("docker") is None:
+    needs_docker = shutil.which("docker") is None
+    needs_compose = not _docker_compose_available()
+    needs_orca = shutil.which("orca") is None
+    if needs_docker or needs_compose or needs_orca:
         if os.geteuid() != 0:
-            raise BootstrapError("Docker is absent; rerun bootstrap as root")
+            raise BootstrapError("host prerequisites are absent; rerun bootstrap as root")
         _run(["apt-get", "update"], label="refresh apt")
-        _run(["apt-get", "install", "--yes", "docker.io", "docker-compose-plugin", "curl"], label="install Docker")
-    if shutil.which("orca") is None:
+        packages = ["curl", _fuse_package()]
+        if needs_docker:
+            packages.append("docker.io")
+        if needs_compose:
+            packages.append(_compose_package())
+        _run(
+            ["apt-get", "install", "--yes", *packages],
+            label="install Docker and Orca prerequisites",
+        )
+    if needs_orca:
         if os.geteuid() != 0:
             raise BootstrapError("Orca is absent; rerun bootstrap as root")
         target = Path("/opt/secretary/orca-linux.AppImage")
@@ -163,6 +177,45 @@ def _install_platform(*, dry_run: bool) -> None:
         wrapper = Path("/usr/local/bin/orca")
         write_text_atomic(wrapper, f"#!/bin/sh\nexec {target} \"$@\"\n")
         wrapper.chmod(0o755)
+
+
+def _compose_package() -> str:
+    """Return the Compose v2 package exposed by this distribution's own apt archive."""
+    for package in ("docker-compose-v2", "docker-compose-plugin"):
+        try:
+            result = subprocess.run(
+                ["apt-cache", "show", package], capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise BootstrapError("could not inspect apt packages for Docker Compose") from None
+        if result.returncode == 0:
+            return package
+    raise BootstrapError("no Docker Compose v2 package is available from configured apt sources")
+
+
+def _docker_compose_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return subprocess.run(
+            ["docker", "compose", "version"], capture_output=True, text=True, timeout=30,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _fuse_package(os_release: Path = Path("/etc/os-release")) -> str:
+    try:
+        fields = dict(
+            line.split("=", 1) for line in os_release.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+    except OSError:
+        raise BootstrapError("could not identify the operating system") from None
+    version = fields.get("VERSION_ID", "").strip('"')
+    if fields.get("ID", "").strip('"') == "ubuntu" and version >= "24.04":
+        return "libfuse2t64"
+    return "libfuse2"
 
 
 def _start_orca_service(user: str) -> None:
@@ -224,6 +277,8 @@ def bootstrap(args: argparse.Namespace) -> int:
     try:
         if not args.dry_run and os.geteuid() != 0:
             raise BootstrapError("host bootstrap must run as root")
+        if not args.dry_run:
+            _host_supported()
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)

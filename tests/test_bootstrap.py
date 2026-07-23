@@ -6,7 +6,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.bootstrap import BOOTSTRAP_STAMP, PIPELINE_COLUMNS, bootstrap, ensure_pipeline_board
+from secretary.bootstrap import (
+    BOOTSTRAP_STAMP,
+    PIPELINE_COLUMNS,
+    BootstrapError,
+    _fuse_package,
+    _install_platform,
+    bootstrap,
+    ensure_pipeline_board,
+)
 
 
 class Board:
@@ -83,6 +91,50 @@ class BootstrapBoardTests(unittest.TestCase):
             self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
             self.assertIn("removeColumn", board.calls)
 
+    def test_refuses_to_remove_surplus_columns_when_only_closed_cards_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = Path(temporary)
+            board = Board()
+            board.project = {"id": 7, "name": "Pipeline"}
+            board.columns = [{"id": index, "title": f"old-{index}"} for index in range(1, 9)]
+
+            def closed_cards(method: str, **params: object) -> object:
+                if method == "getAllTasks":
+                    self.assertNotIn("status_id", params)
+                    return [{"id": 3, "is_active": 0}]
+                return Board.call(board, method, **params)
+
+            board.call = closed_cards  # type: ignore[method-assign]
+            with self.assertRaisesRegex(BootstrapError, "cards but an incompatible"):
+                ensure_pipeline_board(instance, client=board)
+
+    def test_platform_uses_distribution_compose_and_ubuntu_fuse_packages(self) -> None:
+        with (
+            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+            mock.patch("secretary.bootstrap.shutil.which", side_effect=lambda name: None),
+            mock.patch("secretary.bootstrap._docker_compose_available", return_value=False),
+            mock.patch("secretary.bootstrap._compose_package", return_value="docker-compose-v2"),
+            mock.patch("secretary.bootstrap._fuse_package", return_value="libfuse2t64"),
+            mock.patch("secretary.bootstrap._run") as run,
+            mock.patch("secretary.bootstrap.write_text_atomic"),
+            mock.patch("secretary.bootstrap.Path.mkdir"),
+            mock.patch("secretary.bootstrap.Path.chmod"),
+        ):
+            _install_platform(dry_run=False)
+
+        self.assertIn(
+            ["apt-get", "install", "--yes", "curl", "libfuse2t64", "docker.io", "docker-compose-v2"],
+            [call.args[0] for call in run.call_args_list],
+        )
+
+    def test_fuse_package_handles_ubuntu_t64_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary) / "os-release"
+            release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+            self.assertEqual(_fuse_package(release), "libfuse2t64")
+            release.write_text('ID=debian\nVERSION_ID="12"\n', encoding="utf-8")
+            self.assertEqual(_fuse_package(release), "libfuse2")
+
     def test_bootstrap_generates_usable_runtime_and_ignored_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
@@ -126,6 +178,21 @@ class BootstrapBoardTests(unittest.TestCase):
             contents = compose.read_text(encoding="utf-8")
             self.assertIn("API_AUTHENTICATION_TOKEN: ${KANBOARD_API_TOKEN}", contents)
             self.assertIn("image: kanboard/kanboard:v1.2.46", contents)
+
+    def test_rejects_unsupported_host_before_creating_user_or_checkout(self) -> None:
+        args = SimpleNamespace(
+            instance_dir="/tmp/instance", instance_remote="remote", installation_user="dev", dry_run=False,
+        )
+        with (
+            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+            mock.patch("secretary.bootstrap._host_supported", side_effect=BootstrapError("unsupported")),
+            mock.patch("secretary.bootstrap._ensure_installation_user") as ensure_user,
+            mock.patch("secretary.bootstrap._clone_or_reuse") as clone,
+            mock.patch("builtins.print"),
+        ):
+            self.assertEqual(bootstrap(args), 1)
+        ensure_user.assert_not_called()
+        clone.assert_not_called()
 
 
 if __name__ == "__main__":

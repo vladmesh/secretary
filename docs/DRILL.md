@@ -45,14 +45,22 @@ manager оператора:
 
 ## Восстановление
 
-Порядок команд для свежей сессии. Шаги 3 и 6 частично ручные до закрытия карточек.
+Порядок команд для свежей сессии. После recover остаётся ручной только подготовка
+project checkouts и managed CODEX_HOME до закрытия secretary-680.
 
 1. Базовый хост: ssh-доступ root/sudo, `apt install git python3.12 python3.12-venv`.
    Опционально Claude Code для оператора.
 2. GitHub-доступ: `ssh-keygen`, добавить deploy key к `secretary-instance` и
    project-репозиториям (или PAT в git credential store). Ручной шаг, автоматизации
    не будет: это и есть человеческий секрет.
-3. Kanboard + Orca: bootstrap ставит pinned Kanboard в Docker и pinned Orca AppImage,
+3. Продукт: клонировать secretary и поставить CLI с memory extra:
+
+   ```bash
+   git clone https://github.com/vladmesh/secretary.git ~/secretary
+   cd ~/secretary && python3 -m pip install '.[memory]'
+   ```
+
+4. Kanboard + Orca: bootstrap ставит pinned Kanboard в Docker и pinned Orca AppImage,
    генерирует API token в `runtime.env` и создаёт Pipeline с колонками и
    swimlanes из project registry:
 
@@ -61,19 +69,17 @@ manager оператора:
      --instance-remote git@github.com:vladmesh/secretary-instance.git \
      --instance-dir /home/dev/secretary-instance --installation-user dev
    ```
-4. Продукт:
+5. Install:
 
    ```bash
-   git clone https://github.com/vladmesh/secretary.git ~/secretary
-   cd ~/secretary && python3 -m pip install '.[memory]'
    secretary install \
      --instance-remote git@github.com:vladmesh/secretary-instance.git \
      --instance-dir /home/dev/secretary-instance \
      --installation-user dev
    ```
 
-5. runtime.env создаёт bootstrap. Человек не вводит `KANBOARD_*`.
-6. Recover:
+6. runtime.env создаёт bootstrap. Человек не вводит `KANBOARD_*`.
+7. Recover:
 
    ```bash
    secretary recover \
@@ -85,7 +91,7 @@ manager оператора:
    Возвращает board, runs, memory facts + index, юниты, role worktrees, automations.
    До secretary-680 руками: клонировать project checkouts из registry и собрать
    managed CODEX_HOME. После 680 это делает recover.
-7. Головы: `codex login`, `claude` (логин), `gh auth login`. Интерактивные внешние
+8. Головы: `codex login`, `claude` (логин), `gh auth login`. Интерактивные внешние
    шаги, остаются ручными по контракту (Milestone 3 сделает их управляемыми, не
    автоматическими).
 

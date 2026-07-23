@@ -143,7 +143,11 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
             f"target {target} is not empty; choose --recover for the same instance or use the "
             "separate adopt workflow, no files were overwritten"
         )
-    origin = _run(["git", "-C", str(target), "remote", "get-url", "origin"], label="inspect instance remote")
+    # bootstrap leaves the checkout with the dedicated installation user.  Later
+    # recovery commands may be started from a root shell, for which Git otherwise
+    # rejects the deliberately foreign-owned checkout as dubious ownership.
+    git = ["git", "-c", f"safe.directory={target}", "-C", str(target)]
+    origin = _run([*git, "remote", "get-url", "origin"], label="inspect instance remote")
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
     if not recovery:
@@ -154,11 +158,11 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
                 f"target {target} already contains an installation; choose --recover or use the "
                 "separate adopt workflow"
             )
-    if _run(["git", "-C", str(target), "status", "--porcelain"], label="inspect instance checkout"):
+    if _run([*git, "status", "--porcelain"], label="inspect instance checkout"):
         raise InstallError("instance checkout has local changes; recovery will not overwrite them")
     if not dry_run:
-        _run(["git", "-C", str(target), "fetch", "--quiet", "origin"], label="fetch instance remote")
-        _run(["git", "-C", str(target), "merge", "--ff-only", "@{u}"], label="fast-forward instance checkout")
+        _run([*git, "fetch", "--quiet", "origin"], label="fetch instance remote")
+        _run([*git, "merge", "--ff-only", "@{u}"], label="fast-forward instance checkout")
     return "reused checkpoint checkout"
 
 
@@ -181,7 +185,8 @@ def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str
     if relative is not None:
         try:
             ignored = subprocess.run(
-                ["git", "-C", str(instance_dir), "check-ignore", "--quiet", "--", str(relative)],
+                ["git", "-c", f"safe.directory={instance_dir}", "-C", str(instance_dir),
+                 "check-ignore", "--quiet", "--", str(relative)],
                 capture_output=True,
                 text=True,
                 timeout=30,
