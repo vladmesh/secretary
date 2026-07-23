@@ -275,7 +275,7 @@ class CommandHostRuntime:
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
         )
-        return {"workspace": workspace, "handle": handle, "base_branch": base, "reused": str(reused).lower()}
+        return {"workspace": workspace, "handle": handle, "base_branch": base}
 
     def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Launch rework in the existing workspace without recreating its branch."""
