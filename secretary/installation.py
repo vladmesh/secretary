@@ -370,10 +370,20 @@ def install(args: argparse.Namespace) -> InstallResult:
         result.add("mode", "failed", "full live-host adoption is not supported by this flow")
         return result
     try:
-        _ensure_installation_user(args.installation_user, recovery=recovery, dry_run=args.dry_run)
+        # bootstrap creates this user before the first install. Its stamp is also
+        # checked by _clone_or_reuse, so it is the narrow exception to the usual
+        # refusal to touch an existing installation user.
+        bootstrap_checkout = (target / ".secretary-bootstrap").is_file()
+        _ensure_installation_user(
+            args.installation_user,
+            recovery=recovery or bootstrap_checkout,
+            dry_run=args.dry_run,
+        )
         result.add(
             "installation-user",
-            "unchanged" if recovery else ("would-change" if args.dry_run else "changed"),
+            "unchanged" if recovery or bootstrap_checkout else (
+                "would-change" if args.dry_run else "changed"
+            ),
             args.installation_user,
         )
         detail = _clone_or_reuse(args.instance_remote, target, recovery=recovery, dry_run=args.dry_run)

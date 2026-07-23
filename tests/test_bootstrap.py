@@ -20,6 +20,8 @@ class Board:
         self.calls.append(method)
         if method == "getProjectByName":
             return self.project
+        if method == "getVersion":
+            return "1.2.46"
         if method == "createProject":
             self.project = {"id": 7, "name": params["name"]}
             # Kanboard 1.2.46 creates these four columns for a new project.
@@ -81,7 +83,7 @@ class BootstrapBoardTests(unittest.TestCase):
             self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
             self.assertIn("removeColumn", board.calls)
 
-    def test_bootstrap_generates_jsonrpc_runtime_and_ignored_stamp(self) -> None:
+    def test_bootstrap_generates_usable_runtime_and_ignored_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
             board = Board()
@@ -100,9 +102,9 @@ class BootstrapBoardTests(unittest.TestCase):
                 mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=clone),
                 mock.patch("secretary.bootstrap._install_platform"),
                 mock.patch("secretary.bootstrap._start_orca_service"),
+                mock.patch("secretary.bootstrap._set_installation_owner"),
                 mock.patch("secretary.bootstrap._compose_file"),
                 mock.patch("secretary.bootstrap._run"),
-                mock.patch("secretary.bootstrap._wait_for_kanboard"),
                 mock.patch("secretary.bootstrap.KanboardClient", return_value=board),
             ):
                 self.assertEqual(bootstrap(args), 0)
@@ -110,10 +112,20 @@ class BootstrapBoardTests(unittest.TestCase):
             runtime = (target / "runtime.env").read_text(encoding="utf-8")
             self.assertIn("KANBOARD_API_USER=jsonrpc\n", runtime)
             self.assertIn("KANBOARD_API_TOKEN=", runtime)
+            self.assertNotIn("KANBOARD_BOOTSTRAP_TOKEN", runtime)
+            self.assertNotIn("KANBOARD_IMAGE", runtime)
             self.assertNotIn("KANBOARD_ADMIN_PASSWORD", runtime)
             self.assertEqual((target / "runtime.env").stat().st_mode & 0o777, 0o600)
             self.assertTrue((target / BOOTSTRAP_STAMP).is_file())
-            self.assertIn(f"/{BOOTSTRAP_STAMP}", (target / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
+            exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertIn(f"/{BOOTSTRAP_STAMP}", exclude)
+            self.assertIn("/runtime.env", exclude)
+            compose = (target.parent / "compose.yml")
+            from secretary.bootstrap import _compose_file
+            _compose_file(compose)
+            contents = compose.read_text(encoding="utf-8")
+            self.assertIn("API_AUTHENTICATION_TOKEN: ${KANBOARD_API_TOKEN}", contents)
+            self.assertIn("image: kanboard/kanboard:v1.2.46", contents)
 
 
 if __name__ == "__main__":

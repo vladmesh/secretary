@@ -53,7 +53,7 @@ manager оператора:
    project-репозиториям (или PAT в git credential store). Ручной шаг, автоматизации
    не будет: это и есть человеческий секрет.
 3. Kanboard + Orca: bootstrap ставит pinned Kanboard в Docker и pinned Orca AppImage,
-   генерирует admin/API credentials в `runtime.env` и создаёт Pipeline с колонками и
+   генерирует API token в `runtime.env` и создаёт Pipeline с колонками и
    swimlanes из project registry:
 
    ```bash

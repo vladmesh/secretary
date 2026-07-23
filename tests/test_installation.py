@@ -12,7 +12,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.cli import main
-from secretary.installation import InstallError, _clone_or_reuse, _ensure_installation_user, materialize_checkpoint
+from secretary.installation import (
+    InstallError,
+    _clone_or_reuse,
+    _ensure_installation_user,
+    install,
+    materialize_checkpoint,
+)
 
 
 CARD = {
@@ -82,6 +88,30 @@ class InstallationTests(unittest.TestCase):
     def test_existing_installation_user_requires_recover_or_adopt_choice(self):
         with self.assertRaisesRegex(InstallError, "choose --recover.*adopt"):
             _ensure_installation_user(getpass.getuser(), recovery=False, dry_run=False)
+
+    def test_bootstrap_stamp_allows_the_existing_user_for_first_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            target.mkdir()
+            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            args = SimpleNamespace(
+                instance_dir=str(target), instance_remote="remote",
+                installation_user=getpass.getuser(), recover=False, adopt=False,
+                dry_run=False, runtime_env=None,
+            )
+            with (
+                mock.patch("secretary.installation._ensure_installation_user") as ensure_user,
+                mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
+                mock.patch(
+                    "secretary.installation._read_runtime_env",
+                    side_effect=InstallError("stop after user check"),
+                ),
+            ):
+                result = install(args)
+
+            ensure_user.assert_called_once_with(getpass.getuser(), recovery=True, dry_run=False)
+            self.assertFalse(result.ok)
+            self.assertIn("stop after user check", result.steps[-1].detail)
 
     def test_checkpoint_materialization_builds_local_json_and_never_copies_derived_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:

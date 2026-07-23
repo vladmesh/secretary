@@ -17,7 +17,13 @@ from pathlib import Path
 import yaml
 
 from secretary._fsutil import write_text_atomic
-from secretary.installation import InstallError, _clone_or_reuse, _ensure_installation_user, _run
+from secretary.installation import (
+    InstallError,
+    _clone_or_reuse,
+    _ensure_installation_user,
+    _run,
+    _set_installation_owner,
+)
 from secretary.tasks import KanboardClient, TaskError
 
 
@@ -122,14 +128,14 @@ def _write_runtime(path: Path, values: dict[str, str]) -> None:
 
 def _compose_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, """services:
+    write_text_atomic(path, f"""services:
   kanboard:
-    image: ${KANBOARD_IMAGE}
+    image: {KANBOARD_IMAGE}
     restart: unless-stopped
     ports:
       - 127.0.0.1:8080:80
     environment:
-      API_AUTHENTICATION_TOKEN: ${KANBOARD_BOOTSTRAP_TOKEN}
+      API_AUTHENTICATION_TOKEN: ${{KANBOARD_API_TOKEN}}
     volumes:
       - kanboard-data:/var/www/app/data
 volumes:
@@ -189,7 +195,7 @@ def _wait_for_kanboard(values: dict[str, str], *, timeout: int = 90) -> None:
         try:
             KanboardClient({
                 "KANBOARD_URL": values["KANBOARD_URL"], "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": values["KANBOARD_BOOTSTRAP_TOKEN"],
+                "KANBOARD_API_TOKEN": values["KANBOARD_API_TOKEN"],
             }).call("getVersion")
             return
         except TaskError:
@@ -204,9 +210,12 @@ def _mark_bootstrap_checkout(target: Path) -> None:
     write_text_atomic(stamp, "created by secretary bootstrap\n")
     exclude = target / ".git" / "info" / "exclude"
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    entry = f"/{BOOTSTRAP_STAMP}\n"
-    if entry not in existing.splitlines(keepends=True):
-        write_text_atomic(exclude, existing + ("" if not existing or existing.endswith("\n") else "\n") + entry)
+    entries = (f"/{BOOTSTRAP_STAMP}", "/runtime.env")
+    known = set(existing.splitlines())
+    missing = [entry for entry in entries if entry not in known]
+    if missing:
+        suffix = "" if not existing or existing.endswith("\n") else "\n"
+        write_text_atomic(exclude, existing + suffix + "".join(f"{entry}\n" for entry in missing))
 
 
 def bootstrap(args: argparse.Namespace) -> int:
@@ -215,7 +224,8 @@ def bootstrap(args: argparse.Namespace) -> int:
     try:
         if not args.dry_run and os.geteuid() != 0:
             raise BootstrapError("host bootstrap must run as root")
-        _ensure_installation_user(args.installation_user, recovery=False, dry_run=args.dry_run)
+        # Bootstrap may be safely rerun for an existing dedicated user.
+        _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
         values = _runtime_values(runtime)
         values.setdefault("KANBOARD_URL", "http://127.0.0.1:8080/jsonrpc.php")
@@ -223,10 +233,10 @@ def bootstrap(args: argparse.Namespace) -> int:
         # It avoids trying to mutate admin credentials through an API that cannot do so.
         values.setdefault("KANBOARD_API_USER", "jsonrpc")
         values.setdefault("KANBOARD_API_TOKEN", secrets.token_urlsafe(32))
-        values["KANBOARD_IMAGE"] = KANBOARD_IMAGE
         if not args.dry_run:
             _write_runtime(runtime, values)
             _mark_bootstrap_checkout(target)
+            _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False)
             _start_orca_service(args.installation_user)
             compose = Path("/opt/secretary/kanboard-compose.yml")
@@ -236,6 +246,6 @@ def bootstrap(args: argparse.Namespace) -> int:
             ensure_pipeline_board(target, client=KanboardClient(values))
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
-    except (BootstrapError, InstallError, TaskError, OSError) as exc:
+    except (BootstrapError, InstallError, TaskError, OSError, RuntimeError) as exc:
         print(f"secretary bootstrap\nstatus: failed: {exc}")
         return 1
