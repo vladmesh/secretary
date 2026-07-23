@@ -62,7 +62,7 @@ Milestone остаётся открытым до появления поддер
 
 ### Acceptance gate
 
-- Поддержанный Ubuntu host не содержит заранее подготовленных `/home/dev`, checkout'ов,
+- Поддержанный Ubuntu 24.04 host не содержит заранее подготовленных `/home/dev`, checkout'ов,
   board или Orca state.
 - Все host paths и resource names выводятся из instance и обнаруженного host context.
 - Installer ставит и настраивает bundled Kanboard и Orca без заранее подготовленного runtime.

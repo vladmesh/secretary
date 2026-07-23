@@ -140,7 +140,7 @@ Security boundary: доверенный single-user host. Board и memory энд
 
 ## Fresh install и recovery
 
-Сначала установить продукт с memory extra. `secretary bootstrap` на Ubuntu ставит pinned
+Сначала установить продукт с memory extra. `secretary bootstrap` на Ubuntu 24.04 ставит pinned
 Kanboard и Orca, генерирует `runtime.env` и создаёт Pipeline. `secretary install` их не ставит и
 fail-closed проверяет оба runtime до изменения live state.
 

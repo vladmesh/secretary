@@ -4,8 +4,7 @@
 сносит сервер под ноль и восстанавливает установку из приватного instance remote парой
 команд. Карточки, память и проекты возвращаются; derived state пересобирается.
 
-Статус: drill НЕ готов к прогону на проде, пока открыты secretary-679 (bootstrap
-Kanboard/Orca), secretary-680 (project checkouts + CODEX_HOME) и secretary-681
+Статус: drill НЕ готов к прогону на проде, пока открыты secretary-680 (project checkouts + CODEX_HOME) и secretary-681
 (runtime.env cleanup). Шаги, закрываемые этими карточками, помечены. Первый прогон
 только на одноразовом хосте (LXC-контейнер или дешёвый VPS), прод после зелёного
 одноразового прогона.
@@ -39,7 +38,7 @@ manager оператора:
 
 ## Вайп
 
-Переустановка ОС из панели хостинга (поддержанный Ubuntu) либо снос всего
+Переустановка ОС из панели хостинга (поддержанный Ubuntu 24.04) либо снос всего
 содержимого. После этого на хосте нет ни пользователя dev, ни чекаутов, ни Kanboard,
 ни Orca, ни systemd-юнитов.
 
@@ -60,9 +59,9 @@ project checkouts и managed CODEX_HOME до закрытия secretary-680.
    cd ~/secretary && python3 -m pip install '.[memory]'
    ```
 
-4. Kanboard + Orca: bootstrap ставит pinned Kanboard в Docker и pinned Orca AppImage,
-   генерирует API token в `runtime.env` и создаёт Pipeline с колонками и
-   swimlanes из project registry:
+4. Kanboard + Orca: на Ubuntu 24.04 bootstrap ставит pinned Kanboard в Docker и
+   pinned Orca AppImage, запускает и проверяет Docker и Orca service, генерирует API
+   token в `runtime.env` и создаёт Pipeline с колонками и swimlanes из project registry:
 
    ```bash
    sudo secretary bootstrap \

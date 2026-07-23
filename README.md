@@ -25,7 +25,7 @@ python3 -m secretary task list --project secretary
 ```
 
 Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available
-with `python3 -m pip install '.[memory]'`. On a supported Ubuntu host, bootstrap the
+with `python3 -m pip install '.[memory]'`. On Ubuntu 24.04, bootstrap the
 derived Kanboard and Orca runtime before install:
 
 ```bash

@@ -18,6 +18,7 @@ from secretary.installation import (
     InstallError,
     _clone_or_reuse,
     _ensure_installation_user,
+    check_prerequisites,
     install,
     materialize_checkpoint,
 )
@@ -70,6 +71,21 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_root_checks_orca_as_installation_user(self):
+        with (
+            mock.patch("secretary.installation.os.geteuid", return_value=0),
+            mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
+            mock.patch("secretary.installation._run") as run,
+            mock.patch("secretary.installation.TaskReader") as reader,
+        ):
+            check_prerequisites("dev")
+
+        self.assertIn(
+            ["runuser", "--user", "dev", "--", "orca", "--version"],
+            [call.args[0] for call in run.call_args_list],
+        )
+        reader.return_value.list.assert_called_once()
+
     def test_existing_runtime_env_is_not_a_bootstrap_marker(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"

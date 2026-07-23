@@ -10,7 +10,6 @@ from secretary.bootstrap import (
     BOOTSTRAP_STAMP,
     PIPELINE_COLUMNS,
     BootstrapError,
-    _fuse_package,
     _host_supported,
     _install_platform,
     bootstrap,
@@ -116,7 +115,7 @@ class BootstrapBoardTests(unittest.TestCase):
             mock.patch("secretary.bootstrap.shutil.which", side_effect=lambda name: None),
             mock.patch("secretary.bootstrap._docker_compose_available", return_value=False),
             mock.patch("secretary.bootstrap._compose_package", return_value="docker-compose-v2"),
-            mock.patch("secretary.bootstrap._fuse_package", return_value="libfuse2t64"),
+            mock.patch("secretary.bootstrap._ensure_docker_ready"),
             mock.patch("secretary.bootstrap._run") as run,
             mock.patch("secretary.bootstrap.write_text_atomic"),
             mock.patch("secretary.bootstrap.Path.mkdir"),
@@ -125,25 +124,23 @@ class BootstrapBoardTests(unittest.TestCase):
             _install_platform(dry_run=False)
 
         self.assertIn(
-            ["apt-get", "install", "--yes", "curl", "libfuse2t64", "docker.io", "docker-compose-v2"],
+            [
+                "apt-get", "install", "--yes", "curl", "fuse", "libnss3", "libgtk-3-0t64",
+                "libgbm1", "libasound2t64", "docker.io", "docker-compose-v2",
+            ],
             [call.args[0] for call in run.call_args_list],
         )
 
-    def test_fuse_package_handles_ubuntu_t64_transition(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            release = Path(temporary) / "os-release"
-            release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
-            self.assertEqual(_fuse_package(release), "libfuse2t64")
-            release.write_text('ID=debian\nVERSION_ID="12"\n', encoding="utf-8")
-            self.assertEqual(_fuse_package(release), "libfuse2")
-
-    def test_host_contract_rejects_debian_without_docker_compose_v2(self) -> None:
+    def test_host_contract_accepts_only_ubuntu_2404(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary) / "os-release"
             release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
             _host_supported(release)
+            release.write_text('ID=ubuntu\nVERSION_ID="22.04"\n', encoding="utf-8")
+            with self.assertRaisesRegex(BootstrapError, "Ubuntu 24.04 only"):
+                _host_supported(release)
             release.write_text('ID=debian\nVERSION_ID="12"\n', encoding="utf-8")
-            with self.assertRaisesRegex(BootstrapError, "Ubuntu only"):
+            with self.assertRaisesRegex(BootstrapError, "Ubuntu 24.04 only"):
                 _host_supported(release)
 
     def test_bootstrap_generates_usable_runtime_and_ignored_files(self) -> None:

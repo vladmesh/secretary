@@ -12,6 +12,7 @@ import argparse
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -50,8 +51,11 @@ def _host_supported(os_release: Path = Path("/etc/os-release")) -> None:
         )
     except OSError:
         raise BootstrapError("could not identify the operating system") from None
-    if fields.get("ID", "").strip('"') != "ubuntu":
-        raise BootstrapError("bootstrap supports Ubuntu only")
+    if (
+        fields.get("ID", "").strip('"') != "ubuntu"
+        or fields.get("VERSION_ID", "").strip('"') != "24.04"
+    ):
+        raise BootstrapError("bootstrap supports Ubuntu 24.04 only")
 
 
 def _project_lanes(instance: Path) -> set[str]:
@@ -158,7 +162,11 @@ def _install_platform(*, dry_run: bool) -> None:
         if os.geteuid() != 0:
             raise BootstrapError("host prerequisites are absent; rerun bootstrap as root")
         _run(["apt-get", "update"], label="refresh apt")
-        packages = ["curl", _fuse_package()]
+        # Orca is an Electron AppImage.  These are its explicit runtime
+        # dependencies on the one supported host release, not merely FUSE.
+        packages = [
+            "curl", "fuse", "libnss3", "libgtk-3-0t64", "libgbm1", "libasound2t64",
+        ]
         if needs_docker:
             packages.append("docker.io")
         if needs_compose:
@@ -167,6 +175,7 @@ def _install_platform(*, dry_run: bool) -> None:
             ["apt-get", "install", "--yes", *packages],
             label="install Docker and Orca prerequisites",
         )
+    _ensure_docker_ready()
     if needs_orca:
         if os.geteuid() != 0:
             raise BootstrapError("Orca is absent; rerun bootstrap as root")
@@ -204,18 +213,24 @@ def _docker_compose_available() -> bool:
         return False
 
 
-def _fuse_package(os_release: Path = Path("/etc/os-release")) -> str:
-    try:
-        fields = dict(
-            line.split("=", 1) for line in os_release.read_text(encoding="utf-8").splitlines()
-            if "=" in line
-        )
-    except OSError:
-        raise BootstrapError("could not identify the operating system") from None
-    version = fields.get("VERSION_ID", "").strip('"')
-    if fields.get("ID", "").strip('"') == "ubuntu" and version >= "24.04":
-        return "libfuse2t64"
-    return "libfuse2"
+def _ensure_docker_ready(*, timeout: int = 60) -> None:
+    """Enable Docker and wait until its daemon accepts a client connection."""
+    if os.geteuid() != 0:
+        raise BootstrapError("Docker must be started by root")
+    _run(["systemctl", "enable", "--now", "docker"], label="start Docker")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            ready = subprocess.run(
+                ["docker", "info"], capture_output=True, text=True, timeout=15,
+            ).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ready = False
+        if ready:
+            return
+        if time.monotonic() >= deadline:
+            raise BootstrapError("Docker daemon did not become ready")
+        time.sleep(1)
 
 
 def _start_orca_service(user: str) -> None:
@@ -240,6 +255,26 @@ WantedBy=multi-user.target
     unit.chmod(0o644)
     _run(["systemctl", "daemon-reload"], label="reload systemd")
     _run(["systemctl", "enable", "--now", "secretary-orca.service"], label="start Orca runtime")
+    _wait_for_orca()
+
+
+def _wait_for_orca(*, timeout: int = 60) -> None:
+    """Require both an active unit and its local serve port before success."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            active = subprocess.run(
+                ["systemctl", "is-active", "--quiet", "secretary-orca.service"],
+                timeout=15,
+            ).returncode == 0
+            if active:
+                with socket.create_connection(("127.0.0.1", 6768), timeout=3):
+                    return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if time.monotonic() >= deadline:
+            raise BootstrapError("Orca service did not become ready")
+        time.sleep(1)
 
 
 def _wait_for_kanboard(values: dict[str, str], *, timeout: int = 90) -> None:

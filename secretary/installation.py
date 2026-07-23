@@ -231,12 +231,18 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def check_prerequisites() -> None:
+def check_prerequisites(installation_user: str | None = None) -> None:
     if shutil.which("orca") is None:
         raise InstallError(
             "Orca is not installed; install a supported Orca runtime before secretary recovery"
         )
-    _run(["orca", "--version"], label="inspect Orca")
+    # The pinned Electron AppImage deliberately refuses to start as root.  The
+    # installation command is allowed to run as root, but its CLI probe must
+    # have the same uid as the service it is checking.
+    if os.geteuid() == 0 and installation_user:
+        _run(["runuser", "--user", installation_user, "--", "orca", "--version"], label="inspect Orca")
+    else:
+        _run(["orca", "--version"], label="inspect Orca")
     try:
         TaskReader(KanboardClient()).list()
     except TaskError as exc:
@@ -407,7 +413,7 @@ def install(args: argparse.Namespace) -> InstallResult:
         values = _read_runtime_env(target, args.runtime_env)
         result.add("runtime-env", "unchanged", "credentials loaded from host-only file")
         with _runtime_environment(values):
-            check_prerequisites()
+            check_prerequisites(args.installation_user)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
             report = validate_instance(target)
             if not report.ok:
