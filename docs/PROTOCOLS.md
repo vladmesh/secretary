@@ -20,7 +20,8 @@ inventory. Без `--strict` warnings сами по себе остаются з
 
 Live parity выводится из того же desired state, что и `reconcile`: каждый project checkout
 сверяется по нормализованному полному пути из binding, включая путь вне `projects_root`; сам
-`projects_root` нужен для поиска неуправляемых checkout. Проверяются unit-файлы, Orca registration
+`projects_root` нужен для поиска неуправляемых checkout. Недоступный или не нормализуемый expected
+checkout делает inventory projects unavailable и даёт code `2`, а не `missing-on-host`. Проверяются unit-файлы, Orca registration
 и требуемое enabled/active состояние долгоживущих service и timer. Отсутствующий ресурс или
 нездоровый required runtime state даёт finding и code `1`; oneshot service может быть inactive.
 `foreign_units` исключены из managed parity и не считаются conflict.

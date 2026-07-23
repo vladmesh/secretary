@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -411,6 +412,7 @@ class Expectations:
     projects_root: str = ""
     foreign_units: set[str] = field(default_factory=set)
     unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    project_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -481,12 +483,20 @@ def build_doctor_expectations(instance: dict[str, Any], bindings: Iterable[dict[
     bindings = list(bindings)
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     host = host if isinstance(host, dict) else {}
-    projects = {
-        _normalized_repo_path(binding["repo"])
-        for binding in bindings
-        if isinstance(binding, dict) and isinstance(binding.get("repo"), str)
-        and Path(binding["repo"]).expanduser().is_absolute()
-    }
+    projects: set[str] = set()
+    project_error = ""
+    for binding in bindings:
+        if not isinstance(binding, dict) or not isinstance(binding.get("repo"), str):
+            continue
+        repo = Path(binding["repo"]).expanduser()
+        if not repo.is_absolute():
+            continue
+        try:
+            projects.add(_normalized_repo_path(binding["repo"]))
+        except (OSError, RuntimeError):
+            # A symlink loop or unreadable binding path is not evidence that the
+            # checkout is absent. Leave this kind unavailable for doctor.
+            project_error = "expected project checkout path could not be normalized"
     desired = build_plan(instance, bindings)
     units = {resource.name for resource in desired if resource.kind == "unit"}
     prefix = host.get("unit_prefix", "") if isinstance(host.get("unit_prefix"), str) else ""
@@ -506,6 +516,7 @@ def build_doctor_expectations(instance: dict[str, Any], bindings: Iterable[dict[
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
         foreign_units=foreign_units(host),
         unit_runtime=runtime,
+        project_error=project_error,
     )
 
 
@@ -666,8 +677,19 @@ class LiveHostSource(HostSource):
         return CollectResult(inventory=inventory, errors=errors)
 
     def _projects(self, expected: Expectations) -> tuple[set[str], str]:
+        if expected.project_error:
+            return set(), expected.project_error
         root = expected.projects_root
-        actual = {project for project in expected.projects if Path(project).is_dir()}
+        actual: set[str] = set()
+        for project in expected.projects:
+            try:
+                mode = Path(project).stat().st_mode
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError):
+                return set(), "expected project checkout path could not be inspected"
+            if stat.S_ISDIR(mode):
+                actual.add(project)
         if not root:
             return (actual, "host.projects_root not set") if expected.projects else (actual, "")
         path = Path(root).expanduser()

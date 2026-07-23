@@ -771,6 +771,28 @@ class LiveSourceErrorTests(unittest.TestCase):
         self.assertEqual(projects, set())
         self.assertTrue(reason)
 
+    def test_unreadable_expected_checkout_is_unavailable_not_missing(self):
+        expected = Expectations(projects={"/opt/checkouts/outside-root"})
+        with unittest.mock.patch.object(Path, "stat", side_effect=PermissionError):
+            projects, reason = LiveHostSource()._projects(expected)
+        self.assertEqual(projects, set())
+        self.assertEqual(reason, "expected project checkout path could not be inspected")
+
+    def test_symlink_loop_in_expected_checkout_is_unavailable(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = Path(tmp) / "loop"
+            loop.symlink_to(loop)
+            expected = build_doctor_expectations(
+                {"host": {"projects_root": tmp, "unit_prefix": "secretary-"}},
+                [{"id": "loop", "repo": str(loop), "enabled": True, "orca_binding": "loop"}],
+            )
+        self.assertEqual(expected.project_error, "expected project checkout path could not be normalized")
+        projects, reason = LiveHostSource()._projects(expected)
+        self.assertEqual(projects, set())
+        self.assertEqual(reason, expected.project_error)
+
     def test_projects_root_error_does_not_echo_value(self):
         secret = "/srv/sk-live-projects-root-DO-NOT-LEAK-8c1d"
         expected = Expectations(projects={"a"}, projects_root=secret)
@@ -1045,6 +1067,43 @@ class DoctorHostCliTests(unittest.TestCase):
 
         self.assertEqual(code, 1, output)
         self.assertIn("secretary-memory.service: expected active, got failed", output)
+
+    def test_doctor_returns_unavailable_for_symlink_loop_checkout(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance.yaml"
+            data = root / "data"
+            projects = root / "projects"
+            projects.mkdir()
+            loop = root / "loop"
+            loop.symlink_to(loop)
+            instance.write_text(
+                "version: 1\nname: doctor\ndata_dir: " + str(data) + "\noffsite:\n"
+                "  instance_remote: git@example.invalid:x/y\nhost:\n"
+                "  projects_root: " + str(root) + "\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            (projects / "loop.yaml").write_text(
+                "id: loop\nrepo: " + str(loop)
+                + "\nenabled: true\norca_binding: loop\nadapter: loop\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+
+            class ExpectedCheckoutUnavailable:
+                def collect(self, expected):
+                    return CollectResult(
+                        HostInventory(),
+                        {"projects": expected.project_error},
+                    )
+
+            with unittest.mock.patch.object(cli, "LiveHostSource", return_value=ExpectedCheckoutUnavailable()):
+                code, output = run_cli(["doctor", "--host", "--instance", str(instance)])
+
+        self.assertEqual(code, 2, output)
+        self.assertIn("projects:\n  unavailable: expected project checkout path could not be normalized", output)
+        self.assertNotIn("projects:\n  missing-on-host", output)
 
     def test_without_host_flag_no_inventory(self):
         code, output = run_cli(
