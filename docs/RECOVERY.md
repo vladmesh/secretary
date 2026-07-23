@@ -140,7 +140,7 @@ Security boundary: доверенный single-user host. Board и memory энд
 
 ## Fresh install и recovery
 
-Сначала установить продукт с memory extra. `secretary bootstrap` на Ubuntu/Debian ставит pinned
+Сначала установить продукт с memory extra. `secretary bootstrap` на Ubuntu ставит pinned
 Kanboard и Orca, генерирует `runtime.env` и создаёт Pipeline. `secretary install` их не ставит и
 fail-closed проверяет оба runtime до изменения live state.
 
@@ -154,7 +154,7 @@ sudo secretary bootstrap \
   --instance-dir /home/dev/secretary-instance \
   --installation-user dev
 
-secretary install \
+sudo secretary install \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir /home/dev/secretary-instance \
   --installation-user dev

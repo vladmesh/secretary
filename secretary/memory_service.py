@@ -330,9 +330,17 @@ def load_export_snapshot(path: Path) -> list[dict]:
     return facts
 
 
+def _git(path: Path, *args: str) -> list[str]:
+    """Build a Git command safe for a root recovery over an owned checkout."""
+    # Recovery intentionally runs as root while bootstrap gives the instance
+    # checkout to the installation user.  Git must trust that checkout for every
+    # read in the canon snapshot, not merely for the initial clone/fetch.
+    return ["git", "-c", "safe.directory=*", "-C", str(path), *args]
+
+
 def git_repo_root(path: Path) -> Path | None:
     proc = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        _git(path, "rev-parse", "--show-toplevel"),
         check=False,
         text=True,
         stdout=subprocess.PIPE,
@@ -349,7 +357,7 @@ def load_git_head_snapshot(path: Path) -> list[dict]:
         raise RuntimeError(f"canon snapshot unavailable: {path} is not a git worktree")
     prefix = path.resolve().relative_to(root.resolve())
     proc = subprocess.run(
-        ["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", str(prefix)],
+        _git(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", str(prefix)),
         check=True,
         stdout=subprocess.PIPE,
     )
@@ -362,7 +370,7 @@ def load_git_head_snapshot(path: Path) -> list[dict]:
             continue
         rel = Path(repo_rel).relative_to(prefix)
         show = subprocess.run(
-            ["git", "-C", str(root), "show", f"HEAD:{repo_rel}"],
+            _git(root, "show", f"HEAD:{repo_rel}"),
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -393,7 +401,7 @@ def canon_signature() -> tuple:
     root = git_repo_root(CANON) if CANON.is_dir() else None
     if root is not None:
         proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            _git(root, "rev-parse", "HEAD"),
             check=True,
             text=True,
             stdout=subprocess.PIPE,

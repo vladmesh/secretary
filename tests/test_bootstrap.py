@@ -11,6 +11,7 @@ from secretary.bootstrap import (
     PIPELINE_COLUMNS,
     BootstrapError,
     _fuse_package,
+    _host_supported,
     _install_platform,
     bootstrap,
     ensure_pipeline_board,
@@ -134,6 +135,15 @@ class BootstrapBoardTests(unittest.TestCase):
             self.assertEqual(_fuse_package(release), "libfuse2t64")
             release.write_text('ID=debian\nVERSION_ID="12"\n', encoding="utf-8")
             self.assertEqual(_fuse_package(release), "libfuse2")
+
+    def test_host_contract_rejects_debian_without_docker_compose_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary) / "os-release"
+            release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+            _host_supported(release)
+            release.write_text('ID=debian\nVERSION_ID="12"\n', encoding="utf-8")
+            with self.assertRaisesRegex(BootstrapError, "Ubuntu only"):
+                _host_supported(release)
 
     def test_bootstrap_generates_usable_runtime_and_ignored_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

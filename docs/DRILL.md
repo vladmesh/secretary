@@ -39,7 +39,7 @@ manager оператора:
 
 ## Вайп
 
-Переустановка ОС из панели хостинга (поддержанный Ubuntu/Debian) либо снос всего
+Переустановка ОС из панели хостинга (поддержанный Ubuntu) либо снос всего
 содержимого. После этого на хосте нет ни пользователя dev, ни чекаутов, ни Kanboard,
 ни Orca, ни systemd-юнитов.
 
@@ -72,7 +72,7 @@ project checkouts и managed CODEX_HOME до закрытия secretary-680.
 5. Install:
 
    ```bash
-   secretary install \
+   sudo secretary install \
      --instance-remote git@github.com:vladmesh/secretary-instance.git \
      --instance-dir /home/dev/secretary-instance \
      --installation-user dev
@@ -82,7 +82,7 @@ project checkouts и managed CODEX_HOME до закрытия secretary-680.
 7. Recover:
 
    ```bash
-   secretary recover \
+   sudo secretary recover \
      --instance-remote git@github.com:vladmesh/secretary-instance.git \
      --instance-dir /home/dev/secretary-instance \
      --installation-user dev

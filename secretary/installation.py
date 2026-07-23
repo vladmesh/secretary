@@ -459,6 +459,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 raise InstallError("status findings: " + "; ".join(findings))
             result.add("status", "unchanged", "board, memory and operational configuration are ready")
             _set_installation_owner(data_dir, args.installation_user)
+            _set_installation_owner(target, args.installation_user)
     except (InstallError, RestoreError, RuntimeError) as exc:
         result.add("install", "failed", str(exc))
     return result

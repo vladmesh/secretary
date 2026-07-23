@@ -50,8 +50,8 @@ def _host_supported(os_release: Path = Path("/etc/os-release")) -> None:
         )
     except OSError:
         raise BootstrapError("could not identify the operating system") from None
-    if fields.get("ID", "").strip('"') not in {"debian", "ubuntu"}:
-        raise BootstrapError("bootstrap supports Ubuntu and Debian only")
+    if fields.get("ID", "").strip('"') != "ubuntu":
+        raise BootstrapError("bootstrap supports Ubuntu only")
 
 
 def _project_lanes(instance: Path) -> set[str]:
