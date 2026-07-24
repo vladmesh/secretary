@@ -387,12 +387,13 @@ class RestoreTests(unittest.TestCase):
                 report = restore_commands.validate_instance(instance)
                 with unittest.mock.patch(
                     "secretary.host_apply.find_orca_executable", return_value=None
-                ):
+                ) as find_executable:
                     packaged = resolve_packaged(
                         report.instance,
                         instance_path=report.instance_path.parent,
                         orca_executable=legacy_orca,
                     )
+                find_executable.assert_not_called()
                 desired = build_plan(report.instance, report.bindings, packaged=packaged)
                 (data_dir / "host-managed.json").write_text(
                     json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),

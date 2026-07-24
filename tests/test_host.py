@@ -1209,12 +1209,13 @@ class DoctorHostCliTests(unittest.TestCase):
             with legacy_orca_runtime(root) as legacy_orca:
                 with unittest.mock.patch(
                     "secretary.host_apply.find_orca_executable", return_value=None
-                ):
+                ) as find_executable:
                     packaged = resolve_packaged(
                         report.instance,
                         instance_path=report.instance_path.parent,
                         orca_executable=legacy_orca,
                     )
+                find_executable.assert_not_called()
             desired = [
                 resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)
                 if resource.logical_id.startswith("systemd:dispatcher:production")
