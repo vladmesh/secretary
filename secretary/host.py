@@ -57,11 +57,12 @@ def _resource(logical_id: str, kind: str, name: str, payload: dict[str, str]) ->
 
 @dataclass(frozen=True)
 class PackagedUnit:
-    """One systemd unit shipped by the product, with the digest of its file."""
+    """One rendered systemd unit and the bytes that define its desired state."""
 
     component: str
     name: str
     path: Path
+    content: bytes
     digest: str
     installable: bool
     oneshot: bool
@@ -72,7 +73,41 @@ def default_packaging_root() -> Path:
     return Path(__file__).resolve().parents[1] / "packaging" / "systemd"
 
 
-def load_packaged_units(root: Path, prefix: str) -> list[PackagedUnit]:
+@dataclass(frozen=True)
+class SystemdLayout:
+    """Installation-specific values substituted into shipped systemd templates."""
+
+    product_root: Path
+    instance_path: Path
+    data_dir: Path
+    runtime_user: str
+    runtime_home: Path
+
+
+def default_systemd_layout() -> SystemdLayout:
+    root = Path(__file__).resolve().parents[1]
+    home = Path.home()
+    return SystemdLayout(root, home / "secretary-instance", home / "secretary-data", os.environ.get("USER", "dev"), home)
+
+
+def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
+    """Compile one shipped unit template into its canonical host bytes."""
+    values = {
+        b"{{SECRETARY_PRODUCT_ROOT}}": os.fsencode(layout.product_root),
+        b"{{SECRETARY_INSTANCE_PATH}}": os.fsencode(layout.instance_path),
+        b"{{SECRETARY_DATA_DIR}}": os.fsencode(layout.data_dir),
+        b"{{SECRETARY_RUNTIME_USER}}": layout.runtime_user.encode(),
+        b"{{SECRETARY_RUNTIME_HOME}}": os.fsencode(layout.runtime_home),
+    }
+    rendered = template
+    for marker, value in values.items():
+        rendered = rendered.replace(marker, value)
+    if b"{{SECRETARY_" in rendered:
+        raise ValueError("systemd template has an unknown placeholder")
+    return rendered
+
+
+def load_packaged_units(root: Path, prefix: str, layout: SystemdLayout | None = None) -> list[PackagedUnit]:
     """Read the shipped unit catalogue. A unit outside the prefix is not ours.
 
     Returns an empty catalogue when the directory is absent or unreadable rather
@@ -90,8 +125,8 @@ def load_packaged_units(root: Path, prefix: str) -> list[PackagedUnit]:
         if not entry.name.startswith(prefix) or not entry.name.endswith(UNIT_SUFFIXES):
             continue
         try:
-            payload = entry.read_bytes()
-        except OSError:
+            payload = render_systemd_unit(entry.read_bytes(), layout or default_systemd_layout())
+        except (OSError, ValueError):
             continue
         suffix = entry.name[entry.name.rindex(".") :]
         component = entry.name[len(prefix) : -len(suffix)]
@@ -102,6 +137,7 @@ def load_packaged_units(root: Path, prefix: str) -> list[PackagedUnit]:
                 component=component,
                 name=entry.name,
                 path=entry,
+                content=payload,
                 digest=hashlib.sha256(payload).hexdigest(),
                 # Only a unit with [Install] can be enabled; the rest are pulled
                 # in by a timer's Unit= and enabling them would fail.

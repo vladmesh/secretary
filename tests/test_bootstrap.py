@@ -14,6 +14,7 @@ from secretary.bootstrap import (
     _install_platform,
     bootstrap,
     ensure_pipeline_board,
+    _start_orca_service,
 )
 
 
@@ -60,6 +61,20 @@ class Board:
 
 
 class BootstrapBoardTests(unittest.TestCase):
+    def test_orca_unit_is_rendered_for_the_selected_user(self) -> None:
+        with (
+            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+            mock.patch("secretary.bootstrap.pwd.getpwnam", return_value=SimpleNamespace(pw_dir="/home/operator")),
+            mock.patch("secretary.bootstrap.write_text_atomic") as write,
+            mock.patch("secretary.bootstrap.Path.chmod"),
+            mock.patch("secretary.bootstrap._run"),
+            mock.patch("secretary.bootstrap._wait_for_orca"),
+        ):
+            _start_orca_service("operator")
+        rendered = write.call_args.args[1]
+        self.assertIn("User=operator", rendered)
+        self.assertIn("WorkingDirectory=/home/operator", rendered)
+        self.assertNotIn("/home/dev", rendered)
     def test_creates_pipeline_schema_and_registry_lanes_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             instance = Path(temporary)

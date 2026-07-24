@@ -22,6 +22,8 @@ resource that failed to install is never recorded as managed.
 from __future__ import annotations
 
 import json
+import os
+import pwd
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -38,6 +40,7 @@ from secretary.host import (
     default_packaging_root,
     foreign_units,
     load_packaged_units,
+    SystemdLayout,
     manifest_text,
     plan_changes,
     plan_input_errors,
@@ -148,7 +151,19 @@ class SystemdUnitInstaller(UnitInstaller):
             return None
 
     def install(self, unit: PackagedUnit) -> None:
-        self._run(["install", "-m", "0644", "-o", "root", "-g", "root", str(unit.path), str(self.unit_dir / unit.name)], f"install {unit.name}")
+        argv = (["sudo", "-n"] if self.sudo else []) + [
+            "install", "-m", "0644", "-o", "root", "-g", "root", "/dev/stdin", str(self.unit_dir / unit.name),
+        ]
+        try:
+            result = subprocess.run(argv, input=unit.content, capture_output=True, timeout=self.timeout_seconds)
+        except FileNotFoundError:
+            raise HostCommandError(f"install {unit.name}: install not found") from None
+        except subprocess.TimeoutExpired:
+            raise HostCommandError(f"install {unit.name}: install timed out") from None
+        except OSError:
+            raise HostCommandError(f"install {unit.name}: install could not run") from None
+        if result.returncode != 0:
+            raise HostCommandError(f"install {unit.name}: install exited {result.returncode}")
 
     def remove(self, name: str) -> None:
         self._run(["rm", "-f", str(self.unit_dir / name)], f"remove {name}")
@@ -214,11 +229,31 @@ class ApplyInputs:
     packaged: list[PackagedUnit]
 
 
-def resolve_packaged(instance: dict[str, Any], packaging_root: Path | None = None) -> list[PackagedUnit]:
+def resolve_packaged(
+    instance: dict[str, Any],
+    packaging_root: Path | None = None,
+    *,
+    product_root: Path | None = None,
+    instance_path: Path | None = None,
+    runtime_user: str | None = None,
+) -> list[PackagedUnit]:
+    """Compile shipped templates for this installation's user and filesystem layout."""
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     root = packaging_root or default_packaging_root()
-    return load_packaged_units(root, prefix if isinstance(prefix, str) else "")
+    user = runtime_user or os.environ.get("USER", "dev")
+    try:
+        home = Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        home = Path.home()
+    layout = SystemdLayout(
+        product_root=product_root or root.parents[1],
+        instance_path=instance_path or home / "secretary-instance",
+        data_dir=Path(instance.get("data_dir", home / "secretary-data")),
+        runtime_user=user,
+        runtime_home=home,
+    )
+    return load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
 
 
 def apply_host(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pwd
 import secrets
 import shutil
 import socket
@@ -20,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from secretary._fsutil import write_text_atomic
+from secretary.host import SystemdLayout, render_systemd_unit
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -281,31 +283,13 @@ def _start_orca_service(user: str) -> None:
     if os.geteuid() != 0:
         raise BootstrapError("host bootstrap must run as root")
     unit = Path("/etc/systemd/system/secretary-orca.service")
-    write_text_atomic(unit, f"""[Unit]
-Description=Secretary Orca runtime
-After=network-online.target
-Wants=network-online.target
-# Why: serve is an Electron runtime that can fail repeatedly on a host whose
-# graphics or FUSE prerequisites regressed. Without a start limit, Restart=always
-# retries it forever at RestartSec and buries the original failure.
-StartLimitIntervalSec=300
-StartLimitBurst=10
-
-[Service]
-Type=simple
-User={user}
-Group={user}
-WorkingDirectory=/home/{user}
-Environment=HOME=/home/{user}
-ExecStart=/usr/local/bin/orca serve --port 6768 --pairing-address 127.0.0.1
-Restart=always
-RestartSec=3
-KillSignal=SIGINT
-TimeoutStopSec=20
-
-[Install]
-WantedBy=multi-user.target
-""")
+    home = Path(pwd.getpwnam(user).pw_dir)
+    template = Path(__file__).resolve().parents[1] / "packaging" / "systemd" / "secretary-orca.service.template"
+    rendered = render_systemd_unit(
+        template.read_bytes(),
+        SystemdLayout(Path(__file__).resolve().parents[1], home / "secretary-instance", home / "secretary-data", user, home),
+    )
+    write_text_atomic(unit, rendered.decode("utf-8"))
     unit.chmod(0o644)
     _run(["systemctl", "daemon-reload"], label="reload systemd")
     _run(["systemctl", "enable", "--now", "secretary-orca.service"], label="start Orca runtime")

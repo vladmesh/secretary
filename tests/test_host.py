@@ -24,6 +24,8 @@ from secretary.host import (
     inventory,
     plan_input_errors,
     plan_changes,
+    SystemdLayout,
+    load_packaged_units,
 )
 
 
@@ -375,12 +377,16 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 
     def test_production_dispatcher_unit_sets_path_for_orca_lookup(self):
-        unit_path = REPO_ROOT / "packaging" / "systemd" / "secretary-dispatcher-production.service"
-        lines = unit_path.read_text(encoding="utf-8").splitlines()
+        units = load_packaged_units(
+            REPO_ROOT / "packaging" / "systemd", "secretary-",
+            SystemdLayout(REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")),
+        )
+        unit = next(unit for unit in units if unit.name == "secretary-dispatcher-production.service")
+        lines = unit.content.decode("utf-8").splitlines()
         path_lines = [line for line in lines if line.startswith("Environment=PATH=")]
         self.assertEqual(len(path_lines), 1)
         path_value = path_lines[0].split("=", 2)[2]
-        self.assertIn("/home/dev/.local/bin", path_value.split(":"))
+        self.assertIn("/home/operator/.local/bin", path_value.split(":"))
         for standard_dir in ("/usr/local/bin", "/usr/bin", "/bin"):
             self.assertIn(standard_dir, path_value.split(":"))
 

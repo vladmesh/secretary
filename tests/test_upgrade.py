@@ -27,6 +27,7 @@ from secretary.host import (
     load_packaged_units,
     plan_changes,
     strict_manifest,
+    SystemdLayout,
 )
 from secretary.host_apply import ApplyInputs, HostCommandError, apply_host
 from secretary.head_registry import (
@@ -98,7 +99,7 @@ class FakeUnitInstaller:
         if unit.name in self.fail_on:
             raise HostCommandError(f"install {unit.name}: exited 1")
         self.calls.append(("install", unit.name))
-        self.files[unit.name] = unit.path.read_bytes()
+        self.files[unit.name] = unit.content
 
     def remove(self, name: str) -> None:
         self.calls.append(("remove", name))
@@ -131,6 +132,21 @@ class FakeRegistrar:
 
 
 class PackagedUnitTests(unittest.TestCase):
+    def test_render_is_stable_and_uses_the_installation_layout(self):
+        layout = SystemdLayout(
+            Path("/opt/secretary"), Path("/srv/secretary-instance"), Path("/srv/secretary-data"),
+            "operator", Path("/home/operator"),
+        )
+        first = load_packaged_units(upgrade.default_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
+        second = load_packaged_units(upgrade.default_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
+
+        self.assertEqual([(unit.name, unit.content, unit.digest) for unit in first], [(unit.name, unit.content, unit.digest) for unit in second])
+        rendered = b"\n".join(unit.content for unit in first)
+        self.assertIn(b"User=operator", rendered)
+        self.assertIn(b"/opt/secretary", rendered)
+        self.assertIn(b"/srv/secretary-instance", rendered)
+        self.assertIn(b"/srv/secretary-data", rendered)
+        self.assertNotIn(b"/home/dev", rendered)
     def test_catalogue_reads_component_digest_and_installability(self):
         with tempfile.TemporaryDirectory() as tmp:
             packaging = write_packaging(Path(tmp))

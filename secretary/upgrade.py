@@ -314,7 +314,13 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
 
 def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
-    packaged = resolve_packaged(report.instance, context.product_root / "packaging" / "systemd")
+    packaged = resolve_packaged(
+        report.instance,
+        context.product_root / "packaging" / "systemd",
+        product_root=context.product_root,
+        instance_path=context.instance_path,
+        runtime_user=context.runtime_user,
+    )
     expected = build_expectations(report.bindings, report.host)
     source = (
         FixtureHostSource(context.host_fixture)

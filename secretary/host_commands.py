@@ -205,7 +205,7 @@ def run_reconcile_apply(args) -> int:
     if not report.ok:
         print("secretary reconcile apply: invalid instance config")
         return 2
-    packaged = resolve_packaged(report.instance)
+    packaged = resolve_packaged(report.instance, instance_path=Path(args.instance))
     expected = build_expectations(report.bindings, report.host)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
     collected = source.collect(expected)
