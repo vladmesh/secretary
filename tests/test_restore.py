@@ -19,6 +19,7 @@ from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
 from secretary.host import CollectResult, HostInventory, build_plan
+from secretary.host_apply import resolve_packaged
 import secretary.restore_commands as restore_commands
 import secretary.restore as restore_module
 import secretary.backup_verify as backup_verify_module
@@ -373,7 +374,8 @@ class RestoreTests(unittest.TestCase):
             )
 
             report = restore_commands.validate_instance(instance)
-            desired = build_plan(report.instance, report.bindings)
+            packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+            desired = build_plan(report.instance, report.bindings, packaged=packaged)
             (data_dir / "host-managed.json").write_text(
                 json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
                 encoding="utf-8",

@@ -258,8 +258,18 @@ class ReconcilePlanTests(unittest.TestCase):
                     "--host-fixture", str(fixture), "--managed-manifest", str(manifest),
                 ])
 
+                # Apply has its own command boundary. It must compile the same
+                # bytes before it decides whether the manifest has drifted.
+                apply_code, apply_output = run_cli([
+                    "reconcile", "apply", "--dry-run", "--instance", str(instance_path / "instance.yaml"),
+                    "--host-fixture", str(fixture), "--managed-manifest", str(manifest),
+                ])
+
         self.assertEqual(code, 0, output)
         self.assertIn("unchanged systemd:unit:secretary-memory.service", output)
+        self.assertEqual(apply_code, 0, apply_output)
+        self.assertNotIn("update systemd:unit:secretary-memory.service", apply_output)
+        self.assertIn("already reconciled", apply_output)
 
     def test_cli_plan_uses_live_source_by_default(self):
         class FakeLiveHost:

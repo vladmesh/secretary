@@ -24,6 +24,7 @@ from secretary.backup_policy import ARCHIVE_ROOT
 from secretary.cli import main
 from secretary.data import export_memory, init_layout
 from secretary.host import CollectResult, HostInventory, build_plan
+from secretary.host_apply import resolve_packaged
 import secretary.restore_commands as restore_commands
 from secretary.restore import (
     RestoreError,
@@ -195,7 +196,8 @@ def _reindex_script(root: Path) -> Path:
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
     report = restore_commands.validate_instance(instance)
-    desired = build_plan(report.instance, report.bindings)
+    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    desired = build_plan(report.instance, report.bindings, packaged=packaged)
     (data_dir / "host-managed.json").write_text(
         json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
         encoding="utf-8",
