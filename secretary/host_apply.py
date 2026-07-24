@@ -22,7 +22,6 @@ resource that failed to install is never recorded as managed.
 from __future__ import annotations
 
 import json
-import os
 import pwd
 import subprocess
 from abc import ABC, abstractmethod
@@ -234,7 +233,7 @@ def resolve_packaged(
     packaging_root: Path | None = None,
     *,
     product_root: Path | None = None,
-    instance_path: Path | None = None,
+    instance_path: Path,
     runtime_user: str | None = None,
 ) -> list[PackagedUnit]:
     """Compile shipped templates for this installation's user and filesystem layout."""
@@ -256,27 +255,28 @@ def resolve_systemd_layout(
     packaging_root: Path | None = None,
     *,
     product_root: Path | None = None,
-    instance_path: Path | None = None,
+    instance_path: Path,
     runtime_user: str | None = None,
 ) -> SystemdLayout:
     """Resolve the one systemd layout used for an installation command.
 
-    The instance checkout is durable installation state.  When a command runs
-    as root after recovery, its owner identifies the runtime account instead of
-    leaking root's home and user into newly rendered unit bytes.
+    The instance checkout is durable installation state. When a command runs
+    as root after recovery, its owner identifies the runtime account. Failure
+    to resolve that owner is an error: falling back to the invoking account
+    would turn a read or repair command into a different desired state.
     """
     root = packaging_root or default_packaging_root()
-    target = instance_path or Path.home() / "secretary-instance"
+    target = instance_path
     if runtime_user is None:
         try:
             runtime_user = pwd.getpwuid(target.stat().st_uid).pw_name
         except (KeyError, OSError):
-            runtime_user = os.environ.get("USER", "dev")
+            raise ValueError(f"could not resolve installation user from {target}") from None
     user = runtime_user
     try:
         home = Path(pwd.getpwnam(user).pw_dir)
     except KeyError:
-        home = Path.home()
+        raise ValueError(f"installation user does not exist: {user}") from None
     return SystemdLayout(
         product_root=product_root or root.parents[1],
         instance_path=target,
