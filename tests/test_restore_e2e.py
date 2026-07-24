@@ -198,11 +198,12 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
     with legacy_orca_runtime(root) as legacy_orca:
         report = restore_commands.validate_instance(instance)
-        packaged = resolve_packaged(
-            report.instance,
-            instance_path=report.instance_path.parent,
-            orca_executable=legacy_orca,
-        )
+        with mock.patch("secretary.host_apply.find_orca_executable", return_value=None):
+            packaged = resolve_packaged(
+                report.instance,
+                instance_path=report.instance_path.parent,
+                orca_executable=legacy_orca,
+            )
         desired = build_plan(report.instance, report.bindings, packaged=packaged)
         (data_dir / "host-managed.json").write_text(
             json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
