@@ -515,6 +515,28 @@ class ReconcilePlanTests(unittest.TestCase):
         for standard_dir in ("/usr/local/bin", "/usr/bin", "/bin"):
             self.assertIn(standard_dir, path_value.split(":"))
 
+    def test_scheduler_units_depend_on_the_rendered_orca_runtime(self):
+        units = load_packaged_units(
+            REPO_ROOT / "packaging" / "systemd", "secretary-",
+            SystemdLayout(REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")),
+        )
+        scheduler_services = {
+            "secretary-curator.service",
+            "secretary-dispatcher-production.service",
+            "secretary-retro.service",
+            "secretary-steward.service",
+            "secretary-steward-deep-sweep.service",
+        }
+
+        rendered = {unit.name: unit.content for unit in units}
+        self.assertTrue(scheduler_services <= rendered.keys())
+        for name in scheduler_services:
+            content = rendered[name]
+            self.assertIn(b"After=", content)
+            self.assertIn(b"Wants=", content)
+            self.assertIn(b"secretary-orca.service", content)
+            self.assertNotIn(b"orca-server.service", content)
+
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
 
