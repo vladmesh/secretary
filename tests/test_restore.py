@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
+from secretary.cli import main as cli_main
 from secretary.backup import create_backup, verify_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
@@ -43,6 +43,15 @@ from tests.restore_fixtures import (
     _write_instance_to,
 )
 from tests.orca_fixtures import legacy_orca_runtime
+
+
+LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+
+def main(argv: list[str], *, orca_executable: Path = LEGACY_ORCA) -> int:
+    """Run CLI fixtures with their checked-in legacy Orca executable."""
+    with mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable):
+        return cli_main(argv)
 
 
 def _seed_legacy_facts(data_dir: Path) -> Path:
@@ -398,14 +407,18 @@ class RestoreTests(unittest.TestCase):
                 )
                 self.assertEqual(main([
                     "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
-                ]), 0)
+                ], orca_executable=legacy_orca), 0)
 
                 inventory = HostInventory(units=live_units)
                 source = mock.Mock()
                 source.collect.return_value = CollectResult(inventory=inventory)
                 with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
-                    self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 0)
-            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+                    self.assertEqual(main(
+                        ["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca
+                    ), 0)
+            self.assertEqual(main(
+                ["doctor", "--offline", "--instance", str(instance)], orca_executable=legacy_orca
+            ), 0)
             self.assertEqual(restore_findings(data_dir), [])
 
     def test_restore_reconcile_fails_closed_before_marking_state(self):
