@@ -21,7 +21,7 @@ from unittest import mock
 
 from secretary.backup import create_backup
 from secretary.backup_policy import ARCHIVE_ROOT
-from secretary.cli import main
+from secretary.cli import main as cli_main
 from secretary.data import export_memory, init_layout
 from secretary.host import CollectResult, HostInventory, build_plan
 from secretary.host_apply import resolve_packaged
@@ -41,6 +41,16 @@ from tests.restore_fixtures import (
     _write_checksums,
     _write_instance_to,
 )
+from tests.orca_fixtures import legacy_orca_runtime
+
+
+LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+
+def main(argv: list[str], *, orca_executable: Path = LEGACY_ORCA) -> int:
+    """Run CLI fixtures with their checked-in legacy Orca executable."""
+    with mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable):
+        return cli_main(argv)
 
 
 REINDEX_SCRIPT = '''
@@ -195,25 +205,37 @@ def _reindex_script(root: Path) -> Path:
 
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
-    report = restore_commands.validate_instance(instance)
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
-    desired = build_plan(report.instance, report.bindings, packaged=packaged)
-    (data_dir / "host-managed.json").write_text(
-        json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
-        encoding="utf-8",
-    )
-    host_fixture = root / "host-fixture"
-    host_fixture.mkdir(exist_ok=True)
-    (host_fixture / "units.txt").write_text(
-        "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
-    )
-    if main(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(host_fixture)]):
-        raise AssertionError("reconcile plan rejected the restored desired state")
-    inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
-    live = mock.Mock()
-    live.collect.return_value = CollectResult(inventory=inventory)
-    with mock.patch.object(restore_commands, "LiveHostSource", return_value=live):
-        return main(["restore-reconcile", "--instance", str(instance)])
+    with legacy_orca_runtime(root) as legacy_orca:
+        report = restore_commands.validate_instance(instance)
+        with mock.patch(
+            "secretary.host_apply.find_orca_executable", return_value=None
+        ) as find_executable:
+            packaged = resolve_packaged(
+                report.instance,
+                instance_path=report.instance_path.parent,
+                orca_executable=legacy_orca,
+            )
+        find_executable.assert_not_called()
+        desired = build_plan(report.instance, report.bindings, packaged=packaged)
+        (data_dir / "host-managed.json").write_text(
+            json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
+            encoding="utf-8",
+        )
+        host_fixture = root / "host-fixture"
+        host_fixture.mkdir(exist_ok=True)
+        (host_fixture / "units.txt").write_text(
+            "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
+        )
+        if main(
+            ["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(host_fixture)],
+            orca_executable=legacy_orca,
+        ):
+            raise AssertionError("reconcile plan rejected the restored desired state")
+        inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+        live = mock.Mock()
+        live.collect.return_value = CollectResult(inventory=inventory)
+        with mock.patch.object(restore_commands, "LiveHostSource", return_value=live):
+            return main(["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca)
 
 
 class RestoreEndToEndTests(unittest.TestCase):
@@ -246,7 +268,10 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(_apply_reconcile(instance, data_dir, root), 0)
 
             self.assertEqual(restore_findings(data_dir), [])
-            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+            self.assertEqual(main(
+                ["doctor", "--offline", "--instance", str(instance)],
+                orca_executable=root / "operator" / ".local" / "bin" / "orca",
+            ), 0)
             state = restore_state(data_dir)
             self.assertEqual(state["board_count"], fixture.manifest["components"]["board"]["count"])
             self.assertEqual(state["memory_index_count"], fixture.facts)

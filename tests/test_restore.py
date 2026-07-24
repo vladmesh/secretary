@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
+from secretary.cli import main as cli_main
 from secretary.backup import create_backup, verify_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
@@ -42,6 +42,16 @@ from tests.restore_fixtures import (
     _seed_instance_facts,
     _write_instance_to,
 )
+from tests.orca_fixtures import legacy_orca_runtime
+
+
+LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+
+def main(argv: list[str], *, orca_executable: Path = LEGACY_ORCA) -> int:
+    """Run CLI fixtures with their checked-in legacy Orca executable."""
+    with mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable):
+        return cli_main(argv)
 
 
 def _seed_legacy_facts(data_dir: Path) -> Path:
@@ -373,30 +383,43 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
 
-            report = restore_commands.validate_instance(instance)
-            packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
-            desired = build_plan(report.instance, report.bindings, packaged=packaged)
-            (data_dir / "host-managed.json").write_text(
-                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
-                encoding="utf-8",
-            )
-            fixture = root / "host"
-            fixture.mkdir()
-            live_units = {resource.name for resource in desired if resource.kind == "unit"}
-            live_units.add("secretary-supervisor.timer")
-            (fixture / "units.txt").write_text(
-                "\n".join(sorted(live_units)), encoding="utf-8"
-            )
-            self.assertEqual(main([
-                "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
-            ]), 0)
+            with legacy_orca_runtime(root) as legacy_orca:
+                report = restore_commands.validate_instance(instance)
+                with unittest.mock.patch(
+                    "secretary.host_apply.find_orca_executable", return_value=None
+                ) as find_executable:
+                    packaged = resolve_packaged(
+                        report.instance,
+                        instance_path=report.instance_path.parent,
+                        orca_executable=legacy_orca,
+                    )
+                find_executable.assert_not_called()
+                desired = build_plan(report.instance, report.bindings, packaged=packaged)
+                (data_dir / "host-managed.json").write_text(
+                    json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
+                    encoding="utf-8",
+                )
+                fixture = root / "host"
+                fixture.mkdir()
+                live_units = {resource.name for resource in desired if resource.kind == "unit"}
+                live_units.add("secretary-supervisor.timer")
+                (fixture / "units.txt").write_text(
+                    "\n".join(sorted(live_units)), encoding="utf-8"
+                )
+                self.assertEqual(main([
+                    "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
+                ], orca_executable=legacy_orca), 0)
 
-            inventory = HostInventory(units=live_units)
-            source = mock.Mock()
-            source.collect.return_value = CollectResult(inventory=inventory)
-            with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
-                self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 0)
-            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+                inventory = HostInventory(units=live_units)
+                source = mock.Mock()
+                source.collect.return_value = CollectResult(inventory=inventory)
+                with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
+                    self.assertEqual(main(
+                        ["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca
+                    ), 0)
+            self.assertEqual(main(
+                ["doctor", "--offline", "--instance", str(instance)], orca_executable=legacy_orca
+            ), 0)
             self.assertEqual(restore_findings(data_dir), [])
 
     def test_restore_reconcile_fails_closed_before_marking_state(self):
