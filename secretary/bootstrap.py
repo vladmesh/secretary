@@ -21,11 +21,11 @@ import yaml
 
 from secretary._fsutil import write_text_atomic
 from secretary.config import validate_instance
-from secretary.host import build_plan, foreign_units, manifest_text, strict_manifest
 from secretary.host_apply import (
     HostCommandError,
     SystemdUnitInstaller,
-    find_orca_executable,
+    materialize_orca_service,
+    pinned_orca_executable,
     resolve_packaged,
 )
 from secretary.installation import (
@@ -178,10 +178,10 @@ def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None
         return
     needs_docker = shutil.which("docker") is None
     needs_compose = not _docker_compose_available()
-    needs_orca = (
-        find_orca_executable(runtime_user) is None
-        if runtime_user is not None else shutil.which("orca") is None
-    )
+    # Bootstrap owns a pinned runtime.  A legacy per-user CLI is suitable for
+    # upgrading an existing installation, but it must not turn a new bootstrap
+    # into an installation with an unpinned runtime.
+    needs_orca = pinned_orca_executable() is None
     if needs_docker or needs_compose or needs_orca:
         if os.geteuid() != 0:
             raise BootstrapError("host prerequisites are absent; rerun bootstrap as root")
@@ -311,40 +311,13 @@ def _start_orca_service(user: str, instance: Path | None = None) -> None:
         )
     except ValueError as exc:
         raise BootstrapError(str(exc)) from None
-    units = [unit for unit in packaged if unit.component == "orca" and unit.name.endswith(".service")]
-    if len(units) != 1:
-        raise BootstrapError("product must ship exactly one Orca service")
-    unit = units[0]
-    desired = {resource.name: resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)}
-    resource = desired.get(unit.name)
-    foreign = unit.name in foreign_units(report.host)
-    if resource is None and not foreign:
-        raise BootstrapError("Orca service is disabled in the instance configuration")
     manifest = Path(report.instance["data_dir"]).expanduser().resolve() / "host-managed.json"
-    managed, error = strict_manifest(manifest)
-    if error:
-        raise BootstrapError(error)
-    records = {item.logical_id: item for item in managed}
-    owned = records.get(resource.logical_id) if resource is not None else None
     installer = SystemdUnitInstaller(sudo=False)
-    installed = installer.installed(unit.name)
     try:
-        if installed is None:
-            installer.install(unit)
-            installer.daemon_reload()
-        # A matching file is not ownership evidence.  Bootstrap may create a
-        # missing Orca unit and record that write, but it must never adopt an
-        # already-present unit just because its bytes happen to match ours.
-        elif not foreign and owned != resource:
-            raise BootstrapError(f"Orca service exists but is not owned by this instance: {unit.name}")
-        elif owned == resource and installed != unit.content:
-            installer.install(unit)
-            installer.daemon_reload()
-        if resource is not None and owned != resource:
-            records[resource.logical_id] = resource
-            write_text_atomic(manifest, manifest_text(records.values()))
-        installer.enable(unit.name)
-    except HostCommandError as exc:
+        materialize_orca_service(
+            report.instance, report.bindings, packaged, manifest, installer,
+        )
+    except (HostCommandError, ValueError) as exc:
         raise BootstrapError(str(exc)) from None
     _wait_for_orca()
 

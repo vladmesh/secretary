@@ -41,6 +41,7 @@ from secretary.host_apply import (
     ApplyInputs,
     HostCommandError,
     LiveOrcaRegistrar,
+    materialize_orca_service,
     OrcaRegistrar,
     SystemdUnitInstaller,
     UnitInstaller,
@@ -321,6 +322,17 @@ def step_host(context: UpgradeContext) -> StepResult:
         instance_path=context.instance_path,
         runtime_user=context.runtime_user,
     )
+    manifest = Path(report.instance["data_dir"]) / "host-managed.json"
+    # The legacy declaration deliberately keeps this unit out of build_plan,
+    # but upgrade still needs a running service before that declaration can be
+    # removed.  This writes no managed ownership record while it is foreign.
+    try:
+        orca_started = materialize_orca_service(
+            report.instance, report.bindings, packaged, manifest, context.units,
+            dry_run=context.dry_run,
+        )
+    except (HostCommandError, ValueError) as exc:
+        return StepResult("host", "failed", str(exc))
     expected = build_expectations(report.bindings, report.host)
     source = (
         FixtureHostSource(context.host_fixture)
@@ -331,7 +343,6 @@ def step_host(context: UpgradeContext) -> StepResult:
     if collected.errors:
         reasons = "; ".join(f"{kind}: {reason}" for kind, reason in sorted(collected.errors.items()))
         return StepResult("host", "failed", f"host inventory unavailable: {reasons}")
-    manifest = Path(report.instance["data_dir"]) / "host-managed.json"
     managed, error = strict_manifest(manifest)
     if error:
         return StepResult("host", "failed", error)
@@ -357,9 +368,11 @@ def step_host(context: UpgradeContext) -> StepResult:
     context.unit_changed = any(
         change.kind == "unit" and change.name.startswith(_memory_unit_prefix(report)) for change in pending
     )
-    if not pending:
+    if not pending and not orca_started:
         return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
     detail = ", ".join(f"{change.action} {change.name}" for change in pending)
+    if orca_started:
+        detail = ", ".join(part for part in ("created secretary-orca.service", detail) if part)
     return StepResult("host", "changed", detail)
 
 

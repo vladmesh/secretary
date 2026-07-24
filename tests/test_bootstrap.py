@@ -322,6 +322,20 @@ class BootstrapBoardTests(unittest.TestCase):
         )
         install_orca.assert_called_once_with()
 
+    def test_clean_bootstrap_installs_pinned_runtime_despite_legacy_user_cli(self) -> None:
+        with (
+            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+            mock.patch("secretary.bootstrap.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("secretary.bootstrap._docker_compose_available", return_value=True),
+            mock.patch("secretary.bootstrap.pinned_orca_executable", return_value=None),
+            mock.patch("secretary.bootstrap._ensure_docker_ready"),
+            mock.patch("secretary.bootstrap._install_orca") as install_orca,
+            mock.patch("secretary.bootstrap._run"),
+        ):
+            _install_platform(dry_run=False, runtime_user="existing-dedicated-user")
+
+        install_orca.assert_called_once_with()
+
     def test_host_contract_accepts_only_ubuntu_2404(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary) / "os-release"

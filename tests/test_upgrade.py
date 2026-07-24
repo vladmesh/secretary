@@ -518,6 +518,42 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "changed")
         self.assertEqual(units.calls, [])
 
+    def test_upgrade_materializes_foreign_orca_before_the_ownership_migration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            instance.mkdir()
+            data = root / "data"
+            legacy = root / "operator" / ".local" / "bin" / "orca"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("#!/bin/sh\n", encoding="utf-8")
+            legacy.chmod(0o755)
+            report = SimpleNamespace(
+                instance=instance_config(data, foreign_units=["secretary-orca.service"]),
+                bindings=[],
+                host={"unit_prefix": UNIT_PREFIX, "foreign_units": ["secretary-orca.service"]},
+            )
+            account = SimpleNamespace(pw_dir=str(root / "operator"))
+            source = mock.Mock()
+            source.collect.return_value = SimpleNamespace(inventory=HostInventory(), errors={})
+            units = FakeUnitInstaller()
+            context = self.context(
+                units, instance_path=instance, report=report, runtime_user="operator", host_fixture=root / "fixture",
+            )
+            with (
+                mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.FixtureHostSource", return_value=source),
+            ):
+                result = upgrade.step_host(context)
+
+            self.assertEqual(result.status, "changed")
+            self.assertIn(("install", "secretary-orca.service"), units.calls)
+            self.assertIn(("enable", "secretary-orca.service"), units.calls)
+            self.assertIn(f"ExecStart={legacy}".encode(), units.files["secretary-orca.service"])
+            managed, error = strict_manifest(data / "host-managed.json")
+            self.assertEqual(error, "")
+            self.assertNotIn("systemd:unit:secretary-orca.service", {item.logical_id for item in managed})
+
     def test_the_run_stops_at_the_first_failed_step(self):
         calls: list[str] = []
 
