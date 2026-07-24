@@ -1496,28 +1496,18 @@ class DispatcherRuntime:
             moved = self.reader.show(ref)
             try:
                 record.handle = self.host.restart_worker(moved, record)
-            except HostError as exc:
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
-                    target="blocked",
-                    reason=f"dispatcher rework bring-up failed: {scrub_host_output(str(exc))}",
-                    request_id=_attempt_request_id(
-                        record.attempt_id or attempt_id, "rework-blocked", ref
-                    ),
+            except Exception as exc:
+                return self._block_failed_worker_restart(
+                    ref=ref,
+                    record=record,
+                    records=records,
+                    payload=payload,
+                    attempt_id=attempt_id,
+                    step="review",
+                    reason="rework bring-up failed",
+                    request_id=_attempt_request_id(record.attempt_id or attempt_id, "rework-blocked", ref),
+                    error=exc,
                 )
-                resume_workspaces = payload.setdefault("resume_workspaces", {})
-                if isinstance(resume_workspaces, dict):
-                    resume_workspaces[ref] = record.attempt_id or attempt_id
-                records.pop(ref, None)
-                self._save_records(payload, records)
-                return {
-                    "status": "blocked",
-                    "step": "review",
-                    "pilot_ref": ref,
-                    "reason": "rework bring-up failed",
-                }
             record.state = "claimed"
             records[ref] = record
             self._save_records(payload, records)
@@ -1622,22 +1612,22 @@ class DispatcherRuntime:
             try:
                 record.handle = self.host.restart_worker(task, record)
             except Exception as exc:
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
-                    target="blocked",
-                    reason=f"worker respawn failed: {scrub_host_output(str(exc))}",
+                return self._block_failed_worker_restart(
+                    ref=ref,
+                    record=record,
+                    records=records,
+                    payload=payload,
+                    attempt_id=attempt_id,
+                    step=step,
+                    reason="worker respawn failed",
                     request_id=_attempt_request_id(
                         record.attempt_id or attempt_id,
                         "worker-respawn-blocked",
                         ref,
                         _wait_cycle_token(record),
                     ),
+                    error=exc,
                 )
-                records.pop(ref, None)
-                self._save_records(payload, records)
-                return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": "worker respawn failed"}
             record.state = "claimed"
         # Persist the restart before commenting. The pilot tick has no try/except around this, so
         # a writer.comment that raises would otherwise escape with the head already respawned and
@@ -1781,22 +1771,51 @@ class DispatcherRuntime:
         moved = self.reader.show(ref)
         try:
             record.handle = self.host.restart_worker(moved, record)
-        except HostError as exc:
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                target="blocked",
-                reason=f"dispatcher rework bring-up failed: {scrub_host_output(str(exc))}",
+        except Exception as exc:
+            return self._block_failed_worker_restart(
+                ref=ref,
+                record=record,
+                records=records,
+                payload=payload,
+                attempt_id=attempt_id,
+                step="gate",
+                reason="rework bring-up failed",
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{phase}-red-blocked", ref),
+                error=exc,
             )
-            records.pop(ref, None)
-            self._save_records(payload, records)
-            return {"status": "blocked", "step": "gate", "pilot_ref": ref, "reason": "rework bring-up failed"}
         record.state = "claimed"
         records[ref] = record
         self._save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
+
+    def _block_failed_worker_restart(
+        self,
+        *,
+        ref: str,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        step: str,
+        reason: str,
+        request_id: str,
+        error: Exception,
+    ) -> dict[str, Any]:
+        """Block a failed rework launch while retaining the workspace's resume provenance."""
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=f"{reason}: {scrub_host_output(str(error))}",
+            request_id=request_id,
+        )
+        resume_workspaces = payload.setdefault("resume_workspaces", {})
+        if isinstance(resume_workspaces, dict):
+            resume_workspaces[ref] = record.attempt_id or attempt_id
+        records.pop(ref, None)
+        self._save_records(payload, records)
+        return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": reason}
 
     def _gate_pending(
         self,

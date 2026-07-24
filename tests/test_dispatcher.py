@@ -616,6 +616,55 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.prepare_requires_existing, [False, True])
         self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["resume_workspaces"])
 
+    def test_production_requeue_after_failed_gate_rework_preserves_workspace_provenance(self) -> None:
+        """A failed gate rework resumes the same committed and dirty worker checkout."""
+        self.commit_cutover()
+        self.runtime.production_tick()
+        workspace = self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
+        git(workspace, "init", "-q")
+        _configure_git_user(workspace)
+        (workspace / "kept.py").write_text("committed = True\n", encoding="utf-8")
+        git(workspace, "add", "kept.py")
+        git(workspace, "commit", "-qm", "preserved worker commit")
+        commit = git(workspace, "rev-parse", "HEAD")
+        (workspace / "wip.py").write_text("uncommitted = True\n", encoding="utf-8")
+        git(workspace, "add", "wip.py")
+
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="ready for validation",
+            request_id="production-worker-done-before-gate-red",
+        )
+        self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "validate")
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.host.fail_restart_reason = "terminal service unavailable"
+        blocked = self.runtime.production_tick()
+
+        self.assertEqual(blocked["actions"][0]["reason"], "rework bring-up failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["resume_workspaces"])
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="retry preserved gate workspace after infrastructure outage",
+            request_id="production-requeue-gate-workspace",
+        )
+        self.host.fail_restart_reason = ""
+        self.host.fail_prepare_reason = "resume workspace is missing"
+        retry = self.runtime.production_tick()
+
+        self.assertEqual(retry["actions"][0]["status"], "blocked")
+        self.assertEqual(self.host.prepare_requires_existing, [False, True])
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["resume_workspaces"])
+
     def test_production_scan_skips_project_with_active_code_task(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 3
