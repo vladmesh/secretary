@@ -31,7 +31,7 @@ from secretary.tasks import KanboardClient, TaskError
 
 
 KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
-ORCA_VERSION = "v1.4.150"
+ORCA_VERSION = "v1.4.152"
 ORCA_APPIMAGE_URL = (
     "https://github.com/stablyai/orca/releases/download/"
     f"{ORCA_VERSION}/orca-linux.AppImage"
@@ -285,6 +285,11 @@ def _start_orca_service(user: str) -> None:
 Description=Secretary Orca runtime
 After=network-online.target
 Wants=network-online.target
+# Why: serve is an Electron runtime that can fail repeatedly on a host whose
+# graphics or FUSE prerequisites regressed. Without a start limit, Restart=always
+# retries it forever at RestartSec and buries the original failure.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
