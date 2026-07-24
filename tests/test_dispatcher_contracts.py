@@ -30,6 +30,7 @@ from secretary import dispatcher_production, dispatcher_review, tasks as tasks_m
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_state import DispatcherRecord
+from secretary.host import SystemdLayout, render_systemd_unit
 from secretary.tasks import KanboardClient
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
@@ -326,14 +327,25 @@ class RuntimeWiringContractTests(unittest.TestCase):
         """The dispatcher shells out to `orca` by bare name. systemd starts with a minimal PATH, so
         the unit must carry one that contains the install dir, or every host call fails at runtime
         while the whole unit test suite stays green."""
-        unit = Path(__file__).resolve().parents[1] / "packaging" / "systemd" / "secretary-dispatcher-production.service"
+        product_root = Path(__file__).resolve().parents[1]
+        unit = product_root / "packaging" / "systemd" / "secretary-dispatcher-production.service"
+        rendered = render_systemd_unit(
+            unit.read_bytes(),
+            SystemdLayout(
+                product_root,
+                Path("/srv/secretary-instance"),
+                Path("/srv/secretary-data"),
+                "operator",
+                Path("/home/operator"),
+            ),
+        )
         lines = [
             line.split("=", 1)[1]
-            for line in unit.read_text(encoding="utf-8").splitlines()
+            for line in rendered.decode("utf-8").splitlines()
             if line.startswith("Environment=PATH=")
         ]
         self.assertEqual(len(lines), 1, "the production unit must declare exactly one PATH")
-        self.assertIn("/home/dev/.local/bin", lines[0].split("PATH=", 1)[1])
+        self.assertIn("/home/operator/.local/bin", lines[0].split("PATH=", 1)[1])
 
 
 if __name__ == "__main__":
