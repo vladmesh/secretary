@@ -222,6 +222,25 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
+    def test_explicit_fixture_orca_executable_bypasses_runtime_lookup(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance"
+            instance.mkdir()
+            with legacy_orca_runtime(root) as legacy_orca, unittest.mock.patch(
+                "secretary.host_apply.find_orca_executable", return_value=None
+            ):
+                packaged = resolve_packaged(
+                    {"data_dir": str(root / "data"), "host": {"unit_prefix": "secretary-"}},
+                    instance_path=instance,
+                    orca_executable=legacy_orca,
+                )
+
+        orca_service = next(unit for unit in packaged if unit.component == "orca")
+        self.assertIn(f"ExecStart={legacy_orca}".encode(), orca_service.content)
+
     def test_relative_direct_config_path_renders_canonical_absolute_layout(self):
         import tempfile
 
@@ -1188,7 +1207,11 @@ class DoctorHostCliTests(unittest.TestCase):
             report = validate_instance(instance)
             self.assertTrue(report.ok, report.errors)
             with legacy_orca_runtime(root) as legacy_orca:
-                packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+                packaged = resolve_packaged(
+                    report.instance,
+                    instance_path=report.instance_path.parent,
+                    orca_executable=legacy_orca,
+                )
             desired = [
                 resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)
                 if resource.logical_id.startswith("systemd:dispatcher:production")

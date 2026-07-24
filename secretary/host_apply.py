@@ -236,6 +236,7 @@ def resolve_packaged(
     product_root: Path | None = None,
     instance_path: Path,
     runtime_user: str | None = None,
+    orca_executable: Path | None = None,
 ) -> list[PackagedUnit]:
     """Compile shipped templates for this installation's user and filesystem layout."""
     layout = resolve_systemd_layout(
@@ -244,6 +245,7 @@ def resolve_packaged(
         product_root=product_root,
         instance_path=instance_path,
         runtime_user=runtime_user,
+        orca_executable=orca_executable,
     )
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
@@ -344,6 +346,7 @@ def resolve_systemd_layout(
     product_root: Path | None = None,
     instance_path: Path,
     runtime_user: str | None = None,
+    orca_executable: Path | None = None,
 ) -> SystemdLayout:
     """Resolve the one systemd layout used for an installation command.
 
@@ -367,14 +370,14 @@ def resolve_systemd_layout(
         home = Path(pwd.getpwnam(user).pw_dir).expanduser().resolve(strict=False)
     except KeyError:
         raise ValueError(f"installation user does not exist: {user}") from None
-    orca_executable = find_orca_executable(user, home) or Path("/usr/local/bin/orca")
+    executable = orca_executable or find_orca_executable(user, home) or Path("/usr/local/bin/orca")
     return SystemdLayout(
         product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
         instance_path=target,
         data_dir=Path(instance.get("data_dir", home / "secretary-data")).expanduser().resolve(strict=False),
         runtime_user=user,
         runtime_home=home,
-        orca_executable=orca_executable,
+        orca_executable=executable,
     )
 
 

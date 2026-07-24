@@ -374,9 +374,13 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
 
-            with legacy_orca_runtime(root):
+            with legacy_orca_runtime(root) as legacy_orca:
                 report = restore_commands.validate_instance(instance)
-                packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+                packaged = resolve_packaged(
+                    report.instance,
+                    instance_path=report.instance_path.parent,
+                    orca_executable=legacy_orca,
+                )
                 desired = build_plan(report.instance, report.bindings, packaged=packaged)
                 (data_dir / "host-managed.json").write_text(
                     json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
