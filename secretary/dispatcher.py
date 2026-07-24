@@ -1220,6 +1220,8 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
+        *,
+        resume_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
         # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
@@ -1249,6 +1251,7 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
+        retry_after_block = retry_after_block or resume_workspace
         head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
@@ -1344,6 +1347,9 @@ class DispatcherRuntime:
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
         record.state = "claimed"
+        resume_workspaces = payload.get("resume_workspaces")
+        if isinstance(resume_workspaces, dict):
+            resume_workspaces.pop(ref, None)
         records[ref] = record
         self._save_records(payload, records)
         self.writer.comment(
@@ -1501,6 +1507,9 @@ class DispatcherRuntime:
                         record.attempt_id or attempt_id, "rework-blocked", ref
                     ),
                 )
+                resume_workspaces = payload.setdefault("resume_workspaces", {})
+                if isinstance(resume_workspaces, dict):
+                    resume_workspaces[ref] = record.attempt_id or attempt_id
                 records.pop(ref, None)
                 self._save_records(payload, records)
                 return {

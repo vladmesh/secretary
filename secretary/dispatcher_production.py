@@ -556,8 +556,16 @@ def _production_claim_ready(
             })
             continue
         attempt_id = new_attempt_id()
+        resume_workspaces = payload.get("resume_workspaces")
+        resume_workspace = isinstance(resume_workspaces, dict) and task["ref"] in resume_workspaces
         try:
-            outcome = runtime._claim(task, records, payload, attempt_id)
+            outcome = runtime._claim(
+                task,
+                records,
+                payload,
+                attempt_id,
+                resume_workspace=resume_workspace,
+            )
         except TaskError as exc:
             if exc.code in {"capacity_reached", "claim_conflict", "predecessor_open"}:
                 skipped.append({"ref": task["ref"], "reason": exc.message})

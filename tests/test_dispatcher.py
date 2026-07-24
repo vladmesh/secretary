@@ -571,6 +571,51 @@ class DispatcherRuntimeTests(unittest.TestCase):
         claim_events = [event for event in self.audit_events() if event["kind"] == "claimed"]
         self.assertEqual(len(claim_events), 1)
 
+    def test_production_requeue_after_failed_rework_requires_the_preserved_workspace(self) -> None:
+        """A fresh production attempt must retain the failed rework's resume provenance."""
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="ready for review",
+            request_id="production-worker-done",
+        )
+        self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "validate")
+        self.assertEqual(self.runtime.production_tick()["actions"][0]["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix the outage regression",
+            request_id="production-review-red",
+        )
+        self.host.fail_restart_reason = "terminal service unavailable"
+        blocked = self.runtime.production_tick()
+        self.assertEqual(blocked["actions"][0]["reason"], "rework bring-up failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["resume_workspaces"])
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="retry after infrastructure outage",
+            request_id="production-requeue-missing-workspace",
+        )
+        self.host.fail_restart_reason = ""
+        self.host.fail_prepare_reason = "resume workspace is missing"
+        retry = self.runtime.production_tick()
+
+        self.assertEqual(retry["actions"][0]["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.prepare_requires_existing, [False, True])
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["resume_workspaces"])
+
     def test_production_scan_skips_project_with_active_code_task(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 3
