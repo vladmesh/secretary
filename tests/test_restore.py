@@ -374,9 +374,7 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
 
-            with legacy_orca_runtime(root) as legacy_orca, mock.patch(
-                "secretary.host_apply.find_orca_executable", return_value=legacy_orca
-            ):
+            with legacy_orca_runtime(root):
                 report = restore_commands.validate_instance(instance)
                 packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
                 desired = build_plan(report.instance, report.bindings, packaged=packaged)

@@ -1187,9 +1187,7 @@ class DoctorHostCliTests(unittest.TestCase):
             )
             report = validate_instance(instance)
             self.assertTrue(report.ok, report.errors)
-            with legacy_orca_runtime(root) as legacy_orca, unittest.mock.patch(
-                "secretary.host_apply.find_orca_executable", return_value=legacy_orca
-            ):
+            with legacy_orca_runtime(root) as legacy_orca:
                 packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
             desired = [
                 resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)
