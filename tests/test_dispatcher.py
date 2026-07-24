@@ -665,6 +665,65 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
         self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["resume_workspaces"])
 
+    def test_pilot_requeues_after_failed_merge_gate_rework_in_preserved_workspace(self) -> None:
+        """A pilot retry gives a failed merge-gate rework a new claim and its old checkout."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        first_attempt = self.runtime.state.load()["attempt_id"]
+        workspace = self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
+        git(workspace, "init", "-q")
+        _configure_git_user(workspace)
+        (workspace / "kept.py").write_text("committed = True\n", encoding="utf-8")
+        git(workspace, "add", "kept.py")
+        git(workspace, "commit", "-qm", "preserved worker commit")
+        commit = git(workspace, "rev-parse", "HEAD")
+        (workspace / "wip.py").write_text("uncommitted = True\n", encoding="utf-8")
+        git(workspace, "add", "wip.py")
+
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="ready for validation",
+            request_id="pilot-worker-done-before-merge-gate-red",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.host.gate_results = [GateResult("green", "pre-review green"), GateResult("red", "merge red")]
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="green",
+            request_id="pilot-review-green-before-merge-gate-red",
+        )
+        self.host.fail_restart_reason = "terminal service unavailable"
+        blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["reason"], "rework bring-up failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn("secretary-510-pilot", self.runtime.state.load()["resume_workspaces"])
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="retry preserved merge-gate workspace after infrastructure outage",
+            request_id="pilot-requeue-merge-gate-workspace",
+        )
+        self.host.fail_restart_reason = ""
+        retried = self.runtime.tick(self.selector)
+
+        self.assertEqual(retried["status"], "ok")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.prepare_requires_existing, [False, True])
+        self.assertNotEqual(self.runtime.state.load()["attempt_id"], first_attempt)
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
+
     def test_production_scan_skips_project_with_active_code_task(self) -> None:
         self.commit_cutover()
         self.board.tasks[0]["column_id"] = 3

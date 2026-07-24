@@ -1199,7 +1199,15 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         ref = task["ref"]
         if task["state"] == "ready":
-            return self._claim(task, records, payload, attempt_id)
+            resume_workspaces = payload.get("resume_workspaces")
+            resume_workspace = isinstance(resume_workspaces, dict) and ref in resume_workspaces
+            return self._claim(
+                task,
+                records,
+                payload,
+                attempt_id,
+                resume_workspace=resume_workspace,
+            )
         if task["state"] == "in_progress":
             return self._advance_worker(task, records, payload, attempt_id)
         if task["state"] == "validate":
@@ -1228,7 +1236,7 @@ class DispatcherRuntime:
         # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
         # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
         # before claiming so its worker report command cannot collide with the old report either.
-        retry_after_block = any(
+        retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
                 "bringup-blocked",
@@ -1241,8 +1249,10 @@ class DispatcherRuntime:
                 "gate-red-blocked",
                 "gate-pending-stall",
                 "merge-gate-blocked",
+                "merge-gate-red-blocked",
                 "merge-blocked",
                 "review-blocked",
+                "review-freeze-red-blocked",
                 "review-inventory-blocked",
                 "review-wait-stall",
             )
@@ -1251,7 +1261,6 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
-        retry_after_block = retry_after_block or resume_workspace
         head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
