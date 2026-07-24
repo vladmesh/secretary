@@ -196,7 +196,9 @@ def _reindex_script(root: Path) -> Path:
 
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
-    with legacy_orca_runtime(root):
+    with legacy_orca_runtime(root) as legacy_orca, mock.patch(
+        "secretary.host_apply.find_orca_executable", return_value=legacy_orca
+    ):
         report = restore_commands.validate_instance(instance)
         packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
         desired = build_plan(report.instance, report.bindings, packaged=packaged)

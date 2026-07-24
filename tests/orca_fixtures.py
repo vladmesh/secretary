@@ -18,6 +18,5 @@ def legacy_orca_runtime(root: Path):
     with (
         mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account),
         mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
-        mock.patch("secretary.host_apply.find_orca_executable", return_value=executable),
     ):
         yield executable
