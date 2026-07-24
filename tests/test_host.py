@@ -30,7 +30,7 @@ from secretary.host import (
     load_packaged_units,
     manifest_text,
 )
-from secretary.host_apply import resolve_packaged
+from secretary.host_apply import resolve_packaged, resolve_systemd_layout
 from secretary.config import validate_instance
 
 
@@ -216,6 +216,71 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
+    def test_relative_direct_config_path_renders_canonical_absolute_layout(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp, contextlib.chdir(tmp):
+            root = Path(tmp)
+            instance = root / "instance"
+            instance.mkdir()
+            data_dir = root / "data"
+            data_dir.mkdir()
+            config = instance / "instance.yaml"
+            config.write_text(
+                "version: 1\nname: operator\ndata_dir: " + str(data_dir)
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            product_root = root / "product"
+            account = SimpleNamespace(pw_dir="/srv/operator")
+            with unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
+                directory_report = validate_instance(Path("instance"))
+                relative_report = validate_instance(Path("instance/instance.yaml"))
+                absolute_report = validate_instance(config)
+                self.assertTrue(directory_report.ok, directory_report.errors)
+                self.assertTrue(relative_report.ok, relative_report.errors)
+                self.assertTrue(absolute_report.ok, absolute_report.errors)
+                directory = resolve_packaged(
+                    directory_report.instance,
+                    product_root=Path("product"),
+                    instance_path=directory_report.instance_path.parent,
+                    runtime_user="operator",
+                )
+                relative = resolve_packaged(
+                    relative_report.instance,
+                    product_root=Path("product"),
+                    instance_path=relative_report.instance_path.parent,
+                    runtime_user="operator",
+                )
+                absolute = resolve_packaged(
+                    absolute_report.instance,
+                    product_root=product_root,
+                    instance_path=absolute_report.instance_path.parent,
+                    runtime_user="operator",
+                )
+                layout = resolve_systemd_layout(
+                    relative_report.instance,
+                    product_root=Path("product"),
+                    instance_path=relative_report.instance_path.parent,
+                    runtime_user="operator",
+                )
+
+        self.assertEqual(
+            [(unit.name, unit.content, unit.digest) for unit in directory],
+            [(unit.name, unit.content, unit.digest) for unit in relative],
+        )
+        self.assertEqual(
+            [(unit.name, unit.content, unit.digest) for unit in relative],
+            [(unit.name, unit.content, unit.digest) for unit in absolute],
+        )
+        self.assertEqual(layout.product_root, product_root)
+        self.assertEqual(layout.instance_path, instance)
+        self.assertEqual(layout.data_dir, data_dir)
+        rendered = b"\n".join(unit.content for unit in relative)
+        self.assertIn(str(product_root).encode(), rendered)
+        self.assertIn(str(instance).encode(), rendered)
+        self.assertNotIn(b"EnvironmentFile=instance/runtime.env", rendered)
+
     def test_plan_keeps_materialized_owner_layout_when_process_user_differs(self):
         import tempfile
 

@@ -265,8 +265,11 @@ def resolve_systemd_layout(
     to resolve that owner is an error: falling back to the invoking account
     would turn a read or repair command into a different desired state.
     """
-    root = packaging_root or default_packaging_root()
-    target = instance_path
+    root = (packaging_root or default_packaging_root()).resolve(strict=False)
+    # Units run with the product checkout as their working directory. Keep every
+    # rendered filesystem value absolute so a caller's relative spelling cannot
+    # change the service's interpretation of its own layout.
+    target = instance_path.expanduser().resolve(strict=False)
     if runtime_user is None:
         try:
             runtime_user = pwd.getpwuid(target.stat().st_uid).pw_name
@@ -274,13 +277,13 @@ def resolve_systemd_layout(
             raise ValueError(f"could not resolve installation user from {target}") from None
     user = runtime_user
     try:
-        home = Path(pwd.getpwnam(user).pw_dir)
+        home = Path(pwd.getpwnam(user).pw_dir).expanduser().resolve(strict=False)
     except KeyError:
         raise ValueError(f"installation user does not exist: {user}") from None
     return SystemdLayout(
-        product_root=product_root or root.parents[1],
+        product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
         instance_path=target,
-        data_dir=Path(instance.get("data_dir", home / "secretary-data")),
+        data_dir=Path(instance.get("data_dir", home / "secretary-data")).expanduser().resolve(strict=False),
         runtime_user=user,
         runtime_home=home,
     )
