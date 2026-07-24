@@ -554,6 +554,26 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertEqual(error, "")
             self.assertNotIn("systemd:unit:secretary-orca.service", {item.logical_id for item in managed})
 
+    def test_host_reports_an_unavailable_orca_runtime_before_writing_ownership(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            report = SimpleNamespace(
+                instance=instance_config(data_dir), bindings=[], host={"unit_prefix": UNIT_PREFIX},
+            )
+            units = FakeUnitInstaller()
+            context = self.context(units, report=report)
+
+            with mock.patch(
+                "secretary.upgrade.resolve_packaged",
+                side_effect=ValueError("Orca executable for operator is unavailable"),
+            ):
+                result = upgrade.step_host(context)
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("Orca executable for operator is unavailable", result.detail)
+            self.assertEqual(units.calls, [])
+            self.assertFalse((data_dir / "host-managed.json").exists())
+
     def test_the_run_stops_at_the_first_failed_step(self):
         calls: list[str] = []
 

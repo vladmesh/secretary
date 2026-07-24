@@ -315,18 +315,18 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
 
 def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
-    packaged = resolve_packaged(
-        report.instance,
-        context.product_root / "packaging" / "systemd",
-        product_root=context.product_root,
-        instance_path=context.instance_path,
-        runtime_user=context.runtime_user,
-    )
     manifest = Path(report.instance["data_dir"]) / "host-managed.json"
     # The legacy declaration deliberately keeps this unit out of build_plan,
     # but upgrade still needs a running service before that declaration can be
     # removed.  This writes no managed ownership record while it is foreign.
     try:
+        packaged = resolve_packaged(
+            report.instance,
+            context.product_root / "packaging" / "systemd",
+            product_root=context.product_root,
+            instance_path=context.instance_path,
+            runtime_user=context.runtime_user,
+        )
         orca_started = materialize_orca_service(
             report.instance, report.bindings, packaged, manifest, context.units,
             dry_run=context.dry_run,
