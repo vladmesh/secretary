@@ -145,10 +145,12 @@ def build_plan(
     """Render the supported host surface without consulting the live host.
 
     Heads produce systemd services. Every enabled component of the shipped unit
-    catalogue produces its unit. Enabled project bindings produce Orca
-    registrations, whose names are explicit binding data. The host block only
-    supplies a namespace boundary and the component opt-outs; it never carries a
-    second list of resources.
+    catalogue produces its unit. Project bindings with an explicit
+    ``orca_binding`` produce Orca registrations, whose names are explicit
+    binding data. This is independent from ``enabled``: that flag gates task
+    routing after onboarding, while an inventory-only project may still need a
+    durable Orca registration. The host block only supplies a namespace boundary
+    and the component opt-outs; it never carries a second list of resources.
     """
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
@@ -172,7 +174,7 @@ def build_plan(
         result.extend(_production_dispatcher_units(prefix, digests))
         result.extend(_packaged_component_units(host, packaged))
     for binding in bindings:
-        if not isinstance(binding, dict) or not binding.get("enabled"):
+        if not isinstance(binding, dict):
             continue
         project_id = binding.get("id")
         name = binding.get("orca_binding")

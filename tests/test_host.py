@@ -292,6 +292,21 @@ class ReconcilePlanTests(unittest.TestCase):
         errors = plan_input_errors({}, [{"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True}])
         self.assertEqual(errors, ["enabled binding requires explicit orca_binding"])
 
+    def test_disabled_inventory_binding_can_own_orca_registration(self):
+        bindings = [
+            {
+                "id": "inventory-project",
+                "repo": "/srv/inventory-project",
+                "orca_binding": "inventory-project",
+                "enabled": False,
+            }
+        ]
+        desired = build_plan({}, bindings, packaged=[])
+        self.assertEqual(
+            [(resource.logical_id, resource.name) for resource in desired],
+            [("orca:project:inventory-project", "inventory-project")],
+        )
+
     def test_plan_rejects_heads_without_unit_prefix(self):
         errors = plan_input_errors({"heads": [{"role": "worker", "model": "test"}]}, [])
         self.assertEqual(errors, ["host.unit_prefix is required when heads are configured"])
