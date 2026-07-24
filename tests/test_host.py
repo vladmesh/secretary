@@ -60,6 +60,19 @@ class ExpectationTests(unittest.TestCase):
         self.assertIn("secretary-dispatcher-production.timer", expected.units)
         self.assertEqual(expected.orca_repos, {"widget"})
 
+    def test_doctor_checks_relative_checkout_path(self):
+        repo = "missing-relative-doctor-checkout"
+        expected = build_doctor_expectations(
+            {"host": {"projects_root": "/srv/projects", "unit_prefix": "secretary-"}},
+            [{"id": "relative", "repo": repo, "enabled": True, "orca_binding": "relative"}],
+        )
+
+        self.assertEqual(expected.projects, {str(Path(repo).resolve(strict=False))})
+        self.assertEqual(
+            inventory(expected, HostInventory())["projects"].missing_on_host,
+            [str(Path(repo).resolve(strict=False))],
+        )
+
     def test_doctor_runtime_expectations_distinguish_service_and_timer(self):
         expected = build_doctor_expectations({"host": {"unit_prefix": "secretary-"}}, [])
         self.assertEqual(expected.unit_runtime["secretary-memory.service"], (True, True))

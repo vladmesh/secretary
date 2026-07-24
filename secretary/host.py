@@ -506,9 +506,6 @@ def build_doctor_expectations(instance: dict[str, Any], bindings: Iterable[dict[
     for binding in bindings:
         if not isinstance(binding, dict) or not isinstance(binding.get("repo"), str):
             continue
-        repo = Path(binding["repo"]).expanduser()
-        if not repo.is_absolute():
-            continue
         try:
             projects.add(_normalized_repo_path(binding["repo"]))
         except (OSError, RuntimeError):
