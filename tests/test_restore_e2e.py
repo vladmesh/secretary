@@ -41,9 +41,7 @@ from tests.restore_fixtures import (
     _write_checksums,
     _write_instance_to,
 )
-
-
-LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+from tests.orca_fixtures import legacy_orca_runtime
 
 
 REINDEX_SCRIPT = '''
@@ -198,9 +196,7 @@ def _reindex_script(root: Path) -> Path:
 
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
-    with mock.patch(
-        "secretary.host_apply.find_orca_executable", return_value=LEGACY_ORCA
-    ):
+    with legacy_orca_runtime(root):
         report = restore_commands.validate_instance(instance)
         packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
         desired = build_plan(report.instance, report.bindings, packaged=packaged)

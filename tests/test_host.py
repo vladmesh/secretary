@@ -32,6 +32,7 @@ from secretary.host import (
 )
 from secretary.host_apply import resolve_packaged, resolve_systemd_layout
 from secretary.config import validate_instance
+from tests.orca_fixtures import legacy_orca_runtime
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,12 +41,12 @@ HOST_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "host"
 LEGACY_ORCA = REPO_ROOT / "tests" / "fixtures" / "legacy-orca"
 
 
-def run_cli(argv: list[str]) -> tuple[int, str]:
+def run_cli(argv: list[str], *, orca_executable: Path = LEGACY_ORCA) -> tuple[int, str]:
     output = io.StringIO()
     # Reconcile compiles the packaged Orca unit. Keep command-surface fixtures
     # independent of whichever runtime happens to be installed on the test host.
     with contextlib.redirect_stdout(output), unittest.mock.patch(
-        "secretary.host_apply.find_orca_executable", return_value=LEGACY_ORCA
+        "secretary.host_apply.find_orca_executable", return_value=orca_executable
     ):
         code = main(argv)
     return code, output.getvalue()
@@ -1186,8 +1187,8 @@ class DoctorHostCliTests(unittest.TestCase):
             )
             report = validate_instance(instance)
             self.assertTrue(report.ok, report.errors)
-            with unittest.mock.patch(
-                "secretary.host_apply.find_orca_executable", return_value=LEGACY_ORCA
+            with legacy_orca_runtime(root) as legacy_orca, unittest.mock.patch(
+                "secretary.host_apply.find_orca_executable", return_value=legacy_orca
             ):
                 packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
             desired = [
@@ -1221,10 +1222,13 @@ class DoctorHostCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with unittest.mock.patch.dict("os.environ", {"SECRETARY_LEGACY_PAUSE_FILE": str(pause)}, clear=False):
+            account = SimpleNamespace(pw_name="operator", pw_dir=str(root / "operator"))
+            with unittest.mock.patch.dict("os.environ", {"SECRETARY_LEGACY_PAUSE_FILE": str(pause)}, clear=False), unittest.mock.patch(
+                "secretary.host_apply.pwd.getpwuid", return_value=account
+            ), unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
                 code, output = run_cli([
                     "doctor", "--dry-run", "--instance", str(instance), "--host-fixture", str(fixture),
-                ])
+                ], orca_executable=legacy_orca)
 
         self.assertEqual(code, 0, output)
         self.assertIn("state: production-owner", output)
