@@ -238,22 +238,52 @@ def resolve_packaged(
     runtime_user: str | None = None,
 ) -> list[PackagedUnit]:
     """Compile shipped templates for this installation's user and filesystem layout."""
+    layout = resolve_systemd_layout(
+        instance,
+        packaging_root=packaging_root,
+        product_root=product_root,
+        instance_path=instance_path,
+        runtime_user=runtime_user,
+    )
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     root = packaging_root or default_packaging_root()
-    user = runtime_user or os.environ.get("USER", "dev")
+    return load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
+
+
+def resolve_systemd_layout(
+    instance: dict[str, Any],
+    packaging_root: Path | None = None,
+    *,
+    product_root: Path | None = None,
+    instance_path: Path | None = None,
+    runtime_user: str | None = None,
+) -> SystemdLayout:
+    """Resolve the one systemd layout used for an installation command.
+
+    The instance checkout is durable installation state.  When a command runs
+    as root after recovery, its owner identifies the runtime account instead of
+    leaking root's home and user into newly rendered unit bytes.
+    """
+    root = packaging_root or default_packaging_root()
+    target = instance_path or Path.home() / "secretary-instance"
+    if runtime_user is None:
+        try:
+            runtime_user = pwd.getpwuid(target.stat().st_uid).pw_name
+        except (KeyError, OSError):
+            runtime_user = os.environ.get("USER", "dev")
+    user = runtime_user
     try:
         home = Path(pwd.getpwnam(user).pw_dir)
     except KeyError:
         home = Path.home()
-    layout = SystemdLayout(
+    return SystemdLayout(
         product_root=product_root or root.parents[1],
-        instance_path=instance_path or home / "secretary-instance",
+        instance_path=target,
         data_dir=Path(instance.get("data_dir", home / "secretary-data")),
         runtime_user=user,
         runtime_home=home,
     )
-    return load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
 
 
 def apply_host(
@@ -418,4 +448,5 @@ __all__ = [
     "UnitInstaller",
     "apply_host",
     "resolve_packaged",
+    "resolve_systemd_layout",
 ]

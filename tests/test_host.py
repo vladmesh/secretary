@@ -4,6 +4,8 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+from types import SimpleNamespace
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -26,7 +28,10 @@ from secretary.host import (
     plan_changes,
     SystemdLayout,
     load_packaged_units,
+    manifest_text,
 )
+from secretary.host_apply import resolve_packaged
+from secretary.config import validate_instance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -211,6 +216,44 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
+    def test_plan_keeps_materialized_owner_layout_when_process_user_differs(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(os.environ, {"USER": "root"}):
+            root = Path(tmp)
+            instance_path = root / "instance"
+            instance_path.mkdir()
+            (instance_path / "instance.yaml").write_text(
+                "version: 1\nname: operator\ndata_dir: " + str(root / "data")
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            report_instance = {
+                "data_dir": str(root / "data"),
+                "host": {"unit_prefix": "secretary-"},
+            }
+            account = SimpleNamespace(pw_name="operator", pw_dir="/srv/operator")
+            with unittest.mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account), unittest.mock.patch(
+                "secretary.host_apply.pwd.getpwnam", return_value=account
+            ):
+                packaged = resolve_packaged(report_instance, instance_path=instance_path)
+                desired = build_plan(report_instance, [], packaged=packaged)
+                fixture = root / "host"
+                fixture.mkdir()
+                (fixture / "units.txt").write_text(
+                    "\n".join(resource.name for resource in desired if resource.kind == "unit") + "\n",
+                    encoding="utf-8",
+                )
+                manifest = root / "managed.json"
+                manifest.write_text(manifest_text(desired), encoding="utf-8")
+                code, output = run_cli([
+                    "reconcile", "plan", "--instance", str(instance_path),
+                    "--host-fixture", str(fixture), "--managed-manifest", str(manifest),
+                ])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("unchanged systemd:unit:secretary-memory.service", output)
+
     def test_cli_plan_uses_live_source_by_default(self):
         class FakeLiveHost:
             def collect(self, expected):
@@ -1028,8 +1071,11 @@ class DoctorHostCliTests(unittest.TestCase):
                 json.dumps({"version": 1, "mode": "production", "phase": "production", "owner": "secretary-dispatcher"}),
                 encoding="utf-8",
             )
+            report = validate_instance(instance)
+            self.assertTrue(report.ok, report.errors)
+            packaged = resolve_packaged(report.instance, instance_path=instance)
             desired = [
-                resource for resource in build_plan({"host": {"unit_prefix": "secretary-"}}, [])
+                resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)
                 if resource.logical_id.startswith("systemd:dispatcher:production")
             ]
             (data / "host-managed.json").write_text(

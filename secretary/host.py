@@ -534,7 +534,12 @@ def _normalized_repo_path(repo: str) -> str:
     return str(Path(repo).expanduser().resolve(strict=False))
 
 
-def build_doctor_expectations(instance: dict[str, Any], bindings: Iterable[dict[str, Any]]) -> Expectations:
+def build_doctor_expectations(
+    instance: dict[str, Any],
+    bindings: Iterable[dict[str, Any]],
+    *,
+    packaged: Iterable[PackagedUnit] | None = None,
+) -> Expectations:
     """Derive doctor parity from reconcile's canonical desired state."""
     bindings = list(bindings)
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
@@ -550,13 +555,14 @@ def build_doctor_expectations(instance: dict[str, Any], bindings: Iterable[dict[
             # A symlink loop or unreadable binding path is not evidence that the
             # checkout is absent. Leave this kind unavailable for doctor.
             project_error = "expected project checkout path could not be normalized"
-    desired = build_plan(instance, bindings)
-    units = {resource.name for resource in desired if resource.kind == "unit"}
     prefix = host.get("unit_prefix", "") if isinstance(host.get("unit_prefix"), str) else ""
-    packaged = {unit.name: unit for unit in load_packaged_units(default_packaging_root(), prefix)}
+    packaged = list(packaged) if packaged is not None else load_packaged_units(default_packaging_root(), prefix)
+    desired = build_plan(instance, bindings, packaged=packaged)
+    units = {resource.name for resource in desired if resource.kind == "unit"}
+    packaged_by_name = {unit.name: unit for unit in packaged}
     runtime: dict[str, tuple[bool, bool]] = {}
     for name in units:
-        unit = packaged.get(name)
+        unit = packaged_by_name.get(name)
         if name.endswith(".timer"):
             runtime[name] = (True, True)
         elif unit is None or not unit.oneshot:

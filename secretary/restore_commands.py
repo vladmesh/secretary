@@ -16,6 +16,7 @@ from secretary.restore import (
     rebuild_memory_index,
     restore_backup,
 )
+from secretary.host_apply import resolve_packaged
 from secretary.host import (
     LiveHostSource,
     build_expectations,
@@ -102,7 +103,8 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
     if not report.ok:
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid instance config"})
         return 2
-    if plan_input_errors(report.instance, report.bindings):
+    packaged = resolve_packaged(report.instance, instance_path=Path(args.instance))
+    if plan_input_errors(report.instance, report.bindings, packaged=packaged):
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid desired state"})
         return 2
     expected = build_expectations(report.bindings, report.host)
@@ -117,7 +119,7 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         return 2
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
     changes = plan_changes(
-        build_plan(report.instance, report.bindings),
+        build_plan(report.instance, report.bindings, packaged=packaged),
         collected.inventory,
         load_managed_manifest(data_dir / "host-managed.json"),
         prefix,

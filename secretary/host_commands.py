@@ -21,6 +21,7 @@ from secretary.host import (
     plan_input_errors,
     strict_manifest as _strict_manifest,
 )
+from secretary.host_apply import resolve_packaged
 
 
 def run_reconcile_plan(args) -> int:
@@ -28,7 +29,8 @@ def run_reconcile_plan(args) -> int:
     if not report.ok:
         print("secretary reconcile plan: invalid instance config")
         return 2
-    errors = plan_input_errors(report.instance, report.bindings)
+    packaged = resolve_packaged(report.instance, instance_path=Path(args.instance))
+    errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
         print("secretary reconcile plan: " + errors[0])
         return 2
@@ -47,7 +49,7 @@ def run_reconcile_plan(args) -> int:
     manifest = _manifest_path(args, report)
     prefix = report.host.get("unit_prefix", "")
     changes = plan_changes(
-        build_plan(report.instance, report.bindings),
+        build_plan(report.instance, report.bindings, packaged=packaged),
         collected.inventory,
         load_managed_manifest(manifest),
         prefix if isinstance(prefix, str) else "",
@@ -81,11 +83,15 @@ def run_reconcile_adopt(args) -> int:
     if not report.ok:
         print("secretary reconcile adopt: invalid instance config")
         return 2
-    errors = plan_input_errors(report.instance, report.bindings)
+    packaged = resolve_packaged(report.instance, instance_path=Path(args.instance))
+    errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
         print("secretary reconcile adopt: " + errors[0])
         return 2
-    desired = {resource.logical_id: resource for resource in build_plan(report.instance, report.bindings)}
+    desired = {
+        resource.logical_id: resource
+        for resource in build_plan(report.instance, report.bindings, packaged=packaged)
+    }
     resource = desired.get(args.logical_id)
     if resource is None:
         print("secretary reconcile adopt: logical id is not in desired state")
@@ -198,7 +204,6 @@ def run_reconcile_apply(args) -> int:
         LiveOrcaRegistrar,
         SystemdUnitInstaller,
         apply_host,
-        resolve_packaged,
     )
 
     report = validate_instance(Path(args.instance))
