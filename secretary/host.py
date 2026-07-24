@@ -82,6 +82,7 @@ class SystemdLayout:
     data_dir: Path
     runtime_user: str
     runtime_home: Path
+    orca_executable: Path = Path("/usr/local/bin/orca")
 
 
 def default_systemd_layout() -> SystemdLayout:
@@ -98,6 +99,7 @@ def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
         b"{{SECRETARY_DATA_DIR}}": os.fsencode(layout.data_dir),
         b"{{SECRETARY_RUNTIME_USER}}": layout.runtime_user.encode(),
         b"{{SECRETARY_RUNTIME_HOME}}": os.fsencode(layout.runtime_home),
+        b"{{SECRETARY_ORCA_EXECUTABLE}}": os.fsencode(layout.orca_executable),
     }
     rendered = template
     for marker, value in values.items():

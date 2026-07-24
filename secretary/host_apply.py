@@ -247,7 +247,33 @@ def resolve_packaged(
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     root = packaging_root or default_packaging_root()
-    return load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
+    packaged = load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
+    if any(unit.component == "orca" for unit in packaged) and not _is_executable(layout.orca_executable):
+        raise ValueError(
+            f"Orca executable for {layout.runtime_user} is unavailable: {layout.orca_executable}; "
+            "install the pinned runtime or restore ~/.local/bin/orca"
+        )
+    return packaged
+
+
+def find_orca_executable(runtime_user: str, runtime_home: Path | None = None) -> Path | None:
+    """Find the pinned runtime or the legacy CLI owned by the runtime user."""
+    if runtime_home is None:
+        try:
+            runtime_home = Path(pwd.getpwnam(runtime_user).pw_dir).expanduser().resolve(strict=False)
+        except KeyError:
+            return None
+    for candidate in (Path("/usr/local/bin/orca"), runtime_home / ".local" / "bin" / "orca"):
+        if _is_executable(candidate):
+            return candidate
+    return None
+
+
+def _is_executable(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_mode & 0o111 != 0
+    except OSError:
+        return False
 
 
 def resolve_systemd_layout(
@@ -280,12 +306,14 @@ def resolve_systemd_layout(
         home = Path(pwd.getpwnam(user).pw_dir).expanduser().resolve(strict=False)
     except KeyError:
         raise ValueError(f"installation user does not exist: {user}") from None
+    orca_executable = find_orca_executable(user, home) or Path("/usr/local/bin/orca")
     return SystemdLayout(
         product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
         instance_path=target,
         data_dir=Path(instance.get("data_dir", home / "secretary-data")).expanduser().resolve(strict=False),
         runtime_user=user,
         runtime_home=home,
+        orca_executable=orca_executable,
     )
 
 

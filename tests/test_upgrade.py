@@ -133,6 +133,22 @@ class FakeRegistrar:
 
 
 class PackagedUnitTests(unittest.TestCase):
+    def test_legacy_user_orca_is_rendered_for_an_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "operator" / ".local" / "bin" / "orca"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("#!/bin/sh\n", encoding="utf-8")
+            legacy.chmod(0o755)
+            account = SimpleNamespace(pw_dir=str(root / "operator"))
+            with mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
+                units = upgrade.resolve_packaged(
+                    instance_config(root / "data"), instance_path=root / "instance", runtime_user="operator"
+                )
+
+        orca = next(unit for unit in units if unit.name == "secretary-orca.service")
+        self.assertIn(f"ExecStart={legacy}".encode(), orca.content)
+
     def test_render_is_stable_and_uses_the_installation_layout(self):
         layout = SystemdLayout(
             Path("/opt/secretary"), Path("/srv/secretary-instance"), Path("/srv/secretary-data"),
@@ -590,6 +606,8 @@ class UpgradeStepTests(unittest.TestCase):
 
             with mock.patch.object(upgrade, "run_steps", side_effect=capture), mock.patch(
                 "secretary.host_apply.pwd.getpwnam", return_value=account
+            ), mock.patch("secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")), mock.patch(
+                "secretary.host_apply._is_executable", return_value=True
             ):
                 for value in (instance, config):
                     code = upgrade.run_upgrade(SimpleNamespace(

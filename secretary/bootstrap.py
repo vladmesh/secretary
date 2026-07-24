@@ -22,7 +22,12 @@ import yaml
 from secretary._fsutil import write_text_atomic
 from secretary.config import validate_instance
 from secretary.host import build_plan, foreign_units, manifest_text, strict_manifest
-from secretary.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged
+from secretary.host_apply import (
+    HostCommandError,
+    SystemdUnitInstaller,
+    find_orca_executable,
+    resolve_packaged,
+)
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -168,12 +173,15 @@ volumes:
     path.chmod(0o600)
 
 
-def _install_platform(*, dry_run: bool) -> None:
+def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None:
     if dry_run:
         return
     needs_docker = shutil.which("docker") is None
     needs_compose = not _docker_compose_available()
-    needs_orca = shutil.which("orca") is None
+    needs_orca = (
+        find_orca_executable(runtime_user) is None
+        if runtime_user is not None else shutil.which("orca") is None
+    )
     if needs_docker or needs_compose or needs_orca:
         if os.geteuid() != 0:
             raise BootstrapError("host prerequisites are absent; rerun bootstrap as root")
@@ -410,7 +418,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             _write_runtime(runtime, values)
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)
-            _install_platform(dry_run=False)
+            _install_platform(dry_run=False, runtime_user=args.installation_user)
             _start_orca_service(args.installation_user, target)
             compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)

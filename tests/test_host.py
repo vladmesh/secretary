@@ -233,7 +233,9 @@ class ReconcilePlanTests(unittest.TestCase):
             )
             product_root = root / "product"
             account = SimpleNamespace(pw_dir="/srv/operator")
-            with unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
+            with unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account), unittest.mock.patch(
+                "secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")
+            ), unittest.mock.patch("secretary.host_apply._is_executable", return_value=True):
                 directory_report = validate_instance(Path("instance"))
                 relative_report = validate_instance(Path("instance/instance.yaml"))
                 absolute_report = validate_instance(config)
@@ -300,6 +302,8 @@ class ReconcilePlanTests(unittest.TestCase):
             account = SimpleNamespace(pw_name="operator", pw_dir="/srv/operator")
             with unittest.mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account), unittest.mock.patch(
                 "secretary.host_apply.pwd.getpwnam", return_value=account
+            ), unittest.mock.patch("secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")), unittest.mock.patch(
+                "secretary.host_apply._is_executable", return_value=True
             ):
                 packaged = resolve_packaged(report_instance, instance_path=instance_path)
                 desired = build_plan(report_instance, [], packaged=packaged)

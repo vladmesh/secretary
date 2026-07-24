@@ -54,6 +54,11 @@ Memory runtime загружает локальную embedding model. На produ
 шести минут и достигал примерно 1.9 GiB RSS. Отдельный target с 1.9 GiB общей RAM не смог завершить
 live rebuild. Поддерживаемый minimum ещё не установлен; не считать 2 GiB profile доказанным.
 
+Для `secretary-orca.service` materializer сначала выбирает pinned `/usr/local/bin/orca`, затем
+legacy CLI пользователя установки `~/.local/bin/orca`. Если оба файла не исполняемы, он прекращает
+применение до записи unit или `host-managed.json`; поставить Orca вручную перед этим не требуется,
+если legacy CLI сохранился.
+
 ## Data plane
 
 ```bash
