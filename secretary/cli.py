@@ -423,7 +423,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if host_incomplete:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
-        return 1 if args.dry_run else 2
+        return 2
     if host_findings:
         print("status: findings")
         return 1

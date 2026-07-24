@@ -1215,7 +1215,7 @@ class DoctorHostCliTests(unittest.TestCase):
                 missing_root,
             ]
         )
-        self.assertEqual(code, 1, output)
+        self.assertEqual(code, 2, output)
         self.assertIn("unavailable: fixture host directory not found", output)
         self.assertIn("status: host inventory incomplete", output)
         # The false-clean symptom is gone: no expected resource is listed as
@@ -1259,7 +1259,7 @@ class DoctorHostCliTests(unittest.TestCase):
         finally:
             cli.LiveHostSource = original
 
-        self.assertEqual(code, 1, output)
+        self.assertEqual(code, 2, output)
         self.assertIn("orca repos:\n  unavailable: orca not found", output)
         self.assertIn("status: host inventory incomplete", output)
         # A kind that did read is still reported normally.
@@ -1297,7 +1297,7 @@ class DoctorHostCliTests(unittest.TestCase):
             finally:
                 cli.LiveHostSource = original
 
-        self.assertEqual(code, 1, output)
+            self.assertEqual(code, 2, output)
         self.assertNotIn(secret, output)
         self.assertIn("projects:\n  unavailable:", output)
 
