@@ -72,9 +72,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("status: ok", output)
 
     def test_doctor_checks_live_host_by_default(self):
-        code, output = self.run_cli(
-            ["doctor", "--instance", str(EXAMPLE_INSTANCE)]
-        )
+        legacy_orca = REPO_ROOT / "tests" / "fixtures" / "legacy-orca"
+        with mock.patch(
+            "secretary.host_apply.find_orca_executable", return_value=legacy_orca
+        ):
+            code, output = self.run_cli(
+                ["doctor", "--instance", str(EXAMPLE_INSTANCE)]
+            )
 
         self.assertIn("host inventory: read-only", output)
         self.assertIn("mode: read-only", output)
