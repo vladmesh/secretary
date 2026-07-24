@@ -108,6 +108,52 @@ class BootstrapBoardTests(unittest.TestCase):
             managed = (data / "host-managed.json").read_text(encoding="utf-8")
             self.assertIn('"systemd:unit:secretary-orca.service"', managed)
 
+    def test_orca_bootstrap_refuses_matching_unowned_unit(self) -> None:
+        class Installer:
+            def __init__(self) -> None:
+                self.files: dict[str, bytes] = {}
+                self.calls: list[tuple[str, str]] = []
+
+            def installed(self, name: str) -> bytes | None:
+                return self.files.get(name)
+
+            def install(self, unit) -> None:
+                self.files[unit.name] = unit.content
+                self.calls.append(("install", unit.name))
+
+            def daemon_reload(self) -> None:
+                self.calls.append(("reload", ""))
+
+            def enable(self, name: str) -> None:
+                self.calls.append(("enable", name))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            data = root / "data"
+            (instance / "instance.yaml").write_text(
+                "version: 1\nname: bootstrap\ndata_dir: " + str(data)
+                + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
+                + "host:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            installer = Installer()
+            account = SimpleNamespace(pw_dir="/home/operator")
+            with (
+                mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+                mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.bootstrap.SystemdUnitInstaller", return_value=installer),
+                mock.patch("secretary.bootstrap._wait_for_orca"),
+            ):
+                _start_orca_service("operator", instance)
+                (data / "host-managed.json").unlink()
+                with self.assertRaisesRegex(BootstrapError, "not owned by this instance"):
+                    _start_orca_service("operator", instance)
+
+            self.assertEqual(installer.calls.count(("install", "secretary-orca.service")), 1)
+            self.assertFalse((data / "host-managed.json").exists())
+
     def test_creates_pipeline_schema_and_registry_lanes_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             instance = Path(temporary)

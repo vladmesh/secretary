@@ -324,7 +324,10 @@ def _start_orca_service(user: str, instance: Path | None = None) -> None:
         if installed is None:
             installer.install(unit)
             installer.daemon_reload()
-        elif not foreign and owned != resource and installed != unit.content:
+        # A matching file is not ownership evidence.  Bootstrap may create a
+        # missing Orca unit and record that write, but it must never adopt an
+        # already-present unit just because its bytes happen to match ours.
+        elif not foreign and owned != resource:
             raise BootstrapError(f"Orca service exists but is not owned by this instance: {unit.name}")
         elif owned == resource and installed != unit.content:
             installer.install(unit)
