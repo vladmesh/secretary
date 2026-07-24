@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary import upgrade
@@ -559,6 +560,52 @@ class UpgradeStepTests(unittest.TestCase):
 
             self.assertEqual(result.status, "changed")
             self.assertFalse((instance / "heads" / "heads.yaml").exists())
+
+    def test_upgrade_direct_config_path_renders_the_same_units_as_its_checkout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            instance.mkdir()
+            data_dir = root / "data"
+            data_dir.mkdir()
+            config = instance / "instance.yaml"
+            config.write_text(
+                "version: 1\nname: upgrade\ndata_dir: " + str(data_dir)
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            account = SimpleNamespace(pw_dir="/srv/operator")
+            rendered: list[dict[str, bytes]] = []
+
+            def capture(context: upgrade.UpgradeContext) -> upgrade.UpgradeResult:
+                packaged = upgrade.resolve_packaged(
+                    context.report.instance,
+                    context.product_root / "packaging" / "systemd",
+                    product_root=context.product_root,
+                    instance_path=context.instance_path,
+                    runtime_user="operator",
+                )
+                rendered.append({unit.name: unit.content for unit in packaged})
+                return upgrade.UpgradeResult()
+
+            with mock.patch.object(upgrade, "run_steps", side_effect=capture), mock.patch(
+                "secretary.host_apply.pwd.getpwnam", return_value=account
+            ):
+                for value in (instance, config):
+                    code = upgrade.run_upgrade(SimpleNamespace(
+                        instance=str(value),
+                        product_root=None,
+                        base_branch="main",
+                        dry_run=True,
+                        no_pull=True,
+                        host_fixture=None,
+                        json=False,
+                    ))
+                    self.assertEqual(code, 0)
+
+            self.assertEqual(rendered[0], rendered[1])
+            self.assertIn(str(instance).encode(), rendered[1]["secretary-memory.service"])
+            self.assertNotIn(str(config).encode(), rendered[1]["secretary-memory.service"])
 
     def test_stale_head_snapshot_fails_the_dispatcher_guard(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -460,7 +460,10 @@ def run_upgrade(args) -> int:
         return 2
     product_root = Path(args.product_root).expanduser() if args.product_root else default_product_root()
     context = UpgradeContext(
-        instance_path=Path(args.instance),
+        # `validate_instance` accepts either a checkout or instance.yaml. Steps
+        # operate on the checkout, whose path is the parent of the canonical
+        # config file returned in the report.
+        instance_path=report.instance_path.parent,
         product_root=product_root,
         base_branch=args.base_branch,
         dry_run=args.dry_run,
