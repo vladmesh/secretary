@@ -183,7 +183,14 @@ def build_plan(
         if not isinstance(repo, str):
             continue
         result.append(_resource(logical_id, "orca", name, {"repo": repo, "binding": name}))
-    return sorted(result, key=lambda resource: (resource.kind, resource.logical_id))
+    # A declared foreign unit is outside this installation's ownership even
+    # when its name overlaps a product-shipped unit. Keep that boundary in the
+    # canonical desired state so reconcile and doctor cannot disagree about it.
+    foreign = foreign_units(host)
+    return sorted(
+        (resource for resource in result if resource.kind != "unit" or resource.name not in foreign),
+        key=lambda resource: (resource.kind, resource.logical_id),
+    )
 
 
 def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[PlannedResource]:
@@ -358,9 +365,20 @@ def plan_changes(
     declared_foreign: Iterable[str] = (),
 ) -> list[PlanChange]:
     """Classify changes. A name match is a conflict unless exact state owns it."""
+    declared_foreign = set(declared_foreign)
     actual_names = {"unit": actual.units, "orca": actual.orca_repos}
-    managed_by_id = {resource.logical_id: resource for resource in managed}
-    desired_by_id = {resource.logical_id: resource for resource in desired}
+    # Do not let an older manifest record pull a now-declared foreign unit back
+    # under management through the deletion pass below.
+    managed_by_id = {
+        resource.logical_id: resource
+        for resource in managed
+        if resource.kind != "unit" or resource.name not in declared_foreign
+    }
+    desired_by_id = {
+        resource.logical_id: resource
+        for resource in desired
+        if resource.kind != "unit" or resource.name not in declared_foreign
+    }
     changes: list[PlanChange] = []
     for resource in desired_by_id.values():
         present = resource.name in actual_names[resource.kind]

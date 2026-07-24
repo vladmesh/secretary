@@ -112,6 +112,38 @@ class ExpectationTests(unittest.TestCase):
         result = inventory(expected, HostInventory(units={"secretary-memory.service", "secretary-other.service"}))
         self.assertEqual(result["units"].unmanaged_on_host, [])
 
+    def test_foreign_shipped_unit_is_outside_desired_doctor_and_reconcile_parity(self):
+        owned = build_plan({"host": {"unit_prefix": "secretary-"}}, [])
+        memory = next(resource for resource in owned if resource.name == "secretary-memory.service")
+        instance = {
+            "host": {
+                "unit_prefix": "secretary-",
+                "foreign_units": ["secretary-memory.service"],
+            }
+        }
+
+        desired = build_plan(instance, [])
+        expected = build_doctor_expectations(instance, [])
+        diff = inventory(
+            expected,
+            HostInventory(units={resource.name for resource in desired} | {"secretary-memory.service"}),
+        )
+        changes = plan_changes(
+            desired,
+            HostInventory(units={"secretary-memory.service"}),
+            [memory],
+            "secretary-",
+            {"secretary-memory.service"},
+        )
+
+        self.assertNotIn("secretary-memory.service", expected.units)
+        self.assertNotIn("secretary-memory.service", expected.unit_runtime)
+        self.assertNotIn("secretary-memory.service", {resource.name for resource in desired})
+        self.assertNotIn("secretary-memory.service", diff["units"].matched)
+        self.assertEqual(diff["units"].missing_on_host, [])
+        self.assertEqual(diff["units"].unmanaged_on_host, [])
+        self.assertNotIn("secretary-memory.service", {change.name for change in changes})
+
 
 class FixtureSourceTests(unittest.TestCase):
     def test_collect_reads_project_paths(self):
