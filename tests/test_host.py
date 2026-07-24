@@ -37,11 +37,16 @@ from secretary.config import validate_instance
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 HOST_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "host"
+LEGACY_ORCA = REPO_ROOT / "tests" / "fixtures" / "legacy-orca"
 
 
 def run_cli(argv: list[str]) -> tuple[int, str]:
     output = io.StringIO()
-    with contextlib.redirect_stdout(output):
+    # Reconcile compiles the packaged Orca unit. Keep command-surface fixtures
+    # independent of whichever runtime happens to be installed on the test host.
+    with contextlib.redirect_stdout(output), unittest.mock.patch(
+        "secretary.host_apply.find_orca_executable", return_value=LEGACY_ORCA
+    ):
         code = main(argv)
     return code, output.getvalue()
 

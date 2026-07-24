@@ -556,16 +556,22 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_host_reports_an_unavailable_orca_runtime_before_writing_ownership(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "data"
+            root = Path(tmpdir)
+            data_dir = root / "data"
+            instance = root / "instance"
+            instance.mkdir()
             report = SimpleNamespace(
                 instance=instance_config(data_dir), bindings=[], host={"unit_prefix": UNIT_PREFIX},
             )
             units = FakeUnitInstaller()
-            context = self.context(units, report=report)
+            context = self.context(
+                units, report=report, instance_path=instance, runtime_user="operator"
+            )
 
-            with mock.patch(
-                "secretary.upgrade.resolve_packaged",
-                side_effect=ValueError("Orca executable for operator is unavailable"),
+            account = SimpleNamespace(pw_dir=str(root / "operator"))
+            with mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account), mock.patch(
+                "secretary.host_apply.find_orca_executable", return_value=None
+            ), mock.patch("secretary.host_apply._is_executable", return_value=False
             ):
                 result = upgrade.step_host(context)
 
@@ -763,7 +769,10 @@ class CommandSurfaceTests(unittest.TestCase):
         from secretary.cli import main
 
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        legacy_orca = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+        with contextlib.redirect_stdout(output), mock.patch(
+            "secretary.host_apply.find_orca_executable", return_value=legacy_orca
+        ):
             code = main(argv)
         return code, output.getvalue()
 
