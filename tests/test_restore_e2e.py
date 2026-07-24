@@ -43,6 +43,9 @@ from tests.restore_fixtures import (
 )
 
 
+LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+
 REINDEX_SCRIPT = '''
 import argparse, hashlib, json, sqlite3, sys
 from pathlib import Path
@@ -195,25 +198,28 @@ def _reindex_script(root: Path) -> Path:
 
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
-    report = restore_commands.validate_instance(instance)
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
-    desired = build_plan(report.instance, report.bindings, packaged=packaged)
-    (data_dir / "host-managed.json").write_text(
-        json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
-        encoding="utf-8",
-    )
-    host_fixture = root / "host-fixture"
-    host_fixture.mkdir(exist_ok=True)
-    (host_fixture / "units.txt").write_text(
-        "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
-    )
-    if main(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(host_fixture)]):
-        raise AssertionError("reconcile plan rejected the restored desired state")
-    inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
-    live = mock.Mock()
-    live.collect.return_value = CollectResult(inventory=inventory)
-    with mock.patch.object(restore_commands, "LiveHostSource", return_value=live):
-        return main(["restore-reconcile", "--instance", str(instance)])
+    with mock.patch(
+        "secretary.host_apply.find_orca_executable", return_value=LEGACY_ORCA
+    ):
+        report = restore_commands.validate_instance(instance)
+        packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+        desired = build_plan(report.instance, report.bindings, packaged=packaged)
+        (data_dir / "host-managed.json").write_text(
+            json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
+            encoding="utf-8",
+        )
+        host_fixture = root / "host-fixture"
+        host_fixture.mkdir(exist_ok=True)
+        (host_fixture / "units.txt").write_text(
+            "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
+        )
+        if main(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(host_fixture)]):
+            raise AssertionError("reconcile plan rejected the restored desired state")
+        inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+        live = mock.Mock()
+        live.collect.return_value = CollectResult(inventory=inventory)
+        with mock.patch.object(restore_commands, "LiveHostSource", return_value=live):
+            return main(["restore-reconcile", "--instance", str(instance)])
 
 
 class RestoreEndToEndTests(unittest.TestCase):

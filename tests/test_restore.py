@@ -44,6 +44,9 @@ from tests.restore_fixtures import (
 )
 
 
+LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+
 def _seed_legacy_facts(data_dir: Path) -> Path:
     """Seed the pre-flatten canon path: a plain directory, no nested journal."""
     facts = data_dir / "memory" / "facts" / "global"
@@ -373,29 +376,32 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
 
-            report = restore_commands.validate_instance(instance)
-            packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
-            desired = build_plan(report.instance, report.bindings, packaged=packaged)
-            (data_dir / "host-managed.json").write_text(
-                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
-                encoding="utf-8",
-            )
-            fixture = root / "host"
-            fixture.mkdir()
-            live_units = {resource.name for resource in desired if resource.kind == "unit"}
-            live_units.add("secretary-supervisor.timer")
-            (fixture / "units.txt").write_text(
-                "\n".join(sorted(live_units)), encoding="utf-8"
-            )
-            self.assertEqual(main([
-                "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
-            ]), 0)
+            with mock.patch(
+                "secretary.host_apply.find_orca_executable", return_value=LEGACY_ORCA
+            ):
+                report = restore_commands.validate_instance(instance)
+                packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+                desired = build_plan(report.instance, report.bindings, packaged=packaged)
+                (data_dir / "host-managed.json").write_text(
+                    json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
+                    encoding="utf-8",
+                )
+                fixture = root / "host"
+                fixture.mkdir()
+                live_units = {resource.name for resource in desired if resource.kind == "unit"}
+                live_units.add("secretary-supervisor.timer")
+                (fixture / "units.txt").write_text(
+                    "\n".join(sorted(live_units)), encoding="utf-8"
+                )
+                self.assertEqual(main([
+                    "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
+                ]), 0)
 
-            inventory = HostInventory(units=live_units)
-            source = mock.Mock()
-            source.collect.return_value = CollectResult(inventory=inventory)
-            with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
-                self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 0)
+                inventory = HostInventory(units=live_units)
+                source = mock.Mock()
+                source.collect.return_value = CollectResult(inventory=inventory)
+                with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
+                    self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 0)
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
             self.assertEqual(restore_findings(data_dir), [])
 
