@@ -13,10 +13,11 @@ so editing a template or changing the installation layout makes the next apply u
 
 Every unit name here must fall under the instance's `host.unit_prefix`, and its component name (the
 file name minus that prefix and the suffix) is what `host.components` opts out of. Paths in
-committed templates contain placeholders for that layout. `secretary-orca.service.template` is
-rendered by bootstrap but remains bootstrap-owned, not part of reconcile desired state. Run
-`systemd-analyze verify` on anything you change. A unit already on the host is never overwritten until it is adopted; apply
-refuses to write over a name it cannot prove it owns.
+committed templates contain placeholders for that layout. `secretary-orca.service` is installed
+early by bootstrap from this same catalogue, then recorded in `host-managed.json` so the first
+reconcile owns it without an adoption step. Run `systemd-analyze verify` on anything you change.
+A unit already on the host is never overwritten until it is adopted; apply refuses to write over a
+name it cannot prove it owns.
 
 `secretary-dispatcher-production.timer` launches a one-shot `production-tick`.
 `secretary-memory.service` serves MCP on the configured local endpoint and loads the instance

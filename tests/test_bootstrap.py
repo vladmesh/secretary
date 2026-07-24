@@ -61,20 +61,53 @@ class Board:
 
 
 class BootstrapBoardTests(unittest.TestCase):
-    def test_orca_unit_is_rendered_for_the_selected_user(self) -> None:
-        with (
-            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-            mock.patch("secretary.bootstrap.pwd.getpwnam", return_value=SimpleNamespace(pw_dir="/home/operator")),
-            mock.patch("secretary.bootstrap.write_text_atomic") as write,
-            mock.patch("secretary.bootstrap.Path.chmod"),
-            mock.patch("secretary.bootstrap._run"),
-            mock.patch("secretary.bootstrap._wait_for_orca"),
-        ):
-            _start_orca_service("operator")
-        rendered = write.call_args.args[1]
-        self.assertIn("User=operator", rendered)
-        self.assertIn("WorkingDirectory=/home/operator", rendered)
-        self.assertNotIn("/home/dev", rendered)
+    def test_orca_bootstrap_uses_catalogue_and_records_idempotent_ownership(self) -> None:
+        class Installer:
+            def __init__(self) -> None:
+                self.files: dict[str, bytes] = {}
+                self.calls: list[tuple[str, str]] = []
+
+            def installed(self, name: str) -> bytes | None:
+                return self.files.get(name)
+
+            def install(self, unit) -> None:
+                self.files[unit.name] = unit.content
+                self.calls.append(("install", unit.name))
+
+            def daemon_reload(self) -> None:
+                self.calls.append(("reload", ""))
+
+            def enable(self, name: str) -> None:
+                self.calls.append(("enable", name))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            data = root / "data"
+            (instance / "instance.yaml").write_text(
+                "version: 1\nname: bootstrap\ndata_dir: " + str(data)
+                + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
+                + "host:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            installer = Installer()
+            account = SimpleNamespace(pw_dir="/home/operator")
+            with (
+                mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+                mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.bootstrap.SystemdUnitInstaller", return_value=installer),
+                mock.patch("secretary.bootstrap._wait_for_orca"),
+            ):
+                _start_orca_service("operator", instance)
+                _start_orca_service("operator", instance)
+
+            self.assertEqual(installer.calls.count(("install", "secretary-orca.service")), 1)
+            self.assertEqual(installer.calls.count(("enable", "secretary-orca.service")), 2)
+            self.assertIn(b"User=operator", installer.files["secretary-orca.service"])
+            managed = (data / "host-managed.json").read_text(encoding="utf-8")
+            self.assertIn('"systemd:unit:secretary-orca.service"', managed)
+
     def test_creates_pipeline_schema_and_registry_lanes_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             instance = Path(temporary)
@@ -182,6 +215,12 @@ class BootstrapBoardTests(unittest.TestCase):
             def clone(_remote: str, directory: Path, **_kwargs: object) -> str:
                 directory.mkdir()
                 (directory / ".git" / "info").mkdir(parents=True)
+                (directory / "instance.yaml").write_text(
+                    "version: 1\nname: bootstrap\ndata_dir: " + str(directory.parent / "data")
+                    + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
+                    + "host:\n  unit_prefix: secretary-\n",
+                    encoding="utf-8",
+                )
                 return "cloned private instance remote"
 
             args = SimpleNamespace(
@@ -192,13 +231,14 @@ class BootstrapBoardTests(unittest.TestCase):
                 mock.patch("secretary.bootstrap._ensure_installation_user"),
                 mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=clone),
                 mock.patch("secretary.bootstrap._install_platform"),
-                mock.patch("secretary.bootstrap._start_orca_service"),
+                mock.patch("secretary.bootstrap._start_orca_service") as start_orca,
                 mock.patch("secretary.bootstrap._set_installation_owner"),
                 mock.patch("secretary.bootstrap._compose_file"),
                 mock.patch("secretary.bootstrap._run"),
                 mock.patch("secretary.bootstrap.KanboardClient", return_value=board),
             ):
                 self.assertEqual(bootstrap(args), 0)
+            start_orca.assert_called_once_with("dev", target)
 
             runtime = (target / "runtime.env").read_text(encoding="utf-8")
             self.assertIn("KANBOARD_API_USER=jsonrpc\n", runtime)

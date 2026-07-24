@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import pwd
 import secrets
 import shutil
 import socket
@@ -21,7 +20,9 @@ from pathlib import Path
 import yaml
 
 from secretary._fsutil import write_text_atomic
-from secretary.host import SystemdLayout, render_systemd_unit
+from secretary.config import validate_instance
+from secretary.host import build_plan, foreign_units, manifest_text, strict_manifest
+from secretary.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -279,20 +280,61 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
         time.sleep(1)
 
 
-def _start_orca_service(user: str) -> None:
+def _start_orca_service(user: str, instance: Path | None = None) -> None:
+    """Install Orca from the product catalogue and record its ownership.
+
+    Bootstrap needs Orca before the complete host materializer can run.  It
+    therefore owns this one early write, but records the same desired resource
+    that the materializer will later reconcile.
+    """
     if os.geteuid() != 0:
         raise BootstrapError("host bootstrap must run as root")
-    unit = Path("/etc/systemd/system/secretary-orca.service")
-    home = Path(pwd.getpwnam(user).pw_dir)
-    template = Path(__file__).resolve().parents[1] / "packaging" / "systemd" / "secretary-orca.service.template"
-    rendered = render_systemd_unit(
-        template.read_bytes(),
-        SystemdLayout(Path(__file__).resolve().parents[1], home / "secretary-instance", home / "secretary-data", user, home),
-    )
-    write_text_atomic(unit, rendered.decode("utf-8"))
-    unit.chmod(0o644)
-    _run(["systemctl", "daemon-reload"], label="reload systemd")
-    _run(["systemctl", "enable", "--now", "secretary-orca.service"], label="start Orca runtime")
+    if instance is None:
+        raise BootstrapError("bootstrap needs the instance checkout to render Orca")
+    report = validate_instance(instance)
+    if not report.ok:
+        raise BootstrapError("invalid instance config: " + "; ".join(map(str, report.errors)))
+    try:
+        packaged = resolve_packaged(
+            report.instance,
+            product_root=Path(__file__).resolve().parents[1],
+            instance_path=instance,
+            runtime_user=user,
+        )
+    except ValueError as exc:
+        raise BootstrapError(str(exc)) from None
+    units = [unit for unit in packaged if unit.component == "orca" and unit.name.endswith(".service")]
+    if len(units) != 1:
+        raise BootstrapError("product must ship exactly one Orca service")
+    unit = units[0]
+    desired = {resource.name: resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)}
+    resource = desired.get(unit.name)
+    foreign = unit.name in foreign_units(report.host)
+    if resource is None and not foreign:
+        raise BootstrapError("Orca service is disabled in the instance configuration")
+    manifest = Path(report.instance["data_dir"]).expanduser().resolve() / "host-managed.json"
+    managed, error = strict_manifest(manifest)
+    if error:
+        raise BootstrapError(error)
+    records = {item.logical_id: item for item in managed}
+    owned = records.get(resource.logical_id) if resource is not None else None
+    installer = SystemdUnitInstaller(sudo=False)
+    installed = installer.installed(unit.name)
+    try:
+        if installed is None:
+            installer.install(unit)
+            installer.daemon_reload()
+        elif not foreign and owned != resource and installed != unit.content:
+            raise BootstrapError(f"Orca service exists but is not owned by this instance: {unit.name}")
+        elif owned == resource and installed != unit.content:
+            installer.install(unit)
+            installer.daemon_reload()
+        if resource is not None and owned != resource:
+            records[resource.logical_id] = resource
+            write_text_atomic(manifest, manifest_text(records.values()))
+        installer.enable(unit.name)
+    except HostCommandError as exc:
+        raise BootstrapError(str(exc)) from None
     _wait_for_orca()
 
 
@@ -366,7 +408,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False)
-            _start_orca_service(args.installation_user)
+            _start_orca_service(args.installation_user, target)
             compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)
             _run(["docker", "compose", "--env-file", str(runtime), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)

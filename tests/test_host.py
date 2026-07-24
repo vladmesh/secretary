@@ -1182,7 +1182,8 @@ class DoctorHostCliTests(unittest.TestCase):
             fixture.mkdir()
             (fixture / "units.txt").write_text(
                 "secretary-dispatcher-production.service\n"
-                "secretary-dispatcher-production.timer\n",
+                "secretary-dispatcher-production.timer\n"
+                "secretary-orca.service\n",
                 encoding="utf-8",
             )
 

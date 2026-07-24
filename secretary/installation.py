@@ -264,8 +264,14 @@ def materialize_checkpoint(
     instance_dir: Path, data_dir: Path, *, dry_run: bool = False,
 ) -> tuple[int, int]:
     """Validate the checkpoint and optionally publish it into the local layout."""
+    bootstrap_evidence = False
     if data_dir.exists() and any(data_dir.iterdir()):
-        if not _valid_existing_layout(data_dir):
+        # Bootstrap records the Orca unit before checkpoint materialization so
+        # the first full reconcile can prove ownership.  That one evidence file
+        # is compatible with an otherwise empty data root.
+        entries = {entry.name for entry in data_dir.iterdir()}
+        bootstrap_evidence = entries == {"host-managed.json"}
+        if not bootstrap_evidence and not _valid_existing_layout(data_dir):
             raise InstallError(
                 f"data target {data_dir} is not an installation created by secretary; "
                 "choose adopt or a clean recovery target"
@@ -317,7 +323,7 @@ def materialize_checkpoint(
     if dry_run:
         return len(cards), run_count
 
-    if not data_dir.exists() or not any(data_dir.iterdir()):
+    if not data_dir.exists() or not any(data_dir.iterdir()) or bootstrap_evidence:
         init_layout(data_dir)
 
     board_target = data_dir / "board"
