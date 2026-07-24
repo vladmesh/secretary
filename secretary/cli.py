@@ -596,7 +596,7 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
         return []
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
     prefix = prefix if isinstance(prefix, str) else ""
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path)
+    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
     desired = build_plan(report.instance, report.bindings, packaged=packaged)
     managed = load_managed_manifest(data_dir / "host-managed.json")
     changes = plan_changes(desired, collected_host.inventory, managed, prefix)
@@ -993,7 +993,7 @@ def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, bool, 
     else:
         source = LiveHostSource()
 
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path)
+    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
     expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
     collected = source.collect(expected)
     diffs = inventory(expected, collected.inventory)

@@ -103,7 +103,7 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
     if not report.ok:
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid instance config"})
         return 2
-    packaged = resolve_packaged(report.instance, instance_path=Path(args.instance))
+    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
     if plan_input_errors(report.instance, report.bindings, packaged=packaged):
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid desired state"})
         return 2

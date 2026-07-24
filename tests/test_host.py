@@ -238,6 +238,10 @@ class ReconcilePlanTests(unittest.TestCase):
             ):
                 packaged = resolve_packaged(report_instance, instance_path=instance_path)
                 desired = build_plan(report_instance, [], packaged=packaged)
+                self.assertIn(
+                    b"User=operator",
+                    next(unit.content for unit in packaged if unit.name == "secretary-memory.service"),
+                )
                 fixture = root / "host"
                 fixture.mkdir()
                 (fixture / "units.txt").write_text(
@@ -247,7 +251,10 @@ class ReconcilePlanTests(unittest.TestCase):
                 manifest = root / "managed.json"
                 manifest.write_text(manifest_text(desired), encoding="utf-8")
                 code, output = run_cli([
-                    "reconcile", "plan", "--instance", str(instance_path),
+                    # Commands also accept the config file itself. The resolved
+                    # checkout, rather than that file path or this process's
+                    # user, defines the rendered unit layout.
+                    "reconcile", "plan", "--instance", str(instance_path / "instance.yaml"),
                     "--host-fixture", str(fixture), "--managed-manifest", str(manifest),
                 ])
 
@@ -1073,7 +1080,7 @@ class DoctorHostCliTests(unittest.TestCase):
             )
             report = validate_instance(instance)
             self.assertTrue(report.ok, report.errors)
-            packaged = resolve_packaged(report.instance, instance_path=instance)
+            packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
             desired = [
                 resource for resource in build_plan(report.instance, report.bindings, packaged=packaged)
                 if resource.logical_id.startswith("systemd:dispatcher:production")
