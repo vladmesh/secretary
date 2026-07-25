@@ -768,10 +768,7 @@ class CommandSurfaceTests(unittest.TestCase):
         from secretary.cli import main
 
         output = io.StringIO()
-        legacy_orca = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
-        with contextlib.redirect_stdout(output), mock.patch(
-            "secretary.host_apply.find_orca_executable", return_value=legacy_orca
-        ):
+        with contextlib.redirect_stdout(output):
             code = main(argv)
         return code, output.getvalue()
 
