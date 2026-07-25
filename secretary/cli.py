@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.backup import create_backups, verify_backup
@@ -67,6 +68,20 @@ NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
 MEMORY_EXIT_LOCKED = 4
+
+
+@dataclass
+class DoctorInspection:
+    """Single read-only evaluation shared by doctor renderers."""
+
+    findings: list[dict[str, object]]
+    unavailable: bool
+    restore: list[str]
+    dispatcher: list[str]
+    checkpoint: list[str]
+    expected: object | None = None
+    collected: CollectResult | None = None
+    diffs: dict[str, KindDiff] | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -419,39 +434,30 @@ def run_doctor(args: argparse.Namespace) -> int:
         for warning in report.warnings:
             print(f"  {warning}")
 
-    restore_problems = print_restore_status(report)
+    inspection = collect_doctor_inspection(report, args)
+    print_restore_status(report, findings=inspection.restore)
 
-    host_incomplete = False
-    host_findings = False
-    collected_host: CollectResult | None = None
-    inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
+    inspect_host = inspection.collected is not None
     if inspect_host:
-        host_incomplete, host_findings, collected_host = print_host_inventory(report, args)
+        print_host_inventory(
+            report, args, expected=inspection.expected, collected=inspection.collected, diffs=inspection.diffs
+        )
 
     print_background_automations(inspect=inspect_host)
 
-    dispatcher_findings = print_dispatcher_status(report, collected_host, inspect_live=not args.offline)
-    checkpoint_findings = print_checkpoint_status(report)
+    print_dispatcher_status(
+        report, inspection.collected, inspect_live=not args.offline, findings=inspection.dispatcher
+    )
+    print_checkpoint_status(report, findings=inspection.checkpoint)
 
     print("host changes: none")
-    if host_incomplete:
+    if inspection.unavailable:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
         return 2
-    if host_findings:
-        print("status: findings")
-        return 1
-    if dispatcher_findings:
-        print("status: findings")
-        return 1
-    if checkpoint_findings:
-        print("status: findings")
-        return 1
-    if restore_problems:
-        print("status: findings")
-        return 1
-    if report.warnings and args.strict:
-        print("status: warnings")
+    if inspection.findings:
+        warning_only = all(finding["code"] == "config_warning" for finding in inspection.findings)
+        print("status: warnings" if warning_only else "status: findings")
         return 1
     print("status: ok")
     return 0
@@ -487,20 +493,23 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         }, sort_keys=True))
         return 1 if args.dry_run else 2
     snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
-    findings, unavailable = collect_doctor_findings(report, args)
-    payload = {"schema_version": 1, "ok": not findings, "findings": findings, "status": snapshot}
+    inspection = collect_doctor_inspection(report, args)
+    payload = {"schema_version": 1, "ok": not inspection.findings, "findings": inspection.findings, "status": snapshot}
     print(json.dumps(payload, sort_keys=True))
-    if unavailable:
+    if inspection.unavailable:
         return 2
-    return 1 if findings else 0
+    return 1 if inspection.findings else 0
 
 
-def collect_doctor_findings(report, args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
-    """Collect the same invariant failures rendered by the text doctor report."""
+def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspection:
+    """Collect invariant failures once for the text and JSON doctor renderers."""
     findings: list[dict[str, object]] = []
-    findings.extend({"code": "restore_problem", "message": finding} for finding in _restore_findings(report))
+    restore = _restore_findings(report)
+    findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     collected: CollectResult | None = None
+    expected = None
+    diffs = None
     unavailable = False
     if inspect_host:
         expected, collected, diffs = collect_host_inventory(report, args)
@@ -513,16 +522,17 @@ def collect_doctor_findings(report, args: argparse.Namespace) -> tuple[list[dict
             findings.extend({"code": "missing_on_host", "kind": kind, "name": name} for name in diff.missing_on_host)
             findings.extend({"code": "unmanaged_on_host", "kind": kind, "name": name} for name in diff.unmanaged_on_host)
         findings.extend({"code": "unit_runtime", "message": finding} for finding in _unit_runtime_findings(expected, collected))
-    findings.extend({"code": "dispatcher", "message": finding}
-                    for finding in dispatcher_findings(report, collected, inspect_live=not args.offline))
-    findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint_findings(report))
+    dispatcher = dispatcher_findings(report, collected, inspect_live=not args.offline)
+    checkpoint = checkpoint_findings(report)
+    findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
+    findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
-    return findings, unavailable
+    return DoctorInspection(findings, unavailable, restore, dispatcher, checkpoint, expected, collected, diffs)
 
 
-def print_restore_status(report) -> list[str]:
-    findings = _restore_findings(report)
+def print_restore_status(report, *, findings: list[str] | None = None) -> list[str]:
+    findings = _restore_findings(report) if findings is None else findings
     if findings:
         print("restore findings:")
         for finding in findings:
@@ -572,6 +582,7 @@ def print_dispatcher_status(
     collected_host: CollectResult | None,
     *,
     inspect_live: bool,
+    findings: list[str] | None = None,
 ) -> bool:
     data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
     if not isinstance(data_dir_value, str) or not data_dir_value:
@@ -594,7 +605,7 @@ def print_dispatcher_status(
     else:
         owner_state = "legacy-owner"
 
-    findings = dispatcher_findings(report, collected_host, inspect_live=inspect_live)
+    findings = dispatcher_findings(report, collected_host, inspect_live=inspect_live) if findings is None else findings
     print("")
     print("dispatcher ownership: read-only")
     print(f"  state: {owner_state}")
@@ -643,7 +654,7 @@ def dispatcher_findings(report, collected_host: CollectResult | None, *, inspect
     return findings
 
 
-def print_checkpoint_status(report) -> list[str]:
+def print_checkpoint_status(report, *, findings: list[str] | None = None) -> list[str]:
     """Checkpoint freshness: docs/RECOVERY.md, "Observability".
 
     Last commit, last push, lag, the gate's blocking reason and the
@@ -667,7 +678,7 @@ def print_checkpoint_status(report) -> list[str]:
     for line in render_checkpoint_lines(snapshot):
         print(f"  {line}")
 
-    findings = checkpoint_findings(report)
+    findings = checkpoint_findings(report) if findings is None else findings
     if findings:
         print("checkpoint findings:")
         for finding in findings:
@@ -1094,12 +1105,20 @@ def run_backup_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, bool, CollectResult]:
+def print_host_inventory(
+    report,
+    args: argparse.Namespace,
+    *,
+    expected=None,
+    collected: CollectResult | None = None,
+    diffs: dict[str, KindDiff] | None = None,
+) -> tuple[bool, bool, CollectResult]:
     """Print the read-only host inventory: matched / missing / unmanaged per kind.
 
     Returns True if any kind could not be inspected (reported as unavailable).
     """
-    expected, collected, diffs = collect_host_inventory(report, args)
+    if expected is None or collected is None or diffs is None:
+        expected, collected, diffs = collect_host_inventory(report, args)
 
     print("")
     print("host inventory: read-only")

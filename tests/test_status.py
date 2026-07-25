@@ -162,10 +162,17 @@ class StatusCliTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output), mock.patch("secretary.host_apply.find_orca_executable", return_value=root / "tests" / "fixtures" / "legacy-orca"):
-                code = main(["doctor", "--json", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance")])
-        payload = json.loads(output.getvalue())
+            text_output = io.StringIO()
+            json_output = io.StringIO()
+            arguments = ["doctor", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance")]
+            with mock.patch("secretary.host_apply.find_orca_executable", return_value=root / "tests" / "fixtures" / "legacy-orca"):
+                with contextlib.redirect_stdout(text_output):
+                    text_code = main(arguments)
+                with contextlib.redirect_stdout(json_output):
+                    code = main(["doctor", "--json", *arguments[1:]])
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(text_code, 1, text_output.getvalue())
+        self.assertIn("missing-on-host:", text_output.getvalue())
         self.assertEqual(code, 1, payload)
         self.assertFalse(payload["ok"])
         self.assertTrue(any(finding["code"] == "missing_on_host" for finding in payload["findings"]))
