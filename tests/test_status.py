@@ -16,6 +16,18 @@ from secretary.config import validate_instance
 
 
 class StatusCliTests(unittest.TestCase):
+    def setUp(self):
+        # status and doctor resolve the packaged Orca runtime. A CI runner has no Orca, so without
+        # this every test in the class is green on a developer host and red everywhere else. Patch
+        # the whole class in one place instead of per test: the per-test form was added four times
+        # and missed a new test each round (secretary-705, secretary-738).
+        legacy_orca = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "legacy-orca"
+        patcher = mock.patch(
+            "secretary.host_apply.find_orca_executable", return_value=legacy_orca
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_status_json_has_the_documented_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
