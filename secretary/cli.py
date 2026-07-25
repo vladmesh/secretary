@@ -41,6 +41,12 @@ from secretary.host import (
 from secretary.host_commands import add_reconcile_subcommands
 from secretary.host_apply import resolve_packaged
 from secretary.gate import run_gate
+from secretary.knowledge_write import (
+    KnowledgeError,
+    KnowledgeValidationError,
+    list_knowledge_documents,
+    write_knowledge_document,
+)
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
     MemoryExportPublishError,
@@ -56,6 +62,7 @@ from secretary.provision import apply_provision_result, render_result, start_pro
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
+from secretary.state_repo import StateRepoError
 from secretary.task_commands import add_task_subcommands
 from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
@@ -396,6 +403,30 @@ def build_parser() -> argparse.ArgumentParser:
     memory_supersede.add_argument("--pinned", action="store_true")
     memory_supersede.set_defaults(handler=run_memory_supersede)
     memory.set_defaults(handler=not_implemented("memory"))
+
+    knowledge = subparsers.add_parser(
+        "knowledge", help="write long recoverable documents into state/knowledge"
+    )
+    knowledge_subcommands = knowledge.add_subparsers(dest="knowledge_command")
+    knowledge_write = knowledge_subcommands.add_parser(
+        "write",
+        help="commit one markdown document into state/knowledge under the writer lock",
+    )
+    knowledge_write.add_argument("--instance", required=True)
+    knowledge_write.add_argument("--actor", required=True)
+    knowledge_write.add_argument(
+        "--path", required=True, help="document path relative to state/knowledge"
+    )
+    knowledge_write.add_argument("--file", required=True, help="source markdown file")
+    knowledge_write.add_argument("--message", help="commit subject; defaults to the document path")
+    knowledge_write.set_defaults(handler=run_knowledge_write)
+
+    knowledge_list = knowledge_subcommands.add_parser(
+        "list", help="list documents currently in state/knowledge"
+    )
+    knowledge_list.add_argument("--instance", required=True)
+    knowledge_list.set_defaults(handler=run_knowledge_list)
+    knowledge.set_defaults(handler=not_implemented("knowledge"))
 
     return parser
 
@@ -950,6 +981,47 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
     except Exception as exc:
         return _print_memory_error("supersede", exc)
     _print_memory_write_result(result)
+    return 0
+
+
+def run_knowledge_write(args: argparse.Namespace) -> int:
+    try:
+        result = write_knowledge_document(
+            _instance_dir(args.instance),
+            document=args.path,
+            actor=args.actor,
+            source_file=Path(args.file),
+            message=args.message,
+        )
+    except KnowledgeValidationError as exc:
+        _print_json(
+            {"ok": False, "op": "write", "error": "validation", "message": str(exc)}
+        )
+        return MEMORY_EXIT_VALIDATION
+    except (KnowledgeError, StateRepoError) as exc:
+        _print_json({"ok": False, "op": "write", "error": "runtime", "message": str(exc)})
+        return 1
+    _print_json(
+        {
+            "ok": True,
+            "op": "write",
+            "document": result.document,
+            "path": str(result.path),
+            "commit": result.commit,
+            "actor": result.actor,
+            "changed": result.changed,
+        }
+    )
+    return 0
+
+
+def run_knowledge_list(args: argparse.Namespace) -> int:
+    try:
+        documents = list_knowledge_documents(_instance_dir(args.instance))
+    except (KnowledgeError, StateRepoError) as exc:
+        _print_json({"ok": False, "op": "list", "error": "runtime", "message": str(exc)})
+        return 1
+    _print_json({"ok": True, "op": "list", "documents": list(documents)})
     return 0
 
 

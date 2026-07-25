@@ -34,7 +34,9 @@ recovery checkpoint. Между коммитами live-состояние оп�
 - instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`;
 - board export: `state/board/cards.ndjson`, `state/board/events.ndjson`, `state/board/export.json`;
 - run/audit: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
-- memory facts: `state/memory/facts/**`.
+- memory facts: `state/memory/facts/**`;
+- knowledge documents: `state/knowledge/**` (свободный markdown, см.
+  [Архитектура](ARCHITECTURE.md#плоскости-знания)).
 
 Вне канона (derived или тяжёлое сырьё, пересоздаётся или в optional cold archive):
 
@@ -61,6 +63,7 @@ Board export держим только в `cards.ndjson` (построчный d
     board/   cards.ndjson, events.ndjson, export.json
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
+    knowledge/**   брейнштормы, журналы решений, разборы инцидентов
 ```
 
 Memory facts хранятся плоско в едином репозитории. Вложенный git-журнал `memory/facts` убирается;
@@ -82,16 +85,17 @@ writer памяти коммитит `propose/commit/supersede` в общий р
 
 ## Writer
 
-В репозиторий пишут двое, каждый своим pathspec:
+В репозиторий пишут трое, каждый своим pathspec:
 
 - tick-writer: `state/board`, `state/runs`, в конце тика диспетчера под `tick_lock`;
-- memory-writer: `state/memory`, по факту `propose/commit/supersede` (`curator memory-write`).
+- memory-writer: `state/memory`, по факту `propose/commit/supersede` (`curator memory-write`);
+- knowledge-writer: `state/knowledge`, по факту `secretary knowledge write`.
 
 Pathspec'ы не пересекаются, поэтому чужое недописанное дерево ни один из них не подхватит.
 `git add -A` не использует никто: ручные незакоммиченные правки конфига остаются нетронутыми.
-Индекс git не рассчитан на параллельную запись, поэтому обе стороны берут общий `state_repo_lock`
-на время staging+commit. Memory-writer коммитит сразу, не дожидаясь тика: факт попадает в HEAD, и
-30-минутный push уносит его вместе с остальным checkpoint.
+Индекс git не рассчитан на параллельную запись, поэтому все три стороны берут общий
+`state_repo_lock` на время staging+commit. Memory- и knowledge-writer коммитят сразу, не дожидаясь
+тика: запись попадает в HEAD, и 30-минутный push уносит её вместе с остальным checkpoint.
 
 Миграция с вложенного журнала одноразовая и идемпотентная: дерево `memory/facts` сначала
 переносится и коммитится в `state/memory/facts`, вложенный `.git` удаляется только после этого.
@@ -109,8 +113,9 @@ checkpoint, пишет причину в `status`, ретраит на след�
   строк;
 - memory staging (`memory/.staging`) пуст;
 - секрет-скан `state/` чист. `state/` уходит на remote, это единственное место возможной утечки
-  секрета (вставленный токен в карточке или логе). Опора на `redact.py`. Memory-writer гоняет тот
-  же скан по тексту факта перед своим коммитом: его путь в тик-гейт не заходит.
+  секрета (вставленный токен в карточке или логе). Опора на `redact.py`. Memory- и
+  knowledge-writer гоняют тот же скан по своему тексту перед коммитом: их путь в тик-гейт не
+  заходит.
 
 ## Failure и divergence
 
