@@ -39,6 +39,11 @@ class DispatcherRecord:
     # rollup first went non-terminal, driving the pending watchdog.
     gate_state: str = ""
     gate_pending_since: float = 0.0
+    # Last checkout rejected by a mechanical gate or red review in this attempt. A worker that
+    # reports done again at this exact SHA has not produced a new result, so the dispatcher can
+    # return it to rework once and then escalate instead of looping forever.
+    rejected_sha: str = ""
+    rejected_done_reports: int = 0
     # Reviewer pane (secretary-651). The reviewer runs in its own split pane inside the worker's
     # worktree, so its terminal handle must be tracked apart from `handle` (the worker's) or
     # stopping one takes down the other and recovery cannot tell them apart. review_leaf is the
@@ -91,6 +96,8 @@ class DispatcherRecord:
             "review_respawns": self.review_respawns,
             "review_started_at": self.review_started_at,
             "review_waiting_since": self.review_waiting_since,
+            "rejected_done_reports": self.rejected_done_reports,
+            "rejected_sha": self.rejected_sha,
             "state": self.state,
             "worker": self.worker,
             "worker_leaf": self.worker_leaf,
@@ -116,6 +123,8 @@ class DispatcherRecord:
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
+            rejected_sha=str(payload.get("rejected_sha") or ""),
+            rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),

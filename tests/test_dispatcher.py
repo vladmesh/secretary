@@ -1753,6 +1753,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record["review_respawns"], 0)
 
         # And the invariant the counters exist for: round 2 still gets its one respawn.
+        self.host.commit = "review-rework-c0ffee"
         self.writer.report(
             role="worker",
             actor="worker",
@@ -1862,6 +1863,83 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.reviews, [])
         # worker prepared once at claim, once on the gate-red relaunch
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+
+    def test_done_at_a_gate_rejected_sha_is_returned_for_rework(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="nothing changed", request_id="worker-done-stale",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "stale-done-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertIn("уже был отклонён", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(record["rejected_sha"], self.host.commit)
+        self.assertEqual(record["rejected_done_reports"], 1)
+
+    def test_done_after_a_new_commit_is_accepted_after_stale_done_rework(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="nothing changed",
+            request_id=_attempt_request_id(
+                record["attempt_id"],
+                "worker-report-done",
+                "secretary-510-pilot",
+                str(record["review_baseline"]),
+            ),
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "stale-done-rework")
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.host.commit = "newc0ffee1234567"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="fixed",
+            request_id=_attempt_request_id(
+                record["attempt_id"],
+                "worker-report-done",
+                "secretary-510-pilot",
+                str(record["review_baseline"]),
+            ),
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["to"], "validate")
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(record["rejected_done_reports"], 0)
+
+    def test_second_done_at_a_rejected_sha_blocks_the_card(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="nothing changed", request_id="worker-done-stale-one",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "stale-done-rework")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="still nothing changed", request_id="worker-done-stale-two",
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn("дважды отчитался", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_gate_red_scrubs_secrets_in_bounce_comment(self) -> None:
         self.start_pilot()
@@ -2103,6 +2181,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(bounced["action"], "gate-red-rework")
         self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
 
+        self.host.commit = "gate-rework-c0ffee"
         self.writer.report(
             role="worker",
             actor="worker",
@@ -2158,6 +2237,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.host.torn_down, [], "rework must reuse the workspace, not tear it down")
 
+        self.host.commit = "review-rework-accepted-c0ffee"
         self.writer.report(
             role="worker",
             actor="worker",
@@ -2391,6 +2471,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
 
+        self.host.commit = "round-two-c0ffee"
         self.writer.report(
             role="worker",
             actor="worker",

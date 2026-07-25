@@ -1485,6 +1485,10 @@ class DispatcherRuntime:
                     "attempt_id": attempt_id,
                     "reason": "worker result is not durable",
                 }
+            current_sha = self.host.head_commit(record)
+            if current_sha and current_sha == record.rejected_sha:
+                return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
+            record.rejected_done_reports = 0
             record.review_baseline = len(task.get("comments") or [])
             record.state = "validate"
             # Fresh code state: the mechanical gate must re-run before this report reaches review.
@@ -1524,6 +1528,93 @@ class DispatcherRuntime:
             "action": "waiting-worker-report",
         }
 
+    def _reject_stale_done(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        sha: str,
+    ) -> dict[str, Any]:
+        """Bounce one repeated rejected result, then leave the diagnosis to a human."""
+        ref = task["ref"]
+        record.rejected_done_reports += 1
+        if record.rejected_done_reports >= 2:
+            self.host.stop(record)
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=(
+                    f"Воркер дважды отчитался done без новой работы: HEAD {sha} уже был отклонён "
+                    "механическим гейтом или красным ревью. Нужен разбор человека."
+                ),
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "stale-done-blocked", ref, str(record.rejected_done_reports)
+                ),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {
+                "status": "blocked",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "reason": "worker repeatedly reported rejected SHA",
+            }
+
+        self.host.stop(record)
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Отчёт done отклонён: HEAD {sha} уже был отклонён механическим гейтом или "
+                "красным ревью. Сделайте и закоммитьте новую работу, затем отчитайтесь снова. "
+                "Если причина в тесте или гейте и код менять не нужно, используйте report --kind blocked; "
+                "ещё один done на этом SHA переведёт карточку в Blocked."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "stale-done-rework", ref, str(record.rejected_done_reports)
+            ),
+        )
+        record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
+        # `review_baseline` is also the round key for the report request-id in TASK.md. Advance
+        # it before restarting this same attempt, or the next legitimate done report is deduped
+        # against the stale one we just rejected.
+        record.review_baseline = record.comment_baseline
+        _reset_wait(record, "worker")
+        _reset_wait(record, "review")
+        moved = self.reader.show(ref)
+        try:
+            record.handle = self.host.restart_worker(moved, record)
+            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        except Exception as exc:
+            return self._block_failed_worker_restart(
+                ref=ref,
+                record=record,
+                records=records,
+                payload=payload,
+                attempt_id=attempt_id,
+                step="advance",
+                reason="stale-result rework bring-up failed",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "stale-done-rework-blocked", ref),
+                error=exc,
+            )
+        record.state = "claimed"
+        record.worker_started_at = record.worker_progress_at = time.time()
+        records[ref] = record
+        self._save_records(payload, records)
+        return {
+            "status": "ok",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "stale-done-rework",
+        }
+
     def _advance_review(
         self,
         task: dict[str, Any],
@@ -1544,6 +1635,8 @@ class DispatcherRuntime:
             # terminals down wholesale, and the same checkout is about to be handed back to a
             # fresh worker head for rework — it is never re-created from base.
             _end_review_pane(self.host, record)
+            record.rejected_sha = record.review_commit or self.host.head_commit(record)
+            record.rejected_done_reports = 0
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -1874,6 +1967,8 @@ class DispatcherRuntime:
         comment, mirroring the review-red rework path. `phase` distinguishes the pre-review gate
         from the pre-merge re-check in the request-id and the log line."""
         ref = task["ref"]
+        record.rejected_sha = self.host.head_commit(record)
+        record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
         body = f"Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
