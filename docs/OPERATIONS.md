@@ -22,8 +22,11 @@ python3 -m unittest
 остаётся decision gate первого milestone; готовый runtime применяется через `secretary install` /
 `secretary recover` по [Recovery](RECOVERY.md).
 
-Для проверки действующей установки использовать `doctor`, `reconcile plan` и `memory verify` по
-контракту из [Protocols](PROTOCOLS.md).
+Для текущей сводки установки использовать `secretary status --instance <dir>`. Его `--json`
+даёт стабильный снимок services/timers, активных попыток, checkpoint, памяти и ресурсов хоста,
+без записи состояния. `doctor` отвечает на другой вопрос: какие инварианты нарушены. Он остаётся
+строгой проверкой и его `--json` возвращает структурированный список findings. Для изменения
+хоста по-прежнему нужен `reconcile plan` и отдельное подтверждённое применение.
 
 ## Runtime secrets
 

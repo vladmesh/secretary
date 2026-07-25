@@ -59,6 +59,7 @@ from secretary.task_commands import add_task_subcommands
 from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
 from secretary.installation import add_install_commands
+from secretary.status import collect_status
 
 
 PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
@@ -107,7 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="treat migration warnings as findings",
     )
+    doctor.add_argument("--json", action="store_true", help="print structured findings")
     doctor.set_defaults(handler=run_doctor)
+
+    status = subparsers.add_parser("status", help="show the current installation state")
+    status.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    status.add_argument("--json", action="store_true", help="print the stable JSON status schema")
+    status.add_argument("--offline", action="store_true", help="do not inspect the live host")
+    status.add_argument("--host-fixture", metavar="DIR", help="read a fixture host inventory")
+    status.set_defaults(handler=run_status)
 
     add_upgrade_command(subparsers)
     add_install_commands(subparsers)
@@ -386,6 +395,9 @@ def run_doctor(args: argparse.Namespace) -> int:
     instance_path = Path(args.instance)
     report = validate_instance(instance_path)
 
+    if args.json:
+        return run_doctor_json(args, report)
+
     if not report.ok:
         print(f"secretary doctor: {len(report.errors)} config problem(s):")
         for error in report.errors:
@@ -443,6 +455,61 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
+
+
+def run_status(args: argparse.Namespace) -> int:
+    report = validate_instance(Path(args.instance))
+    if not report.ok:
+        payload = {"schema_version": 1, "error": "invalid_instance", "findings": [str(error) for error in report.errors]}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print("secretary status: invalid instance config")
+        return 2
+    snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
+    if args.json:
+        print(json.dumps(snapshot, sort_keys=True))
+        return 0
+    print(f"Secretary status: {snapshot['installation']['name'] or 'unnamed'}")
+    print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
+    print(f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}")
+    print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
+    return 0
+
+
+def run_doctor_json(args: argparse.Namespace, report) -> int:
+    """Structured counterpart to doctor without changing its default transcript."""
+    if not report.ok:
+        print(json.dumps({
+            "schema_version": 1,
+            "ok": False,
+            "findings": [{"code": "config_invalid", "message": str(error)} for error in report.errors],
+        }, sort_keys=True))
+        return 1 if args.dry_run else 2
+    snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
+    findings = []
+    for kind, reason in snapshot["host"]["inventory_errors"].items():
+        findings.append({"code": "host_inventory_unavailable", "kind": kind, "message": reason})
+    for unit in snapshot["host"]["units"]:
+        if unit["present"] is False:
+            findings.append({"code": "managed_unit_missing", "unit": unit["name"]})
+    checkpoint = snapshot["checkpoint"]
+    if checkpoint["remote_diverged"]:
+        findings.append({"code": "checkpoint_remote_diverged", "message": checkpoint["push_reason"]})
+    if checkpoint["blocked_reason"]:
+        findings.append({"code": "checkpoint_blocked", "message": checkpoint["blocked_reason"]})
+    data_dir = Path(report.instance["data_dir"]).expanduser()
+    production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    has_checkpoint = "checkpoint" in production or "checkpoint_push" in production
+    if has_checkpoint and isinstance(checkpoint["lag_minutes"], int) and checkpoint["lag_minutes"] > 2 * PUSH_INTERVAL_MINUTES:
+        findings.append({"code": "checkpoint_lag", "minutes": checkpoint["lag_minutes"]})
+    if args.strict:
+        findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
+    payload = {"schema_version": 1, "ok": not findings, "findings": findings, "status": snapshot}
+    print(json.dumps(payload, sort_keys=True))
+    if snapshot["host"]["inventory_errors"]:
+        return 2
+    return 1 if findings else 0
 
 
 def print_restore_status(report) -> list[str]:
