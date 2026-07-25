@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,7 @@ from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
     ensure_claude_workspace_trusted,
+    role_launch_env,
 )
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
@@ -220,7 +222,9 @@ class FakeCatalog:
         if str(profile.get("adapter") or "") == "claude":
             # Same as InstanceCatalog: a claude profile that pins no model leaves the choice to the
             # CLI, and the snapshot names the model that CLI resolves at this bring-up.
-            model, model_source = claude_launch_model(profile, workspace=workspace)
+            model, model_source = claude_launch_model(
+                profile, workspace=workspace, env=role_launch_env(role)
+            )
         return head_run_from_profile(
             role=role,
             head=launched,
@@ -3446,6 +3450,70 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual((user.head, user.adapter), ("claude-default", "claude"))
         self.assertEqual((user.model, user.model_source), ("opus", "user_settings"))
         self.assertEqual((project.model, project.model_source), ("sonnet", "project_settings"))
+
+    def test_claude_snapshot_reads_the_env_the_role_wrapper_delivers(self) -> None:
+        """The head does not run in the dispatcher's environment. `wrap_role_shell_command` hands
+        it to `secretary.role_env exec`, which drops every `runtime.env` variable that is not
+        role-allowlisted, and `ANTHROPIC_MODEL` is not. A snapshot read from `os.environ` would
+        journal a model the launched CLI never receives, so the record is taken from the env the
+        wrapper delivers and checked here against what the wrapped process actually gets."""
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            (home / ".claude").mkdir(parents=True)
+            (home / ".claude" / "settings.json").write_text(
+                json.dumps({"model": "sonnet"}), encoding="utf-8"
+            )
+            workspace = root / "workspace"
+            workspace.mkdir()
+            runtime = root / "runtime.env"
+            runtime.write_text(
+                "KANBOARD_URL=http://board.invalid\n"
+                "KANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=board-token\n"
+                "ANTHROPIC_MODEL=opus\n",
+                encoding="utf-8",
+            )
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(home),
+                "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
+                "TA_SECRETARY_REPO": str(repo),
+                "ANTHROPIC_MODEL": "opus",
+                "CLAUDE_MANAGED_SETTINGS": str(root / "no-managed.json"),
+                "KANBOARD_URL": "http://board.invalid",
+                "KANBOARD_API_USER": "jsonrpc",
+                "KANBOARD_API_TOKEN": "board-token",
+            }
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = canonical_heads(repo)  # type: ignore[attr-defined]
+            card = {"routing": {"review_head_override": "claude-default"}}
+            with mock.patch.dict(os.environ, env, clear=True):
+                run = catalog.head_run(  # type: ignore[attr-defined]
+                    card, role="reviewer", workspace=str(workspace)
+                )
+                # What the dispatcher's own environment says, which is the value the wrapper drops.
+                naive = claude_launch_model({"adapter": "claude"}, workspace=str(workspace))
+
+            probe = (
+                "python3 -c 'import json,sys;"
+                "from secretary.dispatcher_launcher import claude_launch_model;"
+                'print(json.dumps(claude_launch_model({"adapter": "claude"}, workspace=sys.argv[1])))\' '
+                + shlex.quote(str(workspace))
+            )
+            delivered = subprocess.run(
+                ["/bin/sh", "-c", _wrap_role_shell_command("reviewer", probe)],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=tmp,
+            )
+
+        self.assertEqual(delivered.returncode, 0, delivered.stderr)
+        self.assertEqual(naive, ("opus", "env:ANTHROPIC_MODEL"))
+        self.assertEqual(json.loads(delivered.stdout.strip().splitlines()[-1]), ["sonnet", "user_settings"])
+        self.assertEqual((run.model, run.model_source), ("sonnet", "user_settings"))
 
     def test_claude_launch_model_reports_the_cli_default_it_cannot_name(self) -> None:
         """Nothing pinned anywhere: the CLI falls back to its own built-in default, which the

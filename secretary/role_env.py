@@ -9,9 +9,18 @@ import shlex
 import sys
 from pathlib import Path
 
-RUNTIME_ENV = Path(
-    os.environ.get("SECRETARY_RUNTIME_ENV_FILE", "/home/dev/secretary-instance/runtime.env")
-)
+RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
+RUNTIME_ENV = Path(os.environ.get("SECRETARY_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
+
+
+def runtime_env_path() -> Path:
+    """Where the runtime env file lives, resolved per call.
+
+    The file itself is read on every `runtime_env()`, so the override that names it is read the
+    same way rather than frozen at import: an in-process caller that has to model what a launched
+    head will receive sees the same file the launched process would open.
+    """
+    return Path(os.environ.get("SECRETARY_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
 BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 NONSECRET_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
@@ -57,7 +66,7 @@ def _parse_assignment(line: str) -> tuple[str, str] | None:
 
 
 def load_env_file(path: Path | str | None = None) -> dict[str, str]:
-    env_path = Path(path) if path is not None else RUNTIME_ENV
+    env_path = Path(path) if path is not None else runtime_env_path()
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:

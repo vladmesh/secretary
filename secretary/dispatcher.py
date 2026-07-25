@@ -24,6 +24,7 @@ from secretary.dispatcher_launcher import (
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
+    role_launch_env as _role_launch_env,
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
@@ -280,7 +281,9 @@ class InstanceCatalog:
             # A claude profile need not pin a model (`claude-default` does not), and then the CLI
             # resolves one from its settings at startup. Read it here, at bring-up, so the record
             # names the model that ran instead of an empty field.
-            model, model_source = _claude_launch_model(profile, workspace=workspace)
+            model, model_source = _claude_launch_model(
+                profile, workspace=workspace, env=_role_launch_env(role)
+            )
         return head_run_from_profile(
             role=role,
             head=launched,
