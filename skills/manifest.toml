@@ -1,6 +1,7 @@
 [roles.secretary]
 skills = [
   "spec-card",
+  "knowledge-doc",
   "grilling",
   "grill-me",
   "thermo-nuclear-code-quality-review",

@@ -14,11 +14,6 @@ from typing import Any
 CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
 CLAUDE_THEME_DEFAULT = "dark"
-# Where the `claude` CLI itself takes a model from when the head profile pins none.
-CLAUDE_MANAGED_SETTINGS_DEFAULT = "/etc/claude-code/managed-settings.json"
-CLAUDE_MANAGED_SETTINGS_ENV = "CLAUDE_MANAGED_SETTINGS"
-CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
-CLAUDE_MODEL_ENV = "ANTHROPIC_MODEL"
 CODEX_EFFORTS = {
     "default": None,
     "low": "low",
@@ -40,10 +35,6 @@ class HeadLaunchError(RuntimeError):
 class HeadLaunch:
     command: str
     prompt_after_start: bool = False
-    # The profile this command actually starts. Set by InstanceCatalog.head_launch, which resolves
-    # the requested head against resource health before rendering; the renderers below take a
-    # profile, not a head id, so they leave it empty.
-    head: str = ""
 
 
 def ensure_claude_workspace_trusted(workspace: str, config: Path | None = None) -> None:
@@ -111,52 +102,6 @@ def render_codex_launch(
     return HeadLaunch(
         _render_codex_exec_command(profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt)
     )
-
-
-def claude_launch_model(profile: dict[str, Any], *, workspace: str = "") -> tuple[str, str]:
-    """The model a `claude` bring-up will run under, and where that value came from.
-
-    A profile without `model` (`claude-default`) renders a command without `--model`, so the CLI
-    picks the model itself. The routing journal has to name that model as of the bring-up rather
-    than record an empty field, so this reads the same sources the CLI reads, in the CLI's own
-    precedence: enterprise policy over the command line, the command line over the environment,
-    then the workspace's settings, then the user's. When nothing pins a model anywhere the value
-    stays empty under a `cli_default` source, which says the CLI's built-in default applied instead
-    of guessing which model that is.
-    """
-    managed = _settings_model(Path(os.environ.get(CLAUDE_MANAGED_SETTINGS_ENV, CLAUDE_MANAGED_SETTINGS_DEFAULT)))
-    if managed:
-        return managed, "managed_settings"
-    pinned = str(profile.get("model") or "")
-    if pinned:
-        return pinned, "profile"
-    from_env = str(os.environ.get(CLAUDE_MODEL_ENV) or "").strip()
-    if from_env:
-        return from_env, f"env:{CLAUDE_MODEL_ENV}"
-    if workspace:
-        for name, source in (("settings.local.json", "project_settings_local"), ("settings.json", "project_settings")):
-            model = _settings_model(Path(workspace) / ".claude" / name)
-            if model:
-                return model, source
-    user = _settings_model(_claude_config_dir() / "settings.json")
-    if user:
-        return user, "user_settings"
-    return "", "cli_default"
-
-
-def _claude_config_dir() -> Path:
-    override = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
-    return Path(override) if override else Path.home() / ".claude"
-
-
-def _settings_model(path: Path) -> str:
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return ""
-    if not isinstance(loaded, dict):
-        return ""
-    return str(loaded.get("model") or "").strip()
 
 
 def _render_codex_exec_command(

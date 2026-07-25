@@ -1,77 +1,108 @@
-"""Resource health the head resolver reads at bring-up.
-
-A resource (`heads.yaml` `[resources.*]`) is the account several profiles draw from, so red is a
-property of the resource, not of a profile: a card whose head sits on a red resource still gets a
-head, by walking that profile's declared `fallback` chain to one drawing from a green resource.
-That walk is what makes a reviewer asked for as `codex-reviewer` actually launch as `claude-opus`.
-
-The dispatcher never probes here. Probing costs real quota and already happens on its own timer;
-this module only reads the status file that probe leaves behind, so a tick is a file read. The file
-is `state/heads/resource_health.json` under the instance, or whatever `SECRETARY_RESOURCE_HEALTH`
-points at when the probe writes elsewhere. Shape, one entry per resource:
-
-    {"openai-sub": {"status": "red", "checked_at": 1784941231.2}}
-
-No file, an unreadable file, or an entry older than `HEALTH_TTL_S` all mean "unknown", and unknown
-means green: an absent or stale probe must not silently re-route every card in the queue onto a
-different model family. Everything else about routing (which chains exist, what they contain) stays
-in the registry; this module answers one question, "is this resource red right now".
-"""
+"""Cheap, cached preflight checks for dispatcher head resources."""
 
 from __future__ import annotations
 
 import json
-import os
+import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
-GREEN = "green"
-RED = "red"
-HEALTH_RELATIVE = Path("state") / "heads" / "resource_health.json"
-HEALTH_ENV = "SECRETARY_RESOURCE_HEALTH"
-# A status nobody has refreshed for a quarter of an hour is not evidence about now. The pipeline
-# probe re-checks every ~5 minutes, so this leaves room for a couple of missed cycles before a red
-# stops counting.
-HEALTH_TTL_S = float(os.environ.get("SECRETARY_RESOURCE_HEALTH_TTL_S", "900"))
+from secretary._fsutil import write_json
 
 
-def health_path(instance_dir: Path) -> Path:
-    override = os.environ.get(HEALTH_ENV)
-    return Path(override) if override else Path(instance_dir) / HEALTH_RELATIVE
+PROBE_TTL_SECONDS = 300
+PROBE_TIMEOUT_SECONDS = 20
 
 
-def resource_statuses(instance_dir: Path, *, now: float | None = None) -> dict[str, str]:
-    """`{resource: "green"|"red"}` for every resource the status file still speaks for."""
-    try:
-        loaded = json.loads(health_path(instance_dir).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return {}
-    if not isinstance(loaded, dict):
-        return {}
-    moment = time.time() if now is None else now
-    statuses: dict[str, str] = {}
-    for resource, entry in loaded.items():
-        status = _status_of(entry, moment)
-        if status:
-            statuses[str(resource)] = status
-    return statuses
+@dataclass(frozen=True)
+class HeadReadiness:
+    resource: str
+    status: str
+    reason: str
+    checked_at: float
+    cached: bool = False
+
+    @property
+    def launch_allowed(self) -> bool:
+        return self.status in {"ready", "unknown"}
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "resource": self.resource,
+            "status": self.status,
+            "reason": self.reason,
+            "checked_at": self.checked_at,
+            "cached": self.cached,
+        }
 
 
-def _status_of(entry: Any, now: float) -> str:
-    """One resource's status, or "" when the entry says nothing usable about this moment."""
-    if isinstance(entry, str):
-        # A hand-written file may carry the bare status; it has no timestamp to age out.
-        value = entry.strip().lower()
-        return value if value in (GREEN, RED) else ""
-    if not isinstance(entry, dict):
-        return ""
-    value = str(entry.get("status") or "").strip().lower()
-    if value not in (GREEN, RED):
-        return ""
-    checked_at = entry.get("checked_at")
-    if isinstance(checked_at, (int, float)) and not isinstance(checked_at, bool):
-        if HEALTH_TTL_S > 0 and now - float(checked_at) > HEALTH_TTL_S:
-            return ""
-    return value
+class HeadHealth:
+    """Store resource verdicts independently from the dispatcher attempt state.
+
+    A failed probe is not proof that the provider is down.  Only a definite authentication or
+    provider failure stops a launch; probe execution failures are recorded as ``unknown`` and
+    retry after the normal TTL.
+    """
+
+    def __init__(self, catalog: Any, data_dir: Path) -> None:
+        self.catalog = catalog
+        self.path = data_dir / "dispatcher" / "resource_health.json"
+
+    def check(self, head: str) -> HeadReadiness:
+        try:
+            profile = self.catalog.head_profile(head)
+            resource = str(profile["resource"])
+            probe = str(self.catalog.resource(resource).get("probe") or "")
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            return HeadReadiness("", "unknown", f"head health configuration unavailable: {type(exc).__name__}", time.time())
+        if not probe:
+            return HeadReadiness(resource, "unknown", "resource has no probe command", time.time())
+
+        cache = self._load()
+        entry = cache.get(resource)
+        now = time.time()
+        if isinstance(entry, dict) and now - float(entry.get("checked_at") or 0) < PROBE_TTL_SECONDS:
+            return HeadReadiness(resource, str(entry.get("status") or "unknown"), str(entry.get("reason") or ""), float(entry["checked_at"]), True)
+
+        verdict = self._run(resource, probe, now)
+        cache[resource] = verdict.to_json()
+        try:
+            self._save(cache)
+        except RuntimeError:
+            # The preflight still has a useful verdict when its observability cache cannot be
+            # written.  A later dispatcher write will surface a broader data-dir failure.
+            pass
+        return verdict
+
+    def snapshot(self) -> dict[str, Any]:
+        return self._load()
+
+    def _run(self, resource: str, probe: str, now: float) -> HeadReadiness:
+        try:
+            completed = subprocess.run(
+                probe, shell=True, text=True, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return HeadReadiness(resource, "unknown", "probe timed out", now)
+        except Exception as exc:  # a broken probe must not turn into a false resource outage
+            return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
+        if completed.returncode == 0:
+            return HeadReadiness(resource, "ready", "probe succeeded", now)
+        text = " ".join((completed.stdout or "", completed.stderr or "")).lower()
+        if any(marker in text for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")):
+            return HeadReadiness(resource, "unauthenticated", "resource authentication failed", now)
+        if any(marker in text for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")):
+            return HeadReadiness(resource, "unavailable", "resource provider is unavailable", now)
+        return HeadReadiness(resource, "unknown", "probe returned an unclassified failure", now)
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _save(self, cache: dict[str, Any]) -> None:
+        write_json(self.path, cache)

@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,6 @@ from secretary import state_repo
 from secretary.dispatcher_launcher import (
     HeadLaunch,
     HeadLaunchError,
-    claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
@@ -42,7 +40,12 @@ from secretary.dispatcher_gate import (
     gate_check as _gate_check,
     validation_ci as _validation_ci,
 )
-from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
+from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot, ProductionPause
+from secretary.dispatcher_pause_ops import (
+    pause as _pause_pipeline,
+    pause_status as _pause_status,
+    resume as _resume_pipeline,
+)
 from secretary.dispatcher_production import (
     ProductionState,
     production_observe as _production_observe,
@@ -51,12 +54,14 @@ from secretary.dispatcher_production import (
     production_tick as _production_tick,
 )
 from secretary.dispatcher_review import (
+    command_terminal_status as _command_terminal_status,
     command_review_running as _command_review_running,
     end_review_pane as _end_review_pane,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
 from secretary.dispatcher_watchdog import (
+    initial_output_stall_seconds as _initial_output_stall_seconds,
     reset_wait as _reset_wait,
     stall_seconds as _stall_seconds,
     wait_cycle_token as _wait_cycle_token,
@@ -85,19 +90,8 @@ from secretary.dispatcher_types import (
     ReviewLaunch,
     review_pane_label,
 )
-from secretary.head_health import RED, resource_statuses
 from secretary.head_registry import HeadRegistryConfigError, assert_snapshot_current
-from secretary.routing_journal import (
-    FROM_HEALTH,
-    FROM_LAUNCH,
-    FROM_REQUESTED,
-    FROM_RETRY_SWITCH,
-    HeadRun,
-    attempts as _routing_attempts,
-    head_run_from_profile,
-    routing_payload as _routing_payload,
-    run_key as _run_key,
-)
+from secretary.head_health import HeadHealth, HeadReadiness
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -131,32 +125,6 @@ def _same_repo(first: Path, second: Path) -> bool:
         return first.expanduser().resolve() == second.expanduser().resolve()
     except OSError:
         return first.expanduser().absolute() == second.expanduser().absolute()
-
-
-@dataclass(frozen=True)
-class HeadResolution:
-    """What the resolver picked for one requested head, and what it walked past to get there.
-
-    `skipped` lists the profiles rejected for sitting on a red resource, in walk order, so a launch
-    record can show the fallback was taken rather than merely declared.
-    """
-
-    requested: str
-    resolved: str
-    skipped: tuple[str, ...] = ()
-
-    @property
-    def fallback(self) -> bool:
-        return self.resolved != self.requested
-
-
-@dataclass(frozen=True)
-class LaunchedHead:
-    """One head bring-up as it happened: the pane it runs in and the configuration it runs with."""
-
-    handle: str
-    head: str = ""
-    run: dict[str, Any] = field(default_factory=dict)
 
 
 class InstanceCatalog:
@@ -207,149 +175,20 @@ class InstanceCatalog:
         return str(branch or "main")
 
     def worker_head(self, task: dict[str, Any]) -> str:
-        return self.head_run(task, role="worker").resolved
+        requested = task.get("routing", {}).get("head_override")
+        head = str(requested) if requested else str(
+            self._heads.get("role_defaults", {}).get("new_card") or "codex"
+        )
+        self._head_profile(head)
+        return head
 
     def review_head(self, task: dict[str, Any]) -> str:
-        return self.head_run(task, role="reviewer").resolved
-
-    def requested_review_head(self, task: dict[str, Any]) -> str:
-        """The reviewer profile the card asks for, before any health resolution.
-
-        Claim keeps this rather than the head it would resolve to right then: the reviewer launches
-        hours later, and a resource that was red at claim may well be green by the time the card
-        reaches Validate. Resolving from the ask at the reviewer's own bring-up is what makes a
-        recorded fallback mean "the fallback fired at launch".
-        """
-        override = (task.get("routing") or {}).get("review_head_override")
-        if override:
-            return str(override)
-        return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
-
-    def head_run(
-        self, task: dict[str, Any], *, role: str, launched: str = "", workspace: str = ""
-    ) -> HeadRun:
-        """The launch record for one head of `role`.
-
-        `launched` is the profile the launcher actually brought up. Every record written after a
-        bring-up passes it, so the record carries the configuration of the process that runs rather
-        than a re-resolution that a later health flip or `heads.toml` edit would answer differently.
-        Without it this answers "what will the next bring-up launch", which is what claim needs
-        before there is a process to describe.
-
-        `requested` is the head the card was routed onto before any fallback: its own ask, or the
-        pre-switch head from its retry history when the watchdog has already switched it
-        (`retry.heads`, oldest first). `resolved` is what launched. They differ when a fallback
-        fired, and `resolved_from` says which one: the card's watchdog head-switch (`retry_switch`),
-        the resolver's walk over a red resource (`health_fallback`), or a bring-up that launched
-        something else than the card asks for now (`launch`). `fallback_chain` is the chain the
-        requested profile declared at this bring-up, never re-read afterwards.
-        """
-        routing = task.get("routing") or {}
-        if role == "worker":
-            override = routing.get("head_override")
-            default = str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
-            codex_mode = str(routing.get("codex_launch_mode") or "")
-            switched = self._retry_origin(task)
-        else:
-            override = routing.get("review_head_override")
-            default = str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
-            codex_mode = ""
-            # The retry-switch history is the worker head's; a reviewer that differs from the ask
-            # differs because this bring-up resolved or launched something else.
-            switched = ""
-        asked = str(override) if override else default
-        requested = switched or asked
-        requested_from = "retry_history" if switched else ("card" if override else "role_default")
-        resolution = self.resolve_head(asked)
-        resolved = str(launched) if launched else resolution.resolved
-        if resolved == requested:
-            resolved_from = FROM_REQUESTED
-        elif switched and resolved == asked:
-            resolved_from = FROM_RETRY_SWITCH
-        elif resolved == resolution.resolved and resolution.fallback:
-            resolved_from = FROM_HEALTH
-        else:
-            resolved_from = FROM_LAUNCH
-        profile = self._head_profile(resolved)
-        resources = self._heads.get("resources")
-        model: str | None = None
-        model_source = ""
-        if str(profile.get("adapter") or "") == "claude":
-            # A claude profile need not pin a model (`claude-default` does not), and then the CLI
-            # resolves one from its settings at startup. Read it here, at bring-up, so the record
-            # names the model that ran instead of an empty field.
-            model, model_source = _claude_launch_model(profile, workspace=workspace)
-        return head_run_from_profile(
-            role=role,
-            requested=requested,
-            resolved=resolved,
-            requested_from=requested_from,
-            resolved_from=resolved_from,
-            profile=profile,
-            resources=resources if isinstance(resources, dict) else {},
-            codex_mode=codex_mode,
-            fallback_chain=self._declared_fallback(requested),
-            model=model,
-            model_source=model_source,
+        requested = task.get("routing", {}).get("review_head_override")
+        head = str(requested) if requested else str(
+            self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
         )
-
-    def resource_statuses(self) -> dict[str, str]:
-        return resource_statuses(self.instance_dir)
-
-    def resolve_head(self, requested: str) -> HeadResolution:
-        """The profile to actually launch for `requested`: itself when its resource is green, else
-        the first profile — breadth-first over the declared `fallback` chains, recursively — that
-        draws from a green one. This is where `codex-reviewer` becomes `claude-opus`.
-
-        A chain whose every profile sits on a red resource resolves back to `requested`: the card
-        keeps the head it asked for and the bring-up fails on its own terms, rather than the
-        dispatcher inventing a routing decision out of an exhausted chain. Same for an unknown
-        profile, which `head_launch` reports as the unknown head it is.
-        """
-        statuses = self.resource_statuses()
-        if not statuses:
-            return HeadResolution(requested=requested, resolved=requested)
-        profiles = self._heads.get("profiles")
-        profiles = profiles if isinstance(profiles, dict) else {}
-        seen: set[str] = set()
-        skipped: list[str] = []
-        queue = [str(requested)]
-        while queue:
-            head = queue.pop(0)
-            if head in seen:
-                continue
-            seen.add(head)
-            profile = profiles.get(head)
-            if not isinstance(profile, dict):
-                continue
-            if statuses.get(str(profile.get("resource") or "")) != RED:
-                return HeadResolution(requested=requested, resolved=head, skipped=tuple(skipped))
-            skipped.append(head)
-            chain = profile.get("fallback")
-            if isinstance(chain, list):
-                queue.extend(str(item) for item in chain)
-        return HeadResolution(requested=requested, resolved=requested, skipped=tuple(skipped))
-
-    def _retry_origin(self, task: dict[str, Any]) -> str:
-        """The head this card's worker was originally routed onto, per its own retry history.
-
-        The retry path appends every head it has used this life to `retry_heads` (oldest first) and
-        repins `head` to the one it switched to, so the first entry is the pre-fallback ask. An
-        empty history means no switch has happened, and the card's current ask is the ask. The id is
-        taken as written, not looked up: a profile dropped from the registry since the switch is
-        still the head this card was routed onto.
-        """
-        retry = task.get("retry")
-        heads = retry.get("heads") if isinstance(retry, dict) else None
-        if not isinstance(heads, list) or len(heads) < 2:
-            return ""
-        return str(heads[0] or "")
-
-    def _declared_fallback(self, head: str) -> tuple[str, ...]:
-        profiles = self._heads.get("profiles")
-        profile = profiles.get(head) if isinstance(profiles, dict) else None
-        chain = profile.get("fallback") if isinstance(profile, dict) else None
-        return tuple(str(item) for item in chain) if isinstance(chain, list) else ()
+        self._head_profile(head)
+        return head
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
         return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
@@ -364,18 +203,10 @@ class InstanceCatalog:
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
     ) -> HeadLaunch:
-        """Build the command for `head`, or for whatever the resolver puts in its place.
-
-        The resolver runs here, at the last moment before the process starts, so the returned
-        `head` is the profile that actually goes up — a reviewer asked for as `codex-reviewer` on a
-        red `openai-sub` comes back as `claude-opus`. Callers take the head to record from this
-        result rather than from what they asked for.
-        """
-        resolved = self.resolve_head(head).resolved
-        profile = self._head_profile(resolved)
+        profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
-            self.prepare_head_workspace(resolved, workspace)
+            self.prepare_head_workspace(head, workspace)
             if adapter == "claude":
                 launch = HeadLaunch(_render_claude_command(profile, prompt_file, launch_prompt=launch_prompt))
             else:
@@ -387,7 +218,6 @@ class InstanceCatalog:
         return HeadLaunch(
             _wrap_role_shell_command(role, launch.command),
             prompt_after_start=launch.prompt_after_start,
-            head=resolved,
         )
 
     def prepare_head_workspace(self, head: str, workspace: str) -> None:
@@ -407,6 +237,16 @@ class InstanceCatalog:
             known = ", ".join(sorted(profiles)) if isinstance(profiles, dict) else ""
             raise HostError(f"unknown head {head!r} (known: {known or '(none)'})")
         return profile
+
+    def head_profile(self, head: str) -> dict[str, Any]:
+        return self._head_profile(head)
+
+    def resource(self, resource: str) -> dict[str, Any]:
+        resources = self._heads.get("resources", {})
+        value = resources.get(resource) if isinstance(resources, dict) else None
+        if not isinstance(value, dict):
+            raise HostError(f"unknown head resource {resource!r}")
+        return value
 
     @staticmethod
     def _load_optional_yaml(path: Path) -> dict[str, Any]:
@@ -431,7 +271,7 @@ class CommandHostRuntime:
         *,
         attempt_id: str = "",
         require_existing_workspace: bool = False,
-    ) -> dict[str, Any]:
+    ) -> dict[str, str]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
         workspace = self.restore_workspace(task, worker_id)
@@ -446,7 +286,7 @@ class CommandHostRuntime:
             self._run_setup(project, workspace)
         self._clear_body_file("report", task["ref"], 0)
         self._write_prompt(Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id))
-        launched = self._launch(
+        handle = self._launch(
             workspace,
             f"{task['ref']} worker",
             head,
@@ -455,19 +295,10 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
-            task=task,
         )
-        return {
-            "workspace": workspace,
-            "handle": launched.handle,
-            "base_branch": base,
-            # The head that went up, which a fallback makes different from `head`, and its launch
-            # configuration. The caller records these instead of re-resolving the card.
-            "head": launched.head,
-            "run": launched.run,
-        }
+        return {"workspace": workspace, "handle": handle, "base_branch": base}
 
-    def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> LaunchedHead:
+    def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Launch rework in the existing workspace without recreating its branch."""
         workspace = Path(record.workspace)
         if self.mode == "noop":
@@ -488,8 +319,32 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
-            task=task,
         )
+
+    def pane_leaf(self, workspace: str, handle: str) -> str:
+        return self._pane_leaf(workspace, handle)
+
+    def codex_tui_activity(
+        self, task: dict[str, Any], record: DispatcherRecord, kind: str
+    ) -> float | None:
+        """Return Codex TUI rollout activity without reading the session contents."""
+        if not isinstance(getattr(self.catalog, "_heads", None), dict):
+            return None
+        head = record.review_head if kind == "review" else record.head
+        try:
+            profile = self.catalog._head_profile(head)
+        except HostError:
+            # Head snapshots can change while a card is waiting.  That makes the optional TUI
+            # supplement unavailable, not the terminal inventory itself unavailable.
+            return None
+        mode = (
+            task.get("routing", {}).get("codex_launch_mode")
+            or profile.get("codex_mode", "exec")
+        )
+        if profile.get("adapter") != "codex" or mode != "tui" or not record.workspace:
+            return None
+        from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
+        return latest_activity_for(record.workspace)
 
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
         """Bring the reviewer up as a second pane inside the worker's own worktree.
@@ -509,33 +364,30 @@ class CommandHostRuntime:
         review_file = Path(record.workspace) / "REVIEW.md"
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
         self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
-        launched = self._launch(
+        handle = self._launch(
             record.workspace,
             review_pane_label(task["ref"]),
-            # The card's own ask, so the resolver runs against resource health as it is now. Handing
-            # it `record.review_head` would replay the resolution claim made hours ago and launch a
-            # fallback head onto a resource that has since recovered.
-            record.requested_review_head or record.review_head,
+            record.review_head,
             "REVIEW.md",
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
             split_from=self._split_anchor(record),
-            task=task,
         )
         self._freeze_worker(record)
         return ReviewLaunch(
-            handle=launched.handle,
-            leaf=self._pane_leaf(record.workspace, launched.handle),
+            handle=handle,
+            leaf=self._pane_leaf(record.workspace, handle),
             commit=self.head_commit(record),
-            # The reviewer is resolved at its own bring-up, not at claim: `openai-sub` can go red in
-            # the hours a card spends in the worker's hands, and then the pane that judges this
-            # attempt is the fallback head, not the one claim wrote to the board.
-            head=launched.head,
-            run=launched.run,
         )
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
+
+    def worker_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        return _command_terminal_status(self, task, record, kind="worker")
+
+    def review_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        return _command_terminal_status(self, task, record, kind="review")
 
     def stop_review(self, record: DispatcherRecord) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
@@ -860,25 +712,13 @@ class CommandHostRuntime:
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
         split_from: str = "",
-        task: dict[str, Any] | None = None,
-    ) -> LaunchedHead:
-        """Bring one head up and report which head that turned out to be.
-
-        The resolver sits inside this call, so every path out of it — the real launcher, the
-        `SECRETARY_DISPATCHER_*_COMMAND` override, the noop mode — reports the same resolved head
-        and the same launch snapshot. That snapshot is the only thing the routing journal records:
-        no caller re-resolves the card afterwards, so a head that went up before a `heads.toml`
-        edit or a health flip keeps the configuration it started with.
-        """
-        resolved = self.catalog.resolve_head(head).resolved
+    ) -> str:
         if self.mode == "noop":
-            return self._launched(
-                f"noop:{resolved}:{Path(workspace).name}:{prompt_file}", resolved, task, role, workspace
-            )
+            return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
         command = os.environ.get(env_name)
-        launch = HeadLaunch(command, head=resolved) if command else None
+        launch = HeadLaunch(command) if command else None
         if command:
-            self.catalog.prepare_head_workspace(resolved, workspace)
+            self.catalog.prepare_head_workspace(head, workspace)
         else:
             launch = self.catalog.head_launch(
                 head,
@@ -889,7 +729,6 @@ class CommandHostRuntime:
                 launch_prompt=launch_prompt,
             )
             command = launch.command
-            resolved = launch.head or resolved
         if split_from:
             handle = self._split_pane(split_from, title, command)
         else:
@@ -905,27 +744,7 @@ class CommandHostRuntime:
             except HostError:
                 _close_tui_terminal(handle, run_json=self._run_json)
                 raise
-        return self._launched(handle, resolved, task, role, workspace)
-
-    def _launched(
-        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = ""
-    ) -> LaunchedHead:
-        """Pair the pane with the launch snapshot of the head running in it.
-
-        A registry that no longer describes the launched head still has to yield a usable record —
-        the point of the journal is that it survives edits to `heads.toml` — so an unreadable
-        profile degrades to the head id under an `unknown` adapter instead of failing the bring-up
-        that already succeeded.
-        """
-        if task is None:
-            return LaunchedHead(handle=handle, head=head)
-        try:
-            run = self.catalog.head_run(
-                task, role=role, launched=head, workspace=workspace
-            ).to_json()
-        except (HostError, AttributeError, KeyError, TypeError):
-            run = HeadRun(role=role, requested=head, resolved=head, adapter="unknown").to_json()
-        return LaunchedHead(handle=handle, head=head, run=run)
+        return handle
 
     def _create_terminal(self, workspace: str, title: str, command: str) -> str:
         result = self._run_json([
@@ -1148,6 +967,7 @@ class DispatcherRuntime:
         owner: str = "secretary-dispatcher",
         legacy_pause: FileLegacyPauseProbe | None = None,
         production_state: ProductionState | None = None,
+        pause: ProductionPause | None = None,
         checkpoint: CheckpointWriter | None = None,
         checkpoint_push: CheckpointPusher | None = None,
     ) -> None:
@@ -1156,12 +976,22 @@ class DispatcherRuntime:
         self.audit = audit
         self.state = state
         self.production_state = production_state or ProductionState(state.root.parent)
+        self.pause = pause or ProductionPause(state.root.parent)
         self.catalog = catalog
         self.host = host
         self.owner = owner
         self.legacy_pause = legacy_pause or FileLegacyPauseProbe()
         self.checkpoint = checkpoint
         self.checkpoint_push = checkpoint_push
+        self.head_health = HeadHealth(catalog, state.root.parent)
+
+    def head_readiness(self, head: str) -> HeadReadiness:
+        return self.head_health.check(head)
+
+    def _require_head_ready(self, head: str) -> None:
+        readiness = self.head_readiness(head)
+        if not readiness.launch_allowed:
+            raise HostError(f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}")
 
     def preflight(self, selector: PilotSelector) -> dict[str, Any]:
         audit = self.audit.status()
@@ -1307,6 +1137,24 @@ class DispatcherRuntime:
             "records": list((payload.get("records") or {}).keys()),
             "divergences": list((payload.get("controlled_divergences") or [])),
         }
+
+    def pause_pipeline(
+        self,
+        *,
+        mode: str,
+        actor: str,
+        reason: str,
+        exclude_workspaces: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return _pause_pipeline(
+            self, mode=mode, actor=actor, reason=reason, exclude_workspaces=exclude_workspaces
+        )
+
+    def resume_pipeline(self, *, actor: str) -> dict[str, Any]:
+        return _resume_pipeline(self, actor=actor)
+
+    def pause_status(self) -> dict[str, Any]:
+        return _pause_status(self)
 
     def production_observe(self) -> dict[str, Any]:
         return _production_observe(self)
@@ -1462,6 +1310,18 @@ class DispatcherRuntime:
         resume_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        head = self.catalog.worker_head(task)
+        readiness = self.head_readiness(head)
+        if not readiness.launch_allowed:
+            return {
+                "status": "skipped",
+                "step": "head-preflight",
+                "action": "resource-not-ready",
+                "pilot_ref": ref,
+                "head": head,
+                "readiness": readiness.to_json(),
+                "reason": readiness.reason,
+            }
         # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
         # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
         # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
@@ -1491,7 +1351,6 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
-        head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
@@ -1512,16 +1371,12 @@ class DispatcherRuntime:
             handle="",
             head=head,
             review_head=review_head,
-            requested_review_head=self.catalog.requested_review_head(task),
             attempt_id=attempt_id,
             comment_baseline=len(claimed.get("comments") or []),
             review_baseline=0,
             state="claim_verified",
             claimed_at=time.time(),
         )
-        # A re-claimed card continues its own attempt numbering: the journal, not the board, knows
-        # how many rounds it has already had, so a return to Ready adds a round instead of resetting.
-        self._open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self._save_records(payload, records)
         return self._launch_worker_after_claim(
@@ -1589,20 +1444,13 @@ class DispatcherRuntime:
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
-        # The head the launcher brought up wins over the head claim resolved: a resource that went
-        # red between the two turns the ask into its fallback, and the record has to name the
-        # process that runs.
-        record.head = str(prepared.get("head") or record.head)
+        record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        record.worker_started_at = record.worker_progress_at = time.time()
         record.state = "claimed"
         resume_workspaces = payload.get("resume_workspaces")
         if isinstance(resume_workspaces, dict):
             resume_workspaces.pop(ref, None)
         records[ref] = record
-        self._save_records(payload, records)
-        # The worker is up: record the head that is running it, from the launcher's own snapshot. An
-        # adopted card whose claim predates this telemetry has no round yet, so record_worker_routing
-        # opens one from the journal rather than leaving the attempt unrecorded.
-        self.record_worker_routing(claimed, record, prepared.get("run"))
         self._save_records(payload, records)
         self.writer.comment(
             role="dispatcher",
@@ -1668,6 +1516,10 @@ class DispatcherRuntime:
                     "attempt_id": attempt_id,
                     "reason": "worker result is not durable",
                 }
+            current_sha = self.host.head_commit(record)
+            if current_sha and current_sha == record.rejected_sha:
+                return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
+            record.rejected_done_reports = 0
             record.review_baseline = len(task.get("comments") or [])
             record.state = "validate"
             # Fresh code state: the mechanical gate must re-run before this report reaches review.
@@ -1707,6 +1559,94 @@ class DispatcherRuntime:
             "action": "waiting-worker-report",
         }
 
+    def _reject_stale_done(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        sha: str,
+    ) -> dict[str, Any]:
+        """Bounce one repeated rejected result, then leave the diagnosis to a human."""
+        ref = task["ref"]
+        record.rejected_done_reports += 1
+        if record.rejected_done_reports >= 2:
+            self.host.stop(record)
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=(
+                    f"Воркер дважды отчитался done без новой работы: HEAD {sha} уже был отклонён "
+                    "механическим гейтом или красным ревью. Нужен разбор человека."
+                ),
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "stale-done-blocked", ref, str(record.rejected_done_reports)
+                ),
+            )
+            records.pop(ref, None)
+            self._save_records(payload, records)
+            return {
+                "status": "blocked",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "reason": "worker repeatedly reported rejected SHA",
+            }
+
+        self.host.stop(record)
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Отчёт done отклонён: HEAD {sha} уже был отклонён механическим гейтом или "
+                "красным ревью. Сделайте и закоммитьте новую работу, затем отчитайтесь снова. "
+                "Если причина в тесте или гейте и код менять не нужно, используйте report --kind blocked; "
+                "ещё один done на этом SHA переведёт карточку в Blocked."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "stale-done-rework", ref, str(record.rejected_done_reports)
+            ),
+        )
+        record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
+        # `review_baseline` is also the round key for the report request-id in TASK.md. Advance
+        # it before restarting this same attempt, or the next legitimate done report is deduped
+        # against the stale one we just rejected.
+        record.review_baseline = record.comment_baseline
+        _reset_wait(record, "worker")
+        _reset_wait(record, "review")
+        moved = self.reader.show(ref)
+        try:
+            self._require_head_ready(record.head)
+            record.handle = self.host.restart_worker(moved, record)
+            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        except Exception as exc:
+            return self._block_failed_worker_restart(
+                ref=ref,
+                record=record,
+                records=records,
+                payload=payload,
+                attempt_id=attempt_id,
+                step="advance",
+                reason="stale-result rework bring-up failed",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "stale-done-rework-blocked", ref),
+                error=exc,
+            )
+        record.state = "claimed"
+        record.worker_started_at = record.worker_progress_at = time.time()
+        records[ref] = record
+        self._save_records(payload, records)
+        return {
+            "status": "ok",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "stale-done-rework",
+        }
+
     def _advance_review(
         self,
         task: dict[str, Any],
@@ -1727,6 +1667,8 @@ class DispatcherRuntime:
             # terminals down wholesale, and the same checkout is about to be handed back to a
             # fresh worker head for rework — it is never re-created from base.
             _end_review_pane(self.host, record)
+            record.rejected_sha = record.review_commit or self.host.head_commit(record)
+            record.rejected_done_reports = 0
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -1740,7 +1682,6 @@ class DispatcherRuntime:
                     str(len(task.get("comments") or [])),
                 ),
             )
-            self._record_verdict_routing(ref, record, "red")
             record.comment_baseline = len(task.get("comments") or [])
             record.gate_state = ""
             record.gate_pending_since = 0.0
@@ -1748,7 +1689,9 @@ class DispatcherRuntime:
             _reset_wait(record, "worker")
             moved = self.reader.show(ref)
             try:
-                launched = self.host.restart_worker(moved, record)
+                self._require_head_ready(record.head)
+                record.handle = self.host.restart_worker(moved, record)
+                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
                     ref=ref,
@@ -1762,9 +1705,7 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
-            self._open_worker_round(record)
-            self._apply_worker_launch(record, launched)
-            self.record_worker_routing(moved, record, launched.run)
+            record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
             self._save_records(payload, records)
             return {
@@ -1818,17 +1759,65 @@ class DispatcherRuntime:
         *,
         kind: str,
     ) -> dict[str, Any] | None:
-        """Watch an open-ended wait (kind "worker" or "review"). Returns None to keep waiting,
-        or a tick outcome once the wait blew its ceiling: one respawn, then Blocked. Without
-        this a head that died before posting parks the card forever. The ceiling is the only
-        input on purpose; see dispatcher_watchdog for why no liveness probe is trustworthy."""
+        """Watch an open-ended wait without confusing a bad Orca inventory for a dead head."""
+        if getattr(record, f"paused_{'reviewer' if kind == 'review' else 'worker'}_at"):
+            return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
+        runtime_reason = ""
+        try:
+            status = (
+                self.host.review_status(task, record)
+                if kind == "review" else self.host.worker_status(task, record)
+            )
+        except Exception as exc:
+            # Orca may be down or between reconnects.  It is not evidence that this particular
+            # head died, so do not restart it merely for that.  It also cannot prove progress,
+            # so retain the ordinary wait ceiling as the fallback.
+            status = {"known": False, "live": True, "reason": "runtime-unavailable"}
+            runtime_reason = scrub_host_output(str(exc))
+
+        def unavailable() -> dict[str, Any]:
+            return {
+                "status": "degraded", "step": "review" if kind == "review" else "advance",
+                "pilot_ref": task["ref"], "attempt_id": attempt_id,
+                "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
+            }
+        if not status.get("live"):
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"terminal {status.get('reason') or 'missing'}",
+            )
+        activity = status.get("last_activity")
+        progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
+        if activity:
+            updated = max(progress_at, float(activity))
+            if updated != progress_at:
+                progress_at = updated
+                setattr(record, f"{kind}_progress_at", progress_at)
+                self._save_records(payload, records)
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         now = time.time()
-        if not waiting_since:
+        started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
+        if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"no terminal output since launch for {int(now - started_at)}s",
+            )
+        if progress_at and now - progress_at > stall:
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"no terminal output for {int(now - progress_at)}s",
+            )
+        # A known fresh activity signal is progress, not merely liveness.  It starts a new wait
+        # window so a long-running head cannot hit the old total-duration fallback ceiling.
+        if activity and float(activity) >= waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
             self._save_records(payload, records)
             return None
+        if not waiting_since:
+            setattr(record, f"{kind}_waiting_since", now)
+            self._save_records(payload, records)
+            return unavailable() if runtime_reason else None
         outcome = _wait_outcome(
             waiting_since=waiting_since,
             now=now,
@@ -1836,10 +1825,15 @@ class DispatcherRuntime:
             respawns=int(getattr(record, f"{kind}_respawns") or 0),
         )
         if outcome == "wait":
-            return None
+            return unavailable() if runtime_reason else None
         if outcome == "respawn":
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now)
-        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall)
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+
+    def _trigger_wait_watchdog(self, task, record, records, payload, attempt_id, *, kind: str, trigger: str):
+        if int(getattr(record, f"{kind}_respawns") or 0) < 1:
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
 
     def _respawn_wait(
         self,
@@ -1851,6 +1845,7 @@ class DispatcherRuntime:
         *,
         kind: str,
         now: float,
+        trigger: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -1866,7 +1861,9 @@ class DispatcherRuntime:
         else:
             self.host.stop(record)
             try:
-                launched = self.host.restart_worker(task, record)
+                self._require_head_ready(record.head)
+                record.handle = self.host.restart_worker(task, record)
+                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
                     ref=ref,
@@ -1885,11 +1882,9 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
-            # A respawn is a real bring-up: it may land on a repinned profile or on a fallback the
-            # resolver picked just now, so the round gets the configuration that is running rather
-            # than the one it started with.
-            self._apply_worker_launch(record, launched)
-            self.record_worker_routing(task, record, launched.run)
+            record.worker_started_at = record.worker_progress_at = now
+        if kind == "review":
+            record.review_started_at = record.review_progress_at = now
         # Persist the restart before commenting. The pilot tick has no try/except around this, so
         # a writer.comment that raises would otherwise escape with the head already respawned and
         # respawns still 0: the next tick respawns again and the escalation never arrives.
@@ -1905,7 +1900,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"Dispatcher wait watchdog: no {_wait_expectation(kind)} within {_stall_seconds(kind)}s, "
+                f"Dispatcher wait watchdog: {trigger}, "
                 f"respawned the {kind} head (respawn {respawns}). Another stall escalates to Blocked."
             ),
             request_id=_attempt_request_id(
@@ -1933,6 +1928,7 @@ class DispatcherRuntime:
         *,
         kind: str,
         stall: int,
+        trigger: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -1943,7 +1939,7 @@ class DispatcherRuntime:
             reference=ref,
             target="blocked",
             reason=(
-                f"wait watchdog: no {_wait_expectation(kind)} after respawn "
+                f"wait watchdog: {trigger} after respawn "
                 f"(ceiling {stall}s), blocked for the operator"
             ),
             request_id=_attempt_request_id(
@@ -2005,6 +2001,8 @@ class DispatcherRuntime:
         comment, mirroring the review-red rework path. `phase` distinguishes the pre-review gate
         from the pre-merge re-check in the request-id and the log line."""
         ref = task["ref"]
+        record.rejected_sha = self.host.head_commit(record)
+        record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
         body = f"Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
@@ -2031,7 +2029,9 @@ class DispatcherRuntime:
         _reset_wait(record, "worker")
         moved = self.reader.show(ref)
         try:
-            launched = self.host.restart_worker(moved, record)
+            self._require_head_ready(record.head)
+            record.handle = self.host.restart_worker(moved, record)
+            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
             return self._block_failed_worker_restart(
                 ref=ref,
@@ -2045,9 +2045,7 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
-        self._open_worker_round(record)
-        self._apply_worker_launch(record, launched)
-        self.record_worker_routing(moved, record, launched.run)
+        record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self._save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
@@ -2129,9 +2127,6 @@ class DispatcherRuntime:
         """Green review verdict. Re-run the mechanical gate right before merging so a non-green
         CI/local gate never lands: green merges, red bounces back to the worker, pending waits."""
         ref = task["ref"]
-        # The verdict is recorded before the merge gate runs: it is a fact about the head pair of
-        # this round, and it stays true even when the merge path bounces the card back afterwards.
-        self._record_verdict_routing(ref, record, "green")
         drift = self._review_drift(task, record)
         if drift:
             return self._gate_red_to_worker(
@@ -2205,147 +2200,6 @@ class DispatcherRuntime:
             f"в In progress — доработай и отчитайся заново."
         )
 
-    def head_run_snapshot(
-        self, task: dict[str, Any], *, role: str, launched: str = "", workspace: str = ""
-    ) -> dict[str, Any]:
-        """The launch snapshot of the head this bring-up put up, or a marked minimal record when its
-        profile can no longer be read.
-
-        `launched` is the profile id the bring-up handed to the launcher (`record.head` /
-        `record.review_head`) — the head that is running, not the head a later resolution of the
-        card would pick. A registry edited between two rounds must leave a usable attempt record
-        rather than take the tick down: the point of the journal is that it keeps working when
-        `heads.toml` moves.
-        """
-        try:
-            return self.catalog.head_run(
-                task, role=role, launched=launched, workspace=workspace
-            ).to_json()
-        except (HostError, AttributeError, KeyError, TypeError):
-            profile = launched or (task.get("routing", {}).get("head_override") or "")
-            return HeadRun(
-                role=role,
-                requested=str(profile),
-                resolved=str(profile),
-                adapter="unknown",
-            ).to_json()
-
-    def _journal_round(self, ref: str) -> int:
-        """The last worker round the journal holds for this card. Survives a lost dispatcher record,
-        a restore, and a card that went back to Ready and was claimed again."""
-        history = _routing_attempts(self.audit.events(ref, kind="routing"))
-        return history[-1].attempt if history else 0
-
-    def _open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
-        """Start the card's next worker round: stamp its number and drop the previous round's heads.
-
-        A round is one worker bring-up plus the review it earns. Claim opens round 1, each rework
-        bounce opens the next; a respawn inside a round continues that round. Nothing is snapshotted
-        here — the heads are recorded by the bring-ups themselves, once they are actually up.
-        """
-        record.attempt_round = round_number or (record.attempt_round + 1)
-        record.worker_run = {}
-        record.review_run = {}
-
-    def _apply_worker_launch(self, record: DispatcherRecord, launched: LaunchedHead) -> None:
-        """Take the pane and the head from a worker bring-up.
-
-        The head is the launcher's answer, not the record's ask: a rework or a respawn re-resolves,
-        so a resource that went red since the claim moves the card onto its fallback for the rest of
-        this round, and the next relaunch of the same round keeps that head.
-        """
-        record.handle = launched.handle
-        record.head = launched.head or record.head
-
-    def record_worker_routing(
-        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
-    ) -> None:
-        """Record the worker head this bring-up just put up, as launched.
-
-        Called after every worker launch — claim, rework, respawn, adoption — never before: the
-        record must name the process that is running, and `run` is the snapshot the launcher handed
-        back for it. Only an adopted card, whose launch happened in a previous dispatcher life, has
-        no such snapshot and falls back to resolving the card. A relaunch that lands on the same
-        configuration is the same record and dedupes on its request id; a relaunch that lands on a
-        different one (a `heads.toml` repin, a health fallback, a switched head) replaces the
-        round's active snapshot and appends its own event, so the verdict below reports the head
-        that actually issued it.
-        """
-        ref = task["ref"]
-        if not record.attempt_round:
-            record.attempt_round = self._journal_round(ref) + 1
-        record.worker_run = run or self.head_run_snapshot(
-            task, role="worker", launched=record.head, workspace=record.workspace
-        )
-        self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
-
-    def record_review_routing(
-        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
-    ) -> None:
-        """Record the reviewer head this bring-up just put up, as launched.
-
-        Same rule as the worker: `run` comes from the reviewer's own bring-up, so a card claimed
-        against `codex-reviewer` that launched `claude-opus` after `openai-sub` went red records the
-        pair that actually judged the attempt. A respawn or a recovery restart onto an unchanged
-        configuration is the same record; one onto a different adapter/model/resource is a second
-        reviewer for the round and says so.
-        """
-        ref = task["ref"]
-        if not record.attempt_round:
-            record.attempt_round = self._journal_round(ref) + 1
-        record.review_run = run or self.head_run_snapshot(
-            task, role="reviewer", launched=record.review_head, workspace=record.workspace
-        )
-        self._record_routing(ref, record, phase="review", heads=[record.review_run])
-
-    def _record_routing(
-        self,
-        ref: str,
-        record: DispatcherRecord,
-        *,
-        phase: str,
-        heads: list[dict[str, Any]],
-        outcome: str = "",
-    ) -> None:
-        heads = [head for head in heads if head]
-        if not heads or not record.attempt_round:
-            return
-        # The request id carries the launched configurations, not just the round: a repeated
-        # bring-up of the same head writes the same id and commits once, while a bring-up on a
-        # different head is a different id and appends. Same for a verdict — it is keyed by the
-        # pair that produced it, so a verdict re-issued by a relaunched reviewer is not swallowed
-        # by the first reviewer's record.
-        parts = [str(record.attempt_round)]
-        if outcome:
-            parts.append(outcome)
-        parts.extend(_run_key(head) for head in heads)
-        self.writer.routing(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            payload=_routing_payload(
-                attempt=record.attempt_round,
-                attempt_id=record.attempt_id,
-                phase=phase,
-                heads=heads,
-                outcome=outcome,
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id, f"routing-{phase}", ref, "-".join(parts)
-            ),
-        )
-
-    def _record_verdict_routing(self, ref: str, record: DispatcherRecord, outcome: str) -> None:
-        """Tie the verdict to the round it judged, carrying both heads of that round so the
-        worker-reviewer pairs group by outcome without a join against the launch records."""
-        self._record_routing(
-            ref,
-            record,
-            phase="verdict",
-            heads=[record.worker_run, record.review_run],
-            outcome=outcome,
-        )
-
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         state = self.production_state if payload.get("mode") == "production" else self.state
         state.put_records(payload, records)
@@ -2357,27 +2211,12 @@ class DispatcherRuntime:
         review_baseline = _review_adoption_baseline(task)
         launched = self._review_launch_recorded(task, review_baseline)
         state = "review_starting" if launched else "adopted"
-        # The routing round of a card whose dispatcher record was lost comes back from the journal,
-        # heads included: re-resolving would report today's `heads.toml` for a head launched hours
-        # ago. A card claimed before this telemetry existed has no round; it opens one on its next
-        # bring-up rather than inventing history for the round already running.
-        history = _routing_attempts(self.audit.events(task["ref"], kind="routing"))
-        resumed = history[-1] if history else None
-        # Heads come from what the card was claimed with, not from resolving it again: the resolver
-        # answers about resource health *now*, and a flip since the claim would read as a card
-        # somebody else re-routed. Only a card the board has no resolved head for is resolved here.
-        routing = task.get("routing") or {}
-        record = DispatcherRecord(
+        return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
             handle="",
-            head=str(routing.get("resolved_worker_head") or "") or self.catalog.worker_head(task),
-            review_head=(
-                str(routing.get("resolved_review_head") or "") or self.catalog.review_head(task)
-            ),
-            # The ask, not the resolution: an adopted card whose reviewer has not started yet still
-            # resolves at its own bring-up.
-            requested_review_head=self.catalog.requested_review_head(task),
+            head=self.catalog.worker_head(task),
+            review_head=self.catalog.review_head(task),
             attempt_id=attempt_id,
             comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,
@@ -2386,11 +2225,7 @@ class DispatcherRuntime:
             # A reviewer only launches once the gate is green, so an adopted card already in review
             # inherits a passed gate rather than re-running it before the recovery path.
             gate_state="green" if launched else "",
-            attempt_round=resumed.attempt if resumed else 0,
-            worker_run=resumed.worker.to_json() if resumed and resumed.worker else {},
-            review_run=resumed.reviewer.to_json() if resumed and resumed.reviewer else {},
         )
-        return record
 
     def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:
         if task.get("state") != "validate":

@@ -59,7 +59,6 @@ def create_backup(
     copy_transcripts: bool = False,
     allow_claimed_worker: bool = False,
     caller_workspace: Path | None = None,
-    pipeline_worktree: Path = PIPELINE_WORKTREE,
     pipeline_command: list[str] | None = None,
     backup_kind: BackupKind = "full",
 ) -> BackupResult:
@@ -69,7 +68,6 @@ def create_backup(
         copy_transcripts=copy_transcripts,
         allow_claimed_worker=allow_claimed_worker,
         caller_workspace=caller_workspace,
-        pipeline_worktree=pipeline_worktree,
         pipeline_command=pipeline_command,
         backup_kinds=(backup_kind,),
     )[0]
@@ -82,7 +80,6 @@ def create_backups(
     copy_transcripts: bool = False,
     allow_claimed_worker: bool = False,
     caller_workspace: Path | None = None,
-    pipeline_worktree: Path = PIPELINE_WORKTREE,
     pipeline_command: list[str] | None = None,
     backup_kinds: tuple[BackupKind, ...] = ("full",),
 ) -> list[BackupResult]:
@@ -122,12 +119,12 @@ def create_backups(
             for kind in kinds
         ]
         try:
-            pre_pause = _pipeline_status(pipeline_worktree=pipeline_worktree, command=pipeline_command)
+            pre_pause = _pipeline_status(instance_file=instance_file, command=pipeline_command)
             if pre_pause.get("paused"):
                 raise RuntimeError("pipeline is already paused; backup create must own the freeze")
             pause_status = _pipeline_action(
                 "pause",
-                pipeline_worktree=pipeline_worktree,
+                instance_file=instance_file,
                 command=pipeline_command,
                 exclude_workspace=exclude_workspace,
             )
@@ -183,7 +180,7 @@ def create_backups(
                 if paused_by_us:
                     _pipeline_action(
                         "resume",
-                        pipeline_worktree=pipeline_worktree,
+                        instance_file=instance_file,
                         command=pipeline_command,
                     )
             finally:
@@ -273,17 +270,23 @@ def _build_versions_manifest(
 def _pipeline_action(
     action: str,
     *,
-    pipeline_worktree: Path,
+    instance_file: Path,
     command: list[str] | None,
     exclude_workspace: Path | None = None,
 ) -> dict[str, Any] | None:
-    cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
+    """Freeze or resume the pipeline through the product CLI (secretary-731).
+
+    This used to shell out to `triggered_agents pipeline pause`, which wrote a flag the production
+    dispatcher never read: the backup ran while cards kept being claimed. `secretary pause` is now
+    the one door, and it mirrors the flag back to the legacy path for the background roles.
+    """
+    cmd = command or [sys.executable, "-m", "secretary"]
     if action == "pause":
         args = [
-            "--role",
-            "steward",
             "pause",
             "freeze",
+            "--instance",
+            str(instance_file),
             "--reason",
             PIPELINE_PAUSE_REASON,
             "--actor",
@@ -292,14 +295,9 @@ def _pipeline_action(
         if exclude_workspace is not None:
             args.extend(["--exclude-workspace", str(exclude_workspace)])
     elif action == "resume":
-        args = ["--role", "steward", "resume"]
+        args = ["resume", "--instance", str(instance_file), "--actor", PIPELINE_PAUSE_ACTOR]
     else:
         raise RuntimeError(f"unknown pipeline action: {action}")
-    env = os.environ.copy()
-    pythonpath = str(pipeline_worktree)
-    if env.get("PYTHONPATH"):
-        pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
-    env["PYTHONPATH"] = pythonpath
     try:
         result = subprocess.run(
             [*cmd, *args],
@@ -307,7 +305,7 @@ def _pipeline_action(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=env,
+            env=os.environ.copy(),
         )
         return json.loads(result.stdout) if result.stdout.strip() else None
     except FileNotFoundError:
@@ -315,9 +313,8 @@ def _pipeline_action(
     except subprocess.CalledProcessError as exc:
         if exclude_workspace is not None and _rejects_exclude_workspace(exc.stderr):
             raise RuntimeError(
-                "pipeline dispatcher does not understand --exclude-workspace; it "
-                "predates triggered-agents PR #85 and would relaunch the calling "
-                "worker on resume, so refusing to pause instead of dropping the flag"
+                "pause command does not understand --exclude-workspace and would relaunch the "
+                "calling worker on resume, so refusing to pause instead of dropping the flag"
             ) from None
         reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
         raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
@@ -332,23 +329,18 @@ def _rejects_exclude_workspace(stderr: str | None) -> bool:
 
 def _pipeline_status(
     *,
-    pipeline_worktree: Path,
+    instance_file: Path,
     command: list[str] | None,
 ) -> dict[str, Any]:
-    cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
-    env = os.environ.copy()
-    pythonpath = str(pipeline_worktree)
-    if env.get("PYTHONPATH"):
-        pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
-    env["PYTHONPATH"] = pythonpath
+    cmd = command or [sys.executable, "-m", "secretary"]
     try:
         result = subprocess.run(
-            [*cmd, "--role", "steward", "pause-status"],
+            [*cmd, "pause-status", "--instance", str(instance_file)],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=env,
+            env=os.environ.copy(),
         )
     except FileNotFoundError:
         raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None

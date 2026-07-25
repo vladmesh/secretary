@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher import CommandHostRuntime, HeadResolution, HostError
+from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_launcher import HeadLaunch
+from secretary.dispatcher_state import DispatcherRecord
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 codex_mode="tui",
             )
 
-        self.assertEqual(handle.handle, "term-tui")
+        self.assertEqual(handle, "term-tui")
         create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
         wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
         send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
@@ -163,8 +164,49 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     codex_mode="tui",
                 )
 
-        self.assertEqual(handle.handle, "term-tui")
+        self.assertEqual(handle, "term-tui")
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
+
+    def test_tui_activity_uses_rollout_mtime_only_for_tui_profiles(self) -> None:
+        """Alternate-screen TUI output gets a progress signal without masking exec stalls."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = ActivityCatalog()
+            host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
+            task = {"routing": {}}
+            tui_record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="codex-tui",
+                review_head="codex-tui", attempt_id="attempt", comment_baseline=0,
+                review_baseline=0, state="claimed", claimed_at=0.0,
+            )
+            exec_record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="codex-exec",
+                review_head="codex-exec", attempt_id="attempt", comment_baseline=0,
+                review_baseline=0, state="claimed", claimed_at=0.0,
+            )
+
+            with mock.patch(
+                "triggered_agents.agents.pipeline.codex_sessions.latest_activity_for",
+                return_value=123.0,
+            ) as latest_activity:
+                self.assertEqual(host.codex_tui_activity(task, tui_record, "worker"), 123.0)
+                self.assertIsNone(host.codex_tui_activity(task, exec_record, "worker"))
+
+        latest_activity.assert_called_once_with(str(root))
+
+    def test_tui_activity_ignores_a_head_removed_from_the_snapshot(self) -> None:
+        """A stale record cannot turn an optional supplemental signal into an inventory failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = ActivityCatalog()
+            host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
+            record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="removed-head",
+                review_head="removed-head", attempt_id="attempt", comment_baseline=0,
+                review_baseline=0, state="claimed", claimed_at=0.0,
+            )
+
+            self.assertIsNone(host.codex_tui_activity({"routing": {}}, record, "worker"))
 
 
 class TuiCatalog:
@@ -173,11 +215,6 @@ class TuiCatalog:
 
     def prepare_head_workspace(self, head: str, workspace: str) -> None:
         return None
-
-    def resolve_head(self, requested: str) -> HeadResolution:
-        # No resource health here: these tests are about prompt delivery, so the head asked for is
-        # the head launched.
-        return HeadResolution(requested=requested, resolved=requested)
 
     def head_launch(
         self,
@@ -193,8 +230,23 @@ class TuiCatalog:
         return HeadLaunch(
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox",
             prompt_after_start=True,
-            head=head,
         )
+
+
+class ActivityCatalog:
+    def __init__(self) -> None:
+        self._heads = {
+            "profiles": {
+                "codex-tui": {"adapter": "codex", "codex_mode": "tui"},
+                "codex-exec": {"adapter": "codex", "codex_mode": "exec"},
+            },
+        }
+
+    def _head_profile(self, head: str) -> dict:
+        try:
+            return self._heads["profiles"][head]
+        except KeyError:
+            raise HostError(f"unknown head {head}") from None
 
 
 class RecordingTuiHost(CommandHostRuntime):

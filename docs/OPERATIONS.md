@@ -22,8 +22,11 @@ python3 -m unittest
 остаётся decision gate первого milestone; готовый runtime применяется через `secretary install` /
 `secretary recover` по [Recovery](RECOVERY.md).
 
-Для проверки действующей установки использовать `doctor`, `reconcile plan` и `memory verify` по
-контракту из [Protocols](PROTOCOLS.md).
+Для текущей сводки установки использовать `secretary status --instance <dir>`. Его `--json`
+даёт стабильный снимок services/timers, активных попыток, checkpoint, памяти и ресурсов хоста,
+без записи состояния. `doctor` отвечает на другой вопрос: какие инварианты нарушены. Он остаётся
+строгой проверкой и его `--json` возвращает структурированный список findings. Для изменения
+хоста по-прежнему нужен `reconcile plan` и отдельное подтверждённое применение.
 
 ## Runtime secrets
 
@@ -54,10 +57,28 @@ Memory runtime загружает локальную embedding model. На produ
 шести минут и достигал примерно 1.9 GiB RSS. Отдельный target с 1.9 GiB общей RAM не смог завершить
 live rebuild. Поддерживаемый minimum ещё не установлен; не считать 2 GiB profile доказанным.
 
-Для `secretary-orca.service` materializer сначала выбирает pinned `/usr/local/bin/orca`, затем
-legacy CLI пользователя установки `~/.local/bin/orca`. Если оба файла не исполняемы, он прекращает
-применение до записи unit или `host-managed.json`; поставить Orca вручную перед этим не требуется,
-если legacy CLI сохранился.
+Memory model cache lives at `DATA_DIR/memory/fastembed-cache`, never in `/tmp`. The memory unit
+passes this path directly to fastembed, so it survives `systemd-tmpfiles-clean`. `host.memory_threads`
+sets the ONNX Runtime inference limit; its default is `1`, because this host has three cores and a
+single semantic search otherwise expands across all of them while the dispatcher still ticks every
+minute. `secretary doctor --instance INSTANCE` prints the cache path and warns when `data_dir` puts
+it below `/tmp` or `/var/tmp`.
+
+To move a live cache without downloading the 2.1 GB model again, stop the service and copy
+`/tmp/fastembed_cache` into `DATA_DIR/memory/fastembed-cache`. If a previous restore created
+`DATA_DIR/memory/.fastembed-cache`, merge it into that same destination before deleting it. Then
+run `secretary reconcile apply --instance INSTANCE` and start `secretary-memory.service`. Verify
+the cache path with `secretary doctor --instance INSTANCE` before removing either old cache. The
+service must remain stopped during the copy so fastembed cannot create a partial second cache.
+Treat this migration as a required deployment step before the first restart with this release.
+
+Orca runtime принадлежит хосту. Secretary не создаёт `secretary-orca.service` и не запускает
+`orca serve`: scheduler units имеют только `After=orca-server.service`, без `Wants=` на runtime,
+поэтому минутный dispatcher tick не может его перезапустить. `secretary doctor` показывает этот
+runtime как external, not managed by Secretary, и отличает отсутствующий сервис от неактивного.
+При миграции старый `secretary-orca.service` и его временный drop-in нужно удалить через обычный
+systemd change после того, как `orca-server.service` подтверждён active; сам `orca-server.service`
+не останавливать и не перезапускать.
 
 ## Data plane
 
@@ -90,6 +111,19 @@ Board регенерируется одним `pipeline export`: доска це
 Memory writer независимо коммитит `state/memory` при `propose/commit/supersede`. Его pathspec не
 пересекается с tick-writer, а общий instance-repo lock сериализует оба writer'а и publish reviewed
 изменений instance repo.
+
+## Status and doctor
+
+`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe
+to poll: it reports managed services and timers, projects and configured heads, active dispatcher
+attempts, their workspace, watchdog pane/progress/respawn state, pause state, checkpoint freshness,
+memory index state and host disk, memory and load. A live invocation uses the dispatcher's own pane
+probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
+
+`secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and
+returns structured findings with a non-zero exit status for a broken or unavailable host. Use
+`status` to answer what is running now, and `doctor` to decide what needs repair. The default
+human-readable `doctor` output remains available for incident work.
 
 ## Checkpoint push
 
@@ -186,27 +220,123 @@ Kill-switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` отключает push и fas
 целиком — карточка всё равно уходит в `done`, но branch остаётся неслитым и требует ручного мёржа.
 Дефолт — `on` (авто-мёрж включён).
 
+## Пауза пайплайна
+
+Аварийная остановка — одна команда продуктового CLI, два режима:
+
+```bash
+python3 -m secretary pause drain  --instance INSTANCE --reason "почему"
+python3 -m secretary pause freeze --instance INSTANCE --reason "почему"
+python3 -m secretary resume       --instance INSTANCE
+python3 -m secretary pause-status --instance INSTANCE
+```
+
+`drain` — тик перестаёт клеймить Ready, но карточки, которые уже в работе, доезжают свой цикл:
+воркер дописывает, ревьюер судит, зелёный PR мержится. Берётся, когда нужно остановить приток, не
+обрывая работу.
+
+`freeze` — то же плюс живые головы воркера и ревьюера останавливаются, и тик после этого не
+продвигает ничего. Воркспейсы, worktree и незакоммиченная работа не трогаются: останавливаются
+только терминалы. Берётся, когда хост нужно освободить прямо сейчас (бэкап, перезагрузка, разбор
+аварии).
+
+`resume` снимает паузу, поднимает остановленные freeze'ом головы в тех же воркспейсах и выдаёт
+вотчдогам ожиданий свежее окно, чтобы длинная пауза не прочиталась потом как молчание головы.
+Карточка, чья голова успела отчитаться во время freeze, head'а не получает: её двигает ближайший
+тик по уже записанному отчёту.
+
+Смена режима на весу запрещена: сначала `resume`, потом пауза в другом режиме. Повторная пауза в
+том же режиме — no-op.
+
+Флаг лежит в живом data plane, рядом с состоянием того диспетчера, который реально работает:
+`<data_dir>/dispatcher/pause.json`. Оттуда его читает каждый прогон продуктового тика. Фоновые
+роли (steward/curator/retro) по-прежнему читают легаси-флаг в воркспейсе пайплайна, поэтому пауза
+дополнительно пишет туда зеркало, а `resume` его убирает — но только если зеркало поставила сама
+пауза. Чужой легаси-флаг не перезаписывается и не удаляется.
+
+Легаси-вход `triggered_agents pipeline pause|resume` больше не пауза: он писал флаг, которого
+продуктовый диспетчер не читает. Команда отказывает и называет `secretary pause`.
+
+### Пауза или авария
+
+`pause-status` показывает состояние продуктового диспетчера: режим, кто и когда поставил, путь к
+файлу флага, и построчно по карточкам — что с их головами:
+
+- `running` — голова живая;
+- `stopped-by-pause` — голову остановила пауза, воркспейс на месте, `resume` поднимет её обратно;
+- `not-running` — головы нет и пауза её не останавливала: это либо карточка, до которой ещё не
+  дошли, либо настоящий обрыв, и разбирать его надо как обрыв (см. «Вотчдоги ожиданий»).
+
+Тик во время freeze отвечает `skipped` с причиной `pipeline is frozen by pause` и снимком паузы, а
+не молчанием, так что «ничего не двигается» в логе всегда отличимо от вставшего диспетчера. Health
+probe (`production-tick --probe`) во время freeze тоже отвечает `ok` с этим снимком.
+
+Замороженный тик по-прежнему пишет и пушит checkpoint: freeze останавливает продвижение карточек, а
+не durability, иначе долгая пауза оказалась бы дырой в истории снимков и растущим push-лагом ровно
+там, где восстановление и понадобится. В ответе такого тика есть `checkpoint` и `checkpoint_push`,
+хотя `actions` пустых нет вообще.
+
+### Freeze, который снимается сам
+
+Freeze от автоматики живёт по TTL. Если `actor` паузы входит в
+`TA_HARD_PAUSE_AUTO_RESUME_ACTORS` (по умолчанию `pipeline,secretary-backup,secretary,steward,
+curator,retro`), то через `TA_HARD_PAUSE_AUTO_RESUME_TTL_S` секунд (по умолчанию 2700) ближайший
+тик сам вызовет `resume` — тем же путём, что оператор, с подъёмом голов и свежими окнами вотчдогов.
+Без этого `secretary backup create`, убитый до своего `finally`, оставлял бы диспетчер замороженным
+навсегда. Freeze от человека (любой другой actor) не истекает никогда: окно обслуживания снимает тот,
+кто его поставил. `TA_HARD_PAUSE_AUTO_RESUME_TTL_S=0` выключает авто-resume совсем.
+
+`pause-status` в поле `auto_resume` отвечает, снимется ли пауза сама: `fresh` (снимется, TTL ещё не
+вышел), `manual-or-unknown-actor` (не снимется, держит человек), `disabled` (авто-resume выключен).
+В ответе тика, который снял паузу по TTL, лежит `auto_resume` с `resumed: true`, возрастом паузы и
+списками поднятых голов, так что снятие по TTL не путается ни с ручным resume, ни с обрывом.
+
 ## Вотчдоги ожиданий
 
 Диспетчер ждёт голову в двух точках: `waiting-worker-report` (карточка в In progress) и
 `waiting-review-verdict` (карточка в Validate). Раньше оба ожидания повторялись каждый тик без
 ограничения, и голова, умершая до отчёта, оставляла карточку висеть (secretary-637, secretary-649).
 
-Теперь каждое ожидание ограничено потолком по времени. Первое превышение — один respawn той же
-головы в том же воркспейсе, второе — карточка в Blocked с сигналом оператору.
+Теперь на каждом тике ожидания диспетчер сверяет сохранённые handle и `leafId` активной попытки с
+`orca terminal list`. Orca может выдать другой handle тому же pane, поэтому leafId остаётся
+стабильным токеном и для воркера, и для ревьюера. Отсутствующий или disconnected pane сразу запускает тот
+же путь, что и stall: один respawn в том же воркспейсе, затем Blocked с сигналом оператору.
+Ответ о недоступном runtime не считается смертью головы: тик возвращает
+`worker-runtime-unavailable` или `review-runtime-unavailable` и не трогает карточку только из-за
+ошибки инвентаря. Такой тик не доказывает прогресс, поэтому обычный потолок ожидания продолжает
+работать как fallback и по его истечении запускает обычный respawn/Blocked путь.
 
-Потолок — единственный сигнал, лайвнесс-проб нет намеренно. Заголовок терминала голова
-перезаписывает своей OSC-последовательностью сразу после старта, а orca `status:running`
-залипает на `working` после тихого выхода (637/649/654). Оба сигнала показали бы живую голову
-мёртвой и убивали бы здоровые карточки, поэтому потолки заданы с запасом.
+Наличие pane само по себе недостаточно. Инвентарь содержит `lastOutputAt`; диспетчер хранит
+последний вывод именно сохранённого pane, не всего воркспейса. Если вывод не меняется до потолка,
+срабатывает тот же watchdog. Так ловится экран логина и другой живой, но бездействующий head, а
+вывод случайного shell в том же worktree не маскирует проблему. Заголовок терминала и
+`status:running` по-прежнему не используются: голова переписывает title своей OSC-последовательностью,
+а `status:running` может залипнуть на `working` после тихого выхода.
+
+Каждый свежий сигнал прогресса начинает новое окно ожидания. Поэтому потолок означает, сколько
+голова молчит, а не сколько длится задача: пишущая вывод голова не получает respawn только из-за
+возраста карточки. Если `lastOutputAt` известен, но не сдвинулся дальше времени подъёма головы,
+действует отдельное короткое окно в 180 секунд: это ловит экран логина и другую голову, которая
+не напечатала ничего после запуска. После первого вывода действует только длинный потолок, потому
+что голова имеет право долго думать. У Codex TUI alternate screen может не обновлять
+`lastOutputAt`, поэтому для профилей `codex_mode: tui` сигнал дополняется mtime rollout JSONL,
+привязанного к worktree, а не к конкретному pane: активность другой Codex-сессии в том же worktree
+тоже обновит этот дополнительный сигнал. Это компромисс alternate screen, который проверяет только
+метаданные файла, не читает текст сессии. На старом
+Orca без `lastOutputAt` короткое окно не применяется, а потолок остаётся fallback. Первое
+превышение — один respawn той же головы в том же воркспейсе, второе — карточка в Blocked с
+сигналом оператору.
 
 Respawn пишет комментарий на доску, чтобы оператор отличал первое залипание от карточки, у которой
 голову уже перезапускали, не дожидаясь финального Blocked.
 
-- `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — потолок ожидания вердикта, дефолт 5400.
-- `SECRETARY_WORKER_REPORT_STALL_SECONDS` — потолок ожидания отчёта воркера, дефолт 21600.
+- `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — короткое окно первого вывода, дефолт 180 секунд.
+- `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — потолок ожидания вердикта после первого вывода,
+  дефолт 5400 секунд.
+- `SECRETARY_WORKER_REPORT_STALL_SECONDS` — потолок ожидания отчёта после первого вывода,
+  дефолт 21600 секунд.
 
-Обе переменные читаются в момент проверки; мусор или ноль в значении откатывается на дефолт, чтобы
+Все три переменные читаются в момент проверки; мусор или ноль в значении откатывается на дефолт, чтобы
 опечатка в юните не роняла старт диспетчера.
 
 Тело отчёта и вердикта голова пишет в файл вне воркспейса
@@ -311,3 +441,30 @@ python3 -m unittest discover -s tests
 guards, сканирует те же состояния карточек и прогоняет ту же логику решения, но первая же запись
 превращается в abort и попадает в отчёт как «что сделал бы следующий тик». Зелёный probe при
 сломанном тике невозможен — сломанный тик падает и здесь.
+
+### Готовность голов
+
+Перед новым worker- или reviewer-запуском диспетчер читает ресурс профиля из `heads/heads.yaml`
+и выполняет его `probe`. Вердикты лежат в
+`<data_dir>/dispatcher/resource_health.json`; их можно посмотреть без запуска карточки:
+
+```
+secretary dispatcher resource-health --instance <dir>
+```
+
+Проверка кэшируется на 300 секунд. Это ограничивает расход probe до одного дешёвого вызова на
+ресурс за окно, хотя production tick может идти чаще. `ready` разрешает запуск.
+`unauthenticated` и `unavailable` оставляют новую карточку в Ready до следующей проверки, без
+claim и без занятия project slot. Такой выбор не создаёт цикл claim/отказ и не превращает
+временную проблему провайдера в операторскую Blocked-карточку. Для уже взятой карточки повторный
+worker launch блокирует её с причиной, сохраняя контекст попытки.
+
+`unknown` означает, что сам probe не удалось надёжно выполнить или классифицировать. Он виден в
+снимке, но не запрещает запуск: сбой наблюдения не доказывает отказ ресурса и не может навсегда
+остановить очередь.
+
+Если `claude-sub` показывает `unauthenticated`, оператор запускает `/login` в интерактивном
+Claude, затем ждёт окончания TTL или проверяет следующий тик. Для `openai-sub` восстановите
+ChatGPT-сессию через `codex login` в том же `CODEX_HOME`, который указан у профиля. При
+`unavailable` не перезапускайте карточки: проверьте состояние провайдера, дождитесь следующего
+TTL и снимите `resource-health`; fallback-маршрутизация сюда не входит.

@@ -92,86 +92,17 @@ committed. Unresolved pending write блокирует согласованны�
 (`secretary-data/`) не считается за грязь, `--kind blocked` не гейтится (WIP допустим), а
 пост-фактум чек диспетчера остаётся как defense-in-depth.
 
+Диспетчер также запоминает SHA, отклонённый механическим гейтом или красным ревью в текущей
+попытке. `done` на том же SHA не идёт в Validate: первый такой отчёт возвращает воркера к
+доработке в том же воркспейсе с требованием нового коммита. Второй переводит карточку в Blocked,
+чтобы не крутить бесконечный rework-цикл. Если код осознанно не меняется, например дефект в тесте
+или самом гейте, воркер сообщает `report --kind blocked` с разбором вместо повторного `done`.
+
 Audit trail всегда пишется в data dir установки: `--data-dir`, иначе `SECRETARY_DATA_DIR`, иначе
 `data_dir` из instance config (`--instance` / `SECRETARY_INSTANCE`). Относительный `data_dir`
 резолвится от instance file, не от CWD, поэтому вызов из воркспейса чужого проекта не оставляет
 там `secretary-data/`. Если data dir не резолвится, команда падает с usage error вместо записи
 рядом с процессом.
-
-### Routing-телеметрия попыток
-
-Карточка не хранит историю роутинга: `resolved_review_head` стирается при уходе из Validate, а весь
-routing-блок сбрасывается при возврате в Ready. Поэтому «кто был воркером и кто ревьюером на попытке
-N» живёт только в append-only журнале, событиями `kind: "routing"`. Пишет их диспетчер, backend при
-этом не трогается: у события нет mutation, только запись в `events.ndjson` через обычный
-pending/commit путь, идемпотентная по `request_id`.
-
-Попытка (round) — это один подъём воркера плюс заработанное им ревью. Claim открывает попытку 1,
-каждый bounce на доработку (red-вердикт, red gate) открывает следующую; respawn той же головы
-остаётся в своей попытке. Возврат в Ready и повторный claim добавляют попытку, а не затирают
-предыдущую: номер берётся из журнала, а не из dispatcher state, поэтому переживает и потерю record,
-и restore.
-
-```json
-{"kind": "routing", "ref": "PROJECT-N", "payload": {
-  "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",
-  "heads": [{"role": "worker", "requested_head": "codex", "head": "codex",
-             "requested_from": "card", "resolved_from": "requested",
-             "fallback": false, "fallback_chain": [],
-             "adapter": "codex", "model": "gpt-5.6-terra", "effort": "default",
-             "codex_mode": "exec", "resource": "openai-sub", "account": "openai-subscription"}]}}
-```
-
-`phase` — `worker` (подъём воркера), `review` (подъём ревьюера), `verdict` (исход попытки, несёт обе
-головы, `outcome` = `green`/`red`), так что пары «воркер-ревьюер» группируются по исходу без join.
-
-Запись снимается после фактического подъёма и по той голове, которую вернул лаунчер, а не по
-повторному резолву карточки: конфигурация в записи — это конфигурация процесса, который работает.
-`CommandHostRuntime._launch` резолвит голову последним шагом перед стартом процесса и отдаёт
-`LaunchedHead(handle, head, run)`; `prepare_worker`, `restart_worker` и `start_review` пробрасывают
-это наверх, диспетчер кладёт `head` в record и пишет `run` в журнал. Каждый подъём внутри попытки
-пишет своё событие: respawn после молчания, recovery-перезапуск, rework. `request_id` включает дайджест конфигурации, так
-что повторный подъём той же головы коммитится один раз (идемпотентность), а подъём на другой
-adapter/model/resource добавляет второе событие и заменяет активную голову попытки — вердикт всегда
-несёт ту голову, которая его выдала. `attempts()` отдаёт все подъёмы попытки в `worker_runs` /
-`reviewer_runs`, а `worker` / `reviewer` — те, что относятся к вердикту.
-
-Имя профиля не является историческим ключом: `codex`, `codex-terra`, `codex-high` и `codex-extra` —
-одна модель с разным effort, `claude-default` вообще не пинит модель, профили перепиниваются. Поэтому
-каждая голова несёт конфигурацию запуска целиком, снятую в момент подъёма и больше не перечитываемую
-из `heads.toml`.
-
-`requested_head` — голова, на которую карточку сроутили до любого fallback, `head` — та, что реально
-поднялась; `fallback` = они различаются. Расхождение возникает двумя дорогами. Первая — резолвер
-самого подъёма (`InstanceCatalog.resolve_head`): если resource запрошенного профиля красный, он идёт
-breadth-first по объявленным `fallback`-цепочкам до профиля на зелёном resource, и именно так
-`codex-reviewer` поднимается как `claude-opus`. Ревьюер резолвится на своём подъёме, а не на claim:
-resource может покраснеть за те часы, что карточка была у воркера. Цепочка, которая никуда не ведёт
-(пустая или вся красная), резолвится обратно в запрошенную голову — диспетчер не придумывает
-маршрут, подъём падает своими силами. Вторая дорога — retry-путь: он пинит свой выбор в метаданные
-карточки `head` / `retry_heads`, и тогда `requested_head` берётся из `retry_heads` (первый элемент —
-ask до переключения, `requested_from: "retry_history"`). `resolved_from` говорит, какая это была
-дорога:
-
-- `requested` — расхождения нет;
-- `health_fallback` — резолвер обошёл красный resource по цепочке (`codex-reviewer` → `claude-opus`);
-- `retry_switch` — голову переключил retry-путь;
-- `launch` — подъём поднял не то, что карточка просит сейчас (перепин `heads.toml` или
-  `head`-метаданных после claim).
-
-Здоровье resource'ов диспетчер только читает, сам не пробит: пробы стоят квоту и уже ходят по своему
-таймеру. Источник — `<instance>/state/heads/resource_health.json` (или путь из
-`SECRETARY_RESOURCE_HEALTH`), формат `{"openai-sub": {"status": "red", "checked_at": 1784941231.2}}`.
-Нет файла, битый файл или запись старше `SECRETARY_RESOURCE_HEALTH_TTL_S` (по умолчанию 900 c) — это
-«неизвестно», а неизвестное считается зелёным: пропавшая проба не должна молча перекинуть очередь на
-другое семейство моделей.
-
-`fallback_chain` — цепочка, объявленная запрошенным профилем на момент этого подъёма, а не выведенная
-задним числом из сегодняшнего `heads.toml`.
-
-Читающая сторона — `secretary.routing_journal.attempts(events, ref)`: последовательность попыток
-завершённой карточки с головами и исходом. События попадают в recovery checkpoint вместе с остальным
-`events.ndjson` и восстанавливаются при materialize.
 
 ## Production dispatcher
 
@@ -190,6 +121,35 @@ owner записан в dispatcher state; несовпадение owner, dirty 
 
 Старые pilot/cutover subcommands остаются compatibility recovery surface текущей версии, но не
 являются путём установки нового instance.
+
+## Пауза
+
+Пауза общая для пайплайна и живёт поверх продуктового диспетчера:
+
+```bash
+python3 -m secretary pause drain|freeze --instance INSTANCE --reason "почему"
+python3 -m secretary resume --instance INSTANCE
+python3 -m secretary pause-status --instance INSTANCE
+```
+
+Контракт режимов: `drain` останавливает claim новых карточек и диспатч фоновых ролей, но уже
+идущие карточки доезжают цикл; `freeze` дополнительно останавливает живые головы воркера и
+ревьюера (`stop`, никогда `teardown`) и замораживает тик целиком — ничего не продвигается и ни
+один вотчдог не срабатывает на голову, остановленную намеренно. `resume` поднимает остановленные
+головы в тех же воркспейсах, отдаёт карточку с уже поставленным отчётом ближайшему тику и
+перезапускает окна вотчдогов.
+
+Флаг: `<data_dir>/dispatcher/pause.json`, читается каждым `production-tick`. Зеркало для фоновых
+ролей — легаси `state/pipeline/pause.json`; его пишет и снимает та же команда. Легаси-вход
+`triggered_agents pipeline pause|resume` отказывает и указывает на продуктовую команду.
+
+Оператор при freeze может исключить свой собственный воркспейс (`--exclude-workspace`): этим
+пользуется `secretary backup create`, который замораживает пайплайн из воркера.
+
+Freeze, поставленный автоматикой из allowlist `TA_HARD_PAUSE_AUTO_RESUME_ACTORS`, истекает через
+`TA_HARD_PAUSE_AUTO_RESUME_TTL_S` (по умолчанию 45 минут): тик проверяет это до freeze-skip и
+снимает паузу продуктовым `resume` под тем же tick lock. Freeze от человека держится до явного
+`resume`. Замороженный тик карточки не двигает, но checkpoint пишет и пушит.
 
 ## Подключение проекта
 
@@ -226,5 +186,22 @@ python3 -m secretary memory reindex --instance INSTANCE
 Writer operations требуют actor и проходят journal protocol; прямые edits минуют audit trail.
 `reindex` меняет только derived index и не должен пересекаться с другим index writer. Model и
 dimension берутся из instance configuration.
+
+## Knowledge
+
+Длинные восстановимые документы (брейнштормы, журналы решений, разборы инцидентов) лежат в
+`state/knowledge/<раздел>/<документ>.md`. Разделение с curated memory и Pipeline описано в
+[Архитектуре](ARCHITECTURE.md#плоскости-знания).
+
+```bash
+python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+  --path decisions/2026-07-25-sprint-1.md --file DOC.md
+python3 -m secretary knowledge list --instance INSTANCE
+```
+
+`write` перезаписывает документ целиком и коммитит только `state/knowledge` под общим writer lock,
+поэтому ручной `git commit` в instance-репозитории не нужен и с тиковым писателем не гоняется.
+Документ с секретом отклоняется с кодом 2, и на диск ничего не попадает. Повторная запись того же
+содержимого возвращает `changed: false` и нового коммита не делает.
 
 Data-plane, archive restore и unit runbooks находятся в [Operations](OPERATIONS.md).

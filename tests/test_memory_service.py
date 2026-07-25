@@ -6,9 +6,10 @@ from unittest import mock
 
 try:
     import numpy as np
-    from secretary import memory_service
+    from secretary import memory_reindex, memory_service
 except ImportError:  # The base install deliberately excludes the heavy memory extra.
     np = None
+    memory_reindex = None
     memory_service = None
 
 
@@ -149,6 +150,50 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         update_index.assert_called_once_with()
         rebuild_index.assert_not_called()
         self.assertEqual(self.calls, [])
+
+    def test_embedder_uses_configured_persistent_cache_and_thread_limit(self):
+        fake_embedding = mock.Mock()
+        with (
+            mock.patch.object(memory_service, "_embedder", None),
+            mock.patch.object(memory_service, "TextEmbedding", return_value=fake_embedding) as embedding,
+            mock.patch.object(memory_service, "MODEL", "test-model"),
+            mock.patch.object(memory_service, "MODEL_CACHE_DIR", self.root / "fastembed-cache"),
+            mock.patch.object(memory_service, "THREADS", 1),
+        ):
+            self.assertIs(memory_service.embedder(), fake_embedding)
+
+        embedding.assert_called_once_with(
+            model_name="test-model", cache_dir=str(self.root / "fastembed-cache"), threads=1
+        )
+
+    def test_offline_rebuild_fallback_uses_configured_cache_and_thread_limit(self):
+        self.write_export([("global/a", "alpha")])
+        cache_dir = self.root / "fastembed-cache"
+        with mock.patch.object(
+            memory_service, "build_document_embedder", return_value=self.embed
+        ) as build_embedder:
+            result = memory_service.offline_rebuild(
+                self.canon, self.export, self.db, "test-model", 4,
+                cache_dir=cache_dir, threads=2,
+            )
+
+        self.assertTrue(result["ok"])
+        build_embedder.assert_called_once_with("test-model", cache_dir, 2)
+
+    def test_reindex_entrypoint_forwards_cache_and_thread_limit(self):
+        cache_dir = self.root / "fastembed-cache"
+        with mock.patch.object(memory_service, "offline_rebuild", return_value={"ok": True}) as rebuild:
+            self.assertEqual(
+                memory_reindex.rebuild(
+                    self.canon, self.export, self.db, "test-model", 4,
+                    cache_dir=cache_dir, threads=2,
+                ),
+                {"ok": True},
+            )
+
+        rebuild.assert_called_once_with(
+            self.canon, self.export, self.db, "test-model", 4, None, False, cache_dir, 2
+        )
 
 
 if __name__ == "__main__":

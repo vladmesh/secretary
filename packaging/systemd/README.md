@@ -13,9 +13,9 @@ so editing a template or changing the installation layout makes the next apply u
 
 Every unit name here must fall under the instance's `host.unit_prefix`, and its component name (the
 file name minus that prefix and the suffix) is what `host.components` opts out of. Paths in
-committed templates contain placeholders for that layout. `secretary-orca.service` is installed
-early by bootstrap from this same catalogue, then recorded in `host-managed.json` so the first
-reconcile owns it without an adoption step. Run `systemd-analyze verify` on anything you change.
+committed templates contain placeholders for that layout. Orca itself is a host-owned runtime:
+Secretary orders its ticks after `orca-server.service` but never starts, owns or replaces that
+unit. Run `systemd-analyze verify` on anything you change.
 A unit already on the host is never overwritten until it is adopted; apply refuses to write over a
 name it cannot prove it owns.
 

@@ -326,47 +326,6 @@ class TaskWriterTests(unittest.TestCase):
         with open(audit.events_path, encoding="utf-8") as events:
             self.assertEqual(len(events.readlines()), 1)
 
-    def test_routing_is_dispatcher_only_and_needs_a_head(self) -> None:
-        with self.assertRaisesRegex(TaskError, "not permitted") as raised:
-            self.writer.routing(
-                role="worker", actor="w", reference="secretary-468",
-                payload={"attempt": 1, "phase": "worker", "heads": [{"role": "worker"}]},
-            )
-        self.assertEqual(raised.exception.code, "role_forbidden")
-        with self.assertRaisesRegex(TaskError, "unknown routing phase"):
-            self.writer.routing(
-                role="dispatcher", actor="d", reference="secretary-468",
-                payload={"attempt": 1, "phase": "merge", "heads": [{"role": "worker"}]},
-            )
-        with self.assertRaisesRegex(TaskError, "at least one head"):
-            self.writer.routing(
-                role="dispatcher", actor="d", reference="secretary-468",
-                payload={"attempt": 1, "phase": "worker", "heads": []},
-            )
-        self.assertEqual(self.client.calls, [])
-
-    def test_routing_appends_to_the_journal_without_touching_the_card(self) -> None:
-        payload = {
-            "attempt": 1, "attempt_id": "attempt-x", "phase": "worker", "outcome": "",
-            "heads": [{"role": "worker", "requested_head": "codex", "head": "codex"}],
-        }
-        first = self.writer.routing(
-            role="dispatcher", actor="d", reference="secretary-468",
-            payload=payload, request_id="routing-1",
-        )
-        second = self.writer.routing(
-            role="dispatcher", actor="d", reference="secretary-468",
-            payload=payload, request_id="routing-1",
-        )
-
-        self.assertEqual(first["event_id"], second["event_id"])
-        self.assertNotIn("saveTaskMetadata", [call[0] for call in self.client.calls])
-        self.assertNotIn("createComment", [call[0] for call in self.client.calls])
-        events = TaskAudit(self.tmpdir.name).events("secretary-468", kind="routing")
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["payload"]["heads"][0]["head"], "codex")
-        self.assertEqual(events[0]["actor"], {"role": "dispatcher", "id": "d"})
-
     def test_backend_failure_removes_uncommitted_pending_record(self) -> None:
         self.client.fail_comments = True
         with self.assertRaisesRegex(TaskError, "rejected"):

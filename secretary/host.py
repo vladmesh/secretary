@@ -83,6 +83,9 @@ class SystemdLayout:
     runtime_user: str
     runtime_home: Path
     orca_executable: Path = Path("/usr/local/bin/orca")
+    memory_model: str = "intfloat/multilingual-e5-large"
+    memory_dim: int = 1024
+    memory_threads: int = 1
 
 
 def default_systemd_layout() -> SystemdLayout:
@@ -100,6 +103,9 @@ def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
         b"{{SECRETARY_RUNTIME_USER}}": layout.runtime_user.encode(),
         b"{{SECRETARY_RUNTIME_HOME}}": os.fsencode(layout.runtime_home),
         b"{{SECRETARY_ORCA_EXECUTABLE}}": os.fsencode(layout.orca_executable),
+        b"{{SECRETARY_MEMORY_MODEL}}": layout.memory_model.encode(),
+        b"{{SECRETARY_MEMORY_DIM}}": str(layout.memory_dim).encode(),
+        b"{{SECRETARY_MEMORY_THREADS}}": str(layout.memory_threads).encode(),
     }
     rendered = template
     for marker, value in values.items():
@@ -470,6 +476,7 @@ class Expectations:
     projects_root: str = ""
     foreign_units: set[str] = field(default_factory=set)
     unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    external_runtime: str = ""
     project_error: str = ""
 
 
@@ -569,6 +576,7 @@ def build_doctor_expectations(
             runtime[name] = (True, True)
         elif unit is None or not unit.oneshot:
             runtime[name] = (True, True)
+    runtime["orca-server.service"] = (False, True)
     return Expectations(
         projects=projects,
         units=units,
@@ -577,6 +585,10 @@ def build_doctor_expectations(
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
         foreign_units=foreign_units(host),
         unit_runtime=runtime,
+        # The headless server belongs to the Orca installation, not Secretary.
+        # Keep it out of unit ownership parity while still requiring it to be
+        # active before the scheduler can use the local runtime.
+        external_runtime="orca-server.service",
         project_error=project_error,
     )
 
@@ -671,13 +683,34 @@ class FixtureHostSource(HostSource):
             )
         projects, project_error = self._projects(expected)
         units, unit_error = self._lines("units.txt")
+        states, state_error = self._unit_states()
         repos, repo_error = self._lines("orca-repos.txt")
         errors = {
             kind: reason for kind, reason in (
-                ("projects", project_error), ("units", unit_error), ("orca repos", repo_error)
+                ("projects", project_error), ("units", unit_error or state_error), ("orca repos", repo_error)
             ) if reason
         }
-        return CollectResult(HostInventory(projects, units, repos), errors)
+        return CollectResult(HostInventory(projects, units, repos, states), errors)
+
+    def _unit_states(self) -> tuple[dict[str, tuple[str, str]], str]:
+        """Optional fixture runtime states: ``unit enabled active`` per line."""
+        try:
+            path = self.root / "unit-states.txt"
+            if not path.is_file():
+                return {}, ""
+            states: dict[str, tuple[str, str]] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                fields = line.split()
+                if not fields or fields[0].startswith("#"):
+                    continue
+                if len(fields) != 3:
+                    return {}, "fixture unit states are invalid"
+                states[fields[0]] = (fields[1], fields[2])
+            return states, ""
+        except UnicodeError:
+            return {}, "fixture unit states are not valid UTF-8"
+        except OSError:
+            return {}, "fixture unit states are unreadable"
 
 
 @dataclass(frozen=True)
@@ -785,7 +818,7 @@ class LiveHostSource(HostSource):
                 names.add(token)
         states: dict[str, tuple[str, str]] = {}
         for name in expected.unit_runtime:
-            if name not in names:
+            if name not in names and name != expected.external_runtime:
                 continue
             enabled = self._run(["systemctl", "is-enabled", name])
             active = self._run(["systemctl", "is-active", name])

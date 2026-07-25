@@ -21,7 +21,8 @@ state. Instance содержит persona, project bindings, adapters, policies �
 git checkpoint или archive payload. Структурированный реестр проектов живёт только в
 `secretary-instance/projects/`.
 
-`secretary-instance/state/` хранит нормализованный recovery-канон: board, runs и memory facts.
+`secretary-instance/state/` хранит нормализованный recovery-канон: board, runs, memory facts и
+knowledge-документы.
 `secretary-data` остаётся локальным рабочим data plane для task audit, dispatcher state, derived
 exports/index, search log, raw dumps, transcripts и artifacts. SQLite/vector index, worktrees,
 терминалы и generated host resources считаются производными и в checkpoint не входят.
@@ -70,6 +71,21 @@ writer может публиковать производное состояни
 Embedding model загружается локально. В production-проверке startup достигал примерно 1.9 GiB RSS;
 отдельный target с 1.9 GiB общей RAM не смог выполнить live rebuild. Точный поддерживаемый minimum
 ещё должен быть определён clean-host тестами.
+
+## Плоскости знания
+
+Знание разложено на три плоскости, и вопрос «куда это писать» решается по длине и назначению
+записи. Pipeline board хранит исполняемую работу: карточки, спеки, статусы. Curated memory
+(`state/memory/facts`) хранит короткий актуальный вывод, который голова должна получить в контекст
+через `memory_search`. Knowledge (`state/knowledge`) хранит длинное рассуждение и контекст, из
+которого вывод получился: брейнштормы, журналы решений, разборы инцидентов.
+
+Knowledge не индексируется, не попадает в `memory_search` и целиком в контекст голов не грузится.
+Документ читают адресно, когда нужна история вопроса. Формат свободный: это обычный tracked
+markdown, никакого frontmatter или метаданных писатель не требует. Пишут через
+`secretary knowledge write`; писатель владеет только `state/knowledge`, берёт общий instance-repo
+writer lock и проверяет документ на секреты, поэтому ручной `git commit` в knowledge не нужен и
+гонки с тиковым писателем не создаёт.
 
 ## Ownership и безопасность
 

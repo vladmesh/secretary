@@ -13,7 +13,6 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
 )
 from secretary.data import DataExport
-from secretary.routing_journal import attempts
 from secretary.tasks import TaskAudit
 
 
@@ -154,45 +153,6 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("state/board/.gitignore", files)
         ignore = (self.instance_dir / "state" / "board" / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("cards.json", ignore.splitlines())
-
-    def test_routing_attempts_reach_the_committed_checkpoint(self):
-        """secretary-716: attempt telemetry is journal-only, so a restore that replays the
-        checkpoint has to hand back the worker/reviewer pair of every attempt."""
-        audit = TaskAudit(self.data_dir)
-        for phase, heads, outcome in (
-            ("worker", [{"role": "worker", "requested_head": "codex", "head": "codex",
-                         "adapter": "codex", "model": "gpt-5.6-terra", "effort": "default"}], ""),
-            ("review", [{"role": "reviewer", "requested_head": "codex-reviewer", "head": "claude-opus",
-                         "adapter": "claude", "model": "opus", "fallback": True}], ""),
-            ("verdict", [{"role": "worker", "requested_head": "codex", "head": "codex"},
-                         {"role": "reviewer", "requested_head": "codex-reviewer", "head": "claude-opus"}], "green"),
-        ):
-            audit.append(
-                f"routing-{phase}",
-                {
-                    "event_id": f"evt_{phase}", "schema_version": 1, "kind": "routing",
-                    "occurred_at": "2026-07-24T00:00:00Z", "outcome": "success",
-                    "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
-                    "task_id": "task_kanboard_1", "ref": "secretary-637",
-                    "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
-                    "request_id": f"routing-{phase}",
-                    "payload": {
-                        "attempt": 1, "attempt_id": "attempt-1", "phase": phase,
-                        "outcome": outcome, "heads": heads,
-                    },
-                },
-            )
-
-        result = self.write()
-
-        self.assertEqual(result.status, "committed")
-        committed = git(self.instance_dir, "show", "HEAD:state/board/events.ndjson")
-        history = attempts([json.loads(line) for line in committed.splitlines() if line.strip()])
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0].worker.resolved, "codex")
-        self.assertEqual(history[0].reviewer.resolved, "claude-opus")
-        self.assertTrue(history[0].reviewer.fallback)
-        self.assertEqual(history[0].outcome, "green")
 
     def test_unchanged_state_skips_the_commit(self):
         first = self.write()

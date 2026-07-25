@@ -259,60 +259,6 @@ def resolve_packaged(
     return packaged
 
 
-def materialize_orca_service(
-    instance: dict[str, Any],
-    bindings: list[dict[str, Any]],
-    packaged: list[PackagedUnit],
-    manifest_path: Path,
-    units: UnitInstaller,
-    *,
-    dry_run: bool = False,
-) -> bool:
-    """Install and start the Orca service before its ownership is migrated.
-
-    A legacy installation can declare this unit foreign while it still needs the
-    service to make the rest of an upgrade possible.  In that state a missing
-    unit may be created and enabled, but no managed record is written.  The
-    normal materializer remains responsible for adopting it once the foreign
-    declaration is removed.
-    """
-    orca_units = [unit for unit in packaged if unit.component == "orca" and unit.name.endswith(".service")]
-    if len(orca_units) != 1:
-        raise ValueError("product must ship exactly one Orca service")
-    unit = orca_units[0]
-    host = instance.get("host", {}) if isinstance(instance, dict) else {}
-    foreign = unit.name in foreign_units(host if isinstance(host, dict) else {})
-    desired = {resource.name: resource for resource in build_plan(instance, bindings, packaged=packaged)}
-    resource = desired.get(unit.name)
-    if resource is None and not foreign:
-        raise ValueError("Orca service is disabled in the instance configuration")
-    managed, error = strict_manifest(manifest_path)
-    if error:
-        raise ValueError(error)
-    records = {item.logical_id: item for item in managed}
-    owned = records.get(resource.logical_id) if resource is not None else None
-    installed = units.installed(unit.name)
-    wrote_unit = False
-    if installed is None:
-        wrote_unit = True
-        if not dry_run:
-            units.install(unit)
-            units.daemon_reload()
-    elif not foreign and owned != resource:
-        raise HostCommandError(f"Orca service exists but is not owned by this instance: {unit.name}")
-    elif owned == resource and installed != unit.content:
-        wrote_unit = True
-        if not dry_run:
-            units.install(unit)
-            units.daemon_reload()
-    if resource is not None and owned != resource and not dry_run:
-        records[resource.logical_id] = resource
-        _write_manifest(manifest_path, records.values())
-    if not dry_run:
-        units.enable(unit.name)
-    return wrote_unit
-
-
 def find_orca_executable(runtime_user: str, runtime_home: Path | None = None) -> Path | None:
     """Find the pinned runtime or the legacy CLI owned by the runtime user."""
     if runtime_home is None:
@@ -371,6 +317,7 @@ def resolve_systemd_layout(
     except KeyError:
         raise ValueError(f"installation user does not exist: {user}") from None
     executable = orca_executable or find_orca_executable(user, home) or Path("/usr/local/bin/orca")
+    host = instance.get("host", {}) if isinstance(instance.get("host"), dict) else {}
     return SystemdLayout(
         product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
         instance_path=target,
@@ -378,6 +325,9 @@ def resolve_systemd_layout(
         runtime_user=user,
         runtime_home=home,
         orca_executable=executable,
+        memory_model=host.get("memory_model", "intfloat/multilingual-e5-large"),
+        memory_dim=host.get("memory_dim", 1024),
+        memory_threads=host.get("memory_threads", 1),
     )
 
 
@@ -542,7 +492,6 @@ __all__ = [
     "SystemdUnitInstaller",
     "UnitInstaller",
     "apply_host",
-    "materialize_orca_service",
     "pinned_orca_executable",
     "resolve_packaged",
     "resolve_systemd_layout",

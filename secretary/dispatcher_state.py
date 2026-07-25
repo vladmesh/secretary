@@ -6,7 +6,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,11 @@ class DispatcherRecord:
     # rollup first went non-terminal, driving the pending watchdog.
     gate_state: str = ""
     gate_pending_since: float = 0.0
+    # Last checkout rejected by a mechanical gate or red review in this attempt. A worker that
+    # reports done again at this exact SHA has not produced a new result, so the dispatcher can
+    # return it to rework once and then escalate instead of looping forever.
+    rejected_sha: str = ""
+    rejected_done_reports: int = 0
     # Reviewer pane (secretary-651). The reviewer runs in its own split pane inside the worker's
     # worktree, so its terminal handle must be tracked apart from `handle` (the worker's) or
     # stopping one takes down the other and recovery cannot tell them apart. review_leaf is the
@@ -48,26 +53,28 @@ class DispatcherRecord:
     review_handle: str = ""
     review_leaf: str = ""
     review_commit: str = ""
+    # The worker pane has the same handle-alias problem as the reviewer pane.  Keep its leafId
+    # too, so an inventory alias cannot turn a live worker into a missing-terminal respawn.
+    worker_leaf: str = ""
     # Wait watchdogs (secretary-654): when the current wait for a worker report / review
     # verdict started, and how many times that wait has already respawned its head. Both
     # reset whenever the card enters a fresh wait of that kind.
     worker_waiting_since: float = 0.0
     worker_respawns: int = 0
+    # Most recent output from the tracked head pane.  This is deliberately pane-scoped: output
+    # from an unrelated shell in the same worktree must not keep a broken head alive.
+    worker_started_at: float = 0.0
+    worker_progress_at: float = 0.0
     review_waiting_since: float = 0.0
     review_respawns: int = 0
-    # Routing telemetry (secretary-716). attempt_round counts the card's worker rounds: claim opens
-    # round 1, every rework bounce (red verdict, red gate) opens the next one. worker_run/review_run
-    # are the launch snapshots of the heads currently serving that round — kept here so the verdict
-    # record reports the configuration the heads actually started with rather than re-reading a
-    # `heads.toml` that may have been edited since. Canon is the journal; this is the live copy.
-    attempt_round: int = 0
-    worker_run: dict[str, Any] = field(default_factory=dict)
-    review_run: dict[str, Any] = field(default_factory=dict)
-    # The reviewer profile the card asks for, kept unresolved. `review_head` holds what claim
-    # resolved and then what actually launched; the reviewer starts hours after the claim, so it
-    # resolves again from this ask at its own bring-up. Otherwise a resource that was red at claim
-    # pins the fallback head onto a reviewer that could have run on the requested one.
-    requested_review_head: str = ""
+    review_started_at: float = 0.0
+    review_progress_at: float = 0.0
+    # Pause (secretary-731): when a freeze stopped this card's worker / reviewer head, 0.0 when it
+    # did not. A head with an empty handle is otherwise indistinguishable from one that died, so
+    # these are what let the tick log and pause-status say "stopped on purpose". Cleared on resume,
+    # by the relaunch or by the decision not to relaunch.
+    paused_worker_at: float = 0.0
+    paused_reviewer_at: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -75,23 +82,28 @@ class DispatcherRecord:
             "comment_baseline": self.comment_baseline,
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
-            "attempt_round": self.attempt_round,
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
-            "review_run": self.review_run,
-            "worker_run": self.worker_run,
+            "paused_reviewer_at": self.paused_reviewer_at,
+            "paused_worker_at": self.paused_worker_at,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "review_handle": self.review_handle,
             "review_head": self.review_head,
-            "requested_review_head": self.requested_review_head,
             "review_leaf": self.review_leaf,
+            "review_progress_at": self.review_progress_at,
             "review_respawns": self.review_respawns,
+            "review_started_at": self.review_started_at,
             "review_waiting_since": self.review_waiting_since,
+            "rejected_done_reports": self.rejected_done_reports,
+            "rejected_sha": self.rejected_sha,
             "state": self.state,
             "worker": self.worker,
+            "worker_leaf": self.worker_leaf,
+            "worker_progress_at": self.worker_progress_at,
             "worker_respawns": self.worker_respawns,
+            "worker_started_at": self.worker_started_at,
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
         }
@@ -104,7 +116,6 @@ class DispatcherRecord:
             handle=str(payload.get("handle") or ""),
             head=str(payload.get("head") or ""),
             review_head=str(payload.get("review_head") or ""),
-            requested_review_head=str(payload.get("requested_review_head") or ""),
             attempt_id=str(payload.get("attempt_id") or ""),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
@@ -112,21 +123,23 @@ class DispatcherRecord:
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
+            rejected_sha=str(payload.get("rejected_sha") or ""),
+            rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),
+            worker_leaf=str(payload.get("worker_leaf") or ""),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
+            worker_started_at=float(payload.get("worker_started_at") or 0.0),
+            worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
-            attempt_round=int(payload.get("attempt_round") or 0),
-            worker_run=_run_snapshot(payload.get("worker_run")),
-            review_run=_run_snapshot(payload.get("review_run")),
+            review_started_at=float(payload.get("review_started_at") or 0.0),
+            review_progress_at=float(payload.get("review_progress_at") or 0.0),
+            paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
+            paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
         )
-
-
-def _run_snapshot(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
 
 
 class CutoverState:
