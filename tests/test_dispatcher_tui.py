@@ -9,6 +9,7 @@ from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_launcher import HeadLaunch
+from secretary.dispatcher_state import DispatcherRecord
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -166,6 +167,33 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertEqual(handle, "term-tui")
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
+    def test_tui_activity_uses_rollout_mtime_only_for_tui_profiles(self) -> None:
+        """Alternate-screen TUI output gets a progress signal without masking exec stalls."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = ActivityCatalog()
+            host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
+            task = {"routing": {}}
+            tui_record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="codex-tui",
+                review_head="codex-tui", attempt_id="attempt", comment_baseline=0,
+                review_baseline=0, state="claimed", claimed_at=0.0,
+            )
+            exec_record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="codex-exec",
+                review_head="codex-exec", attempt_id="attempt", comment_baseline=0,
+                review_baseline=0, state="claimed", claimed_at=0.0,
+            )
+
+            with mock.patch(
+                "triggered_agents.agents.pipeline.codex_sessions.latest_activity_for",
+                return_value=123.0,
+            ) as latest_activity:
+                self.assertEqual(host.codex_tui_activity(task, tui_record, "worker"), 123.0)
+                self.assertIsNone(host.codex_tui_activity(task, exec_record, "worker"))
+
+        latest_activity.assert_called_once_with(str(root))
+
 
 class TuiCatalog:
     def __init__(self) -> None:
@@ -189,6 +217,19 @@ class TuiCatalog:
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox",
             prompt_after_start=True,
         )
+
+
+class ActivityCatalog:
+    def __init__(self) -> None:
+        self._heads = {
+            "profiles": {
+                "codex-tui": {"adapter": "codex", "codex_mode": "tui"},
+                "codex-exec": {"adapter": "codex", "codex_mode": "exec"},
+            },
+        }
+
+    def _head_profile(self, head: str) -> dict:
+        return self._heads["profiles"][head]
 
 
 class RecordingTuiHost(CommandHostRuntime):

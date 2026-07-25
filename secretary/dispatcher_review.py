@@ -20,7 +20,7 @@ def command_terminal_status(
     report a degraded runtime without restarting a head on a transport failure.
     """
     if host.mode == "noop":
-        return {"known": True, "live": False, "reason": "noop"}
+        return {"known": True, "live": True, "reason": "noop"}
     if not record.workspace:
         raise HostError(f"{kind} workspace is unavailable")
     data = host._run_json([

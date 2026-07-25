@@ -317,10 +317,10 @@ class CommandHostRuntime:
         self, task: dict[str, Any], record: DispatcherRecord, kind: str
     ) -> float | None:
         """Return Codex TUI rollout activity without reading the session contents."""
-        if not isinstance(getattr(self, "_heads", None), dict):
+        if not isinstance(getattr(self.catalog, "_heads", None), dict):
             return None
         head = record.review_head if kind == "review" else record.head
-        profile = self._head_profile(head)
+        profile = self.catalog._head_profile(head)
         mode = (
             task.get("routing", {}).get("codex_launch_mode")
             or profile.get("codex_mode", "exec")
