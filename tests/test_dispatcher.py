@@ -19,8 +19,10 @@ from secretary.dispatcher import (
     DispatcherError,
     DispatcherRuntime,
     FileLegacyPauseProbe,
+    HeadResolution,
     HostError,
     InstanceCatalog,
+    LaunchedHead,
     LegacyPauseSnapshot,
     PilotSelector,
     _legacy_worker_branch,
@@ -32,7 +34,7 @@ from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
-from secretary.head_registry import canonical_heads
+from secretary.head_registry import canonical_heads, render_snapshot
 from secretary.routing_journal import HeadRun, attempts as routing_attempts, head_run_from_profile
 from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
@@ -157,6 +159,9 @@ class FakeCatalog:
             "openai-sub": {"account": "openai-subscription"},
             "claude-sub": {"account": "claude-subscription"},
         }
+        # Resources a test has reddened; the resolver walks the fallback chain around them exactly
+        # as InstanceCatalog does off the health file.
+        self.red: set[str] = set()
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
@@ -193,11 +198,14 @@ class FakeCatalog:
             switched = ""
         asked = str(override) if override else default
         requested = switched or asked
-        resolved = str(launched) if launched else asked
+        resolution = self.resolve_head(asked)
+        resolved = str(launched) if launched else resolution.resolved
         if resolved == requested:
             resolved_from = "requested"
         elif switched and resolved == asked:
             resolved_from = "retry_switch"
+        elif resolved == resolution.resolved and resolution.fallback:
+            resolved_from = "health_fallback"
         else:
             resolved_from = "launch"
         return head_run_from_profile(
@@ -218,6 +226,25 @@ class FakeCatalog:
             return ""
         return str(heads[0] or "")
 
+    def resolve_head(self, requested: str) -> HeadResolution:
+        """Same walk as InstanceCatalog.resolve_head over this three-profile registry."""
+        seen: set[str] = set()
+        skipped: list[str] = []
+        queue = [str(requested)]
+        while queue:
+            head = queue.pop(0)
+            if head in seen:
+                continue
+            seen.add(head)
+            profile = self.profiles.get(head)
+            if not isinstance(profile, dict):
+                continue
+            if str(profile.get("resource") or "") not in self.red:
+                return HeadResolution(requested=requested, resolved=head, skipped=tuple(skipped))
+            skipped.append(head)
+            queue.extend(str(item) for item in profile.get("fallback") or [])
+        return HeadResolution(requested=requested, resolved=requested, skipped=tuple(skipped))
+
     def binding(self, project: str) -> dict:
         binding = {"repo": f"/home/dev/{project}"}
         if self._default_branch:
@@ -226,8 +253,11 @@ class FakeCatalog:
 
 
 class FakeHost:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, catalog: FakeCatalog | None = None) -> None:
         self.root = root
+        # The real host resolves the head at bring-up and hands the launch snapshot back; the fake
+        # goes through the same catalog so a reddened resource reaches the routing journal here too.
+        self.catalog = catalog or FakeCatalog()
         # Ordered log of every host call. The per-method lists below answer "did it happen"; this
         # answers "in what order", which some invariants depend on (complete_green must push from
         # the workspace before teardown removes it).
@@ -269,7 +299,7 @@ class FakeHost:
         *,
         attempt_id: str = "",
         require_existing_workspace: bool = False,
-    ) -> dict[str, str]:
+    ) -> dict:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
         if self.fail_prepare_reason:
@@ -277,10 +307,13 @@ class FakeHost:
         workspace = self.root / worker_id
         workspace.mkdir(parents=True, exist_ok=True)
         self.prepared.append(task["ref"])
+        launched = self._launched(f"term:{worker_id}", head, task, "worker")
         return {
             "workspace": str(workspace),
-            "handle": f"term:{worker_id}",
+            "handle": launched.handle,
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
+            "head": launched.head,
+            "run": launched.run,
         }
 
     def start_review(self, task: dict, record) -> ReviewLaunch:
@@ -291,18 +324,29 @@ class FakeHost:
         # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
+        launched = self._launched(f"review:{task['ref']}", record.review_head, task, "reviewer")
         return ReviewLaunch(
-            handle=f"review:{task['ref']}",
+            handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
             commit=self.commit,
+            head=launched.head,
+            run=launched.run,
         )
 
-    def restart_worker(self, task: dict, record) -> str:
+    def restart_worker(self, task: dict, record) -> LaunchedHead:
         self.calls.append("restart_worker")
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
         self.prepared.append(task["ref"])
-        return f"rework:{task['ref']}"
+        return self._launched(f"rework:{task['ref']}", record.head, task, "worker")
+
+    def _launched(self, handle: str, head: str, task: dict, role: str) -> LaunchedHead:
+        resolved = self.catalog.resolve_head(head).resolved
+        return LaunchedHead(
+            handle=handle,
+            head=resolved,
+            run=self.catalog.head_run(task, role=role, launched=resolved).to_json(),
+        )
 
     def review_running(self, task: dict, record) -> bool:
         self.calls.append("review_running")
@@ -429,9 +473,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # workspace is pinned off the repo checkout: these tests stand in for a worker
         # report, and the done gate would otherwise read this repo's own working tree.
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
-        self.host = FakeHost(self.data_dir / "workspaces")
         self.legacy_pause = FakeLegacyPause()
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
+        self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -2095,6 +2139,37 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual((worker.adapter, worker.model), ("claude", "opus"))
         self.assertEqual(worker.account, "claude-subscription")
 
+    def test_reviewer_that_fell_back_at_its_own_bringup_is_the_one_the_verdict_names(self) -> None:
+        """A resource can go red while the worker is still working. The reviewer resolves at its
+        own bring-up, so the pair the verdict groups by is the one that actually ran: the card was
+        claimed against `codex-reviewer` and judged by `claude-opus`."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.catalog.red.add("openai-sub")
+
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        self.assertEqual(record.review_head, "claude-opus", "the record follows the launched head")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="ok", request_id="review-green-after-fallback",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
+
+        attempt = self.routing_history()[-1]
+        reviewer = attempt.reviewer
+        self.assertEqual(reviewer.requested, "codex-reviewer")
+        self.assertEqual(reviewer.resolved, "claude-opus")
+        self.assertTrue(reviewer.fallback)
+        self.assertEqual(reviewer.resolved_from, "health_fallback")
+        self.assertEqual((reviewer.adapter, reviewer.model), ("claude", "opus"))
+        self.assertEqual(reviewer.account, "claude-subscription")
+        self.assertEqual(reviewer.fallback_chain, ("claude-opus",))
+        self.assertEqual(attempt.outcome, "green")
+        self.assertEqual(
+            attempt.worker.resolved, "codex", "the worker ran before the flip and keeps its head"
+        )
+
     def test_reviewer_relaunched_onto_another_head_is_a_second_record(self) -> None:
         """A reviewer restart inside one round can land on a different adapter/model — a repin, a
         switch — and then the verdict came from that head, not from the one the round started with.
@@ -2649,6 +2724,148 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
 
 
+class RealRegistryFallbackTests(unittest.TestCase):
+    """The `codex-reviewer -> claude-opus` fallback end to end: real registry, real catalog, real
+    host launcher, real dispatcher lifecycle. Nothing here hands the launched head to the resolver;
+    the whole point is that the routing journal learns it from the bring-up itself."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.data_dir = self.root / "data"
+        self.data_dir.mkdir()
+        _clear_env(self, "SECRETARY_RESOURCE_HEALTH")
+        self.instance = self._instance()
+        self.board = FakeKanboard()
+        self.reader = TaskReader(self.board)  # type: ignore[arg-type]
+        self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
+        self.catalog = InstanceCatalog(self.instance / "instance.yaml")
+        self.runtime = DispatcherRuntime(
+            self.reader,
+            self.writer,
+            TaskAudit(self.data_dir),
+            CutoverState(self.data_dir),
+            self.catalog,
+            CommandHostRuntime(self.catalog, self.data_dir, mode="noop"),
+            owner="secretary-pilot",
+            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+        )
+        self.selector = PilotSelector.exact("secretary-510-pilot")
+        self.runtime.pause_old(self.selector, actor="operator", evidence="legacy hard pause")
+        self.runtime.start_new_pilot(self.selector, actor="operator")
+
+    def _instance(self) -> Path:
+        instance = self.root / "instance"
+        (instance / "projects").mkdir(parents=True)
+        (instance / "heads").mkdir(parents=True)
+        (instance / "instance.yaml").write_text(
+            "version: 1\nname: fallback\n"
+            f"data_dir: {self.data_dir}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
+        (instance / "projects" / "secretary.yaml").write_text(
+            f"id: secretary\nrepo: {self.root / 'repo'}\norca_binding: secretary-live\n"
+            "enabled: true\nadapter: python\ndefault_branch: main\n",
+            encoding="utf-8",
+        )
+        # The registry the dispatcher reads is the product canon, snapshot and all: this test is
+        # about the chain `heads.toml` really declares, not about a chain a fixture invented.
+        (instance / "heads" / "heads.yaml").write_text(
+            render_snapshot(canonical_heads(Path(__file__).resolve().parents[1])), encoding="utf-8"
+        )
+        return instance
+
+    def _redden(self, resource: str) -> None:
+        """What the resource probe leaves behind when `resource` fails; the dispatcher only reads."""
+        health = self.instance / "state" / "heads" / "resource_health.json"
+        health.parent.mkdir(parents=True, exist_ok=True)
+        health.write_text(
+            json.dumps({resource: {"status": "red", "checked_at": time.time()}}), encoding="utf-8"
+        )
+
+    def routing_history(self) -> list:
+        return routing_attempts(
+            TaskAudit(self.data_dir).events("secretary-510-pilot", kind="routing")
+        )
+
+    def test_red_openai_sub_launches_and_records_claude_opus_as_the_reviewer(self) -> None:
+        self._redden("openai-sub")
+
+        self.assertEqual(self.runtime.tick(self.selector)["step"], "claim")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="done", request_id="worker-done",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="ok", request_id="review-green",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
+
+        attempt = self.routing_history()[-1]
+        reviewer = attempt.reviewer
+        self.assertEqual(reviewer.requested, "codex-reviewer")
+        self.assertEqual(reviewer.resolved, "claude-opus")
+        self.assertTrue(reviewer.fallback)
+        self.assertEqual(reviewer.resolved_from, "health_fallback")
+        self.assertEqual((reviewer.adapter, reviewer.model), ("claude", "opus"))
+        self.assertEqual(reviewer.account, "claude-subscription")
+        self.assertEqual(reviewer.fallback_chain, ("claude-opus",))
+        self.assertEqual(attempt.outcome, "green")
+        # `codex` declares no chain, so the worker keeps the head it asked for even on the same red
+        # resource: the record must not claim a fallback that never happened.
+        self.assertEqual(attempt.worker.resolved, "codex")
+        self.assertFalse(attempt.worker.fallback)
+
+    def test_green_resource_keeps_the_reviewer_the_card_asked_for(self) -> None:
+        self.assertEqual(self.runtime.tick(self.selector)["step"], "claim")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="done", request_id="worker-done",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        reviewer = self.routing_history()[-1].reviewer
+        self.assertEqual(reviewer.resolved, "codex-reviewer")
+        self.assertFalse(reviewer.fallback)
+        self.assertEqual(reviewer.effort, "extra")
+
+    def test_reviewer_restart_after_the_flip_records_the_head_that_took_over(self) -> None:
+        """The flip lands between the first reviewer bring-up and its restart: both heads stay in
+        the round, and the verdict belongs to the one that was up when it arrived."""
+        self.assertEqual(self.runtime.tick(self.selector)["step"], "claim")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="done", request_id="worker-done",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._redden("openai-sub")
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["state"] = "review_starting"
+        payload["records"]["secretary-510-pilot"]["review_handle"] = ""
+        self.runtime.state.save(payload)
+
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-restarted")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="ok", request_id="review-green-after-restart",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual(
+            [run.resolved for run in attempt.reviewer_runs], ["codex-reviewer", "claude-opus"]
+        )
+        self.assertEqual(attempt.reviewer.resolved, "claude-opus")
+        self.assertEqual(attempt.outcome, "green")
+
+
 class HeadPromptTests(unittest.TestCase):
     """The report/verdict commands handed to a head must survive the codex runtime: a concrete
     body-file path written with a normal editing tool, no inline shell assembly (secretary-637)."""
@@ -2725,7 +2942,9 @@ class HeadPromptTests(unittest.TestCase):
         stale.write_text("half-written verdict from the head that died", encoding="utf-8")
 
         with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(root)}):
-            with mock.patch.object(self.host, "_launch", return_value="term:review"):
+            with mock.patch.object(
+                self.host, "_launch", return_value=LaunchedHead("term:review", "review-head")
+            ):
                 self.host.start_review(self.task, self._record(workspace, 3))
 
         self.assertFalse(stale.exists(), "respawned reviewer inherited the stale body file")
@@ -2904,6 +3123,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             catalog = object.__new__(InstanceCatalog)
+            catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
             catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
             task = {"routing": {"head_override": "codex-terra"}}
 
@@ -2923,6 +3143,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         `codex-terra` and `codex-extra` are one model with different effort, so the id alone
         cannot answer which head reviewed what."""
         catalog = object.__new__(InstanceCatalog)
+        catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
         catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
 
         worker = catalog.head_run(  # type: ignore[attr-defined]
@@ -2952,6 +3173,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         dispatcher as a card that now names `claude-opus` with the earlier ask still in its history.
         """
         catalog = object.__new__(InstanceCatalog)
+        catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
         catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
         card = {
             "routing": {"head_override": "claude-opus"},
@@ -2975,6 +3197,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         card's ask resolves to `codex-reviewer` is recorded as claude-opus, flagged, and kept
         distinguishable from the ask — the pair a diversity reading would otherwise get wrong."""
         catalog = object.__new__(InstanceCatalog)
+        catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
         catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
 
         run = catalog.head_run({"routing": {}}, role="reviewer", launched="claude-opus")  # type: ignore[attr-defined]
@@ -2987,6 +3210,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
     def test_unknown_explicit_head_is_rejected_before_claim(self) -> None:
         catalog = object.__new__(InstanceCatalog)
+        catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
         catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
 
         with self.assertRaisesRegex(HostError, "unknown head 'codex-does-not-exist'"):
@@ -3053,6 +3277,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             catalog = object.__new__(InstanceCatalog)
+            catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
             catalog._heads = {  # type: ignore[attr-defined]
                 "profiles": {
                     "codex-tui": {
@@ -3078,6 +3303,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
     def test_binding_resolves_underscore_swimlane_to_hyphen_id(self) -> None:
         catalog = object.__new__(InstanceCatalog)
+        catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
         catalog.bindings = {  # type: ignore[attr-defined]
             "codegen-orchestrator": {
                 "id": "codegen-orchestrator",
@@ -3099,6 +3325,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             config = Path(tmp) / ".claude.json"
             workspace = str(Path(tmp) / "workspace")
             catalog = object.__new__(InstanceCatalog)
+            catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
             catalog._heads = {  # type: ignore[attr-defined]
                 "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
             }
@@ -3732,10 +3959,12 @@ class GitBranchHost(CommandHostRuntime):
         env_name: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
-    ) -> str:
+        split_from: str = "",
+        task: dict | None = None,
+    ) -> LaunchedHead:
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)
-        return f"test:{head}"
+        return LaunchedHead(f"test:{head}", head)
 
 
 class WorkspaceResumeTests(unittest.TestCase):

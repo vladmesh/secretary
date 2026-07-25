@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -26,6 +26,10 @@ class ReviewLaunch:
     handle: str
     leaf: str = ""
     commit: str = ""
+    # The reviewer profile that actually went up (a fallback makes it differ from the head the card
+    # was claimed with) and its launch configuration, snapshotted by the launcher.
+    head: str = ""
+    run: dict[str, Any] = field(default_factory=dict)
 
 
 def review_pane_label(reference: str) -> str:

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher import CommandHostRuntime, HostError
+from secretary.dispatcher import CommandHostRuntime, HeadResolution, HostError
 from secretary.dispatcher_launcher import HeadLaunch
 
 
@@ -28,7 +28,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 codex_mode="tui",
             )
 
-        self.assertEqual(handle, "term-tui")
+        self.assertEqual(handle.handle, "term-tui")
         create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
         wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
         send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
@@ -163,7 +163,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     codex_mode="tui",
                 )
 
-        self.assertEqual(handle, "term-tui")
+        self.assertEqual(handle.handle, "term-tui")
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
 
@@ -173,6 +173,11 @@ class TuiCatalog:
 
     def prepare_head_workspace(self, head: str, workspace: str) -> None:
         return None
+
+    def resolve_head(self, requested: str) -> HeadResolution:
+        # No resource health here: these tests are about prompt delivery, so the head asked for is
+        # the head launched.
+        return HeadResolution(requested=requested, resolved=requested)
 
     def head_launch(
         self,
@@ -188,6 +193,7 @@ class TuiCatalog:
         return HeadLaunch(
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox",
             prompt_after_start=True,
+            head=head,
         )
 
 

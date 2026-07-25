@@ -28,6 +28,7 @@ PHASES = ("worker", "review", "verdict")
 # Where the head that really launched came from, relative to what the card asked for.
 FROM_REQUESTED = "requested"
 FROM_RETRY_SWITCH = "retry_switch"
+FROM_HEALTH = "health_fallback"
 FROM_LAUNCH = "launch"
 
 
@@ -36,11 +37,12 @@ class HeadRun:
     """One head as it was actually launched.
 
     `requested` is the profile the card (or the role default) asked for, `resolved` is the profile
-    the launcher was actually handed. They differ exactly when a fallback fired, which `fallback`
+    the launcher actually brought up. They differ exactly when a fallback fired, which `fallback`
     states outright so a later diversity analysis never has to infer it from a chain in a
     `heads.toml` that has since moved on. `resolved_from` says which road produced the difference:
-    the card's own watchdog head-switch history (`retry_switch`) or a bring-up that launched
-    something other than what the card asks for right now (`launch`).
+    the resolver's walk over a red resource at bring-up (`health_fallback`), the card's own watchdog
+    head-switch history (`retry_switch`), or a bring-up that launched something other than what the
+    card asks for right now (`launch`).
     """
 
     role: str

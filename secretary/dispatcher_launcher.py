@@ -35,6 +35,10 @@ class HeadLaunchError(RuntimeError):
 class HeadLaunch:
     command: str
     prompt_after_start: bool = False
+    # The profile this command actually starts. Set by InstanceCatalog.head_launch, which resolves
+    # the requested head against resource health before rendering; the renderers below take a
+    # profile, not a head id, so they leave it empty.
+    head: str = ""
 
 
 def ensure_claude_workspace_trusted(workspace: str, config: Path | None = None) -> None:
