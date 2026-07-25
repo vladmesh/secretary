@@ -1883,15 +1883,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record["rejected_sha"], self.host.commit)
         self.assertEqual(record["rejected_done_reports"], 1)
 
-    def test_done_after_a_new_commit_is_accepted_after_gate_red(self) -> None:
+    def test_done_after_a_new_commit_is_accepted_after_stale_done_rework(self) -> None:
         self.start_pilot()
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
         self._run_worker_to_validate()
         self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="nothing changed",
+            request_id=_attempt_request_id(
+                record["attempt_id"],
+                "worker-report-done",
+                "secretary-510-pilot",
+                str(record["review_baseline"]),
+            ),
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "stale-done-rework")
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
         self.host.commit = "newc0ffee1234567"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="fixed", request_id="worker-done-new-commit",
+            body="fixed",
+            request_id=_attempt_request_id(
+                record["attempt_id"],
+                "worker-report-done",
+                "secretary-510-pilot",
+                str(record["review_baseline"]),
+            ),
         )
 
         result = self.runtime.tick(self.selector)

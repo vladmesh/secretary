@@ -1581,6 +1581,10 @@ class DispatcherRuntime:
             ),
         )
         record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
+        # `review_baseline` is also the round key for the report request-id in TASK.md. Advance
+        # it before restarting this same attempt, or the next legitimate done report is deduped
+        # against the stale one we just rejected.
+        record.review_baseline = record.comment_baseline
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
