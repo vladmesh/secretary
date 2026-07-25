@@ -671,13 +671,34 @@ class FixtureHostSource(HostSource):
             )
         projects, project_error = self._projects(expected)
         units, unit_error = self._lines("units.txt")
+        states, state_error = self._unit_states()
         repos, repo_error = self._lines("orca-repos.txt")
         errors = {
             kind: reason for kind, reason in (
-                ("projects", project_error), ("units", unit_error), ("orca repos", repo_error)
+                ("projects", project_error), ("units", unit_error or state_error), ("orca repos", repo_error)
             ) if reason
         }
-        return CollectResult(HostInventory(projects, units, repos), errors)
+        return CollectResult(HostInventory(projects, units, repos, states), errors)
+
+    def _unit_states(self) -> tuple[dict[str, tuple[str, str]], str]:
+        """Optional fixture runtime states: ``unit enabled active`` per line."""
+        try:
+            path = self.root / "unit-states.txt"
+            if not path.is_file():
+                return {}, ""
+            states: dict[str, tuple[str, str]] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                fields = line.split()
+                if not fields or fields[0].startswith("#"):
+                    continue
+                if len(fields) != 3:
+                    return {}, "fixture unit states are invalid"
+                states[fields[0]] = (fields[1], fields[2])
+            return states, ""
+        except UnicodeError:
+            return {}, "fixture unit states are not valid UTF-8"
+        except OSError:
+            return {}, "fixture unit states are unreadable"
 
 
 @dataclass(frozen=True)
@@ -784,7 +805,7 @@ class LiveHostSource(HostSource):
             if token.startswith(prefix):
                 names.add(token)
         states: dict[str, tuple[str, str]] = {}
-        for name in expected.unit_runtime:
+        for name in expected.units:
             if name not in names:
                 continue
             enabled = self._run(["systemctl", "is-enabled", name])

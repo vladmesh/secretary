@@ -42,7 +42,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "instance": str(report.instance_path),
             "projects": report.projects,
             "heads": _heads(report.instance),
-            "cards": {"total": _card_count(data_dir), "active": len(_attempts(production, probe_panels=False))},
+            "cards": {"total": _card_count(data_dir), "active_attempts": len(_attempts(production, probe_panels=False))},
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -65,8 +65,11 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
 
 
 def expected_to_empty_inventory():
-    # Avoid probing the host in --offline mode while preserving CollectResult's
-    # explicit unavailable status for every host kind.
+    """Avoid probing the host in --offline mode.
+
+    Empty inventory and no errors deliberately mean host facts are unavailable;
+    status represents each expected resource with null presence instead.
+    """
     from secretary.host import HostInventory
     return HostInventory()
 
