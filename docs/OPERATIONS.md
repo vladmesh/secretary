@@ -22,8 +22,11 @@ python3 -m unittest
 остаётся decision gate первого milestone; готовый runtime применяется через `secretary install` /
 `secretary recover` по [Recovery](RECOVERY.md).
 
-Для проверки действующей установки использовать `doctor`, `reconcile plan` и `memory verify` по
-контракту из [Protocols](PROTOCOLS.md).
+Для текущей сводки установки использовать `secretary status --instance <dir>`. Его `--json`
+даёт стабильный снимок services/timers, активных попыток, checkpoint, памяти и ресурсов хоста,
+без записи состояния. `doctor` отвечает на другой вопрос: какие инварианты нарушены. Он остаётся
+строгой проверкой и его `--json` возвращает структурированный список findings. Для изменения
+хоста по-прежнему нужен `reconcile plan` и отдельное подтверждённое применение.
 
 ## Runtime secrets
 
@@ -90,6 +93,19 @@ Board регенерируется одним `pipeline export`: доска це
 Memory writer независимо коммитит `state/memory` при `propose/commit/supersede`. Его pathspec не
 пересекается с tick-writer, а общий instance-repo lock сериализует оба writer'а и publish reviewed
 изменений instance repo.
+
+## Status and doctor
+
+`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe
+to poll: it reports managed services and timers, projects and configured heads, active dispatcher
+attempts, their workspace, watchdog pane/progress/respawn state, pause state, checkpoint freshness,
+memory index state and host disk, memory and load. A live invocation uses the dispatcher's own pane
+probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
+
+`secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and
+returns structured findings with a non-zero exit status for a broken or unavailable host. Use
+`status` to answer what is running now, and `doctor` to decide what needs repair. The default
+human-readable `doctor` output remains available for incident work.
 
 ## Checkpoint push
 

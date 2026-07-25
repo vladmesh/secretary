@@ -26,6 +26,7 @@ SCHEMAS = {
     "gate-result": "gate-result.schema.json",
     "data-manifest": "data-manifest.schema.json",
     "onboarding-contract": "onboarding-contract.schema.json",
+    "status": "status.schema.json",
 }
 
 

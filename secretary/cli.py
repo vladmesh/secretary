@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.backup import create_backups, verify_backup
@@ -59,6 +60,7 @@ from secretary.task_commands import add_task_subcommands
 from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
 from secretary.installation import add_install_commands
+from secretary.status import collect_status
 
 
 PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
@@ -66,6 +68,20 @@ NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
 MEMORY_EXIT_LOCKED = 4
+
+
+@dataclass
+class DoctorInspection:
+    """Single read-only evaluation shared by doctor renderers."""
+
+    findings: list[dict[str, object]]
+    unavailable: bool
+    restore: list[str]
+    dispatcher: list[str]
+    checkpoint: list[str]
+    expected: object | None = None
+    collected: CollectResult | None = None
+    diffs: dict[str, KindDiff] | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,7 +123,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="treat migration warnings as findings",
     )
+    doctor.add_argument("--json", action="store_true", help="print structured findings")
     doctor.set_defaults(handler=run_doctor)
+
+    status = subparsers.add_parser("status", help="show the current installation state")
+    status.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    status.add_argument("--json", action="store_true", help="print the stable JSON status schema")
+    status.add_argument("--offline", action="store_true", help="do not inspect the live host")
+    status.add_argument("--host-fixture", metavar="DIR", help="read a fixture host inventory")
+    status.set_defaults(handler=run_status)
 
     add_upgrade_command(subparsers)
     add_install_commands(subparsers)
@@ -386,6 +410,9 @@ def run_doctor(args: argparse.Namespace) -> int:
     instance_path = Path(args.instance)
     report = validate_instance(instance_path)
 
+    if args.json:
+        return run_doctor_json(args, report)
+
     if not report.ok:
         print(f"secretary doctor: {len(report.errors)} config problem(s):")
         for error in report.errors:
@@ -407,45 +434,113 @@ def run_doctor(args: argparse.Namespace) -> int:
         for warning in report.warnings:
             print(f"  {warning}")
 
-    restore_problems = print_restore_status(report)
+    inspection = collect_doctor_inspection(report, args)
+    print_restore_status(report, findings=inspection.restore)
 
-    host_incomplete = False
-    host_findings = False
-    collected_host: CollectResult | None = None
-    inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
+    inspect_host = inspection.collected is not None
     if inspect_host:
-        host_incomplete, host_findings, collected_host = print_host_inventory(report, args)
+        print_host_inventory(
+            report, args, expected=inspection.expected, collected=inspection.collected, diffs=inspection.diffs
+        )
 
     print_background_automations(inspect=inspect_host)
 
-    dispatcher_findings = print_dispatcher_status(report, collected_host, inspect_live=not args.offline)
-    checkpoint_findings = print_checkpoint_status(report)
+    print_dispatcher_status(
+        report, inspection.collected, inspect_live=not args.offline, findings=inspection.dispatcher
+    )
+    print_checkpoint_status(report, findings=inspection.checkpoint)
 
     print("host changes: none")
-    if host_incomplete:
+    if inspection.unavailable:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
         return 2
-    if host_findings:
-        print("status: findings")
-        return 1
-    if dispatcher_findings:
-        print("status: findings")
-        return 1
-    if checkpoint_findings:
-        print("status: findings")
-        return 1
-    if restore_problems:
-        print("status: findings")
-        return 1
-    if report.warnings and args.strict:
-        print("status: warnings")
+    if inspection.findings:
+        warning_only = all(finding["code"] == "config_warning" for finding in inspection.findings)
+        print("status: warnings" if warning_only else "status: findings")
         return 1
     print("status: ok")
     return 0
 
 
-def print_restore_status(report) -> list[str]:
+def run_status(args: argparse.Namespace) -> int:
+    report = validate_instance(Path(args.instance))
+    if not report.ok:
+        payload = {"schema_version": 1, "error": "invalid_instance", "findings": [str(error) for error in report.errors]}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print("secretary status: invalid instance config")
+        return 2
+    snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
+    if args.json:
+        print(json.dumps(snapshot, sort_keys=True))
+        return 0
+    print(f"Secretary status: {snapshot['installation']['name'] or 'unnamed'}")
+    print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
+    print(f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}")
+    print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
+    return 0
+
+
+def run_doctor_json(args: argparse.Namespace, report) -> int:
+    """Structured counterpart to doctor without changing its default transcript."""
+    if not report.ok:
+        print(json.dumps({
+            "schema_version": 1,
+            "ok": False,
+            "findings": [{"code": "config_invalid", "message": str(error)} for error in report.errors],
+        }, sort_keys=True))
+        return 1 if args.dry_run else 2
+    snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
+    inspection = collect_doctor_inspection(report, args)
+    payload = {"schema_version": 1, "ok": not inspection.findings, "findings": inspection.findings, "status": snapshot}
+    print(json.dumps(payload, sort_keys=True))
+    if inspection.unavailable:
+        return 2
+    return 1 if inspection.findings else 0
+
+
+def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspection:
+    """Collect invariant failures once for the text and JSON doctor renderers."""
+    findings: list[dict[str, object]] = []
+    restore = _restore_findings(report)
+    findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
+    inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
+    collected: CollectResult | None = None
+    expected = None
+    diffs = None
+    unavailable = False
+    if inspect_host:
+        expected, collected, diffs = collect_host_inventory(report, args)
+        for kind, reason in collected.errors.items():
+            findings.append({"code": "host_inventory_unavailable", "kind": kind, "message": reason})
+        unavailable = bool(collected.errors)
+        for kind, diff in diffs.items():
+            if kind in collected.errors:
+                continue
+            findings.extend({"code": "missing_on_host", "kind": kind, "name": name} for name in diff.missing_on_host)
+            findings.extend({"code": "unmanaged_on_host", "kind": kind, "name": name} for name in diff.unmanaged_on_host)
+        findings.extend({"code": "unit_runtime", "message": finding} for finding in _unit_runtime_findings(expected, collected))
+    dispatcher = dispatcher_findings(report, collected, inspect_live=not args.offline)
+    checkpoint = checkpoint_findings(report)
+    findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
+    findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
+    if args.strict:
+        findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
+    return DoctorInspection(findings, unavailable, restore, dispatcher, checkpoint, expected, collected, diffs)
+
+
+def print_restore_status(report, *, findings: list[str] | None = None) -> list[str]:
+    findings = _restore_findings(report) if findings is None else findings
+    if findings:
+        print("restore findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return findings
+
+
+def _restore_findings(report) -> list[str]:
     data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
     if not isinstance(data_dir_value, str) or not data_dir_value:
         return []
@@ -455,12 +550,7 @@ def print_restore_status(report) -> list[str]:
         return []
     if not (data_dir / "restore-state.json").is_file():
         return []
-    findings = restore_findings(data_dir)
-    if findings:
-        print("restore findings:")
-        for finding in findings:
-            print(f"  {finding}")
-    return findings
+    return restore_findings(data_dir)
 
 
 def run_project_add(args: argparse.Namespace) -> int:
@@ -492,6 +582,7 @@ def print_dispatcher_status(
     collected_host: CollectResult | None,
     *,
     inspect_live: bool,
+    findings: list[str] | None = None,
 ) -> bool:
     data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
     if not isinstance(data_dir_value, str) or not data_dir_value:
@@ -514,7 +605,7 @@ def print_dispatcher_status(
     else:
         owner_state = "legacy-owner"
 
-    findings: list[str] = []
+    findings = dispatcher_findings(report, collected_host, inspect_live=inspect_live) if findings is None else findings
     print("")
     print("dispatcher ownership: read-only")
     print(f"  state: {owner_state}")
@@ -534,11 +625,6 @@ def print_dispatcher_status(
         else:
             legacy_pause = FileLegacyPauseProbe().snapshot()
             print(f"  legacy freeze: {'confirmed' if legacy_pause.sufficient else 'not confirmed'}")
-            if production_owner and not legacy_pause.sufficient:
-                findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
-        if not production_owner:
-            findings.append("production owner fence is missing after cutover")
-        findings.extend(_production_host_findings(report, data_dir, collected_host))
     elif cutover_committed:
         print("  legacy freeze: not inspected")
 
@@ -549,7 +635,26 @@ def print_dispatcher_status(
     return bool(findings)
 
 
-def print_checkpoint_status(report) -> list[str]:
+def dispatcher_findings(report, collected_host: CollectResult | None, *, inspect_live: bool) -> list[str]:
+    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
+    if not isinstance(data_dir_value, str) or not data_dir_value:
+        return []
+    data_dir = Path(data_dir_value).expanduser()
+    pilot = _load_dispatcher_state(data_dir / "dispatcher" / "pilot-state.json")
+    production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    if str(pilot.get("phase") or "new") != "cutover_committed" or not inspect_live:
+        return []
+    findings: list[str] = []
+    production_owner = str(production.get("owner") or "")
+    if not bool(pilot.get("legacy_decommissioned")) and production_owner and not FileLegacyPauseProbe().snapshot().sufficient:
+        findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
+    if not production_owner:
+        findings.append("production owner fence is missing after cutover")
+    findings.extend(_production_host_findings(report, data_dir, collected_host))
+    return findings
+
+
+def print_checkpoint_status(report, *, findings: list[str] | None = None) -> list[str]:
     """Checkpoint freshness: docs/RECOVERY.md, "Observability".
 
     Last commit, last push, lag, the gate's blocking reason and the
@@ -573,19 +678,30 @@ def print_checkpoint_status(report) -> list[str]:
     for line in render_checkpoint_lines(snapshot):
         print(f"  {line}")
 
+    findings = checkpoint_findings(report) if findings is None else findings
+    if findings:
+        print("checkpoint findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return findings
+
+
+def checkpoint_findings(report) -> list[str]:
+    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
+    if not isinstance(data_dir_value, str) or not data_dir_value:
+        return []
+    production = _load_dispatcher_state(Path(data_dir_value).expanduser() / "dispatcher" / "production-state.json")
+    if "checkpoint" not in production and "checkpoint_push" not in production:
+        return []
+    snapshot = checkpoint_snapshot(report.instance_path.parent, write_state=production.get("checkpoint"), push_state=production.get("checkpoint_push"))
     findings: list[str] = []
     if snapshot["remote_diverged"]:
         findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
     if snapshot["blocked_reason"]:
         findings.append(f"checkpoint gate blocked: {snapshot['blocked_reason']}")
     lag = snapshot["lag_minutes"]
-    # Two missed windows: one late push is the cadence, two is a stuck remote.
     if isinstance(lag, int) and lag > 2 * PUSH_INTERVAL_MINUTES:
         findings.append(f"checkpoint lag is {lag} min, past the {PUSH_INTERVAL_MINUTES} min RPO")
-    if findings:
-        print("checkpoint findings:")
-        for finding in findings:
-            print(f"  {finding}")
     return findings
 
 
@@ -989,20 +1105,20 @@ def run_backup_verify(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, bool, CollectResult]:
+def print_host_inventory(
+    report,
+    args: argparse.Namespace,
+    *,
+    expected=None,
+    collected: CollectResult | None = None,
+    diffs: dict[str, KindDiff] | None = None,
+) -> tuple[bool, bool, CollectResult]:
     """Print the read-only host inventory: matched / missing / unmanaged per kind.
 
     Returns True if any kind could not be inspected (reported as unavailable).
     """
-    if args.host_fixture:
-        source = FixtureHostSource(Path(args.host_fixture))
-    else:
-        source = LiveHostSource()
-
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
-    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
-    collected = source.collect(expected)
-    diffs = inventory(expected, collected.inventory)
+    if expected is None or collected is None or diffs is None:
+        expected, collected, diffs = collect_host_inventory(report, args)
 
     print("")
     print("host inventory: read-only")
@@ -1022,6 +1138,14 @@ def print_host_inventory(report, args: argparse.Namespace) -> tuple[bool, bool, 
     return bool(collected.errors), parity_findings or runtime_findings, collected
 
 
+def collect_host_inventory(report, args: argparse.Namespace):
+    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
+    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    collected = source.collect(expected)
+    return expected, collected, inventory(expected, collected.inventory)
+
+
 def _print_kind(kind: str, diff: KindDiff) -> None:
     print(f"{kind}:")
     print(f"  matched: {_join(diff.matched)}")
@@ -1033,21 +1157,28 @@ def _print_unit_runtime(expected, collected: CollectResult) -> bool:
     """Report required enabled/active state separately from unit-file parity."""
     if "units" in collected.errors:
         return False
-    findings: list[str] = []
-    for name, (need_enabled, need_active) in sorted(expected.unit_runtime.items()):
-        state = collected.inventory.unit_states.get(name)
-        if state is None:
-            continue  # Missing unit file is already printed by the parity diff.
-        enabled, active = state
-        if need_enabled and enabled != "enabled":
-            findings.append(f"{name}: expected enabled, got {enabled}")
-        if need_active and active != "active":
-            findings.append(f"{name}: expected active, got {active}")
+    findings = _unit_runtime_findings(expected, collected)
     if findings:
         print("unit runtime findings:")
         for finding in findings:
             print(f"  {finding}")
     return bool(findings)
+
+
+def _unit_runtime_findings(expected, collected: CollectResult) -> list[str]:
+    if "units" in collected.errors:
+        return []
+    findings: list[str] = []
+    for name, (need_enabled, need_active) in sorted(expected.unit_runtime.items()):
+        state = collected.inventory.unit_states.get(name)
+        if state is None:
+            continue
+        enabled, active = state
+        if need_enabled and enabled != "enabled":
+            findings.append(f"{name}: expected enabled, got {enabled}")
+        if need_active and active != "active":
+            findings.append(f"{name}: expected active, got {active}")
+    return findings
 
 
 def print_background_automations(*, inspect: bool) -> None:
