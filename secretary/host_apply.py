@@ -317,6 +317,7 @@ def resolve_systemd_layout(
     except KeyError:
         raise ValueError(f"installation user does not exist: {user}") from None
     executable = orca_executable or find_orca_executable(user, home) or Path("/usr/local/bin/orca")
+    host = instance.get("host", {}) if isinstance(instance.get("host"), dict) else {}
     return SystemdLayout(
         product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
         instance_path=target,
@@ -324,6 +325,9 @@ def resolve_systemd_layout(
         runtime_user=user,
         runtime_home=home,
         orca_executable=executable,
+        memory_model=host.get("memory_model", "intfloat/multilingual-e5-large"),
+        memory_dim=host.get("memory_dim", 1024),
+        memory_threads=host.get("memory_threads", 1),
     )
 
 

@@ -39,6 +39,8 @@ DB_PATH = os.environ.get("MEMORY_DB", str(DEFAULT_MEMORY_DIR / "index.sqlite"))
 MODEL = os.environ.get("MEMORY_MODEL", "intfloat/multilingual-e5-large")
 PORT = int(os.environ.get("MEMORY_PORT", "8077"))
 DIM = int(os.environ.get("MEMORY_DIM", "1024"))
+MODEL_CACHE_DIR = Path(os.environ.get("MEMORY_CACHE_DIR", str(DEFAULT_MEMORY_DIR / "fastembed-cache")))
+THREADS = int(os.environ.get("MEMORY_THREADS", "1"))
 SEARCH_LOG = os.environ.get("MEMORY_SEARCH_LOG", str(Path(DB_PATH).parent / "search-log.jsonl"))
 CANON_EXPORT = Path(os.environ["MEMORY_CANON_EXPORT"]) if "MEMORY_CANON_EXPORT" in os.environ else CANON.parent / "export.ndjson"
 WATCH_INTERVAL = float(os.environ.get("MEMORY_WATCH_INTERVAL", "10"))
@@ -56,7 +58,11 @@ def embedder() -> TextEmbedding:
     if _embedder is None:
         with _lock:
             if _embedder is None:
-                _embedder = TextEmbedding(model_name=MODEL)
+                _embedder = TextEmbedding(
+                    model_name=MODEL,
+                    cache_dir=str(MODEL_CACHE_DIR),
+                    threads=THREADS,
+                )
     return _embedder
 
 

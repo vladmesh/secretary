@@ -150,6 +150,21 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         rebuild_index.assert_not_called()
         self.assertEqual(self.calls, [])
 
+    def test_embedder_uses_configured_persistent_cache_and_thread_limit(self):
+        fake_embedding = mock.Mock()
+        with (
+            mock.patch.object(memory_service, "_embedder", None),
+            mock.patch.object(memory_service, "TextEmbedding", return_value=fake_embedding) as embedding,
+            mock.patch.object(memory_service, "MODEL", "test-model"),
+            mock.patch.object(memory_service, "MODEL_CACHE_DIR", self.root / "fastembed-cache"),
+            mock.patch.object(memory_service, "THREADS", 1),
+        ):
+            self.assertIs(memory_service.embedder(), fake_embedding)
+
+        embedding.assert_called_once_with(
+            model_name="test-model", cache_dir=str(self.root / "fastembed-cache"), threads=1
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
