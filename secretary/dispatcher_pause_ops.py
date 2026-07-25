@@ -340,7 +340,8 @@ def _resume_heads(
             parked.append(f"{ref}:worker")
             continue
         try:
-            record.handle = runtime.host.restart_worker(task, record)
+            launched = runtime.host.restart_worker(task, record)
+            record.handle = launched.handle
             record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
         except Exception:  # noqa: BLE001 — one failed relaunch must not strand the others
             # Left with no handle and a fresh watchdog window: the card stays In progress under the
@@ -350,6 +351,9 @@ def _resume_heads(
             skipped.append(f"{ref}:worker")
             continue
         record.state = "claimed"
+        # A resume is a real bring-up: the round records the head that came back, which a registry
+        # repin during the freeze can configure differently (secretary-716).
+        runtime.record_worker_routing(task, record, launched.run)
         record.worker_started_at = record.worker_progress_at = time.time()
         relaunched.append(f"{ref}:worker")
 

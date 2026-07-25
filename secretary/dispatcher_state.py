@@ -6,7 +6,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +75,14 @@ class DispatcherRecord:
     # by the relaunch or by the decision not to relaunch.
     paused_worker_at: float = 0.0
     paused_reviewer_at: float = 0.0
+    # Routing telemetry (secretary-716). attempt_round counts the card's worker rounds: claim opens
+    # round 1, every rework bounce (red verdict, red gate) opens the next one. worker_run/review_run
+    # are the launch snapshots of the heads currently serving that round, kept here so the verdict
+    # record reports the configuration the heads actually started with rather than re-reading a
+    # `heads.toml` that may have been edited since. Canon is the journal; this is the live copy.
+    attempt_round: int = 0
+    worker_run: dict[str, Any] = field(default_factory=dict)
+    review_run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -85,6 +93,7 @@ class DispatcherRecord:
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
+            "attempt_round": self.attempt_round,
             "paused_reviewer_at": self.paused_reviewer_at,
             "paused_worker_at": self.paused_worker_at,
             "review_baseline": self.review_baseline,
@@ -104,6 +113,8 @@ class DispatcherRecord:
             "worker_progress_at": self.worker_progress_at,
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
+            "worker_run": self.worker_run,
+            "review_run": self.review_run,
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
         }
@@ -117,6 +128,9 @@ class DispatcherRecord:
             head=str(payload.get("head") or ""),
             review_head=str(payload.get("review_head") or ""),
             attempt_id=str(payload.get("attempt_id") or ""),
+            attempt_round=int(payload.get("attempt_round") or 0),
+            worker_run=_run_snapshot(payload.get("worker_run")),
+            review_run=_run_snapshot(payload.get("review_run")),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
             state=str(payload.get("state") or "claimed"),
@@ -140,6 +154,10 @@ class DispatcherRecord:
             paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
         )
+
+
+def _run_snapshot(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 class CutoverState:

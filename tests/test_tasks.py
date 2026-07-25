@@ -12,6 +12,12 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.data import export_board
+from secretary.routing_journal import (
+    HeadRun,
+    attempts,
+    head_run_from_profile,
+    routing_payload,
+)
 from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -1007,6 +1013,128 @@ class TaskWriterTests(unittest.TestCase):
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
             export_board(Path(self.tmpdir.name), command=["pipeline"])
+
+
+_READ_METHODS = {
+    "getProjectByName", "getActiveSwimlanes", "getTaskByReference", "getTaskMetadata",
+    "getAllComments", "getTask",
+}
+
+
+class RoutingJournalTests(unittest.TestCase):
+    """secretary-716: the routing record is journal-only and must survive everything the board
+    forgets: the reviewer head cleared on the way out of Validate, the routing block reset on the
+    way back to Ready."""
+
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
+        self.audit = TaskAudit(self.tmpdir.name)
+
+    def _run(self, role: str, head: str):
+        return head_run_from_profile(
+            role=role,
+            head=head,
+            head_source="role_default",
+            profile={"adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra", "resource": "openai-sub"},
+            resources={"openai-sub": {"account": "openai-subscription"}},
+        )
+
+    def _payload(self, attempt: int, phase: str, *heads: tuple[str, str], outcome: str = "") -> dict:
+        return routing_payload(
+            attempt=attempt,
+            attempt_id="att-1",
+            phase=phase,
+            heads=[self._run(role, head) for role, head in heads],
+            outcome=outcome,
+        )
+
+    def test_routing_writes_the_journal_without_touching_the_board(self) -> None:
+        self.writer.routing(
+            role="dispatcher", actor="pilot", reference="secretary-468",
+            payload=self._payload(1, "worker", ("worker", "codex")), request_id="routing-1",
+        )
+
+        events = self.audit.events("secretary-468", kind="routing")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["heads"][0]["head"], "codex")
+        self.assertEqual(
+            [call for call in self.client.calls if call[0] not in _READ_METHODS], [],
+            "a routing record is telemetry; it must not mutate the card",
+        )
+
+    def test_repeated_routing_record_commits_once(self) -> None:
+        for _ in range(2):
+            self.writer.routing(
+                role="dispatcher", actor="pilot", reference="secretary-468",
+                payload=self._payload(1, "worker", ("worker", "codex")), request_id="routing-1",
+            )
+
+        self.assertEqual(len(self.audit.events("secretary-468", kind="routing")), 1)
+
+    def test_only_the_dispatcher_may_write_routing(self) -> None:
+        with self.assertRaisesRegex(TaskError, "not permitted"):
+            self.writer.routing(
+                role="worker", actor="w", reference="secretary-468",
+                payload=self._payload(1, "worker", ("worker", "codex")),
+            )
+
+    def test_routing_rejects_an_unknown_phase_and_an_empty_head_list(self) -> None:
+        with self.assertRaisesRegex(TaskError, "unknown routing phase"):
+            self.writer.routing(
+                role="dispatcher", actor="pilot", reference="secretary-468",
+                payload={"attempt": 1, "phase": "guess", "heads": [{"role": "worker"}]},
+            )
+        with self.assertRaisesRegex(TaskError, "at least one head"):
+            self.writer.routing(
+                role="dispatcher", actor="pilot", reference="secretary-468",
+                payload={"attempt": 1, "phase": "worker", "heads": []},
+            )
+
+    def test_attempts_rebuild_the_pairs_and_their_outcomes(self) -> None:
+        for attempt, outcome in ((1, "red"), (2, "green")):
+            self.writer.routing(
+                role="dispatcher", actor="pilot", reference="secretary-468",
+                payload=self._payload(attempt, "worker", ("worker", "codex")),
+                request_id=f"routing-worker-{attempt}",
+            )
+            self.writer.routing(
+                role="dispatcher", actor="pilot", reference="secretary-468",
+                payload=self._payload(attempt, "review", ("reviewer", "codex-reviewer")),
+                request_id=f"routing-review-{attempt}",
+            )
+            self.writer.routing(
+                role="dispatcher", actor="pilot", reference="secretary-468",
+                payload=self._payload(
+                    attempt, "verdict", ("worker", "codex"), ("reviewer", "codex-reviewer"),
+                    outcome=outcome,
+                ),
+                request_id=f"routing-verdict-{attempt}",
+            )
+
+        history = attempts(self.audit.events("secretary-468", kind="routing"))
+        self.assertEqual([record.attempt for record in history], [1, 2])
+        self.assertEqual([record.outcome for record in history], ["red", "green"])
+        self.assertEqual([record.worker.head for record in history], ["codex", "codex"])
+        self.assertEqual([record.reviewer.head for record in history], ["codex-reviewer"] * 2)
+
+    def test_a_head_without_a_model_must_say_the_cli_resolved_it(self) -> None:
+        """The blank-model guard: a record may only omit the model when it names the runtime that
+        picked one, so `claude-default` can never be journalled as a silent empty string."""
+        with self.assertRaisesRegex(ValueError, "unpinned model"):
+            HeadRun(role="worker", head="claude-default", model_source="profile")
+
+        unpinned = head_run_from_profile(
+            role="reviewer",
+            head="claude-default",
+            head_source="card",
+            profile={"adapter": "claude", "resource": "claude-sub"},
+            resources={"claude-sub": {"account": "claude-subscription"}},
+        )
+
+        self.assertEqual((unpinned.model, unpinned.model_source), ("", "cli_default"))
 
 
 class ReportDurabilityGateTests(unittest.TestCase):

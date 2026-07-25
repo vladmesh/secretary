@@ -9,11 +9,18 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from secretary.role_env import RoleEnvError, runtime_env
 
 CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
 CLAUDE_THEME_DEFAULT = "dark"
+# Where the `claude` CLI itself takes a model from when the head profile pins none.
+CLAUDE_MANAGED_SETTINGS_DEFAULT = "/etc/claude-code/managed-settings.json"
+CLAUDE_MANAGED_SETTINGS_ENV = "CLAUDE_MANAGED_SETTINGS"
+CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+CLAUDE_MODEL_ENV = "ANTHROPIC_MODEL"
 CODEX_EFFORTS = {
     "default": None,
     "low": "low",
@@ -102,6 +109,69 @@ def render_codex_launch(
     return HeadLaunch(
         _render_codex_exec_command(profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt)
     )
+
+
+def claude_launch_model(
+    profile: dict[str, Any],
+    *,
+    workspace: str = "",
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """The model a `claude` bring-up will run under, and where that value came from.
+
+    A profile without `model` (`claude-default`) renders a command without `--model`, so the CLI
+    picks the model itself. The routing journal has to name that model as of the bring-up rather
+    than record an empty field, so this reads the same sources the CLI reads, in the CLI's own
+    precedence: enterprise policy over the command line, the command line over the environment,
+    then the workspace's settings, then the user's. When nothing pins a model anywhere the value
+    stays empty under a `cli_default` source, which says the CLI's built-in default applied instead
+    of guessing which model that is.
+
+    `env` is the environment the head itself will run with, which is not the dispatcher's own:
+    heads are executed through `wrap_role_shell_command`, and `role_env.runtime_env` drops every
+    `runtime.env` variable that is not role-allowlisted. Reading `os.environ` here would journal an
+    `ANTHROPIC_MODEL` or a `CLAUDE_CONFIG_DIR` that the CLI never receives. Callers that are not
+    launching a head can leave it unset and get the current process environment.
+    """
+    environ = os.environ if env is None else env
+    managed = _settings_model(
+        Path(environ.get(CLAUDE_MANAGED_SETTINGS_ENV) or CLAUDE_MANAGED_SETTINGS_DEFAULT)
+    )
+    if managed:
+        return managed, "managed_settings"
+    pinned = str(profile.get("model") or "")
+    if pinned:
+        return pinned, "profile"
+    from_env = str(environ.get(CLAUDE_MODEL_ENV) or "").strip()
+    if from_env:
+        return from_env, f"env:{CLAUDE_MODEL_ENV}"
+    if workspace:
+        for name, source in (("settings.local.json", "project_settings_local"), ("settings.json", "project_settings")):
+            model = _settings_model(Path(workspace) / ".claude" / name)
+            if model:
+                return model, source
+    user = _settings_model(_claude_config_dir(environ) / "settings.json")
+    if user:
+        return user, "user_settings"
+    return "", "cli_default"
+
+
+def _claude_config_dir(env: Mapping[str, str]) -> Path:
+    override = env.get(CLAUDE_CONFIG_DIR_ENV)
+    if override:
+        return Path(override)
+    home = env.get("HOME")
+    return (Path(home) if home else Path.home()) / ".claude"
+
+
+def _settings_model(path: Path) -> str:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(loaded, dict):
+        return ""
+    return str(loaded.get("model") or "").strip()
 
 
 def _render_codex_exec_command(
@@ -232,6 +302,19 @@ def _reject_symlinked_claude_config(config: Path) -> None:
         raise HeadLaunchError(f"refusing symlinked Claude config {config}")
     if not stat.S_ISREG(mode):
         raise HeadLaunchError(f"Claude config {config} is not a regular file")
+
+
+def role_launch_env(role: str) -> dict[str, str]:
+    """The environment `wrap_role_shell_command` will actually hand a head of `role`.
+
+    Same call the wrapper makes, so a snapshot taken here sees what the head sees rather than what
+    the dispatcher happens to carry. A role the allowlist does not know is not launchable through
+    the wrapper at all; the dispatcher's own environment is the closest honest answer there.
+    """
+    try:
+        return runtime_env(role)
+    except RoleEnvError:
+        return dict(os.environ)
 
 
 def wrap_role_shell_command(role: str, command: str) -> str:

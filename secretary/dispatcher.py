@@ -6,8 +6,9 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -18,10 +19,12 @@ from secretary import state_repo
 from secretary.dispatcher_launcher import (
     HeadLaunch,
     HeadLaunchError,
+    claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
+    role_launch_env as _role_launch_env,
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
@@ -91,6 +94,17 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.head_registry import HeadRegistryConfigError, assert_snapshot_current
+from secretary.routing_journal import (
+    HEAD_FROM_CARD,
+    HEAD_FROM_RECORD,
+    HEAD_FROM_ROLE_DEFAULT,
+    MODEL_UNKNOWN,
+    HeadRun,
+    attempts as _routing_attempts,
+    head_run_from_profile,
+    routing_payload as _routing_payload,
+    run_key as _run_key,
+)
 from secretary.head_health import HeadHealth, HeadReadiness
 from secretary.tasks import (
     KanboardClient,
@@ -125,6 +139,15 @@ def _same_repo(first: Path, second: Path) -> bool:
         return first.expanduser().resolve() == second.expanduser().resolve()
     except OSError:
         return first.expanduser().absolute() == second.expanduser().absolute()
+
+
+@dataclass(frozen=True)
+class LaunchedHead:
+    """One head bring-up as it happened: the pane it runs in and the configuration it runs with."""
+
+    handle: str
+    head: str = ""
+    run: dict[str, Any] = field(default_factory=dict)
 
 
 class InstanceCatalog:
@@ -189,6 +212,90 @@ class InstanceCatalog:
         )
         self._head_profile(head)
         return head
+
+    def claimed_worker_head(self, task: dict[str, Any]) -> str:
+        return self._claimed_head(task, "resolved_worker_head", self.worker_head)
+
+    def claimed_review_head(self, task: dict[str, Any]) -> str:
+        return self._claimed_head(task, "resolved_review_head", self.review_head)
+
+    def _claimed_head(
+        self,
+        task: dict[str, Any],
+        key: str,
+        current: Callable[[dict[str, Any]], str],
+    ) -> str:
+        """The head the card was claimed with, for a card the dispatcher is picking back up.
+
+        The head is decided once, at claim, and the claim writes it onto the card. Re-reading the
+        override or the role default here would hand the rest of a running attempt to whatever the
+        board says now, so a role default edited mid-attempt would silently move the reviewer. If
+        that head has since left `heads.yaml` there is nothing to resume it on: the attempt stops
+        and a human decides, because substituting today's role default would launch a head the
+        claim never picked and file it under the running attempt. A card claimed before the claim
+        recorded a head has no decision to keep, so it takes the current one.
+        """
+        claimed = (task.get("routing") or {}).get(key)
+        if not claimed:
+            return current(task)
+        head = str(claimed)
+        try:
+            self._head_profile(head)
+        except HostError as exc:
+            raise HostError(f"head {head!r} recorded at claim is unavailable: {exc}") from None
+        return head
+
+    def head_run(
+        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = ""
+    ) -> HeadRun:
+        """The launch record for one head of `role`: the profile id plus the configuration it is
+        launched with, read from the same snapshot the launcher renders its command from.
+
+        `head` is the profile the bring-up handed to the launcher. There is no substitution between
+        the routing decision and the launch: the head is decided once, at claim, from the card's
+        override or the role default, so it normally equals what the card asks for. Passing it
+        explicitly keeps the record describing the process that runs even when the card's metadata
+        is edited afterwards.
+        """
+        routing = task.get("routing") or {}
+        if role == "worker":
+            override = routing.get("head_override")
+            asked = str(override) if override else str(
+                self._heads.get("role_defaults", {}).get("new_card") or "codex"
+            )
+            codex_mode = str(routing.get("codex_launch_mode") or "")
+        else:
+            override = routing.get("review_head_override")
+            asked = str(override) if override else str(
+                self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
+            )
+            codex_mode = ""
+        launched = str(head) if head else asked
+        if launched != asked:
+            head_source = HEAD_FROM_RECORD
+        else:
+            head_source = HEAD_FROM_CARD if override else HEAD_FROM_ROLE_DEFAULT
+        profile = self._head_profile(launched)
+        resources = self._heads.get("resources")
+        model: str | None = None
+        model_source = ""
+        if str(profile.get("adapter") or "") == "claude":
+            # A claude profile need not pin a model (`claude-default` does not), and then the CLI
+            # resolves one from its settings at startup. Read it here, at bring-up, so the record
+            # names the model that ran instead of an empty field.
+            model, model_source = _claude_launch_model(
+                profile, workspace=workspace, env=_role_launch_env(role)
+            )
+        return head_run_from_profile(
+            role=role,
+            head=launched,
+            head_source=head_source,
+            profile=profile,
+            resources=resources if isinstance(resources, dict) else {},
+            codex_mode=codex_mode,
+            model=model,
+            model_source=model_source,
+        )
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
         return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
@@ -271,7 +378,7 @@ class CommandHostRuntime:
         *,
         attempt_id: str = "",
         require_existing_workspace: bool = False,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
         workspace = self.restore_workspace(task, worker_id)
@@ -286,7 +393,7 @@ class CommandHostRuntime:
             self._run_setup(project, workspace)
         self._clear_body_file("report", task["ref"], 0)
         self._write_prompt(Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id))
-        handle = self._launch(
+        launched = self._launch(
             workspace,
             f"{task['ref']} worker",
             head,
@@ -295,10 +402,18 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
+            task=task,
         )
-        return {"workspace": workspace, "handle": handle, "base_branch": base}
+        return {
+            "workspace": workspace,
+            "handle": launched.handle,
+            "base_branch": base,
+            # The launch configuration of the head that went up. The caller records this instead of
+            # re-reading the registry, which a later edit would answer differently.
+            "run": launched.run,
+        }
 
-    def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+    def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> LaunchedHead:
         """Launch rework in the existing workspace without recreating its branch."""
         workspace = Path(record.workspace)
         if self.mode == "noop":
@@ -319,6 +434,7 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
+            task=task,
         )
 
     def pane_leaf(self, workspace: str, handle: str) -> str:
@@ -364,7 +480,7 @@ class CommandHostRuntime:
         review_file = Path(record.workspace) / "REVIEW.md"
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
         self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
-        handle = self._launch(
+        launched = self._launch(
             record.workspace,
             review_pane_label(task["ref"]),
             record.review_head,
@@ -372,12 +488,14 @@ class CommandHostRuntime:
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
             split_from=self._split_anchor(record),
+            task=task,
         )
         self._freeze_worker(record)
         return ReviewLaunch(
-            handle=handle,
-            leaf=self._pane_leaf(record.workspace, handle),
+            handle=launched.handle,
+            leaf=self._pane_leaf(record.workspace, launched.handle),
             commit=self.head_commit(record),
+            run=launched.run,
         )
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
@@ -712,9 +830,18 @@ class CommandHostRuntime:
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
         split_from: str = "",
-    ) -> str:
+        task: dict[str, Any] | None = None,
+    ) -> LaunchedHead:
+        """Bring one head up and hand back the pane together with the configuration it started with.
+
+        The snapshot is taken here, on the bring-up path itself, so every route out of this call
+        (the real launcher, the `SECRETARY_DISPATCHER_*_COMMAND` override, noop mode) reports the
+        same thing, and no caller has to re-read the registry afterwards.
+        """
         if self.mode == "noop":
-            return f"noop:{head}:{Path(workspace).name}:{prompt_file}"
+            return self._launched(
+                f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace
+            )
         command = os.environ.get(env_name)
         launch = HeadLaunch(command) if command else None
         if command:
@@ -744,7 +871,27 @@ class CommandHostRuntime:
             except HostError:
                 _close_tui_terminal(handle, run_json=self._run_json)
                 raise
-        return handle
+        return self._launched(handle, head, task, role, workspace)
+
+    def _launched(
+        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = ""
+    ) -> LaunchedHead:
+        """Pair the pane with the launch snapshot of the head running in it.
+
+        A registry that no longer describes the launched head still has to yield a usable record:
+        the point of the journal is that it survives edits to `heads.toml`. So an unreadable profile
+        degrades to the head id under an `unknown` adapter instead of failing a bring-up that
+        already succeeded.
+        """
+        if task is None:
+            return LaunchedHead(handle=handle, head=head)
+        try:
+            run = self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json()
+        except (HostError, AttributeError, KeyError, TypeError):
+            run = HeadRun(
+                role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
+            ).to_json()
+        return LaunchedHead(handle=handle, head=head, run=run)
 
     def _create_terminal(self, workspace: str, title: str, command: str) -> str:
         result = self._run_json([
@@ -1322,10 +1469,20 @@ class DispatcherRuntime:
                 "readiness": readiness.to_json(),
                 "reason": readiness.reason,
             }
-        # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
-        # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
-        # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
-        # before claiming so its worker report command cannot collide with the old report either.
+        # A card the dispatcher still holds a record for, back in Ready with its claim already
+        # committed under the current attempt, is a re-run: an operator-approved retry after
+        # Blocked, or a plain preempt/requeue out of in_progress or validate. The pilot dispatcher
+        # otherwise keeps one attempt id for its whole run, so the claim would replay idempotently,
+        # return the old event and leave the card Ready. Give every re-run a fresh identity before
+        # claiming, so it claims the card for real, its worker report command cannot collide with
+        # the old report, and the journal gets a second attempt instead of nothing. A committed
+        # claim without a record is a genuine board divergence and still fails closed below.
+        active = records.get(ref)
+        requeued = (
+            active is not None
+            and (active.attempt_id or attempt_id) == attempt_id
+            and self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
+        )
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
@@ -1347,7 +1504,16 @@ class DispatcherRuntime:
                 "review-wait-stall",
             )
         )
-        if retry_after_block:
+        if requeued and active is not None:
+            # The preempted head can still be sitting in the workspace the next round claims.
+            if active.handle:
+                self.host.stop(active)
+            if active.review_handle or active.review_leaf:
+                # A preempt out of Validate leaves the worker pane already closed by
+                # `start_review` but the reviewer still up. Left alone it keeps reading the same
+                # checkout the new worker gets, and its verdict would land on the new attempt.
+                _end_review_pane(self.host, active)
+        if retry_after_block or requeued:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
@@ -1377,6 +1543,9 @@ class DispatcherRuntime:
             state="claim_verified",
             claimed_at=time.time(),
         )
+        # A re-claimed card continues its own round numbering: the journal, not the board, knows
+        # how many rounds it has had, so a return to Ready adds a round instead of resetting.
+        self._open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self._save_records(payload, records)
         return self._launch_worker_after_claim(
@@ -1452,6 +1621,11 @@ class DispatcherRuntime:
             resume_workspaces.pop(ref, None)
         records[ref] = record
         self._save_records(payload, records)
+        # The worker is up: record the head running it, from the launcher's own snapshot. An adopted
+        # card whose claim predates this telemetry has no round yet, so record_worker_routing opens
+        # one from the journal rather than leaving the round unrecorded.
+        self.record_worker_routing(claimed, record, prepared.get("run"))
+        self._save_records(payload, records)
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
@@ -1481,7 +1655,10 @@ class DispatcherRuntime:
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
-            record = self._adopt(task, attempt_id)
+            try:
+                record = self._adopt(task, attempt_id)
+            except HostError as exc:
+                return self._block_unresumable(task, records, payload, attempt_id, "advance", exc)
             records[ref] = record
             current_claim = _attempt_request_id(attempt_id, "claim", ref)
             if self.audit.committed_event(current_claim) is not None:
@@ -1621,7 +1798,8 @@ class DispatcherRuntime:
         moved = self.reader.show(ref)
         try:
             self._require_head_ready(record.head)
-            record.handle = self.host.restart_worker(moved, record)
+            launched = self.host.restart_worker(moved, record)
+            record.handle = launched.handle
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
             return self._block_failed_worker_restart(
@@ -1636,6 +1814,9 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
+        # A rejected done report earns no verdict, so this stays the same round: the relaunch is
+        # recorded and dedupes unless the registry moved under it.
+        self.record_worker_routing(moved, record, launched.run)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self._save_records(payload, records)
@@ -1657,7 +1838,10 @@ class DispatcherRuntime:
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
-            record = self._adopt(task, attempt_id)
+            try:
+                record = self._adopt(task, attempt_id)
+            except HostError as exc:
+                return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
@@ -1682,6 +1866,7 @@ class DispatcherRuntime:
                     str(len(task.get("comments") or [])),
                 ),
             )
+            self._record_verdict_routing(ref, record, "red")
             record.comment_baseline = len(task.get("comments") or [])
             record.gate_state = ""
             record.gate_pending_since = 0.0
@@ -1690,7 +1875,8 @@ class DispatcherRuntime:
             moved = self.reader.show(ref)
             try:
                 self._require_head_ready(record.head)
-                record.handle = self.host.restart_worker(moved, record)
+                launched = self.host.restart_worker(moved, record)
+                record.handle = launched.handle
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
@@ -1705,6 +1891,8 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            self._open_worker_round(record)
+            self.record_worker_routing(moved, record, launched.run)
             record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
             self._save_records(payload, records)
@@ -1862,7 +2050,8 @@ class DispatcherRuntime:
             self.host.stop(record)
             try:
                 self._require_head_ready(record.head)
-                record.handle = self.host.restart_worker(task, record)
+                launched = self.host.restart_worker(task, record)
+                record.handle = launched.handle
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
@@ -1882,6 +2071,9 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            # A respawn is a real bring-up: a repinned profile lands a different configuration, and
+            # the round then belongs to the head that is actually running.
+            self.record_worker_routing(task, record, launched.run)
             record.worker_started_at = record.worker_progress_at = now
         if kind == "review":
             record.review_started_at = record.review_progress_at = now
@@ -2011,6 +2203,9 @@ class DispatcherRuntime:
         # No-op unless a reviewer pane is up; when one is, drop it before the worker head comes
         # back so no stale reviewer handle survives into the rework round.
         _end_review_pane(self.host, record)
+        # The round ends here without a reviewer verdict: the outcome names the gate so a later
+        # reading does not attribute the bounce to whoever reviewed the round.
+        self._record_verdict_routing(ref, record, f"{phase}_red")
         self.host.stop(record)
         self.writer.move(
             role="dispatcher",
@@ -2030,7 +2225,8 @@ class DispatcherRuntime:
         moved = self.reader.show(ref)
         try:
             self._require_head_ready(record.head)
-            record.handle = self.host.restart_worker(moved, record)
+            launched = self.host.restart_worker(moved, record)
+            record.handle = launched.handle
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
             return self._block_failed_worker_restart(
@@ -2045,10 +2241,46 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
+        self._open_worker_round(record)
+        self.record_worker_routing(moved, record, launched.run)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self._save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
+
+    def _block_unresumable(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        step: str,
+        error: Exception,
+    ) -> dict[str, Any]:
+        """A claimed card the dispatcher cannot pick back up on the head it was claimed with.
+
+        Nothing is launched and nothing is recorded: the routing journal keeps the attempt as the
+        last bring-up left it rather than gaining a head that never ran. A human re-points the card
+        or restores the profile.
+        """
+        ref = task["ref"]
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
+            request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+        )
+        records.pop(ref, None)
+        self._save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "claimed head is unavailable",
+        }
 
     def _block_failed_worker_restart(
         self,
@@ -2127,6 +2359,9 @@ class DispatcherRuntime:
         """Green review verdict. Re-run the mechanical gate right before merging so a non-green
         CI/local gate never lands: green merges, red bounces back to the worker, pending waits."""
         ref = task["ref"]
+        # The verdict is recorded before the merge gate runs: it is a fact about the head pair of
+        # this round and stays true even when the merge path bounces the card back afterwards.
+        self._record_verdict_routing(ref, record, "green")
         drift = self._review_drift(task, record)
         if drift:
             return self._gate_red_to_worker(
@@ -2200,6 +2435,127 @@ class DispatcherRuntime:
             f"в In progress — доработай и отчитайся заново."
         )
 
+    def head_run_snapshot(
+        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = ""
+    ) -> dict[str, Any]:
+        """The launch snapshot for a head the runtime has no launcher record of, or a marked
+        minimal one when its profile can no longer be read.
+
+        Only an adopted card takes this path: its bring-up happened in a previous dispatcher life,
+        so the configuration is re-read now. A registry edited since must still leave a usable
+        attempt record rather than take the tick down: the point of the journal is that it keeps
+        working when `heads.toml` moves.
+        """
+        try:
+            return self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json()
+        except (HostError, AttributeError, KeyError, TypeError):
+            return HeadRun(
+                role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN
+            ).to_json()
+
+    def _journal_round(self, ref: str) -> int:
+        """The last worker round the journal holds for this card. Survives a lost dispatcher record,
+        a restore, and a card that went back to Ready and was claimed again."""
+        history = _routing_attempts(self.audit.events(ref, kind="routing"))
+        return history[-1].attempt if history else 0
+
+    def _open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
+        """Start the card's next worker round: stamp its number and drop the previous round's heads.
+
+        A round is one worker bring-up plus the review it earns. Claim opens round 1, each rework
+        bounce opens the next; a respawn inside a round continues that round. Nothing is snapshotted
+        here: the heads are recorded by the bring-ups themselves, once they are actually up.
+        """
+        record.attempt_round = round_number or (record.attempt_round + 1)
+        record.worker_run = {}
+        record.review_run = {}
+
+    def record_worker_routing(
+        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
+    ) -> None:
+        """Record the worker head this bring-up just put up, as launched.
+
+        Called after every worker launch (claim, rework, respawn) and never before: the record must
+        name the process that is running, and `run` is the snapshot the launcher handed back for it.
+        Only an adopted card, whose launch happened in a previous dispatcher life, has no such
+        snapshot and falls back to reading the registry now. A relaunch onto the same configuration
+        is the same record and dedupes on its request id; one onto a different configuration appends
+        its own event and replaces the round's active head, so the verdict below reports the head
+        that actually earned it.
+        """
+        ref = task["ref"]
+        if not record.attempt_round:
+            record.attempt_round = self._journal_round(ref) + 1
+        record.worker_run = run or self.head_run_snapshot(
+            task, role="worker", head=record.head, workspace=record.workspace
+        )
+        self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
+
+    def record_review_routing(
+        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
+    ) -> None:
+        """Record the reviewer head this bring-up just put up, as launched.
+
+        Same rule as the worker: `run` comes from the reviewer's own bring-up. A restart onto an
+        unchanged configuration is the same record; one onto a repinned profile is a second reviewer
+        for the round and says so.
+        """
+        ref = task["ref"]
+        if not record.attempt_round:
+            record.attempt_round = self._journal_round(ref) + 1
+        record.review_run = run or self.head_run_snapshot(
+            task, role="reviewer", head=record.review_head, workspace=record.workspace
+        )
+        self._record_routing(ref, record, phase="review", heads=[record.review_run])
+
+    def _record_routing(
+        self,
+        ref: str,
+        record: DispatcherRecord,
+        *,
+        phase: str,
+        heads: list[dict[str, Any]],
+        outcome: str = "",
+    ) -> None:
+        heads = [head for head in heads if head]
+        if not heads or not record.attempt_round:
+            return
+        # The request id carries the launched configurations, not just the round: a repeated
+        # bring-up of the same head writes the same id and commits once, while a bring-up on a
+        # different configuration is a different id and appends. Same for a verdict: it is keyed by
+        # the pair that produced it, so a verdict issued by a relaunched reviewer is not swallowed
+        # by the first reviewer's record.
+        parts = [str(record.attempt_round)]
+        if outcome:
+            parts.append(outcome)
+        parts.extend(_run_key(head) for head in heads)
+        self.writer.routing(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            payload=_routing_payload(
+                attempt=record.attempt_round,
+                attempt_id=record.attempt_id,
+                phase=phase,
+                heads=heads,
+                outcome=outcome,
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id, f"routing-{phase}", ref, "-".join(parts)
+            ),
+        )
+
+    def _record_verdict_routing(self, ref: str, record: DispatcherRecord, outcome: str) -> None:
+        """Tie the round's outcome to the heads that earned it, carrying both so worker-reviewer
+        pairs group by outcome without a join against the launch records."""
+        self._record_routing(
+            ref,
+            record,
+            phase="verdict",
+            heads=[record.worker_run, record.review_run],
+            outcome=outcome,
+        )
+
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         state = self.production_state if payload.get("mode") == "production" else self.state
         state.put_records(payload, records)
@@ -2211,12 +2567,18 @@ class DispatcherRuntime:
         review_baseline = _review_adoption_baseline(task)
         launched = self._review_launch_recorded(task, review_baseline)
         state = "review_starting" if launched else "adopted"
+        # The routing round of a card whose dispatcher record was lost comes back from the journal,
+        # heads included: re-reading the registry would report today's `heads.toml` for a head
+        # launched hours ago. A card claimed before this telemetry existed has no round; it opens
+        # one on its next bring-up rather than inventing history for the round already running.
+        resumed = _routing_attempts(self.audit.events(task["ref"], kind="routing"))
+        round_record = resumed[-1] if resumed else None
         return DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
             handle="",
-            head=self.catalog.worker_head(task),
-            review_head=self.catalog.review_head(task),
+            head=self.catalog.claimed_worker_head(task),
+            review_head=self.catalog.claimed_review_head(task),
             attempt_id=attempt_id,
             comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,
@@ -2225,6 +2587,9 @@ class DispatcherRuntime:
             # A reviewer only launches once the gate is green, so an adopted card already in review
             # inherits a passed gate rather than re-running it before the recovery path.
             gate_state="green" if launched else "",
+            attempt_round=round_record.attempt if round_record else 0,
+            worker_run=round_record.worker.to_json() if round_record and round_record.worker else {},
+            review_run=round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
         )
 
     def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:

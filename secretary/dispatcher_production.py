@@ -270,6 +270,9 @@ class _ProbeWriter:
     def comment(self, *args: Any, **kwargs: Any) -> None:
         raise ProbeAbort("comment", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
 
+    def routing(self, *args: Any, **kwargs: Any) -> None:
+        raise ProbeAbort("routing", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 

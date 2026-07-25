@@ -29,7 +29,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 codex_mode="tui",
             )
 
-        self.assertEqual(handle, "term-tui")
+        self.assertEqual(handle.handle, "term-tui")
         create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
         wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
         send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
@@ -164,7 +164,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     codex_mode="tui",
                 )
 
-        self.assertEqual(handle, "term-tui")
+        self.assertEqual(handle.handle, "term-tui")
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
     def test_tui_activity_uses_rollout_mtime_only_for_tui_profiles(self) -> None:
