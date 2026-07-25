@@ -543,6 +543,20 @@ class ReconcilePlanTests(unittest.TestCase):
         for standard_dir in ("/usr/local/bin", "/usr/bin", "/bin"):
             self.assertIn(standard_dir, path_value.split(":"))
 
+    def test_memory_unit_uses_persistent_cache_and_configured_thread_limit(self):
+        units = load_packaged_units(
+            REPO_ROOT / "packaging" / "systemd", "secretary-",
+            SystemdLayout(
+                REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator"),
+                memory_model="test-model", memory_dim=4, memory_threads=2,
+            ),
+        )
+        unit = next(unit for unit in units if unit.name == "secretary-memory.service").content
+        self.assertIn(b"Environment=MEMORY_CACHE_DIR=/srv/data/memory/fastembed-cache", unit)
+        self.assertIn(b"Environment=MEMORY_MODEL=test-model", unit)
+        self.assertIn(b"Environment=MEMORY_DIM=4", unit)
+        self.assertIn(b"Environment=MEMORY_THREADS=2", unit)
+
     def test_scheduler_units_order_after_the_external_orca_runtime_without_starting_it(self):
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd", "secretary-",

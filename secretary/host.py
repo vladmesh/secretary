@@ -83,6 +83,9 @@ class SystemdLayout:
     runtime_user: str
     runtime_home: Path
     orca_executable: Path = Path("/usr/local/bin/orca")
+    memory_model: str = "intfloat/multilingual-e5-large"
+    memory_dim: int = 1024
+    memory_threads: int = 1
 
 
 def default_systemd_layout() -> SystemdLayout:
@@ -100,6 +103,9 @@ def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
         b"{{SECRETARY_RUNTIME_USER}}": layout.runtime_user.encode(),
         b"{{SECRETARY_RUNTIME_HOME}}": os.fsencode(layout.runtime_home),
         b"{{SECRETARY_ORCA_EXECUTABLE}}": os.fsencode(layout.orca_executable),
+        b"{{SECRETARY_MEMORY_MODEL}}": layout.memory_model.encode(),
+        b"{{SECRETARY_MEMORY_DIM}}": str(layout.memory_dim).encode(),
+        b"{{SECRETARY_MEMORY_THREADS}}": str(layout.memory_threads).encode(),
     }
     rendered = template
     for marker, value in values.items():

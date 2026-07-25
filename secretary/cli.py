@@ -460,6 +460,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
     if report.manifest_path:
         print(f"data manifest path: {report.manifest_path}")
+    cache_dir = _memory_cache_dir(report.instance)
+    print(f"memory model cache: {cache_dir}")
+    if _is_temporary_directory(cache_dir):
+        print("warning: memory model cache is in a temporary directory and can be cleaned unexpectedly")
     if report.warnings:
         print(f"warnings: {len(report.warnings)}")
         for warning in report.warnings:
@@ -493,6 +497,23 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
+
+
+def _memory_cache_dir(instance: dict[str, object]) -> Path:
+    """Return the product-owned persistent fastembed cache location."""
+    return Path(str(instance["data_dir"])).expanduser() / "memory" / "fastembed-cache"
+
+
+def _is_temporary_directory(path: Path) -> bool:
+    """Whether a cache path sits below a system temporary directory."""
+    resolved = path.resolve(strict=False)
+    for temporary in (Path("/tmp"), Path("/var/tmp")):
+        try:
+            resolved.relative_to(temporary)
+            return True
+        except ValueError:
+            pass
+    return False
 
 
 def run_status(args: argparse.Namespace) -> int:

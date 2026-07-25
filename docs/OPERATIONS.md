@@ -57,6 +57,21 @@ Memory runtime загружает локальную embedding model. На produ
 шести минут и достигал примерно 1.9 GiB RSS. Отдельный target с 1.9 GiB общей RAM не смог завершить
 live rebuild. Поддерживаемый minimum ещё не установлен; не считать 2 GiB profile доказанным.
 
+Memory model cache lives at `DATA_DIR/memory/fastembed-cache`, never in `/tmp`. The memory unit
+passes this path directly to fastembed, so it survives `systemd-tmpfiles-clean`. `host.memory_threads`
+sets the ONNX Runtime inference limit; its default is `1`, because this host has three cores and a
+single semantic search otherwise expands across all of them while the dispatcher still ticks every
+minute. `secretary doctor --instance INSTANCE` prints the cache path and warns when `data_dir` puts
+it below `/tmp` or `/var/tmp`.
+
+To move a live cache without downloading the 2.1 GB model again, stop the service and copy
+`/tmp/fastembed_cache` into `DATA_DIR/memory/fastembed-cache`. If a previous restore created
+`DATA_DIR/memory/.fastembed-cache`, merge it into that same destination before deleting it. Then
+run `secretary reconcile apply --instance INSTANCE` and start `secretary-memory.service`. Verify
+the cache path with `secretary doctor --instance INSTANCE` before removing either old cache. The
+service must remain stopped during the copy so fastembed cannot create a partial second cache.
+Treat this migration as a required deployment step before the first restart with this release.
+
 Orca runtime принадлежит хосту. Secretary не создаёт `secretary-orca.service` и не запускает
 `orca serve`: scheduler units имеют только `After=orca-server.service`, без `Wants=` на runtime,
 поэтому минутный dispatcher tick не может его перезапустить. `secretary doctor` показывает этот

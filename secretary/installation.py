@@ -520,7 +520,11 @@ def install(args: argparse.Namespace) -> InstallResult:
             ensure_pipeline_board(target)
             restored = import_normalized_board(data_dir)
             result.add("board", "changed", f"{restored} card(s) at parity")
-            count = rebuild_memory_index(data_dir, target)
+            host = report.host if isinstance(report.host, dict) else {}
+            threads = host.get("memory_threads", 1)
+            count = rebuild_memory_index(
+                data_dir, target, threads=threads if isinstance(threads, int) else None
+            )
             result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
             product_root = (
                 Path(args.product_root).expanduser().resolve()

@@ -146,6 +146,7 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
         script = host.get("memory_reindex_script")
         model = host.get("memory_model", "intfloat/multilingual-e5-large")
         dim = host.get("memory_dim", 1024)
+        threads = host.get("memory_threads", 1)
         count = rebuild_memory_index(
             data_dir,
             # `_target` hands back instance.yaml; canon hangs off the repo root.
@@ -154,6 +155,7 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
             script=Path(script) if isinstance(script, str) else None,
             model=model if isinstance(model, str) else None,
             dim=dim if isinstance(dim, int) else None,
+            threads=threads if isinstance(threads, int) else None,
         )
     except RestoreError as exc:
         _print_json({"ok": False, "action": "memory-reindex", "error": str(exc)})

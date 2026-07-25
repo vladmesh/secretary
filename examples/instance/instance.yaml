@@ -37,3 +37,5 @@ host:
   # unrecognised unit in our namespace is a conflict and apply refuses to write.
   foreign_units:
     - secretary-supervisor.timer
+  # One inference request must leave CPU for the minute dispatcher tick.
+  memory_threads: 1

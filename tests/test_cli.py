@@ -60,8 +60,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("projects: 1", output)
         self.assertIn("adapters: 1", output)
         self.assertIn("data manifest: present", output)
+        self.assertIn("memory model cache: /var/lib/secretary-data/memory/fastembed-cache", output)
         self.assertIn("host changes: none", output)
         self.assertIn("status: ok", output)
+
+    def test_doctor_warns_when_model_cache_is_under_tmp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: temporary-cache\ndata_dir: /tmp/secretary-data\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y\n",
+                encoding="utf-8",
+            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("memory model cache: /tmp/secretary-data/memory/fastembed-cache", output)
+        self.assertIn("warning: memory model cache is in a temporary directory", output)
 
     def test_doctor_accepts_instance_file_path(self):
         code, output = self.run_cli(

@@ -39,6 +39,8 @@ DB_PATH = os.environ.get("MEMORY_DB", str(DEFAULT_MEMORY_DIR / "index.sqlite"))
 MODEL = os.environ.get("MEMORY_MODEL", "intfloat/multilingual-e5-large")
 PORT = int(os.environ.get("MEMORY_PORT", "8077"))
 DIM = int(os.environ.get("MEMORY_DIM", "1024"))
+MODEL_CACHE_DIR = Path(os.environ.get("MEMORY_CACHE_DIR", str(DEFAULT_MEMORY_DIR / "fastembed-cache")))
+THREADS = int(os.environ.get("MEMORY_THREADS", "1"))
 SEARCH_LOG = os.environ.get("MEMORY_SEARCH_LOG", str(Path(DB_PATH).parent / "search-log.jsonl"))
 CANON_EXPORT = Path(os.environ["MEMORY_CANON_EXPORT"]) if "MEMORY_CANON_EXPORT" in os.environ else CANON.parent / "export.ndjson"
 WATCH_INTERVAL = float(os.environ.get("MEMORY_WATCH_INTERVAL", "10"))
@@ -56,7 +58,11 @@ def embedder() -> TextEmbedding:
     if _embedder is None:
         with _lock:
             if _embedder is None:
-                _embedder = TextEmbedding(model_name=MODEL)
+                _embedder = TextEmbedding(
+                    model_name=MODEL,
+                    cache_dir=str(MODEL_CACHE_DIR),
+                    threads=THREADS,
+                )
     return _embedder
 
 
@@ -412,11 +418,12 @@ def canon_signature() -> tuple:
     raise RuntimeError(f"canon snapshot unavailable: no {CANON_EXPORT} and {CANON} is not in git")
 
 
-def build_document_embedder(model: str, cache_dir: str | Path | None = None):
+def build_document_embedder(model: str, cache_dir: str | Path, threads: int):
     """Return a normalized document embedder for an explicit model."""
     embedding_model = TextEmbedding(
         model_name=model,
-        cache_dir=str(cache_dir) if cache_dir is not None else None,
+        cache_dir=str(cache_dir),
+        threads=threads,
     )
 
     class DocumentEmbedder:
@@ -548,6 +555,8 @@ def offline_rebuild(
     dim: int,
     document_embed=None,
     allow_empty: bool = False,
+    cache_dir: str | Path = MODEL_CACHE_DIR,
+    threads: int = THREADS,
 ) -> dict:
     """Build and atomically publish an index from an explicit canon snapshot.
 
@@ -566,7 +575,7 @@ def offline_rebuild(
     facts = load_canon(canon_path, export_path)
     if not facts and not allow_empty:
         raise RuntimeError("canon snapshot has no current facts; pass allow_empty=True to publish an empty index")
-    document_embed = document_embed or build_document_embedder(model)
+    document_embed = document_embed or build_document_embedder(model, cache_dir, threads)
     indexed = write_index(facts, target, model, int(dim), document_embed)
     parity = {"expected": len(facts), "indexed": indexed, "ok": indexed == len(facts)}
     if not parity["ok"]:
@@ -590,6 +599,8 @@ def incremental_update(
     dim: int = DIM,
     document_embed=None,
     allow_empty: bool = True,
+    cache_dir: str | Path = MODEL_CACHE_DIR,
+    threads: int = THREADS,
 ) -> dict:
     """Update added, changed and deleted facts in a compatible index.
 
@@ -605,7 +616,8 @@ def incremental_update(
     compatibility, _ = index_compatibility(target, model, int(dim))
     if compatibility != "compatible":
         rebuilt = offline_rebuild(
-            canon_path, export_path, target, model, int(dim), document_embed, allow_empty
+            canon_path, export_path, target, model, int(dim), document_embed, allow_empty,
+            cache_dir, threads,
         )
         return {
             **rebuilt, "mode": "rebuild", "added": len(facts), "updated": 0,
@@ -618,7 +630,8 @@ def incremental_update(
         if not {"fact_id", "content_hash"}.issubset(columns):
             conn.close()
             rebuilt = offline_rebuild(
-                canon_path, export_path, target, model, int(dim), document_embed, allow_empty
+                canon_path, export_path, target, model, int(dim), document_embed, allow_empty,
+                cache_dir, threads,
             )
             return {
                 **rebuilt, "mode": "rebuild", "added": len(facts), "updated": 0,
@@ -637,7 +650,7 @@ def incremental_update(
             if key in existing and existing[key][1] != item[1]
         ]
         deleted = [key for key in existing if key not in desired]
-        document_embed = document_embed or build_document_embedder(model)
+        document_embed = document_embed or build_document_embedder(model, cache_dir, threads)
         vectors = {
             fact["id"]: document_embed(fact["text"])
             for fact, _ in (*added, *changed)

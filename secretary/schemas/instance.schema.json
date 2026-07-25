@@ -129,6 +129,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Embedding dimension paired with host.memory_model."
+        },
+        "memory_threads": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum ONNX Runtime inference threads for the memory embedding model. Defaults to 1 so one memory request does not monopolize the host."
         }
       },
       "if": {"properties": {"units": {"type": "array", "minItems": 1}}, "required": ["units"]},
