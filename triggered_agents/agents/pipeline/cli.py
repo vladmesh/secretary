@@ -15,12 +15,11 @@ never move anything, model.TRANSITIONS leaves each an empty set).
 setup/list/show/probe need no role. Guards live in model/ops; this layer only wires argv to them
 and maps failures to exit codes.
 
-pause/resume (triggered-agents-281) are po-/steward-only. `pause drain|freeze --reason ...`
-toggles the persistent flag in `state/pipeline/pause.json` (see dispatcher.pause/resume, pause.py)
-that dispatcher.tick checks before claiming or (in freeze's internal hard mode) before touching
-any head at all, and runtime/dispatch.py checks before dispatching steward/curator/retro. Legacy
-`soft`/`hard` aliases still parse for compatibility. pause-status needs no role, same as
-list/show, it only reads the flag.
+pause/resume moved out (secretary-731). The production dispatcher never read this flag, so
+pausing here reported success while it kept claiming cards. Both commands now refuse and name
+`secretary pause` / `secretary resume`, which write the production flag and mirror it back to
+`state/pipeline/pause.json` for runtime/dispatch.py, still the flag steward/curator/retro read.
+pause-status stays read-only and still reports this flag, labelled as the legacy one.
 
 `probe --resource <id>` exits 0/1 for green/red (see health.run_builtin_probe), not the generic
 KanboardError/GuardError table below — it is heads.toml's own probe command, run by
@@ -70,17 +69,24 @@ def _need_role(role: str | None, allowed: tuple[str, ...]) -> bool:
     return True
 
 
-def _pause_mode(args) -> str | None:
-    mode_arg = getattr(args, "mode", None)
-    mode_flag = getattr(args, "mode_flag", None)
-    if mode_arg and mode_flag:
-        _err("pause mode specified twice; use positional drain/freeze or legacy --mode, not both")
-        return None
-    mode = mode_arg or mode_flag
-    if not mode:
-        _err("pause needs a mode: drain or freeze (legacy aliases: soft, hard)")
-        return None
-    return mode
+MOVED_PAUSE = "secretary pause drain|freeze --instance <instance> --reason ..."
+MOVED_RESUME = "secretary resume --instance <instance>"
+MOVED_PAUSE_STATUS = "secretary pause-status --instance <instance>"
+
+
+def _moved_pause_command(cmd: str) -> int:
+    """Refuse a legacy pause/resume and name the command that works.
+
+    The legacy dispatcher no longer moves cards, so writing its flag here would report success
+    while the production dispatcher kept claiming. One door only: `secretary pause` writes the
+    production flag and mirrors it to this one for the background roles that still read it.
+    """
+    replacement = MOVED_RESUME if cmd == "resume" else MOVED_PAUSE
+    _err(
+        f"pipeline {cmd} no longer pauses the pipeline: the production dispatcher does not read "
+        f"this flag. Use: {replacement}"
+    )
+    return 2
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -215,28 +221,17 @@ def main(argv=None) -> int:
         if args.cmd in ("tick", "precheck"):
             from . import dispatcher
             return dispatcher.tick() if args.cmd == "tick" else dispatcher.precheck()
-        if args.cmd == "pause":
-            if not _need_role(role, ("po", "steward")):
-                return 2
-            mode = _pause_mode(args)
-            if mode is None:
-                return 2
-            reason = _text_arg(args.reason, args.reason_file).strip()
-            if not reason:
-                _err("pause needs a non-empty --reason or --reason-file")
-                return 2
-            actor = (args.actor or role or "").strip()
-            from . import dispatcher
-            return _emit(dispatcher.pause(mode, reason=reason, actor=actor,
-                                          exclude_workspaces=args.exclude_workspace))
-        if args.cmd == "resume":
-            if not _need_role(role, ("po", "steward")):
-                return 2
-            from . import dispatcher
-            return _emit(dispatcher.resume())
+        if args.cmd in ("pause", "resume"):
+            return _moved_pause_command(args.cmd)
         if args.cmd == "pause-status":
             from . import dispatcher
-            return _emit(dispatcher.pause_status())
+            status = dispatcher.pause_status()
+            status["authoritative_command"] = MOVED_PAUSE_STATUS
+            status["note"] = (
+                "this is the legacy flag; the pipeline is paused and read through "
+                f"{MOVED_PAUSE_STATUS}"
+            )
+            return _emit(status)
         if args.cmd == "probe":
             from . import health
             try:
