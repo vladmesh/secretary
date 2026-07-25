@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary.cli import main
 from secretary.config import validate
@@ -47,7 +48,13 @@ class StatusCliTests(unittest.TestCase):
     def test_doctor_json_has_structured_findings(self):
         root = Path(__file__).resolve().parents[1]
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        # The doctor path resolves the packaged Orca runtime, which a CI runner does not have:
+        # without this the test is green on a host with Orca installed and red everywhere else
+        # (secretary-705, commit c1edf14 did the same for tests/test_cli.py).
+        legacy_orca = root / "tests" / "fixtures" / "legacy-orca"
+        with contextlib.redirect_stdout(output), mock.patch(
+            "secretary.host_apply.find_orca_executable", return_value=legacy_orca
+        ):
             code = main(["doctor", "--offline", "--json", "--instance", str(root / "examples" / "instance")])
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 0, payload)
