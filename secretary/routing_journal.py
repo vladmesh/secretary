@@ -15,6 +15,8 @@ effort, codex launch mode, resource and account — snapshotted at bring-up, nev
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -23,6 +25,10 @@ ROUTING_KIND = "routing"
 WORKER = "worker"
 REVIEWER = "reviewer"
 PHASES = ("worker", "review", "verdict")
+# Where the head that really launched came from, relative to what the card asked for.
+FROM_REQUESTED = "requested"
+FROM_RETRY_SWITCH = "retry_switch"
+FROM_LAUNCH = "launch"
 
 
 @dataclass(frozen=True)
@@ -30,15 +36,18 @@ class HeadRun:
     """One head as it was actually launched.
 
     `requested` is the profile the card (or the role default) asked for, `resolved` is the profile
-    that really ran. They differ exactly when a fallback fired, which `fallback` states outright so
-    a later diversity analysis never has to infer it from a chain in a `heads.toml` that has since
-    moved on.
+    the launcher was actually handed. They differ exactly when a fallback fired, which `fallback`
+    states outright so a later diversity analysis never has to infer it from a chain in a
+    `heads.toml` that has since moved on. `resolved_from` says which road produced the difference:
+    the card's own watchdog head-switch history (`retry_switch`) or a bring-up that launched
+    something other than what the card asks for right now (`launch`).
     """
 
     role: str
     requested: str
     resolved: str
     requested_from: str = "role_default"
+    resolved_from: str = FROM_REQUESTED
     adapter: str = ""
     model: str = ""
     effort: str = ""
@@ -57,6 +66,7 @@ class HeadRun:
             "requested_head": self.requested,
             "head": self.resolved,
             "requested_from": self.requested_from,
+            "resolved_from": self.resolved_from,
             "fallback": self.fallback,
             "fallback_chain": list(self.fallback_chain),
             "adapter": self.adapter,
@@ -75,6 +85,7 @@ class HeadRun:
             requested=str(payload.get("requested_head") or ""),
             resolved=str(payload.get("head") or ""),
             requested_from=str(payload.get("requested_from") or "role_default"),
+            resolved_from=str(payload.get("resolved_from") or FROM_REQUESTED),
             adapter=str(payload.get("adapter") or ""),
             model=str(payload.get("model") or ""),
             effort=str(payload.get("effort") or ""),
@@ -94,9 +105,16 @@ def head_run_from_profile(
     profile: dict[str, Any],
     resources: dict[str, Any],
     codex_mode: str = "",
+    resolved_from: str = "",
+    fallback_chain: Iterable[str] | None = None,
 ) -> HeadRun:
-    """Snapshot a resolved profile. `codex_mode` overrides the profile's own launch mode (a card
-    can pin `codex_launch_mode`), so the record shows the mode the head really started in."""
+    """Snapshot the profile that was launched. `codex_mode` overrides the profile's own launch mode
+    (a card can pin `codex_launch_mode`), so the record shows the mode the head really started in.
+
+    `fallback_chain` is the chain declared by the *requested* profile — the policy in force at this
+    bring-up — and defaults to the launched profile's own chain when the caller has no better
+    source.
+    """
     adapter = str(profile.get("adapter") or "")
     resource = str(profile.get("resource") or "")
     account = ""
@@ -108,20 +126,36 @@ def head_run_from_profile(
     if adapter == "codex":
         mode = str(codex_mode or profile.get("codex_mode") or "exec")
         effort = str(profile.get("effort") or "default")
-    chain = profile.get("fallback")
+    chain = profile.get("fallback") if fallback_chain is None else fallback_chain
     return HeadRun(
         role=role,
         requested=requested,
         resolved=resolved,
         requested_from=requested_from,
+        resolved_from=resolved_from or (FROM_REQUESTED if resolved == requested else FROM_LAUNCH),
         adapter=adapter,
         model=str(profile.get("model") or ""),
         effort=effort,
         codex_mode=mode,
         resource=resource,
         account=account,
-        fallback_chain=tuple(str(item) for item in chain) if isinstance(chain, list) else (),
+        fallback_chain=tuple(str(item) for item in chain) if isinstance(chain, (list, tuple)) else (),
     )
+
+
+def run_key(run: HeadRun | dict[str, Any] | None) -> str:
+    """Short digest of one launch configuration.
+
+    A round can bring the same role up more than once — a respawn after a silent head, a recovery
+    restart, a rework relaunch — and the relaunched head is not necessarily the one that started
+    the round: a `heads.toml` repin or a switch lands a different adapter/model/resource. The
+    digest is what tells "the same head came back" from "a different head now serves this round",
+    so the journal can stay idempotent on the former and still append an event for the latter.
+    """
+    payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
+    payload.pop("fallback_chain", None)
+    material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
 
 
 def routing_payload(
@@ -153,6 +187,11 @@ class AttemptRecord:
     reviewer: HeadRun | None = None
     outcome: str = ""
     events: list[str] = field(default_factory=list)
+    # Every bring-up of the round in journal order, not just the head that served it last: a round
+    # whose reviewer was relaunched onto a different model keeps both records, and `reviewer` is
+    # the one the verdict came from.
+    worker_runs: list[HeadRun] = field(default_factory=list)
+    reviewer_runs: list[HeadRun] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -160,6 +199,8 @@ class AttemptRecord:
             "attempt_id": self.attempt_id,
             "worker": self.worker.to_json() if self.worker else None,
             "reviewer": self.reviewer.to_json() if self.reviewer else None,
+            "worker_runs": [run.to_json() for run in self.worker_runs],
+            "reviewer_runs": [run.to_json() for run in self.reviewer_runs],
             "outcome": self.outcome,
         }
 
@@ -194,15 +235,20 @@ def attempts(events: Iterable[dict[str, Any]], reference: str = "") -> list[Atte
             found[number] = record
             order.append(number)
         record.attempt_id = str(payload.get("attempt_id") or record.attempt_id)
-        record.events.append(str(payload.get("phase") or ""))
+        phase = str(payload.get("phase") or "")
+        record.events.append(phase)
         for head in payload.get("heads") or []:
             if not isinstance(head, dict):
                 continue
             run = HeadRun.from_json(head)
             if run.role == WORKER:
                 record.worker = run
+                if phase == "worker":
+                    record.worker_runs.append(run)
             elif run.role == REVIEWER:
                 record.reviewer = run
+                if phase == "review":
+                    record.reviewer_runs.append(run)
         outcome = str(payload.get("outcome") or "")
         if outcome:
             record.outcome = outcome

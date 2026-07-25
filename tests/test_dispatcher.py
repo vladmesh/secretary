@@ -157,7 +157,6 @@ class FakeCatalog:
             "openai-sub": {"account": "openai-subscription"},
             "claude-sub": {"account": "claude-subscription"},
         }
-        self.fallbacks: dict[str, str] = {}
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
@@ -175,28 +174,49 @@ class FakeCatalog:
     def review_head(self, task: dict) -> str:
         return self.head_run(task, role="reviewer").resolved
 
-    def head_run(self, task: dict, *, role: str) -> HeadRun:
-        """Mirror InstanceCatalog.head_run over a two-profile registry: `codex` for the worker,
-        `codex-reviewer` for the reviewer, with `codex-reviewer` falling back to `claude-opus` when
-        the test asks for it — the pair a diversity question is actually about."""
+    def head_run(self, task: dict, *, role: str, launched: str = "") -> HeadRun:
+        """Mirror InstanceCatalog.head_run over a three-profile registry: `codex` for the worker,
+        `codex-reviewer` for the reviewer, `claude-opus` as the other family — the pair a diversity
+        question is actually about. Same resolution rules as the real catalog: the ask comes from the
+        card (or the role default), the pre-fallback ask from the card's own retry history, and the
+        launched head is whatever the bring-up handed to the launcher."""
+        routing = task.get("routing") or {}
         if role == "worker":
-            requested = str(task.get("routing", {}).get("head_override") or "codex")
-            codex_mode = str(task.get("routing", {}).get("codex_launch_mode") or "")
+            override = routing.get("head_override")
+            default = "codex"
+            codex_mode = str(routing.get("codex_launch_mode") or "")
+            switched = self._retry_origin(task)
         else:
-            requested = str(task.get("routing", {}).get("review_head_override") or "codex-reviewer")
+            override = routing.get("review_head_override")
+            default = "codex-reviewer"
             codex_mode = ""
-        resolved = self.fallbacks.get(requested, requested)
+            switched = ""
+        asked = str(override) if override else default
+        requested = switched or asked
+        resolved = str(launched) if launched else asked
+        if resolved == requested:
+            resolved_from = "requested"
+        elif switched and resolved == asked:
+            resolved_from = "retry_switch"
+        else:
+            resolved_from = "launch"
         return head_run_from_profile(
             role=role,
             requested=requested,
             resolved=resolved,
-            requested_from="card" if task.get("routing", {}).get(
-                "head_override" if role == "worker" else "review_head_override"
-            ) else "role_default",
+            requested_from="retry_history" if switched else ("card" if override else "role_default"),
+            resolved_from=resolved_from,
             profile=self.profiles.get(resolved, {"adapter": "codex", "resource": "openai-sub"}),
             resources=self.resources,
             codex_mode=codex_mode,
+            fallback_chain=(self.profiles.get(requested) or {}).get("fallback") or (),
         )
+
+    def _retry_origin(self, task: dict) -> str:
+        heads = (task.get("retry") or {}).get("heads")
+        if not isinstance(heads, list) or len(heads) < 2:
+            return ""
+        return str(heads[0] or "")
 
     def binding(self, project: str) -> dict:
         binding = {"repo": f"/home/dev/{project}"}
@@ -2053,20 +2073,76 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(first.worker.codex_mode, "exec")
 
     def test_routing_record_names_the_head_that_actually_ran_after_a_fallback(self) -> None:
-        """A reviewer that fell back to another family must be distinguishable from the requested
-        one, or every later diversity reading silently counts the pair that never ran."""
+        """A head that fell back to another family must be distinguishable from the requested one,
+        or every later diversity reading silently counts the pair that never ran.
+
+        The switch itself is the retry path's: it walks `heads.toml`'s chain off a red resource and
+        pins the result into the card's own `head`/`retry_heads`. The dispatcher launches what the
+        card now names, so the journal has to show the pre-switch ask next to the head that ran.
+        """
+        self.board.metadata[12]["head"] = "claude-opus"
+        self.board.metadata[12]["retry_heads"] = "codex,claude-opus"
+        self.board.metadata[12]["retry_switch"] = "1"
         self.start_pilot()
-        self.catalog.fallbacks = {"codex-reviewer": "claude-opus"}
+        self.assertEqual(self.runtime.tick(self.selector)["step"], "claim")
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.requested, "codex")
+        self.assertEqual(worker.resolved, "claude-opus")
+        self.assertTrue(worker.fallback)
+        self.assertEqual(worker.resolved_from, "retry_switch")
+        self.assertEqual(worker.requested_from, "retry_history")
+        self.assertEqual((worker.adapter, worker.model), ("claude", "opus"))
+        self.assertEqual(worker.account, "claude-subscription")
+
+    def test_reviewer_relaunched_onto_another_head_is_a_second_record(self) -> None:
+        """A reviewer restart inside one round can land on a different adapter/model — a repin, a
+        switch — and then the verdict came from that head, not from the one the round started with.
+        Both bring-ups stay in the journal and the verdict carries the later one."""
+        self.start_pilot()
         self._run_worker_to_validate()
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        first = self.routing_history()[-1].reviewer
+        # The reviewer pane died and the registry was repinned before recovery brought it back up.
+        self.catalog.profiles["codex-reviewer"] = dict(
+            self.catalog.profiles["codex-reviewer"], model="gpt-6-terra", effort="high"
+        )
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["state"] = "review_starting"
+        self.runtime.state.save(payload)
+        self.host.review_running_result = False
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-restarted")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="ok", request_id="review-green-after-restart",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
 
-        reviewer = self.routing_history()[-1].reviewer
-        self.assertEqual(reviewer.requested, "codex-reviewer")
-        self.assertEqual(reviewer.resolved, "claude-opus")
-        self.assertTrue(reviewer.fallback)
-        self.assertEqual((reviewer.adapter, reviewer.model), ("claude", "opus"))
-        self.assertEqual(reviewer.account, "claude-subscription")
-        self.assertFalse(self.routing_history()[-1].worker.fallback)
+        attempt = self.routing_history()[-1]
+        self.assertEqual(
+            [run.model for run in attempt.reviewer_runs], ["gpt-5.6-terra", "gpt-6-terra"]
+        )
+        self.assertEqual(first.model, "gpt-5.6-terra")
+        self.assertEqual(attempt.outcome, "green")
+        self.assertEqual(
+            attempt.reviewer.model, "gpt-6-terra", "the verdict must carry the head that issued it"
+        )
+
+    def test_reviewer_relaunched_onto_the_same_head_stays_one_record(self) -> None:
+        """The mirror case: a restart that lands on the same configuration is the same reviewer, so
+        the round keeps one record instead of reading as two reviewers on one attempt."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["state"] = "review_starting"
+        self.runtime.state.save(payload)
+        self.host.review_running_result = False
+
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-restarted")
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual([run.resolved for run in attempt.reviewer_runs], ["codex-reviewer"])
 
     def test_card_requeued_to_ready_starts_a_new_attempt(self) -> None:
         """An operator-approved retry is a second attempt, not a rewrite of the first: the Ready
@@ -2856,7 +2932,8 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertEqual(worker.to_json(), {
             "role": "worker", "requested_head": "codex-extra", "head": "codex-extra",
-            "requested_from": "card", "fallback": False, "fallback_chain": [],
+            "requested_from": "card", "resolved_from": "requested",
+            "fallback": False, "fallback_chain": [],
             "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra",
             # The card pinned the launch mode, so the record shows the mode the head really ran in.
             "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
@@ -2865,6 +2942,48 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual((reviewer.resolved, reviewer.effort), ("codex-reviewer", "extra"))
         self.assertEqual(reviewer.fallback_chain, ("claude-opus",))
         self.assertFalse(reviewer.fallback)
+
+    def test_head_run_reports_the_real_fallback_the_retry_path_performed(self) -> None:
+        """The production resolver, on the real registry: a card whose head was switched along
+        `heads.toml`'s chain must record the head that ran, not the one it was routed onto.
+
+        The switch is the retry path's — it walks the chain off a red resource and pins the result
+        into the card's `head`/`retry_heads` — so `codex-reviewer -> claude-opus` reaches the
+        dispatcher as a card that now names `claude-opus` with the earlier ask still in its history.
+        """
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+        card = {
+            "routing": {"head_override": "claude-opus"},
+            "retry": {"same": 1, "switched": 1, "heads": ["codex-reviewer", "claude-opus"]},
+        }
+
+        run = catalog.head_run(card, role="worker", launched="claude-opus")  # type: ignore[attr-defined]
+
+        self.assertEqual((run.requested, run.resolved), ("codex-reviewer", "claude-opus"))
+        self.assertTrue(run.fallback)
+        self.assertEqual(run.resolved_from, "retry_switch")
+        self.assertEqual(run.requested_from, "retry_history")
+        # The chain is the requested profile's own, read at this bring-up: it shows the switch went
+        # where the registry said it could go.
+        self.assertEqual(run.fallback_chain, ("claude-opus",))
+        self.assertEqual((run.adapter, run.model, run.effort), ("claude", "opus", ""))
+        self.assertEqual((run.resource, run.account), ("claude-sub", "claude-subscription"))
+
+    def test_head_run_records_the_launched_reviewer_over_the_current_ask(self) -> None:
+        """The record follows the process that runs. A reviewer brought up on `claude-opus` while the
+        card's ask resolves to `codex-reviewer` is recorded as claude-opus, flagged, and kept
+        distinguishable from the ask — the pair a diversity reading would otherwise get wrong."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+
+        run = catalog.head_run({"routing": {}}, role="reviewer", launched="claude-opus")  # type: ignore[attr-defined]
+
+        self.assertEqual((run.requested, run.resolved), ("codex-reviewer", "claude-opus"))
+        self.assertTrue(run.fallback)
+        self.assertEqual(run.resolved_from, "launch")
+        self.assertEqual((run.adapter, run.model), ("claude", "opus"))
+        self.assertEqual(run.account, "claude-subscription")
 
     def test_unknown_explicit_head_is_rejected_before_claim(self) -> None:
         catalog = object.__new__(InstanceCatalog)

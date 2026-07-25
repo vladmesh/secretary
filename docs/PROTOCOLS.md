@@ -116,7 +116,8 @@ pending/commit путь, идемпотентная по `request_id`.
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
   "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",
   "heads": [{"role": "worker", "requested_head": "codex", "head": "codex",
-             "requested_from": "card", "fallback": false, "fallback_chain": [],
+             "requested_from": "card", "resolved_from": "requested",
+             "fallback": false, "fallback_chain": [],
              "adapter": "codex", "model": "gpt-5.6-terra", "effort": "default",
              "codex_mode": "exec", "resource": "openai-sub", "account": "openai-subscription"}]}}
 ```
@@ -124,11 +125,34 @@ pending/commit путь, идемпотентная по `request_id`.
 `phase` — `worker` (подъём воркера), `review` (подъём ревьюера), `verdict` (исход попытки, несёт обе
 головы, `outcome` = `green`/`red`), так что пары «воркер-ревьюер» группируются по исходу без join.
 
+Запись снимается после фактического подъёма и по той голове, которую подъём отдал лаунчеру
+(`record.head` / `record.review_head`), а не по повторному резолву карточки: конфигурация в записи —
+это конфигурация процесса, который работает. Каждый подъём внутри попытки пишет своё событие:
+respawn после молчания, recovery-перезапуск, rework. `request_id` включает дайджест конфигурации, так
+что повторный подъём той же головы коммитится один раз (идемпотентность), а подъём на другой
+adapter/model/resource добавляет второе событие и заменяет активную голову попытки — вердикт всегда
+несёт ту голову, которая его выдала. `attempts()` отдаёт все подъёмы попытки в `worker_runs` /
+`reviewer_runs`, а `worker` / `reviewer` — те, что относятся к вердикту.
+
 Имя профиля не является историческим ключом: `codex`, `codex-terra`, `codex-high` и `codex-extra` —
 одна модель с разным effort, `claude-default` вообще не пинит модель, профили перепиниваются. Поэтому
 каждая голова несёт конфигурацию запуска целиком, снятую в момент подъёма и больше не перечитываемую
-из `heads.toml`. `requested_head` против `head` плюс явный `fallback` показывают случай, когда
-заявленная пара голов не совпала с фактической.
+из `heads.toml`.
+
+`requested_head` — голова, на которую карточку сроутили до любого fallback, `head` — та, что реально
+поднялась; `fallback` = они различаются. Сам walk по fallback-цепочкам `heads.toml` делает retry-путь
+(красный resource → `health.resolve_head`), и свой выбор он пинит в метаданные карточки `head` /
+`retry_heads`; диспетчер поднимает то, что карточка называет сейчас. Поэтому `requested_head` берётся
+из `retry_heads` (первый элемент — ask до переключения, `requested_from: "retry_history"`), а
+`resolved_from` говорит, какой дорогой возникло расхождение:
+
+- `requested` — расхождения нет;
+- `retry_switch` — голову переключил retry-путь по цепочке (`codex-reviewer` → `claude-opus`);
+- `launch` — подъём поднял не то, что карточка просит сейчас (перепин `heads.toml` или
+  `head`-метаданных после claim).
+
+`fallback_chain` — цепочка, объявленная запрошенным профилем на момент этого подъёма, а не выведенная
+задним числом из сегодняшнего `heads.toml`.
 
 Читающая сторона — `secretary.routing_journal.attempts(events, ref)`: последовательность попыток
 завершённой карточки с головами и исходом. События попадают в recovery checkpoint вместе с остальным
