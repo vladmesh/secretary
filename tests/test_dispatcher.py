@@ -2603,6 +2603,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(claimed["step"], "claim")
         self.assertNotEqual(claimed["attempt_id"], first_attempt)
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        # start_review already closed the worker pane, so only the reviewer of the preempted
+        # attempt is still up. It has to go before a new worker takes over the same checkout.
+        self.assertEqual(
+            self.host.stopped_reviews,
+            ["review:secretary-510-pilot"],
+            "the preempted attempt's reviewer must not outlive the claim of the next one",
+        )
         history = self.routing_history()
         self.assertEqual([attempt.attempt for attempt in history], [1, 2])
         self.assertEqual(history[0].reviewer.head, "codex-reviewer")

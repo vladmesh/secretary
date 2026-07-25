@@ -1499,9 +1499,15 @@ class DispatcherRuntime:
                 "review-wait-stall",
             )
         )
-        if requeued and active is not None and active.handle:
+        if requeued and active is not None:
             # The preempted head can still be sitting in the workspace the next round claims.
-            self.host.stop(active)
+            if active.handle:
+                self.host.stop(active)
+            if active.review_handle or active.review_leaf:
+                # A preempt out of Validate leaves the worker pane already closed by
+                # `start_review` but the reviewer still up. Left alone it keeps reading the same
+                # checkout the new worker gets, and its verdict would land on the new attempt.
+                _end_review_pane(self.host, active)
         if retry_after_block or requeued:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
