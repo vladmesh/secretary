@@ -91,6 +91,7 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.head_registry import HeadRegistryConfigError, assert_snapshot_current
+from secretary.head_health import HeadHealth, HeadReadiness
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -236,6 +237,16 @@ class InstanceCatalog:
             known = ", ".join(sorted(profiles)) if isinstance(profiles, dict) else ""
             raise HostError(f"unknown head {head!r} (known: {known or '(none)'})")
         return profile
+
+    def head_profile(self, head: str) -> dict[str, Any]:
+        return self._head_profile(head)
+
+    def resource(self, resource: str) -> dict[str, Any]:
+        resources = self._heads.get("resources", {})
+        value = resources.get(resource) if isinstance(resources, dict) else None
+        if not isinstance(value, dict):
+            raise HostError(f"unknown head resource {resource!r}")
+        return value
 
     @staticmethod
     def _load_optional_yaml(path: Path) -> dict[str, Any]:
@@ -972,6 +983,15 @@ class DispatcherRuntime:
         self.legacy_pause = legacy_pause or FileLegacyPauseProbe()
         self.checkpoint = checkpoint
         self.checkpoint_push = checkpoint_push
+        self.head_health = HeadHealth(catalog, state.root.parent)
+
+    def head_readiness(self, head: str) -> HeadReadiness:
+        return self.head_health.check(head)
+
+    def _require_head_ready(self, head: str) -> None:
+        readiness = self.head_readiness(head)
+        if not readiness.launch_allowed:
+            raise HostError(f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}")
 
     def preflight(self, selector: PilotSelector) -> dict[str, Any]:
         audit = self.audit.status()
@@ -1290,6 +1310,18 @@ class DispatcherRuntime:
         resume_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        head = self.catalog.worker_head(task)
+        readiness = self.head_readiness(head)
+        if not readiness.launch_allowed:
+            return {
+                "status": "skipped",
+                "step": "head-preflight",
+                "action": "resource-not-ready",
+                "pilot_ref": ref,
+                "head": head,
+                "readiness": readiness.to_json(),
+                "reason": readiness.reason,
+            }
         # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
         # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
         # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
@@ -1319,7 +1351,6 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
-        head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
@@ -1589,6 +1620,7 @@ class DispatcherRuntime:
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
         try:
+            self._require_head_ready(record.head)
             record.handle = self.host.restart_worker(moved, record)
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
@@ -1657,6 +1689,7 @@ class DispatcherRuntime:
             _reset_wait(record, "worker")
             moved = self.reader.show(ref)
             try:
+                self._require_head_ready(record.head)
                 record.handle = self.host.restart_worker(moved, record)
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
@@ -1828,6 +1861,7 @@ class DispatcherRuntime:
         else:
             self.host.stop(record)
             try:
+                self._require_head_ready(record.head)
                 record.handle = self.host.restart_worker(task, record)
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
@@ -1995,6 +2029,7 @@ class DispatcherRuntime:
         _reset_wait(record, "worker")
         moved = self.reader.show(ref)
         try:
+            self._require_head_ready(record.head)
             record.handle = self.host.restart_worker(moved, record)
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:

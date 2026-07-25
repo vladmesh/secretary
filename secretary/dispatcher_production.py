@@ -74,6 +74,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "legacy_pause": legacy_pause.to_json(),
         "pause": runtime.pause.summary(),
         "records": list((payload.get("records") or {}).keys()),
+        "resource_health": runtime.head_health.snapshot(),
         "divergences": list((payload.get("controlled_divergences") or [])),
         "checkpoint": checkpoint_snapshot(
             runtime.catalog.instance_dir,
@@ -645,6 +646,12 @@ def _production_claim_ready(
                 skipped.append({"ref": task["ref"], "reason": exc.message})
                 continue
             raise
+        if outcome.get("action") == "resource-not-ready":
+            skipped.append({
+                "ref": task["ref"],
+                "reason": str(outcome.get("reason") or "head resource is not ready"),
+            })
+            continue
         if skipped:
             outcome["skipped_ready"] = skipped
         return outcome

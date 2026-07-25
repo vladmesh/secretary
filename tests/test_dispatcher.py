@@ -30,9 +30,11 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
+from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
+from secretary.head_health import HeadReadiness
 from secretary.dispatcher_watchdog import (
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
@@ -413,6 +415,80 @@ class DispatcherRuntimeTests(unittest.TestCase):
         started = self.runtime.start_new_pilot(self.selector, actor="operator")
         self.assertEqual(started["status"], "ok")
 
+    def test_unauthenticated_worker_resource_is_not_claimed(self) -> None:
+        self.start_pilot()
+        self.runtime.head_readiness = lambda _head: HeadReadiness(
+            "openai-sub", "unauthenticated", "resource authentication failed", 1.0
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "resource-not-ready")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertNotIn("prepare_worker", self.host.calls)
+
+    def test_unavailable_worker_resource_is_not_claimed(self) -> None:
+        self.start_pilot()
+        self.runtime.head_readiness = lambda _head: HeadReadiness(
+            "openai-sub", "unavailable", "resource provider is unavailable", 1.0
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "resource-not-ready")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertNotIn("prepare_worker", self.host.calls)
+
+    def test_unready_retry_does_not_create_an_attempt(self) -> None:
+        self.start_pilot()
+        self.runtime.head_readiness = lambda _head: HeadReadiness(
+            "openai-sub", "unavailable", "resource provider is unavailable", 1.0
+        )
+        payload = {"resume_workspaces": {"secretary-510-pilot": {}}}
+
+        result = self.runtime._claim(
+            self.reader.show("secretary-510-pilot"), {}, payload, "old-attempt", resume_workspace=True
+        )
+
+        self.assertEqual(result["action"], "resource-not-ready")
+        self.assertNotIn("attempt_id", payload)
+        self.assertNotIn("attempts", payload)
+
+    def test_unknown_probe_does_not_block_worker_launch(self) -> None:
+        self.start_pilot()
+        self.runtime.head_readiness = lambda _head: HeadReadiness(
+            "openai-sub", "unknown", "probe timed out", 1.0
+        )
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["step"], "claim")
+        self.assertIn("prepare_worker", self.host.calls)
+
+    def test_unavailable_reviewer_resource_does_not_launch_reviewer(self) -> None:
+        record = DispatcherRecord(
+            worker="secretary-510-pilot-pilot",
+            workspace=str(self.data_dir / "workspaces" / "pilot"),
+            handle="term:pilot",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt",
+            comment_baseline=0,
+            review_baseline=0,
+            state="review_starting",
+            claimed_at=1.0,
+        )
+        self.runtime.head_readiness = lambda _head: HeadReadiness(
+            "openai-sub", "unavailable", "resource provider is unavailable", 1.0
+        )
+
+        result = start_reviewer(
+            self.runtime, self.reader.show("secretary-510-pilot"), {}, record, "attempt", action="review-started"
+        )
+
+        self.assertEqual(result["action"], "review-resource-not-ready")
+        self.assertFalse(self.host.reviews)
+
     def commit_cutover(self) -> None:
         self.runtime.state.save({
             "version": 1,
@@ -774,6 +850,29 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
         self.assertEqual(claimed["skipped_ready"][0]["ref"], "secretary-510-neighbor")
+
+    def test_production_scan_continues_after_unready_resource(self) -> None:
+        self.commit_cutover()
+        self.runtime.catalog.worker_head = (  # type: ignore[method-assign]
+            lambda task: "claude-opus" if task["ref"] == "secretary-510-pilot" else "codex"
+        )
+
+        def readiness(head: str) -> HeadReadiness:
+            if head == "claude-opus":
+                return HeadReadiness("claude-sub", "unauthenticated", "claude login expired", 1.0)
+            return HeadReadiness("openai-sub", "ready", "resource is ready", 1.0)
+
+        self.runtime.head_readiness = readiness
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "in_progress")
+        self.assertEqual(
+            claimed["skipped_ready"][0],
+            {"ref": "secretary-510-pilot", "reason": "claude login expired"},
+        )
 
     def test_production_scan_skips_ready_steward_report(self) -> None:
         self.commit_cutover()
