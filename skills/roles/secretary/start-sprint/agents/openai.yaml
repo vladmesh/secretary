@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Sprint"
+  short_description: "Согласовать и открыть новый спринт"
+  default_prompt: "Используй $start-sprint, чтобы согласовать цель и открыть новый спринт."

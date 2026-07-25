@@ -1,0 +1,6 @@
+interface:
+  display_name: "Run Sprint"
+  short_description: "Автономно довести активный спринт до цели"
+  default_prompt: "Используй $run-sprint, чтобы автономно довести активный спринт до цели."
+policy:
+  allow_implicit_invocation: false

@@ -1,5 +1,7 @@
 [roles.secretary]
 skills = [
+  "start-sprint",
+  "run-sprint",
   "spec-card",
   "knowledge-doc",
   "grilling",
