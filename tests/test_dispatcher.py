@@ -169,6 +169,9 @@ class FakeCatalog:
             "openai-sub": {"account": "openai-subscription"},
             "claude-sub": {"account": "claude-subscription"},
         }
+        # Mutable, like the role_defaults block of heads.yaml: an operator can re-point a role
+        # while cards are in flight.
+        self.role_defaults = {"new_card": "codex", "reviewer": "codex-reviewer"}
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
@@ -181,10 +184,20 @@ class FakeCatalog:
         # Routing overrides resolve ahead of the role default, as in InstanceCatalog: the resolved
         # head is written to the board at claim and re-resolved on adoption, so a fake that always
         # answers "codex" would hide an override that never propagates.
-        return str(task.get("routing", {}).get("head_override") or "codex")
+        return str(task.get("routing", {}).get("head_override") or self.role_defaults["new_card"])
 
     def review_head(self, task: dict) -> str:
-        return str(task.get("routing", {}).get("review_head_override") or "codex-reviewer")
+        return str(
+            task.get("routing", {}).get("review_head_override") or self.role_defaults["reviewer"]
+        )
+
+    def claimed_worker_head(self, task: dict) -> str:
+        # Same rule as InstanceCatalog: the head the claim wrote onto the card wins over whatever
+        # the override and the role default say now.
+        return str(task.get("routing", {}).get("resolved_worker_head") or self.worker_head(task))
+
+    def claimed_review_head(self, task: dict) -> str:
+        return str(task.get("routing", {}).get("resolved_review_head") or self.review_head(task))
 
     def head_run(self, task: dict, *, role: str, head: str = "", workspace: str = "") -> HeadRun:
         """Mirror InstanceCatalog.head_run over a four-profile registry: `codex` for the worker,
@@ -194,11 +207,11 @@ class FakeCatalog:
         routing = task.get("routing") or {}
         if role == "worker":
             override = routing.get("head_override")
-            asked = str(override or "codex")
+            asked = str(override or self.role_defaults["new_card"])
             codex_mode = str(routing.get("codex_launch_mode") or "")
         else:
             override = routing.get("review_head_override")
-            asked = str(override or "codex-reviewer")
+            asked = str(override or self.role_defaults["reviewer"])
             codex_mode = ""
         launched = str(head) if head else asked
         profile = self.profiles.get(launched, {"adapter": "codex", "resource": "openai-sub"})
@@ -1576,6 +1589,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         advanced = self.runtime.tick(self.selector)
         self.assertEqual(advanced["to"], "validate")
 
+    def _drop_records_and_restart_attempt(self) -> None:
+        """A dispatcher that came back without its records: the card is mid-flight on the board and
+        the next tick has to adopt it under a fresh attempt id."""
+        payload = self.runtime.state.load()
+        self.runtime.state.put_records(payload, {})
+        payload["attempt_id"] = "attempt-after-restart"
+        self.runtime.state.save(payload)
+
     def _rewind_wait(self, kind: str, seconds: float = 100_000.0) -> None:
         """Age the current wait so the next tick sees it past the watchdog thresholds."""
         payload = self.runtime.state.load()
@@ -2407,6 +2428,69 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(first.reviewer.effort, "extra")
         self.assertEqual(first.reviewer.account, "openai-subscription")
         self.assertEqual(first.worker.codex_mode, "exec")
+
+    def test_adoption_keeps_the_heads_the_card_was_claimed_with(self) -> None:
+        """The head is decided once, at claim. A dispatcher that lost its record and picks the card
+        back up must resume the attempt's own pair: re-reading the role default here would move the
+        reviewer of a running attempt to whatever the registry says now, and the journal would
+        faithfully record a head that was never the one this attempt was claimed with."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="done", request_id="worker-done-adopted",
+        )
+        self._drop_records_and_restart_attempt()
+        self.catalog.role_defaults = {"new_card": "claude-opus", "reviewer": "claude-opus"}
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        self.assertEqual((record.head, record.review_head), ("codex", "codex-reviewer"))
+        attempt = self.routing_history()[-1]
+        self.assertEqual(attempt.worker.head, "codex")
+        self.assertEqual(attempt.reviewer.head, "codex-reviewer")
+        self.assertEqual(attempt.reviewer.model, "gpt-5.6-terra")
+
+    def test_adopted_worker_relaunch_keeps_the_head_the_card_was_claimed_with(self) -> None:
+        """Same loss inside the attempt that claimed the card: the dispatcher re-verifies the claim
+        and brings the worker back up. That bring-up belongs to the running attempt, so it uses the
+        claimed head rather than the role default as it reads now."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        self.runtime.state.put_records(payload, {})
+        self.runtime.state.save(payload)
+        self.catalog.role_defaults = {"new_card": "claude-opus", "reviewer": "claude-opus"}
+
+        relaunched = self.runtime.tick(self.selector)
+
+        self.assertEqual(relaunched["status"], "ok", relaunched)
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        self.assertEqual(record.head, "codex")
+        self.assertEqual(self.routing_history()[-1].worker.head, "codex")
+
+    def test_adoption_of_a_card_claimed_before_heads_were_recorded_uses_the_current_default(
+        self,
+    ) -> None:
+        """A card claimed by an older dispatcher carries no resolved pair. There is nothing to
+        resume, so adoption falls back to the current decision rather than refusing to pick it up."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="done", request_id="worker-done-legacy",
+        )
+        self._drop_records_and_restart_attempt()
+        self.board.metadata[12].update({"resolved_head": "", "resolved_review_head": ""})
+        self.catalog.role_defaults = {"new_card": "claude-opus", "reviewer": "claude-opus"}
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
+        self.assertEqual((record.head, record.review_head), ("claude-opus", "claude-opus"))
 
     def test_reviewer_without_a_pinned_model_records_the_model_the_cli_resolves(self) -> None:
         """`claude-default` pins no model: the launcher renders `claude` with no `--model` and the

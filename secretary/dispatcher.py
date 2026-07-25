@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -210,6 +210,36 @@ class InstanceCatalog:
             self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
         )
         self._head_profile(head)
+        return head
+
+    def claimed_worker_head(self, task: dict[str, Any]) -> str:
+        return self._claimed_head(task, "resolved_worker_head", self.worker_head)
+
+    def claimed_review_head(self, task: dict[str, Any]) -> str:
+        return self._claimed_head(task, "resolved_review_head", self.review_head)
+
+    def _claimed_head(
+        self,
+        task: dict[str, Any],
+        key: str,
+        current: Callable[[dict[str, Any]], str],
+    ) -> str:
+        """The head the card was claimed with, for a card the dispatcher is picking back up.
+
+        The head is decided once, at claim, and the claim writes it onto the card. Re-reading the
+        override or the role default here would hand the rest of a running attempt to whatever the
+        board says now, so a role default edited mid-attempt would silently move the reviewer. A
+        card claimed before the claim recorded a head, or one whose head has since left
+        `heads.yaml`, falls back to the current decision: there is nothing launchable to resume.
+        """
+        claimed = (task.get("routing") or {}).get(key)
+        if not claimed:
+            return current(task)
+        head = str(claimed)
+        try:
+            self._head_profile(head)
+        except HostError:
+            return current(task)
         return head
 
     def head_run(
@@ -2496,8 +2526,8 @@ class DispatcherRuntime:
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
             handle="",
-            head=self.catalog.worker_head(task),
-            review_head=self.catalog.review_head(task),
+            head=self.catalog.claimed_worker_head(task),
+            review_head=self.catalog.claimed_review_head(task),
             attempt_id=attempt_id,
             comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,
