@@ -1434,10 +1434,20 @@ class DispatcherRuntime:
                 "readiness": readiness.to_json(),
                 "reason": readiness.reason,
             }
-        # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
-        # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
-        # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
-        # before claiming so its worker report command cannot collide with the old report either.
+        # A card the dispatcher still holds a record for, back in Ready with its claim already
+        # committed under the current attempt, is a re-run: an operator-approved retry after
+        # Blocked, or a plain preempt/requeue out of in_progress or validate. The pilot dispatcher
+        # otherwise keeps one attempt id for its whole run, so the claim would replay idempotently,
+        # return the old event and leave the card Ready. Give every re-run a fresh identity before
+        # claiming, so it claims the card for real, its worker report command cannot collide with
+        # the old report, and the journal gets a second attempt instead of nothing. A committed
+        # claim without a record is a genuine board divergence and still fails closed below.
+        active = records.get(ref)
+        requeued = (
+            active is not None
+            and (active.attempt_id or attempt_id) == attempt_id
+            and self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
+        )
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
@@ -1459,7 +1469,10 @@ class DispatcherRuntime:
                 "review-wait-stall",
             )
         )
-        if retry_after_block:
+        if requeued and active is not None and active.handle:
+            # The preempted head can still be sitting in the workspace the next round claims.
+            self.host.stop(active)
+        if retry_after_block or requeued:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id

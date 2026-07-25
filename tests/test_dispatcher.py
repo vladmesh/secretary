@@ -2475,6 +2475,55 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(history[1].worker.head, "claude-opus")
         self.assertEqual(history[1].worker.head_source, "card")
 
+    def test_active_card_preempted_back_to_ready_starts_a_new_attempt(self) -> None:
+        """A preempt out of in_progress is part of the documented workflow and nothing about it is
+        blocked, so the retry-after-block path never sees it. The card still has to be claimed
+        again, and the second bring-up has to reach the journal as its own attempt."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        first_attempt = self.runtime.state.load()["attempt_id"]
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot",
+            target="ready", reason="preempted", request_id="po-preempt-attempt-2",
+        )
+        self.board.metadata[12]["head"] = "claude-opus"
+
+        claimed = self.runtime.tick(self.selector)
+
+        self.assertEqual(claimed["step"], "claim")
+        self.assertEqual(claimed["status"], "ok")
+        self.assertNotEqual(claimed["attempt_id"], first_attempt)
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "in_progress")
+        self.assertEqual(card["routing"]["resolved_worker_head"], "claude-opus")
+        # The preempted head is not left running in the workspace the new round claims.
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        history = self.routing_history()
+        self.assertEqual([attempt.attempt for attempt in history], [1, 2])
+        self.assertEqual([attempt.worker.head for attempt in history], ["codex", "claude-opus"])
+
+    def test_card_preempted_out_of_validate_starts_a_new_attempt(self) -> None:
+        """Same for a card pulled back from validate: the first attempt keeps its reviewer, and the
+        second is a new pair rather than an overwrite of the first."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        first_attempt = self.runtime.state.load()["attempt_id"]
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot",
+            target="ready", reason="preempted in review", request_id="po-preempt-validate",
+        )
+
+        claimed = self.runtime.tick(self.selector)
+
+        self.assertEqual(claimed["step"], "claim")
+        self.assertNotEqual(claimed["attempt_id"], first_attempt)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        history = self.routing_history()
+        self.assertEqual([attempt.attempt for attempt in history], [1, 2])
+        self.assertEqual(history[0].reviewer.head, "codex-reviewer")
+        self.assertIsNone(history[1].reviewer)
+
     def test_worker_respawn_on_an_unchanged_head_stays_one_record(self) -> None:
         """A respawn inside a round is the same head coming back, not a second worker: the round
         keeps one launch record, and the journal does not read as two heads on one attempt."""

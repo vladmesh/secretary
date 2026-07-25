@@ -118,6 +118,12 @@ pending/commit путь, идемпотентная по `request_id`.
 добавляют попытку, а не затирают предыдущую: номер берётся из журнала, а не из dispatcher state,
 поэтому переживает и потерю record, и restore.
 
+Возврат в Ready считается таковым в обоих видах: и операторский retry уже заблокированной карточки,
+и обычный preempt/requeue живой карточки из in_progress или validate. Диспетчер в этот момент выдаёт
+попытке новый `attempt_id`, иначе повторный claim попал бы в уже закоммиченный
+`dispatcher-<attempt>-claim-<ref>`, вернул старое событие и оставил карточку в Ready. Голова
+прошлой попытки при этом снимается: новый раунд заходит в тот же workspace.
+
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
   "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",
