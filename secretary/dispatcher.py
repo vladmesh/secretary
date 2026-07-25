@@ -54,12 +54,14 @@ from secretary.dispatcher_production import (
     production_tick as _production_tick,
 )
 from secretary.dispatcher_review import (
+    command_terminal_status as _command_terminal_status,
     command_review_running as _command_review_running,
     end_review_pane as _end_review_pane,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
 from secretary.dispatcher_watchdog import (
+    initial_output_stall_seconds as _initial_output_stall_seconds,
     reset_wait as _reset_wait,
     stall_seconds as _stall_seconds,
     wait_cycle_token as _wait_cycle_token,
@@ -308,6 +310,31 @@ class CommandHostRuntime:
             launch_prompt=self._worker_launch_prompt(),
         )
 
+    def pane_leaf(self, workspace: str, handle: str) -> str:
+        return self._pane_leaf(workspace, handle)
+
+    def codex_tui_activity(
+        self, task: dict[str, Any], record: DispatcherRecord, kind: str
+    ) -> float | None:
+        """Return Codex TUI rollout activity without reading the session contents."""
+        if not isinstance(getattr(self.catalog, "_heads", None), dict):
+            return None
+        head = record.review_head if kind == "review" else record.head
+        try:
+            profile = self.catalog._head_profile(head)
+        except HostError:
+            # Head snapshots can change while a card is waiting.  That makes the optional TUI
+            # supplement unavailable, not the terminal inventory itself unavailable.
+            return None
+        mode = (
+            task.get("routing", {}).get("codex_launch_mode")
+            or profile.get("codex_mode", "exec")
+        )
+        if profile.get("adapter") != "codex" or mode != "tui" or not record.workspace:
+            return None
+        from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
+        return latest_activity_for(record.workspace)
+
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
         """Bring the reviewer up as a second pane inside the worker's own worktree.
 
@@ -344,6 +371,12 @@ class CommandHostRuntime:
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
+
+    def worker_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        return _command_terminal_status(self, task, record, kind="worker")
+
+    def review_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        return _command_terminal_status(self, task, record, kind="review")
 
     def stop_review(self, record: DispatcherRecord) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
@@ -1380,6 +1413,8 @@ class DispatcherRuntime:
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
+        record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        record.worker_started_at = record.worker_progress_at = time.time()
         record.state = "claimed"
         resume_workspaces = payload.get("resume_workspaces")
         if isinstance(resume_workspaces, dict):
@@ -1530,6 +1565,7 @@ class DispatcherRuntime:
             moved = self.reader.show(ref)
             try:
                 record.handle = self.host.restart_worker(moved, record)
+                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
                     ref=ref,
@@ -1543,6 +1579,7 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
             self._save_records(payload, records)
             return {
@@ -1596,17 +1633,65 @@ class DispatcherRuntime:
         *,
         kind: str,
     ) -> dict[str, Any] | None:
-        """Watch an open-ended wait (kind "worker" or "review"). Returns None to keep waiting,
-        or a tick outcome once the wait blew its ceiling: one respawn, then Blocked. Without
-        this a head that died before posting parks the card forever. The ceiling is the only
-        input on purpose; see dispatcher_watchdog for why no liveness probe is trustworthy."""
+        """Watch an open-ended wait without confusing a bad Orca inventory for a dead head."""
+        if getattr(record, f"paused_{'reviewer' if kind == 'review' else 'worker'}_at"):
+            return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
+        runtime_reason = ""
+        try:
+            status = (
+                self.host.review_status(task, record)
+                if kind == "review" else self.host.worker_status(task, record)
+            )
+        except Exception as exc:
+            # Orca may be down or between reconnects.  It is not evidence that this particular
+            # head died, so do not restart it merely for that.  It also cannot prove progress,
+            # so retain the ordinary wait ceiling as the fallback.
+            status = {"known": False, "live": True, "reason": "runtime-unavailable"}
+            runtime_reason = scrub_host_output(str(exc))
+
+        def unavailable() -> dict[str, Any]:
+            return {
+                "status": "degraded", "step": "review" if kind == "review" else "advance",
+                "pilot_ref": task["ref"], "attempt_id": attempt_id,
+                "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
+            }
+        if not status.get("live"):
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"terminal {status.get('reason') or 'missing'}",
+            )
+        activity = status.get("last_activity")
+        progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
+        if activity:
+            updated = max(progress_at, float(activity))
+            if updated != progress_at:
+                progress_at = updated
+                setattr(record, f"{kind}_progress_at", progress_at)
+                self._save_records(payload, records)
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         now = time.time()
-        if not waiting_since:
+        started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
+        if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"no terminal output since launch for {int(now - started_at)}s",
+            )
+        if progress_at and now - progress_at > stall:
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"no terminal output for {int(now - progress_at)}s",
+            )
+        # A known fresh activity signal is progress, not merely liveness.  It starts a new wait
+        # window so a long-running head cannot hit the old total-duration fallback ceiling.
+        if activity and float(activity) >= waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
             self._save_records(payload, records)
             return None
+        if not waiting_since:
+            setattr(record, f"{kind}_waiting_since", now)
+            self._save_records(payload, records)
+            return unavailable() if runtime_reason else None
         outcome = _wait_outcome(
             waiting_since=waiting_since,
             now=now,
@@ -1614,10 +1699,15 @@ class DispatcherRuntime:
             respawns=int(getattr(record, f"{kind}_respawns") or 0),
         )
         if outcome == "wait":
-            return None
+            return unavailable() if runtime_reason else None
         if outcome == "respawn":
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now)
-        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall)
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+
+    def _trigger_wait_watchdog(self, task, record, records, payload, attempt_id, *, kind: str, trigger: str):
+        if int(getattr(record, f"{kind}_respawns") or 0) < 1:
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
 
     def _respawn_wait(
         self,
@@ -1629,6 +1719,7 @@ class DispatcherRuntime:
         *,
         kind: str,
         now: float,
+        trigger: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -1645,6 +1736,7 @@ class DispatcherRuntime:
             self.host.stop(record)
             try:
                 record.handle = self.host.restart_worker(task, record)
+                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
                     ref=ref,
@@ -1663,6 +1755,9 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            record.worker_started_at = record.worker_progress_at = now
+        if kind == "review":
+            record.review_started_at = record.review_progress_at = now
         # Persist the restart before commenting. The pilot tick has no try/except around this, so
         # a writer.comment that raises would otherwise escape with the head already respawned and
         # respawns still 0: the next tick respawns again and the escalation never arrives.
@@ -1678,7 +1773,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"Dispatcher wait watchdog: no {_wait_expectation(kind)} within {_stall_seconds(kind)}s, "
+                f"Dispatcher wait watchdog: {trigger}, "
                 f"respawned the {kind} head (respawn {respawns}). Another stall escalates to Blocked."
             ),
             request_id=_attempt_request_id(
@@ -1706,6 +1801,7 @@ class DispatcherRuntime:
         *,
         kind: str,
         stall: int,
+        trigger: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -1716,7 +1812,7 @@ class DispatcherRuntime:
             reference=ref,
             target="blocked",
             reason=(
-                f"wait watchdog: no {_wait_expectation(kind)} after respawn "
+                f"wait watchdog: {trigger} after respawn "
                 f"(ceiling {stall}s), blocked for the operator"
             ),
             request_id=_attempt_request_id(
@@ -1805,6 +1901,7 @@ class DispatcherRuntime:
         moved = self.reader.show(ref)
         try:
             record.handle = self.host.restart_worker(moved, record)
+            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
             return self._block_failed_worker_restart(
                 ref=ref,
@@ -1818,6 +1915,7 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
+        record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self._save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}

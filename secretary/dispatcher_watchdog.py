@@ -1,23 +1,24 @@
 """Time ceilings for the dispatcher's two open-ended waits.
 
-`waiting-worker-report` and `waiting-review-verdict` used to repeat every tick with nothing
-watching them, so a head that exited without posting (secretary-637: the reviewer's verdict
-command was rejected by the codex runtime; secretary-649: the rework worker never came up)
-left the card parked forever. Both waits now end the same way: one respawn, then Blocked.
-
-The ceiling is the only signal. There is no usable liveness probe for a head: the terminal
-title the dispatcher sets at launch is overwritten by the head's own OSC sequence seconds
-later, and orca's `status:running` wedges on 'working' after a silent exit (observed on
-637/649/654). Both would report a healthy head as dead and kill live cards, so the ceilings
-below are set generously instead.
+`waiting-worker-report` and `waiting-review-verdict` watch the persisted terminal identity on
+every tick. A missing pane is restarted immediately. When Orca supplies `lastOutputAt`, a head
+must also produce its first output shortly after launch; later output renews the ordinary,
+generous silence ceiling. A runtime that cannot supply activity timestamps uses that ceiling as
+its fallback.
 """
 
 from __future__ import annotations
 
 import os
 
+# A missing pane is handled immediately. These ceilings remain deliberately generous for a head
+# that has made progress and then goes quiet, and are the fallback for old Orca runtimes without
+# `lastOutputAt`.
 REVIEW_VERDICT_STALL_DEFAULT = 90 * 60
-WORKER_REPORT_STALL_DEFAULT = 6 * 3600
+WORKER_REPORT_STALL_DEFAULT = 6 * 60 * 60
+# A live head prints a prompt or launch output within a few dispatcher ticks. This only applies
+# when an activity timestamp exists and has not advanced beyond the launch timestamp.
+INITIAL_OUTPUT_STALL_DEFAULT = 3 * 60
 
 
 def stall_seconds(kind: str) -> int:
@@ -32,6 +33,15 @@ def stall_seconds(kind: str) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def initial_output_stall_seconds() -> int:
+    """Short grace period for a pane whose activity has never passed its launch timestamp."""
+    try:
+        value = int(os.environ.get("SECRETARY_INITIAL_OUTPUT_STALL_SECONDS", "") or INITIAL_OUTPUT_STALL_DEFAULT)
+    except ValueError:
+        return INITIAL_OUTPUT_STALL_DEFAULT
+    return value if value > 0 else INITIAL_OUTPUT_STALL_DEFAULT
 
 
 def wait_outcome(
@@ -51,6 +61,7 @@ def reset_wait(record, kind: str) -> None:
     """Clear a wait's watchdog bookkeeping so the next wait of that kind starts fresh."""
     setattr(record, f"{kind}_waiting_since", 0.0)
     setattr(record, f"{kind}_respawns", 0)
+    setattr(record, f"{kind}_progress_at", 0.0)
 
 
 def wait_cycle_token(record) -> str:

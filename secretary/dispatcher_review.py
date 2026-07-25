@@ -2,12 +2,65 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import HostError, legacy_review_pane_label, review_pane_label
 from secretary.dispatcher_watchdog import wait_cycle_token as _wait_cycle_token
+
+
+def command_terminal_status(
+    host: Any, task: dict[str, Any], record: DispatcherRecord, *, kind: str
+) -> dict[str, Any]:
+    """Return the tracked pane's liveness and its last output time.
+
+    A failed inventory raises instead of looking like a missing pane.  The wait watchdog can then
+    report a degraded runtime without restarting a head on a transport failure.
+    """
+    if host.mode == "noop":
+        return {"known": True, "live": True, "reason": "noop"}
+    if not record.workspace:
+        raise HostError(f"{kind} workspace is unavailable")
+    data = host._run_json([
+        "orca", "terminal", "list", "--worktree", f"path:{record.workspace}", "--json",
+    ])
+    if data.get("ok") is False:
+        raise HostError("orca terminal list failed")
+    payload = data.get("result") if isinstance(data.get("result"), dict) else data
+    terminals = payload.get("terminals") if isinstance(payload, dict) else []
+    if not isinstance(terminals, list):
+        raise HostError("orca terminal list returned an unsupported shape")
+    if kind == "review":
+        labels = {review_pane_label(task["ref"]), legacy_review_pane_label(task["ref"])}
+        matches = lambda terminal: bool(
+            (record.review_handle and terminal.get("handle") == record.review_handle)
+            or (record.review_leaf and terminal.get("leafId") == record.review_leaf)
+            or (not record.review_handle and not record.review_leaf and terminal.get("title") in labels)
+        )
+    else:
+        matches = lambda terminal: bool(
+            (record.handle and terminal.get("handle") == record.handle)
+            or (record.worker_leaf and terminal.get("leafId") == record.worker_leaf)
+        )
+    for terminal in terminals:
+        if not isinstance(terminal, dict) or not matches(terminal):
+            continue
+        if terminal.get("connected") is False:
+            return {"known": True, "live": False, "reason": "disconnected"}
+        last = terminal.get("lastOutputAt")
+        try:
+            activity = float(last) / 1000.0 if last else None
+        except (TypeError, ValueError):
+            activity = None
+        supplemental = getattr(host, "codex_tui_activity", lambda _task, _record, _kind: None)(
+            task, record, kind
+        )
+        if supplemental:
+            activity = max(activity or 0.0, float(supplemental))
+        return {"known": True, "live": True, "reason": "live", "last_activity": activity}
+    return {"known": True, "live": False, "reason": "missing-terminal"}
 
 
 def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:
@@ -19,37 +72,7 @@ def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRe
     never persisted — a tick killed between the split and the state write, or a card adopted from a
     dispatcher that predates persisted reviewer handles. It cannot be the primary check: the
     reviewer head overwrites its terminal title with its own OSC sequence seconds after launch."""
-    if host.mode == "noop":
-        return False
-    if not record.workspace:
-        raise HostError("review workspace is unavailable")
-    data = host._run_json([
-        "orca",
-        "terminal",
-        "list",
-        "--worktree",
-        f"path:{record.workspace}",
-        "--json",
-    ])
-    if data.get("ok") is False:
-        raise HostError("orca terminal list failed")
-    payload = data.get("result") if isinstance(data.get("result"), dict) else data
-    terminals = payload.get("terminals") if isinstance(payload, dict) else []
-    if not isinstance(terminals, list):
-        raise HostError("orca terminal list returned an unsupported shape")
-    labels = {review_pane_label(task["ref"]), legacy_review_pane_label(task["ref"])}
-    live = [
-        terminal
-        for terminal in terminals
-        if isinstance(terminal, dict) and terminal.get("connected") is not False
-    ]
-    if record.review_handle or record.review_leaf:
-        return any(
-            (record.review_handle and terminal.get("handle") == record.review_handle)
-            or (record.review_leaf and terminal.get("leafId") == record.review_leaf)
-            for terminal in live
-        )
-    return any(terminal.get("title") in labels for terminal in live)
+    return bool(command_terminal_status(host, task, record, kind="review").get("live"))
 
 
 def end_review_pane(host: Any, record: DispatcherRecord) -> None:
@@ -128,9 +151,11 @@ def start_review(
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit
+    record.review_started_at = record.review_progress_at = time.time()
     # The worker head is gone: its pane was shut down so the reviewer judges a checkout nothing is
     # still editing. A red verdict launches a fresh worker into the same workspace.
     record.handle = ""
+    record.worker_leaf = ""
     record.state = "reviewing"
     return {
         "status": "ok",

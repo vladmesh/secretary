@@ -34,6 +34,7 @@ from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
 from secretary.dispatcher_watchdog import (
+    INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
     stall_seconds,
@@ -190,6 +191,10 @@ class FakeHost:
         # None keeps the default "a review started in this process is live"; set a bool to model a
         # reviewer terminal that died after launch, which is what recovery actually has to detect.
         self.review_running_result: bool | None = None
+        self.worker_status_result: dict | None = None
+        self.review_status_result: dict | None = None
+        self.worker_status_error: Exception | None = None
+        self.review_status_error: Exception | None = None
         # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
@@ -224,6 +229,9 @@ class FakeHost:
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
         }
 
+    def pane_leaf(self, workspace: str, handle: str) -> str:
+        return f"leaf:{handle}"
+
     def start_review(self, task: dict, record) -> ReviewLaunch:
         self.calls.append("start_review")
         if self.fail_review_error is not None:
@@ -252,6 +260,19 @@ class FakeHost:
         if self.review_running_result is not None:
             return self.review_running_result
         return task["ref"] in self.reviews
+
+    def worker_status(self, task: dict, record) -> dict:
+        self.calls.append("worker_status")
+        if self.worker_status_error is not None:
+            raise self.worker_status_error
+        return self.worker_status_result or {"known": True, "live": True, "reason": "live"}
+
+    def review_status(self, task: dict, record) -> dict:
+        self.calls.append("review_status")
+        if self.review_status_error is not None:
+            raise self.review_status_error
+        running = self.review_running(task, record)
+        return self.review_status_result or {"known": True, "live": running, "reason": "live" if running else "missing-terminal"}
 
     def verify_worker_result(self, task: dict, record) -> None:
         self.calls.append("verify_worker_result")
@@ -1426,22 +1447,140 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(waiting["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
-    def test_live_head_that_overwrote_its_terminal_title_is_not_treated_as_dead(self) -> None:
-        """secretary-654: heads replace the launch title with their own OSC sequence, so the
-        terminal-title probe reports a healthy reviewer as gone. The watchdog must never ask."""
+    def test_fresh_output_keeps_a_live_worker_past_the_old_total_wait_ceiling(self) -> None:
+        """A progress signal renews the silence window instead of respawning real work."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": time.time() - 1,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_fresh_output_keeps_a_live_reviewer_past_the_old_total_wait_ceiling(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.review_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": time.time() - 1,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_live_reviewer_is_checked_by_its_saved_handle(self) -> None:
+        """The wait path probes every tick, but does not use the mutable terminal title."""
         self.start_pilot()
         self._run_worker_to_validate()
         self.runtime.tick(self.selector)
         self.runtime.tick(self.selector)
 
-        self.host.review_running_result = False
         self.host.calls.clear()
         self._rewind_wait("review", seconds=stall_seconds("review") - 60)
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"], "healthy reviewer was killed")
-        self.assertNotIn("review_running", self.host.calls, "watchdog must not probe liveness")
+        self.assertIn("review_status", self.host.calls)
+
+    def test_missing_worker_terminal_respawns_without_waiting_for_ceiling(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("terminal missing-terminal", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_missing_reviewer_terminal_respawns_without_waiting_for_ceiling(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "review-respawned")
+
+    def test_live_worker_without_new_output_is_respawned(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_progress_at"] = time.time() - stall_seconds("worker") - 1
+        self.runtime.state.save(payload)
+        self.host.worker_status_result = {"known": True, "live": True, "reason": "live", "last_activity": time.time() - stall_seconds("worker") - 1}
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+
+    def test_worker_without_first_output_is_respawned_within_the_short_window(self) -> None:
+        """A live login prompt has activity at launch, but never progresses past it."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
+        record["worker_started_at"] = started
+        record["worker_progress_at"] = started
+        self.runtime.state.save(payload)
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": started,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+
+    def test_reviewer_without_first_output_is_respawned_within_the_short_window(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
+        record["review_started_at"] = started
+        record["review_progress_at"] = started
+        self.runtime.state.save(payload)
+        self.host.review_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": started,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "review-respawned")
+
+    def test_runtime_inventory_failure_is_degraded_not_a_head_death(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.worker_status_error = HostError("orca terminal list failed")
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-runtime-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_runtime_inventory_failure_still_uses_the_wait_ceiling(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.worker_status_error = HostError("orca terminal list failed")
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
 
     def test_dead_worker_is_respawned_once_then_escalated(self) -> None:
         self.start_pilot()
@@ -4119,6 +4258,43 @@ class ReviewLivenessTests(unittest.TestCase):
         record = self._record(review_handle="term-review", review_leaf="leaf-review")
         self.assertTrue(host.review_running(self.task, record))
 
+    def test_worker_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
+        host = self._host([
+            {"handle": "term-alias", "leafId": "leaf-worker", "connected": True},
+        ])
+
+        record = self._record(worker_leaf="leaf-worker")
+
+        self.assertTrue(host.worker_status(self.task, record)["live"])
+
+    def test_last_output_at_is_converted_from_milliseconds_to_epoch_seconds(self) -> None:
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertEqual(status["last_activity"], 1_753_456_789.123)
+
+    def test_invalid_or_missing_last_output_at_has_no_activity(self) -> None:
+        for terminal in (
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": "not-a-time"},
+        ):
+            with self.subTest(terminal=terminal):
+                status = self._host([terminal]).worker_status(self.task, self._record())
+                self.assertIsNone(status["last_activity"])
+
+    def test_tui_supplement_newer_than_last_output_at_wins(self) -> None:
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
+        ])
+        host.codex_tui_activity = lambda _task, _record, _kind: 1_753_456_800.0  # type: ignore[method-assign]
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertEqual(status["last_activity"], 1_753_456_800.0)
+
     def test_disconnected_reviewer_pane_is_not_running(self) -> None:
         host = self._host([
             {"handle": "term-review", "leafId": "leaf-review", "connected": False},
@@ -4335,9 +4511,16 @@ class ProductionPauseTests(unittest.TestCase):
         records = self.runtime.production_state.records(payload)
         stale = time.time() - (WORKER_REPORT_STALL_DEFAULT * 2)
         records[self.ref].worker_waiting_since = stale
+        records[self.ref].worker_progress_at = stale
         self.runtime.production_state.put_records(payload, records)
         self.runtime.production_state.save(payload)
         self.pause("freeze")
+
+        for _ in range(3):
+            self.assertEqual(self.runtime.production_tick()["status"], "skipped")
+        paused = self.record()
+        self.assertEqual(paused.worker_respawns, 0)
+        self.assertEqual(self.reader.show(self.ref)["state"], "in_progress")
 
         self.runtime.resume_pipeline(actor="operator")
 

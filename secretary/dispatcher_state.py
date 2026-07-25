@@ -48,13 +48,22 @@ class DispatcherRecord:
     review_handle: str = ""
     review_leaf: str = ""
     review_commit: str = ""
+    # The worker pane has the same handle-alias problem as the reviewer pane.  Keep its leafId
+    # too, so an inventory alias cannot turn a live worker into a missing-terminal respawn.
+    worker_leaf: str = ""
     # Wait watchdogs (secretary-654): when the current wait for a worker report / review
     # verdict started, and how many times that wait has already respawned its head. Both
     # reset whenever the card enters a fresh wait of that kind.
     worker_waiting_since: float = 0.0
     worker_respawns: int = 0
+    # Most recent output from the tracked head pane.  This is deliberately pane-scoped: output
+    # from an unrelated shell in the same worktree must not keep a broken head alive.
+    worker_started_at: float = 0.0
+    worker_progress_at: float = 0.0
     review_waiting_since: float = 0.0
     review_respawns: int = 0
+    review_started_at: float = 0.0
+    review_progress_at: float = 0.0
     # Pause (secretary-731): when a freeze stopped this card's worker / reviewer head, 0.0 when it
     # did not. A head with an empty handle is otherwise indistinguishable from one that died, so
     # these are what let the tick log and pause-status say "stopped on purpose". Cleared on resume,
@@ -78,11 +87,16 @@ class DispatcherRecord:
             "review_handle": self.review_handle,
             "review_head": self.review_head,
             "review_leaf": self.review_leaf,
+            "review_progress_at": self.review_progress_at,
             "review_respawns": self.review_respawns,
+            "review_started_at": self.review_started_at,
             "review_waiting_since": self.review_waiting_since,
             "state": self.state,
             "worker": self.worker,
+            "worker_leaf": self.worker_leaf,
+            "worker_progress_at": self.worker_progress_at,
             "worker_respawns": self.worker_respawns,
+            "worker_started_at": self.worker_started_at,
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
         }
@@ -105,10 +119,15 @@ class DispatcherRecord:
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),
+            worker_leaf=str(payload.get("worker_leaf") or ""),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
+            worker_started_at=float(payload.get("worker_started_at") or 0.0),
+            worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
+            review_started_at=float(payload.get("review_started_at") or 0.0),
+            review_progress_at=float(payload.get("review_progress_at") or 0.0),
             paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
         )
