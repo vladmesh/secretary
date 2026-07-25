@@ -350,6 +350,7 @@ def _resume_heads(
             skipped.append(f"{ref}:worker")
             continue
         record.state = "claimed"
+        record.worker_started_at = record.worker_progress_at = time.time()
         relaunched.append(f"{ref}:worker")
 
     return {"relaunched": relaunched, "parked": parked, "skipped": skipped}
@@ -366,8 +367,10 @@ def _refresh_watchdog_windows(records: dict[str, DispatcherRecord]) -> None:
     for record in records.values():
         if record.worker_waiting_since:
             record.worker_waiting_since = now
+            record.worker_progress_at = now
         if record.review_waiting_since:
             record.review_waiting_since = now
+            record.review_progress_at = now
         if record.gate_pending_since:
             record.gate_pending_since = now
 

@@ -151,7 +151,7 @@ def start_review(
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit
-    record.review_progress_at = time.time()
+    record.review_started_at = record.review_progress_at = time.time()
     # The worker head is gone: its pane was shut down so the reviewer judges a checkout nothing is
     # still editing. A red verdict launches a fresh worker into the same workspace.
     record.handle = ""

@@ -34,6 +34,7 @@ from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
 from secretary.dispatcher_watchdog import (
+    INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
     stall_seconds,
@@ -1522,6 +1523,42 @@ class DispatcherRuntimeTests(unittest.TestCase):
         result = self.runtime.tick(self.selector)
 
         self.assertEqual(result["action"], "worker-respawned")
+
+    def test_worker_without_first_output_is_respawned_within_the_short_window(self) -> None:
+        """A live login prompt has activity at launch, but never progresses past it."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
+        record["worker_started_at"] = started
+        record["worker_progress_at"] = started
+        self.runtime.state.save(payload)
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": started,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+
+    def test_reviewer_without_first_output_is_respawned_within_the_short_window(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
+        record["review_started_at"] = started
+        record["review_progress_at"] = started
+        self.runtime.state.save(payload)
+        self.host.review_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": started,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "review-respawned")
 
     def test_runtime_inventory_failure_is_degraded_not_a_head_death(self) -> None:
         self.start_pilot()
@@ -4434,6 +4471,7 @@ class ProductionPauseTests(unittest.TestCase):
         records = self.runtime.production_state.records(payload)
         stale = time.time() - (WORKER_REPORT_STALL_DEFAULT * 2)
         records[self.ref].worker_waiting_since = stale
+        records[self.ref].worker_progress_at = stale
         self.runtime.production_state.put_records(payload, records)
         self.runtime.production_state.save(payload)
         self.pause("freeze")

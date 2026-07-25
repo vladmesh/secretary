@@ -61,6 +61,7 @@ from secretary.dispatcher_review import (
     start_review as _start_review,
 )
 from secretary.dispatcher_watchdog import (
+    initial_output_stall_seconds as _initial_output_stall_seconds,
     reset_wait as _reset_wait,
     stall_seconds as _stall_seconds,
     wait_cycle_token as _wait_cycle_token,
@@ -1408,7 +1409,7 @@ class DispatcherRuntime:
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
         record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
-        record.worker_progress_at = time.time()
+        record.worker_started_at = record.worker_progress_at = time.time()
         record.state = "claimed"
         resume_workspaces = payload.get("resume_workspaces")
         if isinstance(resume_workspaces, dict):
@@ -1573,6 +1574,7 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
             self._save_records(payload, records)
             return {
@@ -1650,11 +1652,20 @@ class DispatcherRuntime:
         activity = status.get("last_activity")
         progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
         if activity:
-            progress_at = max(progress_at, float(activity))
-            setattr(record, f"{kind}_progress_at", progress_at)
+            updated = max(progress_at, float(activity))
+            if updated != progress_at:
+                progress_at = updated
+                setattr(record, f"{kind}_progress_at", progress_at)
+                self._save_records(payload, records)
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         now = time.time()
+        started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
+        if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"no terminal output since launch for {int(now - started_at)}s",
+            )
         if progress_at and now - progress_at > stall:
             return self._trigger_wait_watchdog(
                 task, record, records, payload, attempt_id, kind=kind,
@@ -1733,9 +1744,9 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
-            record.worker_progress_at = now
+            record.worker_started_at = record.worker_progress_at = now
         if kind == "review":
-            record.review_progress_at = now
+            record.review_started_at = record.review_progress_at = now
         # Persist the restart before commenting. The pilot tick has no try/except around this, so
         # a writer.comment that raises would otherwise escape with the head already respawned and
         # respawns still 0: the next tick respawns again and the escalation never arrives.
@@ -1893,6 +1904,7 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
+        record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self._save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
