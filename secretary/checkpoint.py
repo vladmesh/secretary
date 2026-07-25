@@ -10,10 +10,11 @@ checkout. The pusher runs on the same tick but on its own 30-minute window, and
 `checkpoint_snapshot` turns both into the freshness view `status` and `doctor`
 print.
 
-Memory (`state/memory`) is written by its own writer (`secretary.memory_write`)
-directly into the same repo, so it is deliberately outside this pathspec: the
-two writers share the repo but never the paths. `state_repo_lock` keeps their
-index operations from overlapping.
+Memory (`state/memory`) and knowledge (`state/knowledge`) are written by their
+own writers (`secretary.memory_write`, `secretary.knowledge_write`) directly
+into the same repo, so both are deliberately outside this pathspec: the writers
+share the repo but never the paths. `state_repo_lock` keeps their index
+operations from overlapping.
 """
 
 from __future__ import annotations

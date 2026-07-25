@@ -1,10 +1,11 @@
 """The private instance repository as a shared commit target.
 
-Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Two writers commit
-into `state/`: the tick writer (`state/board`, `state/runs`) and the memory
-writer (`state/memory`). They own disjoint pathspecs and never `git add -A`, so
-neither can pick up the other's half-written tree, and `state_repo_lock`
-serializes the index operations git itself does not make concurrency-safe.
+Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Three writers commit
+into `state/`: the tick writer (`state/board`, `state/runs`), the memory writer
+(`state/memory`) and the knowledge writer (`state/knowledge`). They own disjoint
+pathspecs and never `git add -A`, so none can pick up another's half-written
+tree, and `state_repo_lock` serializes the index operations git itself does not
+make concurrency-safe.
 """
 
 from __future__ import annotations
@@ -24,8 +25,10 @@ FALLBACK_IDENTITY = ("secretary checkpoint", "secretary-checkpoint@localhost")
 # Pathspec each writer owns. Disjoint by construction; see the module docstring.
 BOARD_RUNS_PATHSPEC = ("state/board", "state/runs")
 MEMORY_PATHSPEC = ("state/memory",)
+KNOWLEDGE_PATHSPEC = ("state/knowledge",)
 
 MEMORY_FACTS_RELATIVE = Path("state") / "memory" / "facts"
+KNOWLEDGE_RELATIVE = Path("state") / "knowledge"
 
 
 class StateRepoError(RuntimeError):
@@ -34,6 +37,10 @@ class StateRepoError(RuntimeError):
 
 def memory_facts_dir(instance_dir: Path) -> Path:
     return Path(instance_dir).expanduser().resolve() / MEMORY_FACTS_RELATIVE
+
+
+def knowledge_dir(instance_dir: Path) -> Path:
+    return Path(instance_dir).expanduser().resolve() / KNOWLEDGE_RELATIVE
 
 
 @contextmanager

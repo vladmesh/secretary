@@ -187,4 +187,21 @@ Writer operations требуют actor и проходят journal protocol; п�
 `reindex` меняет только derived index и не должен пересекаться с другим index writer. Model и
 dimension берутся из instance configuration.
 
+## Knowledge
+
+Длинные восстановимые документы (брейнштормы, журналы решений, разборы инцидентов) лежат в
+`state/knowledge/<раздел>/<документ>.md`. Разделение с curated memory и Pipeline описано в
+[Архитектуре](ARCHITECTURE.md#плоскости-знания).
+
+```bash
+python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+  --path decisions/2026-07-25-sprint-1.md --file DOC.md
+python3 -m secretary knowledge list --instance INSTANCE
+```
+
+`write` перезаписывает документ целиком и коммитит только `state/knowledge` под общим writer lock,
+поэтому ручной `git commit` в instance-репозитории не нужен и с тиковым писателем не гоняется.
+Документ с секретом отклоняется с кодом 2, и на диск ничего не попадает. Повторная запись того же
+содержимого возвращает `changed: false` и нового коммита не делает.
+
 Data-plane, archive restore и unit runbooks находятся в [Operations](OPERATIONS.md).
