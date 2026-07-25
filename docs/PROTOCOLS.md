@@ -98,6 +98,42 @@ Audit trail всегда пишется в data dir установки: `--data-
 там `secretary-data/`. Если data dir не резолвится, команда падает с usage error вместо записи
 рядом с процессом.
 
+### Routing-телеметрия попыток
+
+Карточка не хранит историю роутинга: `resolved_review_head` стирается при уходе из Validate, а весь
+routing-блок сбрасывается при возврате в Ready. Поэтому «кто был воркером и кто ревьюером на попытке
+N» живёт только в append-only журнале, событиями `kind: "routing"`. Пишет их диспетчер, backend при
+этом не трогается: у события нет mutation, только запись в `events.ndjson` через обычный
+pending/commit путь, идемпотентная по `request_id`.
+
+Попытка (round) — это один подъём воркера плюс заработанное им ревью. Claim открывает попытку 1,
+каждый bounce на доработку (red-вердикт, red gate) открывает следующую; respawn той же головы
+остаётся в своей попытке. Возврат в Ready и повторный claim добавляют попытку, а не затирают
+предыдущую: номер берётся из журнала, а не из dispatcher state, поэтому переживает и потерю record,
+и restore.
+
+```json
+{"kind": "routing", "ref": "PROJECT-N", "payload": {
+  "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",
+  "heads": [{"role": "worker", "requested_head": "codex", "head": "codex",
+             "requested_from": "card", "fallback": false, "fallback_chain": [],
+             "adapter": "codex", "model": "gpt-5.6-terra", "effort": "default",
+             "codex_mode": "exec", "resource": "openai-sub", "account": "openai-subscription"}]}}
+```
+
+`phase` — `worker` (подъём воркера), `review` (подъём ревьюера), `verdict` (исход попытки, несёт обе
+головы, `outcome` = `green`/`red`), так что пары «воркер-ревьюер» группируются по исходу без join.
+
+Имя профиля не является историческим ключом: `codex`, `codex-terra`, `codex-high` и `codex-extra` —
+одна модель с разным effort, `claude-default` вообще не пинит модель, профили перепиниваются. Поэтому
+каждая голова несёт конфигурацию запуска целиком, снятую в момент подъёма и больше не перечитываемую
+из `heads.toml`. `requested_head` против `head` плюс явный `fallback` показывают случай, когда
+заявленная пара голов не совпала с фактической.
+
+Читающая сторона — `secretary.routing_journal.attempts(events, ref)`: последовательность попыток
+завершённой карточки с головами и исходом. События попадают в recovery checkpoint вместе с остальным
+`events.ndjson` и восстанавливаются при materialize.
+
 ## Production dispatcher
 
 Production runtime запускается одним tick или постоянным loop:
