@@ -229,9 +229,11 @@ class InstanceCatalog:
 
         The head is decided once, at claim, and the claim writes it onto the card. Re-reading the
         override or the role default here would hand the rest of a running attempt to whatever the
-        board says now, so a role default edited mid-attempt would silently move the reviewer. A
-        card claimed before the claim recorded a head, or one whose head has since left
-        `heads.yaml`, falls back to the current decision: there is nothing launchable to resume.
+        board says now, so a role default edited mid-attempt would silently move the reviewer. If
+        that head has since left `heads.yaml` there is nothing to resume it on: the attempt stops
+        and a human decides, because substituting today's role default would launch a head the
+        claim never picked and file it under the running attempt. A card claimed before the claim
+        recorded a head has no decision to keep, so it takes the current one.
         """
         claimed = (task.get("routing") or {}).get(key)
         if not claimed:
@@ -239,8 +241,8 @@ class InstanceCatalog:
         head = str(claimed)
         try:
             self._head_profile(head)
-        except HostError:
-            return current(task)
+        except HostError as exc:
+            raise HostError(f"head {head!r} recorded at claim is unavailable: {exc}") from None
         return head
 
     def head_run(
@@ -1653,7 +1655,10 @@ class DispatcherRuntime:
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
-            record = self._adopt(task, attempt_id)
+            try:
+                record = self._adopt(task, attempt_id)
+            except HostError as exc:
+                return self._block_unresumable(task, records, payload, attempt_id, "advance", exc)
             records[ref] = record
             current_claim = _attempt_request_id(attempt_id, "claim", ref)
             if self.audit.committed_event(current_claim) is not None:
@@ -1833,7 +1838,10 @@ class DispatcherRuntime:
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
-            record = self._adopt(task, attempt_id)
+            try:
+                record = self._adopt(task, attempt_id)
+            except HostError as exc:
+                return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
@@ -2239,6 +2247,40 @@ class DispatcherRuntime:
         records[ref] = record
         self._save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
+
+    def _block_unresumable(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        step: str,
+        error: Exception,
+    ) -> dict[str, Any]:
+        """A claimed card the dispatcher cannot pick back up on the head it was claimed with.
+
+        Nothing is launched and nothing is recorded: the routing journal keeps the attempt as the
+        last bring-up left it rather than gaining a head that never ran. A human re-points the card
+        or restores the profile.
+        """
+        ref = task["ref"]
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
+            request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+        )
+        records.pop(ref, None)
+        self._save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "claimed head is unavailable",
+        }
 
     def _block_failed_worker_restart(
         self,

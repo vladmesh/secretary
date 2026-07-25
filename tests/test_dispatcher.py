@@ -195,11 +195,21 @@ class FakeCatalog:
 
     def claimed_worker_head(self, task: dict) -> str:
         # Same rule as InstanceCatalog: the head the claim wrote onto the card wins over whatever
-        # the override and the role default say now.
-        return str(task.get("routing", {}).get("resolved_worker_head") or self.worker_head(task))
+        # the override and the role default say now, and a claimed head that has left the registry
+        # stops the bring-up instead of falling back to the current default.
+        return self._claimed_head(task, "resolved_worker_head", self.worker_head)
 
     def claimed_review_head(self, task: dict) -> str:
-        return str(task.get("routing", {}).get("resolved_review_head") or self.review_head(task))
+        return self._claimed_head(task, "resolved_review_head", self.review_head)
+
+    def _claimed_head(self, task: dict, key: str, current) -> str:
+        claimed = task.get("routing", {}).get(key)
+        if not claimed:
+            return current(task)
+        head = str(claimed)
+        if head not in self.profiles:
+            raise HostError(f"head {head!r} recorded at claim is unavailable")
+        return head
 
     def head_run(self, task: dict, *, role: str, head: str = "", workspace: str = "") -> HeadRun:
         """Mirror InstanceCatalog.head_run over a four-profile registry: `codex` for the worker,
@@ -2495,6 +2505,42 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         record = self.runtime.state.records(self.runtime.state.load())["secretary-510-pilot"]
         self.assertEqual((record.head, record.review_head), ("claude-opus", "claude-opus"))
+
+    def test_adoption_of_a_card_whose_claimed_head_left_the_registry_blocks(self) -> None:
+        """The claimed head is gone from `heads.yaml` and the dispatcher lost its record. There is
+        no substitution at bring-up in this installation, so the attempt stops: launching today's
+        role default would put a head the claim never picked into the running attempt. The card goes
+        to Blocked for a human, and the journal keeps the attempt as the last real bring-up left
+        it."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="done", request_id="worker-done-lost-profile",
+        )
+        self._drop_records_and_restart_attempt()
+        before = self.routing_history()
+        self.catalog.profiles.pop("codex")
+        self.catalog.role_defaults = {"new_card": "claude-opus", "reviewer": "claude-opus"}
+
+        blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["reason"], "claimed head is unavailable")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        self.assertIn("claimed head is unavailable", card["comments"][-1]["body"])
+        self.assertIn("codex", card["comments"][-1]["body"])
+        self.assertNotIn("secretary-510-pilot", self.runtime.state.load()["records"])
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"], "nothing new may be launched")
+        self.assertEqual(self.host.reviews, [])
+        history = self.routing_history()
+        self.assertEqual(
+            [[run.head for run in attempt.worker_runs] for attempt in history],
+            [[run.head for run in attempt.worker_runs] for attempt in before],
+            "a head that never launched must not be appended to the attempt",
+        )
+        self.assertIsNone(history[-1].reviewer)
 
     def test_reviewer_without_a_pinned_model_records_the_model_the_cli_resolves(self) -> None:
         """`claude-default` pins no model: the launcher renders `claude` with no `--model` and the
