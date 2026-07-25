@@ -285,6 +285,7 @@ def _freeze_heads(
         if record.handle:
             runtime.host.stop(record)
             record.handle = ""
+            record.worker_leaf = ""
             record.paused_worker_at = now
             stopped_worker.append(ref)
     return stopped_worker, stopped_reviewer, excluded
@@ -340,10 +341,12 @@ def _resume_heads(
             continue
         try:
             record.handle = runtime.host.restart_worker(task, record)
+            record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
         except Exception:  # noqa: BLE001 — one failed relaunch must not strand the others
             # Left with no handle and a fresh watchdog window: the card stays In progress under the
             # ordinary wait watchdog, which respawns it once and then escalates to Blocked.
             record.handle = ""
+            record.worker_leaf = ""
             skipped.append(f"{ref}:worker")
             continue
         record.state = "claimed"

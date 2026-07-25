@@ -309,6 +309,26 @@ class CommandHostRuntime:
             launch_prompt=self._worker_launch_prompt(),
         )
 
+    def pane_leaf(self, workspace: str, handle: str) -> str:
+        return self._pane_leaf(workspace, handle)
+
+    def codex_tui_activity(
+        self, task: dict[str, Any], record: DispatcherRecord, kind: str
+    ) -> float | None:
+        """Return Codex TUI rollout activity without reading the session contents."""
+        if not isinstance(getattr(self, "_heads", None), dict):
+            return None
+        head = record.review_head if kind == "review" else record.head
+        profile = self._head_profile(head)
+        mode = (
+            task.get("routing", {}).get("codex_launch_mode")
+            or profile.get("codex_mode", "exec")
+        )
+        if profile.get("adapter") != "codex" or mode != "tui" or not record.workspace:
+            return None
+        from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
+        return latest_activity_for(record.workspace)
+
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
         """Bring the reviewer up as a second pane inside the worker's own worktree.
 
@@ -350,11 +370,7 @@ class CommandHostRuntime:
         return _command_terminal_status(self, task, record, kind="worker")
 
     def review_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
-        # Keep command_review_running as the review identity contract.  status adds only the
-        # inventory's output timestamp for the progress watchdog.
-        status = _command_terminal_status(self, task, record, kind="review")
-        status["live"] = self.review_running(task, record)
-        return status
+        return _command_terminal_status(self, task, record, kind="review")
 
     def stop_review(self, record: DispatcherRecord) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
@@ -1391,6 +1407,7 @@ class DispatcherRuntime:
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
+        record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         record.worker_progress_at = time.time()
         record.state = "claimed"
         resume_workspaces = payload.get("resume_workspaces")
@@ -1542,6 +1559,7 @@ class DispatcherRuntime:
             moved = self.reader.show(ref)
             try:
                 record.handle = self.host.restart_worker(moved, record)
+                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
                     ref=ref,
@@ -1642,6 +1660,12 @@ class DispatcherRuntime:
                 task, record, records, payload, attempt_id, kind=kind,
                 trigger=f"no terminal output for {int(now - progress_at)}s",
             )
+        # A known fresh activity signal is progress, not merely liveness.  It starts a new wait
+        # window so a long-running head cannot hit the old total-duration fallback ceiling.
+        if activity and float(activity) >= waiting_since:
+            setattr(record, f"{kind}_waiting_since", now)
+            self._save_records(payload, records)
+            return None
         if not waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
             self._save_records(payload, records)
@@ -1690,6 +1714,7 @@ class DispatcherRuntime:
             self.host.stop(record)
             try:
                 record.handle = self.host.restart_worker(task, record)
+                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
                 return self._block_failed_worker_restart(
                     ref=ref,
@@ -1854,6 +1879,7 @@ class DispatcherRuntime:
         moved = self.reader.show(ref)
         try:
             record.handle = self.host.restart_worker(moved, record)
+            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
             return self._block_failed_worker_restart(
                 ref=ref,

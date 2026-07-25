@@ -40,7 +40,10 @@ def command_terminal_status(
             or (not record.review_handle and not record.review_leaf and terminal.get("title") in labels)
         )
     else:
-        matches = lambda terminal: bool(record.handle and terminal.get("handle") == record.handle)
+        matches = lambda terminal: bool(
+            (record.handle and terminal.get("handle") == record.handle)
+            or (record.worker_leaf and terminal.get("leafId") == record.worker_leaf)
+        )
     for terminal in terminals:
         if not isinstance(terminal, dict) or not matches(terminal):
             continue
@@ -51,6 +54,11 @@ def command_terminal_status(
             activity = float(last) / 1000.0 if last else None
         except (TypeError, ValueError):
             activity = None
+        supplemental = getattr(host, "codex_tui_activity", lambda _task, _record, _kind: None)(
+            task, record, kind
+        )
+        if supplemental:
+            activity = max(activity or 0.0, float(supplemental))
         return {"known": True, "live": True, "reason": "live", "last_activity": activity}
     return {"known": True, "live": False, "reason": "missing-terminal"}
 
@@ -147,6 +155,7 @@ def start_review(
     # The worker head is gone: its pane was shut down so the reviewer judges a checkout nothing is
     # still editing. A red verdict launches a fresh worker into the same workspace.
     record.handle = ""
+    record.worker_leaf = ""
     record.state = "reviewing"
     return {
         "status": "ok",

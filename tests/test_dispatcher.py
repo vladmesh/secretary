@@ -228,6 +228,9 @@ class FakeHost:
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
         }
 
+    def pane_leaf(self, workspace: str, handle: str) -> str:
+        return f"leaf:{handle}"
+
     def start_review(self, task: dict, record) -> ReviewLaunch:
         self.calls.append("start_review")
         if self.fail_review_error is not None:
@@ -1441,6 +1444,36 @@ class DispatcherRuntimeTests(unittest.TestCase):
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_fresh_output_keeps_a_live_worker_past_the_old_total_wait_ceiling(self) -> None:
+        """A progress signal renews the silence window instead of respawning real work."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": time.time() - 1,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_fresh_output_keeps_a_live_reviewer_past_the_old_total_wait_ceiling(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.review_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": time.time() - 1,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
     def test_live_reviewer_is_checked_by_its_saved_handle(self) -> None:
@@ -4176,6 +4209,15 @@ class ReviewLivenessTests(unittest.TestCase):
         record = self._record(review_handle="term-review", review_leaf="leaf-review")
         self.assertTrue(host.review_running(self.task, record))
 
+    def test_worker_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
+        host = self._host([
+            {"handle": "term-alias", "leafId": "leaf-worker", "connected": True},
+        ])
+
+        record = self._record(worker_leaf="leaf-worker")
+
+        self.assertTrue(host.worker_status(self.task, record)["live"])
+
     def test_disconnected_reviewer_pane_is_not_running(self) -> None:
         host = self._host([
             {"handle": "term-review", "leafId": "leaf-review", "connected": False},
@@ -4395,6 +4437,12 @@ class ProductionPauseTests(unittest.TestCase):
         self.runtime.production_state.put_records(payload, records)
         self.runtime.production_state.save(payload)
         self.pause("freeze")
+
+        for _ in range(3):
+            self.assertEqual(self.runtime.production_tick()["status"], "skipped")
+        paused = self.record()
+        self.assertEqual(paused.worker_respawns, 0)
+        self.assertEqual(self.reader.show(self.ref)["state"], "in_progress")
 
         self.runtime.resume_pipeline(actor="operator")
 
