@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import os
 
-REVIEW_VERDICT_STALL_DEFAULT = 90 * 60
-WORKER_REPORT_STALL_DEFAULT = 6 * 3600
+# A missing pane is handled immediately.  These are the fallback ceilings for runtimes that cannot
+# provide activity timestamps and for a pane that remains connected while producing no output.
+REVIEW_VERDICT_STALL_DEFAULT = 10 * 60
+WORKER_REPORT_STALL_DEFAULT = 30 * 60
 
 
 def stall_seconds(kind: str) -> int:
@@ -51,6 +53,7 @@ def reset_wait(record, kind: str) -> None:
     """Clear a wait's watchdog bookkeeping so the next wait of that kind starts fresh."""
     setattr(record, f"{kind}_waiting_since", 0.0)
     setattr(record, f"{kind}_respawns", 0)
+    setattr(record, f"{kind}_progress_at", 0.0)
 
 
 def wait_cycle_token(record) -> str:

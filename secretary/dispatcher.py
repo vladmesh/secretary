@@ -54,6 +54,7 @@ from secretary.dispatcher_production import (
     production_tick as _production_tick,
 )
 from secretary.dispatcher_review import (
+    command_terminal_status as _command_terminal_status,
     command_review_running as _command_review_running,
     end_review_pane as _end_review_pane,
     recover_review_launch as _recover_review_launch,
@@ -344,6 +345,16 @@ class CommandHostRuntime:
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
+
+    def worker_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        return _command_terminal_status(self, task, record, kind="worker")
+
+    def review_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        # Keep command_review_running as the review identity contract.  status adds only the
+        # inventory's output timestamp for the progress watchdog.
+        status = _command_terminal_status(self, task, record, kind="review")
+        status["live"] = self.review_running(task, record)
+        return status
 
     def stop_review(self, record: DispatcherRecord) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
@@ -1380,6 +1391,7 @@ class DispatcherRuntime:
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
+        record.worker_progress_at = time.time()
         record.state = "claimed"
         resume_workspaces = payload.get("resume_workspaces")
         if isinstance(resume_workspaces, dict):
@@ -1596,13 +1608,40 @@ class DispatcherRuntime:
         *,
         kind: str,
     ) -> dict[str, Any] | None:
-        """Watch an open-ended wait (kind "worker" or "review"). Returns None to keep waiting,
-        or a tick outcome once the wait blew its ceiling: one respawn, then Blocked. Without
-        this a head that died before posting parks the card forever. The ceiling is the only
-        input on purpose; see dispatcher_watchdog for why no liveness probe is trustworthy."""
+        """Watch an open-ended wait without confusing a bad Orca inventory for a dead head."""
+        if getattr(record, f"paused_{'reviewer' if kind == 'review' else 'worker'}_at"):
+            return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
+        try:
+            status = (
+                self.host.review_status(task, record)
+                if kind == "review" else self.host.worker_status(task, record)
+            )
+        except Exception as exc:
+            # Orca may be down or between reconnects.  It is not evidence that this particular
+            # head died, so leave the record and the ordinary time ceiling intact.
+            return {
+                "status": "degraded", "step": "review" if kind == "review" else "advance",
+                "pilot_ref": task["ref"], "attempt_id": attempt_id,
+                "action": f"{kind}-runtime-unavailable", "reason": scrub_host_output(str(exc)),
+            }
+        if not status.get("live"):
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"terminal {status.get('reason') or 'missing'}",
+            )
+        activity = status.get("last_activity")
+        progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
+        if activity:
+            progress_at = max(progress_at, float(activity))
+            setattr(record, f"{kind}_progress_at", progress_at)
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         now = time.time()
+        if progress_at and now - progress_at > stall:
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=f"no terminal output for {int(now - progress_at)}s",
+            )
         if not waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
             self._save_records(payload, records)
@@ -1616,8 +1655,13 @@ class DispatcherRuntime:
         if outcome == "wait":
             return None
         if outcome == "respawn":
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now)
-        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall)
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+
+    def _trigger_wait_watchdog(self, task, record, records, payload, attempt_id, *, kind: str, trigger: str):
+        if int(getattr(record, f"{kind}_respawns") or 0) < 1:
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
 
     def _respawn_wait(
         self,
@@ -1629,6 +1673,7 @@ class DispatcherRuntime:
         *,
         kind: str,
         now: float,
+        trigger: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -1663,6 +1708,9 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            record.worker_progress_at = now
+        if kind == "review":
+            record.review_progress_at = now
         # Persist the restart before commenting. The pilot tick has no try/except around this, so
         # a writer.comment that raises would otherwise escape with the head already respawned and
         # respawns still 0: the next tick respawns again and the escalation never arrives.
@@ -1678,7 +1726,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"Dispatcher wait watchdog: no {_wait_expectation(kind)} within {_stall_seconds(kind)}s, "
+                f"Dispatcher wait watchdog: {trigger}, "
                 f"respawned the {kind} head (respawn {respawns}). Another stall escalates to Blocked."
             ),
             request_id=_attempt_request_id(
@@ -1706,6 +1754,7 @@ class DispatcherRuntime:
         *,
         kind: str,
         stall: int,
+        trigger: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -1716,7 +1765,7 @@ class DispatcherRuntime:
             reference=ref,
             target="blocked",
             reason=(
-                f"wait watchdog: no {_wait_expectation(kind)} after respawn "
+                f"wait watchdog: {trigger} after respawn "
                 f"(ceiling {stall}s), blocked for the operator"
             ),
             request_id=_attempt_request_id(

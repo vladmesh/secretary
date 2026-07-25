@@ -190,6 +190,10 @@ class FakeHost:
         # None keeps the default "a review started in this process is live"; set a bool to model a
         # reviewer terminal that died after launch, which is what recovery actually has to detect.
         self.review_running_result: bool | None = None
+        self.worker_status_result: dict | None = None
+        self.review_status_result: dict | None = None
+        self.worker_status_error: Exception | None = None
+        self.review_status_error: Exception | None = None
         # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
@@ -252,6 +256,19 @@ class FakeHost:
         if self.review_running_result is not None:
             return self.review_running_result
         return task["ref"] in self.reviews
+
+    def worker_status(self, task: dict, record) -> dict:
+        self.calls.append("worker_status")
+        if self.worker_status_error is not None:
+            raise self.worker_status_error
+        return self.worker_status_result or {"known": True, "live": True, "reason": "live"}
+
+    def review_status(self, task: dict, record) -> dict:
+        self.calls.append("review_status")
+        if self.review_status_error is not None:
+            raise self.review_status_error
+        running = self.review_running(task, record)
+        return self.review_status_result or {"known": True, "live": running, "reason": "live" if running else "missing-terminal"}
 
     def verify_worker_result(self, task: dict, record) -> None:
         self.calls.append("verify_worker_result")
@@ -1426,22 +1443,62 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(waiting["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
-    def test_live_head_that_overwrote_its_terminal_title_is_not_treated_as_dead(self) -> None:
-        """secretary-654: heads replace the launch title with their own OSC sequence, so the
-        terminal-title probe reports a healthy reviewer as gone. The watchdog must never ask."""
+    def test_live_reviewer_is_checked_by_its_saved_handle(self) -> None:
+        """The wait path probes every tick, but does not use the mutable terminal title."""
         self.start_pilot()
         self._run_worker_to_validate()
         self.runtime.tick(self.selector)
         self.runtime.tick(self.selector)
 
-        self.host.review_running_result = False
         self.host.calls.clear()
         self._rewind_wait("review", seconds=stall_seconds("review") - 60)
         waiting = self.runtime.tick(self.selector)
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"], "healthy reviewer was killed")
-        self.assertNotIn("review_running", self.host.calls, "watchdog must not probe liveness")
+        self.assertIn("review_status", self.host.calls)
+
+    def test_missing_worker_terminal_respawns_without_waiting_for_ceiling(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("terminal missing-terminal", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_missing_reviewer_terminal_respawns_without_waiting_for_ceiling(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "review-respawned")
+
+    def test_live_worker_without_new_output_is_respawned(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_progress_at"] = time.time() - stall_seconds("worker") - 1
+        self.runtime.state.save(payload)
+        self.host.worker_status_result = {"known": True, "live": True, "reason": "live", "last_activity": time.time() - stall_seconds("worker") - 1}
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+
+    def test_runtime_inventory_failure_is_degraded_not_a_head_death(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.worker_status_error = HostError("orca terminal list failed")
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-runtime-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
     def test_dead_worker_is_respawned_once_then_escalated(self) -> None:
         self.start_pilot()
