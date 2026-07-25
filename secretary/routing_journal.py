@@ -1,4 +1,4 @@
-"""Per-attempt routing telemetry: which head actually ran as worker and as reviewer.
+"""Per-attempt routing telemetry: which head ran as worker and as reviewer on each attempt.
 
 Contract: docs/PROTOCOLS.md, "Routing-телеметрия попыток". The card's own metadata cannot answer
 "who reviewed attempt 2": `resolved_review_head` is cleared when the card leaves Validate and the
@@ -8,8 +8,8 @@ bring-up plus one per verdict, so a finished card still yields its worker/review
 
 A profile id alone is not a historical key: `codex`, `codex-terra`, `codex-high` and `codex-extra`
 all resolve to one model with different effort, `claude-default` pins no model at all, and profiles
-get re-pinned over time. So every event carries the launch configuration itself — adapter, model,
-effort, codex launch mode, resource and account — snapshotted at bring-up, never re-read from
+get re-pinned over time. So every event carries the launch configuration itself (adapter, model,
+effort, codex launch mode, resource and account) snapshotted at bring-up, never re-read from
 `heads.toml` afterwards.
 """
 
@@ -25,56 +25,56 @@ ROUTING_KIND = "routing"
 WORKER = "worker"
 REVIEWER = "reviewer"
 PHASES = ("worker", "review", "verdict")
-# Where the head that really launched came from, relative to what the card asked for.
-FROM_REQUESTED = "requested"
-FROM_RETRY_SWITCH = "retry_switch"
-FROM_HEALTH = "health_fallback"
-FROM_LAUNCH = "launch"
+# Where the head id itself came from.
+HEAD_FROM_CARD = "card"
+HEAD_FROM_ROLE_DEFAULT = "role_default"
+HEAD_FROM_RECORD = "record"
+# Where `model` was read at bring-up. `cli_default` means no configuration pinned a model and the
+# adapter's CLI picked one itself at startup, which is the only case where `model` may be empty.
+MODEL_FROM_PROFILE = "profile"
+MODEL_FROM_CLI_DEFAULT = "cli_default"
+MODEL_UNKNOWN = "unknown"
+RUNTIME_MODEL_SOURCES = (MODEL_FROM_CLI_DEFAULT, MODEL_UNKNOWN)
 
 
 @dataclass(frozen=True)
 class HeadRun:
     """One head as it was actually launched.
 
-    `requested` is the profile the card (or the role default) asked for, `resolved` is the profile
-    the launcher actually brought up. They differ exactly when a fallback fired, which `fallback`
-    states outright so a later diversity analysis never has to infer it from a chain in a
-    `heads.toml` that has since moved on. `resolved_from` says which road produced the difference:
-    the resolver's walk over a red resource at bring-up (`health_fallback`), the card's own watchdog
-    head-switch history (`retry_switch`), or a bring-up that launched something other than what the
-    card asks for right now (`launch`).
+    There is one head per role per bring-up and no substitution mechanism between the decision and
+    the launch: `head` is both what the card asked for and what started. `head_source` says where
+    that id came from: the card's own override, the role default, or the dispatcher record of a
+    card claimed earlier.
+
+    `model` may be empty only under a `model_source` that says the CLI resolved it at startup, so a
+    profile that pins no model (`claude-default`) can never be recorded as a silent blank.
     """
 
     role: str
-    requested: str
-    resolved: str
-    requested_from: str = "role_default"
-    resolved_from: str = FROM_REQUESTED
+    head: str
+    head_source: str = HEAD_FROM_ROLE_DEFAULT
     adapter: str = ""
     model: str = ""
-    # Where `model` was read from at bring-up: the head profile, or — for a claude profile that
-    # pins none — the settings the CLI resolves its own model through. `cli_default` means nothing
-    # pinned a model anywhere and the CLI's built-in default applied.
-    model_source: str = ""
+    model_source: str = MODEL_UNKNOWN
     effort: str = ""
     codex_mode: str = ""
     resource: str = ""
     account: str = ""
-    fallback_chain: tuple[str, ...] = ()
 
-    @property
-    def fallback(self) -> bool:
-        return self.resolved != self.requested
+    def __post_init__(self) -> None:
+        if not self.model_source:
+            raise ValueError("head run must say where its model came from")
+        if not self.model and self.model_source not in RUNTIME_MODEL_SOURCES:
+            raise ValueError(
+                f"head run {self.head!r} has no model under source {self.model_source!r}; "
+                f"an unpinned model must be recorded as one of {', '.join(RUNTIME_MODEL_SOURCES)}"
+            )
 
     def to_json(self) -> dict[str, Any]:
         return {
             "role": self.role,
-            "requested_head": self.requested,
-            "head": self.resolved,
-            "requested_from": self.requested_from,
-            "resolved_from": self.resolved_from,
-            "fallback": self.fallback,
-            "fallback_chain": list(self.fallback_chain),
+            "head": self.head,
+            "head_source": self.head_source,
             "adapter": self.adapter,
             "model": self.model,
             "model_source": self.model_source,
@@ -86,49 +86,47 @@ class HeadRun:
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "HeadRun":
-        chain = payload.get("fallback_chain")
+        model = str(payload.get("model") or "")
+        source = str(payload.get("model_source") or "")
+        if not source or (not model and source not in RUNTIME_MODEL_SOURCES):
+            # A record written before this contract, or a hand-edited one. Reading must not fail on
+            # it, but it must not read as a known model either.
+            source = MODEL_UNKNOWN if not model else MODEL_FROM_PROFILE
         return cls(
             role=str(payload.get("role") or ""),
-            requested=str(payload.get("requested_head") or ""),
-            resolved=str(payload.get("head") or ""),
-            requested_from=str(payload.get("requested_from") or "role_default"),
-            resolved_from=str(payload.get("resolved_from") or FROM_REQUESTED),
+            head=str(payload.get("head") or ""),
+            head_source=str(payload.get("head_source") or HEAD_FROM_ROLE_DEFAULT),
             adapter=str(payload.get("adapter") or ""),
-            model=str(payload.get("model") or ""),
-            model_source=str(payload.get("model_source") or ""),
+            model=model,
+            model_source=source,
             effort=str(payload.get("effort") or ""),
             codex_mode=str(payload.get("codex_mode") or ""),
             resource=str(payload.get("resource") or ""),
             account=str(payload.get("account") or ""),
-            fallback_chain=tuple(str(item) for item in chain) if isinstance(chain, list) else (),
         )
 
 
 def head_run_from_profile(
     *,
     role: str,
-    requested: str,
-    resolved: str,
-    requested_from: str,
+    head: str,
+    head_source: str,
     profile: dict[str, Any],
     resources: dict[str, Any],
     codex_mode: str = "",
-    resolved_from: str = "",
-    fallback_chain: Iterable[str] | None = None,
     model: str | None = None,
     model_source: str = "",
 ) -> HeadRun:
-    """Snapshot the profile that was launched. `codex_mode` overrides the profile's own launch mode
-    (a card can pin `codex_launch_mode`), so the record shows the mode the head really started in.
+    """Snapshot the profile that was launched.
 
-    `model` overrides the profile's own field for a head whose model the profile does not decide —
-    a claude profile with no `model` leaves the choice to the CLI, and the caller passes the model
-    that CLI will run under, with `model_source` naming where it read it. Without an override the
-    profile is the source.
+    `codex_mode` overrides the profile's own launch mode (a card can pin `codex_launch_mode`), so
+    the record shows the mode the head really started in.
 
-    `fallback_chain` is the chain declared by the *requested* profile — the policy in force at this
-    bring-up — and defaults to the launched profile's own chain when the caller has no better
-    source.
+    `model` overrides the profile's own field for a head whose model the profile does not decide: a
+    claude profile without `model` renders a command without `--model` and the CLI resolves one at
+    startup, so the caller passes what it will resolve to, with `model_source` naming where it read
+    it. Without an override the profile is the source, and a profile that pins nothing is recorded
+    as resolved by the CLI rather than as an empty field.
     """
     adapter = str(profile.get("adapter") or "")
     resource = str(profile.get("resource") or "")
@@ -141,38 +139,33 @@ def head_run_from_profile(
     if adapter == "codex":
         mode = str(codex_mode or profile.get("codex_mode") or "exec")
         effort = str(profile.get("effort") or "default")
-    chain = profile.get("fallback") if fallback_chain is None else fallback_chain
     if model is None:
         model = str(profile.get("model") or "")
-        model_source = model_source or ("profile" if model else "")
+        model_source = model_source or (MODEL_FROM_PROFILE if model else MODEL_FROM_CLI_DEFAULT)
     return HeadRun(
         role=role,
-        requested=requested,
-        resolved=resolved,
-        requested_from=requested_from,
-        resolved_from=resolved_from or (FROM_REQUESTED if resolved == requested else FROM_LAUNCH),
+        head=head,
+        head_source=head_source,
         adapter=adapter,
         model=str(model),
-        model_source=model_source,
+        model_source=model_source or (MODEL_FROM_PROFILE if model else MODEL_FROM_CLI_DEFAULT),
         effort=effort,
         codex_mode=mode,
         resource=resource,
         account=account,
-        fallback_chain=tuple(str(item) for item in chain) if isinstance(chain, (list, tuple)) else (),
     )
 
 
 def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     """Short digest of one launch configuration.
 
-    A round can bring the same role up more than once — a respawn after a silent head, a recovery
-    restart, a rework relaunch — and the relaunched head is not necessarily the one that started
-    the round: a `heads.toml` repin or a switch lands a different adapter/model/resource. The
-    digest is what tells "the same head came back" from "a different head now serves this round",
-    so the journal can stay idempotent on the former and still append an event for the latter.
+    A round can bring the same role up more than once (a respawn after a silent head, a recovery
+    restart, a rework relaunch), and the relaunched head is not necessarily configured like the one
+    that started the round: a `heads.toml` repin lands a different model or effort. The digest is
+    what tells "the same head came back" from "a different configuration now serves this round", so
+    the journal can stay idempotent on the former and still append an event for the latter.
     """
     payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
-    payload.pop("fallback_chain", None)
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
 
@@ -207,7 +200,7 @@ class AttemptRecord:
     outcome: str = ""
     events: list[str] = field(default_factory=list)
     # Every bring-up of the round in journal order, not just the head that served it last: a round
-    # whose reviewer was relaunched onto a different model keeps both records, and `reviewer` is
+    # whose reviewer was relaunched onto a repinned profile keeps both records, and `reviewer` is
     # the one the verdict came from.
     worker_runs: list[HeadRun] = field(default_factory=list)
     reviewer_runs: list[HeadRun] = field(default_factory=list)
@@ -272,8 +265,3 @@ def attempts(events: Iterable[dict[str, Any]], reference: str = "") -> list[Atte
         if outcome:
             record.outcome = outcome
     return [found[number] for number in sorted(order)]
-
-
-def last_attempt(events: Iterable[dict[str, Any]], reference: str = "") -> AttemptRecord | None:
-    history = attempts(events, reference)
-    return history[-1] if history else None

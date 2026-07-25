@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -26,6 +26,9 @@ class ReviewLaunch:
     handle: str
     leaf: str = ""
     commit: str = ""
+    # The launch configuration of the reviewer head this bring-up started, snapshotted by the
+    # launcher itself (secretary-716). The runtime writes it to the routing journal as-is.
+    run: dict[str, Any] = field(default_factory=dict)
 
 
 def review_pane_label(reference: str) -> str:
