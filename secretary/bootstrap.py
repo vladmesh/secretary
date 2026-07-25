@@ -21,13 +21,7 @@ import yaml
 
 from secretary._fsutil import write_text_atomic
 from secretary.config import validate_instance
-from secretary.host_apply import (
-    HostCommandError,
-    SystemdUnitInstaller,
-    materialize_orca_service,
-    pinned_orca_executable,
-    resolve_packaged,
-)
+from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -288,59 +282,6 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
         time.sleep(1)
 
 
-def _start_orca_service(user: str, instance: Path | None = None) -> None:
-    """Install Orca from the product catalogue and record its ownership.
-
-    Bootstrap needs Orca before the complete host materializer can run.  It
-    therefore owns this one early write, but records the same desired resource
-    that the materializer will later reconcile.
-    """
-    if os.geteuid() != 0:
-        raise BootstrapError("host bootstrap must run as root")
-    if instance is None:
-        raise BootstrapError("bootstrap needs the instance checkout to render Orca")
-    report = validate_instance(instance)
-    if not report.ok:
-        raise BootstrapError("invalid instance config: " + "; ".join(map(str, report.errors)))
-    try:
-        packaged = resolve_packaged(
-            report.instance,
-            product_root=Path(__file__).resolve().parents[1],
-            instance_path=instance,
-            runtime_user=user,
-        )
-    except ValueError as exc:
-        raise BootstrapError(str(exc)) from None
-    manifest = Path(report.instance["data_dir"]).expanduser().resolve() / "host-managed.json"
-    installer = SystemdUnitInstaller(sudo=False)
-    try:
-        materialize_orca_service(
-            report.instance, report.bindings, packaged, manifest, installer,
-        )
-    except (HostCommandError, ValueError) as exc:
-        raise BootstrapError(str(exc)) from None
-    _wait_for_orca()
-
-
-def _wait_for_orca(*, timeout: int = 60) -> None:
-    """Require both an active unit and its local serve port before success."""
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            active = subprocess.run(
-                ["systemctl", "is-active", "--quiet", "secretary-orca.service"],
-                timeout=15,
-            ).returncode == 0
-            if active:
-                with socket.create_connection(("127.0.0.1", 6768), timeout=3):
-                    return
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        if time.monotonic() >= deadline:
-            raise BootstrapError("Orca service did not become ready")
-        time.sleep(1)
-
-
 def _wait_for_kanboard(values: dict[str, str], *, timeout: int = 90) -> None:
     deadline = time.monotonic() + timeout
     while True:
@@ -392,7 +333,6 @@ def bootstrap(args: argparse.Namespace) -> int:
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
-            _start_orca_service(args.installation_user, target)
             compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)
             _run(["docker", "compose", "--env-file", str(runtime), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)

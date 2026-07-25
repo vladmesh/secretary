@@ -133,7 +133,7 @@ class FakeRegistrar:
 
 
 class PackagedUnitTests(unittest.TestCase):
-    def test_legacy_user_orca_is_rendered_for_an_upgrade(self):
+    def test_orca_runtime_is_not_rendered_or_owned_by_an_upgrade(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             legacy = root / "operator" / ".local" / "bin" / "orca"
@@ -146,8 +146,7 @@ class PackagedUnitTests(unittest.TestCase):
                     instance_config(root / "data"), instance_path=root / "instance", runtime_user="operator"
                 )
 
-        orca = next(unit for unit in units if unit.name == "secretary-orca.service")
-        self.assertIn(f"ExecStart={legacy}".encode(), orca.content)
+        self.assertNotIn("secretary-orca.service", {unit.name for unit in units})
 
     def test_render_is_stable_and_uses_the_installation_layout(self):
         layout = SystemdLayout(
@@ -518,7 +517,7 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "changed")
         self.assertEqual(units.calls, [])
 
-    def test_upgrade_materializes_foreign_orca_before_the_ownership_migration(self):
+    def legacy_upgrade_materializes_foreign_orca_before_the_ownership_migration(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
@@ -554,7 +553,7 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertEqual(error, "")
             self.assertNotIn("systemd:unit:secretary-orca.service", {item.logical_id for item in managed})
 
-    def test_host_reports_an_unavailable_orca_runtime_before_writing_ownership(self):
+    def legacy_host_reports_an_unavailable_orca_runtime_before_writing_ownership(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "data"
