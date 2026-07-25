@@ -646,6 +646,12 @@ def _production_claim_ready(
                 skipped.append({"ref": task["ref"], "reason": exc.message})
                 continue
             raise
+        if outcome.get("action") == "resource-not-ready":
+            skipped.append({
+                "ref": task["ref"],
+                "reason": str(outcome.get("reason") or "head resource is not ready"),
+            })
+            continue
         if skipped:
             outcome["skipped_ready"] = skipped
         return outcome

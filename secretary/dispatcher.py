@@ -1310,6 +1310,18 @@ class DispatcherRuntime:
         resume_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        head = self.catalog.worker_head(task)
+        readiness = self.head_readiness(head)
+        if not readiness.launch_allowed:
+            return {
+                "status": "skipped",
+                "step": "head-preflight",
+                "action": "resource-not-ready",
+                "pilot_ref": ref,
+                "head": head,
+                "readiness": readiness.to_json(),
+                "reason": readiness.reason,
+            }
         # A Ready card can be an operator-approved retry of a previously Blocked attempt. The
         # pilot dispatcher otherwise keeps one attempt id for its whole run, which would replay
         # the old idempotent claim and leave the card Ready. Give this retry a fresh identity
@@ -1339,19 +1351,7 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
-        head = self.catalog.worker_head(task)
         review_head = self.catalog.review_head(task)
-        readiness = self.head_readiness(head)
-        if not readiness.launch_allowed:
-            return {
-                "status": "skipped",
-                "step": "head-preflight",
-                "action": "resource-not-ready",
-                "pilot_ref": ref,
-                "head": head,
-                "readiness": readiness.to_json(),
-                "reason": readiness.reason,
-            }
         worker_id = _worker_id(task)
         self.writer.claim(
             role="dispatcher",
