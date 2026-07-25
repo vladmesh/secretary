@@ -194,6 +194,20 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
         latest_activity.assert_called_once_with(str(root))
 
+    def test_tui_activity_ignores_a_head_removed_from_the_snapshot(self) -> None:
+        """A stale record cannot turn an optional supplemental signal into an inventory failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = ActivityCatalog()
+            host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
+            record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="removed-head",
+                review_head="removed-head", attempt_id="attempt", comment_baseline=0,
+                review_baseline=0, state="claimed", claimed_at=0.0,
+            )
+
+            self.assertIsNone(host.codex_tui_activity({"routing": {}}, record, "worker"))
+
 
 class TuiCatalog:
     def __init__(self) -> None:
@@ -229,7 +243,10 @@ class ActivityCatalog:
         }
 
     def _head_profile(self, head: str) -> dict:
-        return self._heads["profiles"][head]
+        try:
+            return self._heads["profiles"][head]
+        except KeyError:
+            raise HostError(f"unknown head {head}") from None
 
 
 class RecordingTuiHost(CommandHostRuntime):

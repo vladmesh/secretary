@@ -320,7 +320,12 @@ class CommandHostRuntime:
         if not isinstance(getattr(self.catalog, "_heads", None), dict):
             return None
         head = record.review_head if kind == "review" else record.head
-        profile = self.catalog._head_profile(head)
+        try:
+            profile = self.catalog._head_profile(head)
+        except HostError:
+            # Head snapshots can change while a card is waiting.  That makes the optional TUI
+            # supplement unavailable, not the terminal inventory itself unavailable.
+            return None
         mode = (
             task.get("routing", {}).get("codex_launch_mode")
             or profile.get("codex_mode", "exec")
@@ -1631,6 +1636,7 @@ class DispatcherRuntime:
         """Watch an open-ended wait without confusing a bad Orca inventory for a dead head."""
         if getattr(record, f"paused_{'reviewer' if kind == 'review' else 'worker'}_at"):
             return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
+        runtime_reason = ""
         try:
             status = (
                 self.host.review_status(task, record)
@@ -1638,11 +1644,16 @@ class DispatcherRuntime:
             )
         except Exception as exc:
             # Orca may be down or between reconnects.  It is not evidence that this particular
-            # head died, so leave the record and the ordinary time ceiling intact.
+            # head died, so do not restart it merely for that.  It also cannot prove progress,
+            # so retain the ordinary wait ceiling as the fallback.
+            status = {"known": False, "live": True, "reason": "runtime-unavailable"}
+            runtime_reason = scrub_host_output(str(exc))
+
+        def unavailable() -> dict[str, Any]:
             return {
                 "status": "degraded", "step": "review" if kind == "review" else "advance",
                 "pilot_ref": task["ref"], "attempt_id": attempt_id,
-                "action": f"{kind}-runtime-unavailable", "reason": scrub_host_output(str(exc)),
+                "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
             }
         if not status.get("live"):
             return self._trigger_wait_watchdog(
@@ -1680,7 +1691,7 @@ class DispatcherRuntime:
         if not waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
             self._save_records(payload, records)
-            return None
+            return unavailable() if runtime_reason else None
         outcome = _wait_outcome(
             waiting_since=waiting_since,
             now=now,
@@ -1688,7 +1699,7 @@ class DispatcherRuntime:
             respawns=int(getattr(record, f"{kind}_respawns") or 0),
         )
         if outcome == "wait":
-            return None
+            return unavailable() if runtime_reason else None
         if outcome == "respawn":
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")

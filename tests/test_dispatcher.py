@@ -1570,6 +1570,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "worker-runtime-unavailable")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
+    def test_runtime_inventory_failure_still_uses_the_wait_ceiling(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.worker_status_error = HostError("orca terminal list failed")
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
+
     def test_dead_worker_is_respawned_once_then_escalated(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)
@@ -4254,6 +4266,34 @@ class ReviewLivenessTests(unittest.TestCase):
         record = self._record(worker_leaf="leaf-worker")
 
         self.assertTrue(host.worker_status(self.task, record)["live"])
+
+    def test_last_output_at_is_converted_from_milliseconds_to_epoch_seconds(self) -> None:
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertEqual(status["last_activity"], 1_753_456_789.123)
+
+    def test_invalid_or_missing_last_output_at_has_no_activity(self) -> None:
+        for terminal in (
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": "not-a-time"},
+        ):
+            with self.subTest(terminal=terminal):
+                status = self._host([terminal]).worker_status(self.task, self._record())
+                self.assertIsNone(status["last_activity"])
+
+    def test_tui_supplement_newer_than_last_output_at_wins(self) -> None:
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
+        ])
+        host.codex_tui_activity = lambda _task, _record, _kind: 1_753_456_800.0  # type: ignore[method-assign]
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertEqual(status["last_activity"], 1_753_456_800.0)
 
     def test_disconnected_reviewer_pane_is_not_running(self) -> None:
         host = self._host([
