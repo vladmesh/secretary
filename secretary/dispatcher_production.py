@@ -10,6 +10,7 @@ from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -91,13 +92,13 @@ def production_tick(runtime: Any) -> dict[str, Any]:
                 "reason": "production dispatcher singleton lock is held",
             }
         pause = runtime.pause.summary()
+        auto_resume: dict[str, Any] | None = None
         if pause.get("mode") == "freeze":
-            return {
-                "status": "skipped",
-                "step": "production-tick",
-                "reason": "pipeline is frozen by pause",
-                "pause": pause,
-            }
+            auto_resume = auto_resume_expired_freeze(runtime, source="tick")
+            if auto_resume is not None and auto_resume.get("resumed"):
+                pause = runtime.pause.summary()
+        if pause.get("mode") == "freeze":
+            return _frozen_tick(runtime, pause, auto_resume)
         payload = runtime.production_state.load()
         guard = _production_mutation_guard(runtime, payload)
         if guard is not None:
@@ -143,11 +144,54 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         }
         if pause.get("paused"):
             result["pause"] = pause
+        if auto_resume is not None:
+            result["auto_resume"] = auto_resume
         if checkpoint is not None:
             result["checkpoint"] = checkpoint
         if push is not None:
             result["checkpoint_push"] = push
         return result
+
+
+def _frozen_tick(
+    runtime: Any, pause: dict[str, Any], auto_resume: dict[str, Any] | None
+) -> dict[str, Any]:
+    """A frozen tick moves no card, and still writes and pushes the checkpoint.
+
+    A freeze stops the pipeline, not durability. Returning before the snapshot would turn every
+    freeze into a hole in the checkpoint history and a push lag that only grows, and the restore path
+    is exactly what an operator reaches for after the incident the freeze was called for.
+    """
+    result: dict[str, Any] = {
+        "status": "skipped",
+        "step": "production-tick",
+        "reason": "pipeline is frozen by pause",
+        "pause": pause,
+    }
+    if auto_resume is not None:
+        result["auto_resume"] = auto_resume
+    payload = runtime.production_state.load()
+    guard = _production_mutation_guard(runtime, payload)
+    if guard is not None:
+        # No state to write the snapshot's own bookkeeping into, so the checkpoint is not attempted:
+        # the freeze is reported with the guard's reason instead of a snapshot that cannot be recorded.
+        result["durability"] = {
+            "status": "skipped",
+            "reason": str(guard.get("reason") or "production state is not writable"),
+        }
+        return result
+    checkpoint = _write_checkpoint(runtime)
+    if checkpoint is not None:
+        payload["checkpoint"] = checkpoint
+        result["checkpoint"] = checkpoint
+    push = _push_checkpoint(runtime, payload)
+    if push is not None:
+        payload["checkpoint_push"] = push
+        result["checkpoint_push"] = push
+    if checkpoint is not None or push is not None:
+        payload["last_frozen_tick_at"] = now_rfc3339()
+        runtime.production_state.save(payload)
+    return result
 
 
 def _write_checkpoint(runtime: Any) -> dict[str, Any] | None:

@@ -14,19 +14,29 @@ Semantics come from the legacy `dispatcher.pause()` docstring and are unchanged:
   freeze — drain, plus the live worker and reviewer heads are stopped and the tick advances
            nothing at all. Workspaces and worktrees are never removed, so branches and
            uncommitted work stay exactly as the heads left them.
+
+A freeze set by automation also carries the legacy TTL: an automation-owned freeze that outlives
+`TA_HARD_PAUSE_AUTO_RESUME_TTL_S` is resumed by the next tick. `secretary backup create` freezes the
+pipeline and resumes in its `finally`, so a backup killed before that block would otherwise leave the
+dispatcher frozen forever, with stopped heads and no watchdog recovery. A freeze held by a human is
+a maintenance window and never expires.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import write_json
 
 PAUSE_MODES = ("drain", "freeze")
+AUTO_RESUME_TTL_DEFAULT = 2700
+AUTO_RESUME_ACTORS_DEFAULT = "pipeline,secretary-backup,secretary,steward,curator,retro"
 _PAUSE_MODE_ALIASES = {"drain": "drain", "soft": "drain", "freeze": "freeze", "hard": "freeze"}
 _LEGACY_MODES = {"drain": "soft", "freeze": "hard"}
 
@@ -35,6 +45,73 @@ def normalize_pause_mode(mode: str | None) -> str:
     """Public mode for a requested one, "" when it is not a pause mode. The legacy `soft`/`hard`
     spellings keep parsing: operators and runbooks still carry them."""
     return _PAUSE_MODE_ALIASES.get(str(mode or "").strip().lower(), "")
+
+
+def auto_resume_ttl_seconds() -> int:
+    """TTL for an automation-owned freeze, 0 when auto-resume is turned off.
+
+    Read from the env on every call, and from the same variable the legacy pause used, so one unit
+    override still covers both flags while the legacy contour is around.
+    """
+    try:
+        ttl = int(os.environ.get("TA_HARD_PAUSE_AUTO_RESUME_TTL_S", str(AUTO_RESUME_TTL_DEFAULT)))
+    except ValueError:
+        ttl = AUTO_RESUME_TTL_DEFAULT
+    return max(0, ttl)
+
+
+def auto_resume_actors() -> tuple[str, ...]:
+    """Actors whose freeze expires. Anything else is a human maintenance window and is held."""
+    raw = os.environ.get("TA_HARD_PAUSE_AUTO_RESUME_ACTORS", AUTO_RESUME_ACTORS_DEFAULT)
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def auto_resume_status(state: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    """Whether this pause state is an automation-owned freeze that has outlived its TTL.
+
+    A freeze without a readable `since` counts as expired rather than eternal: the pause is
+    automation-owned either way, and the failure mode being fixed here is a freeze nobody lifts.
+    """
+    ttl = auto_resume_ttl_seconds()
+    out: dict[str, Any] = {"eligible": False, "ttl_seconds": ttl, "reason": "not-freeze"}
+    if normalize_pause_mode(state.get("mode")) != "freeze":
+        return out
+    if ttl <= 0:
+        out["reason"] = "disabled"
+        return out
+    actor = str(state.get("actor") or "").strip()
+    out["actor"] = actor
+    if actor not in auto_resume_actors():
+        out["reason"] = "manual-or-unknown-actor"
+        return out
+    since = _parse_since(state.get("since"))
+    if since is None:
+        out["eligible"] = True
+        out["reason"] = "missing-or-invalid-since"
+        return out
+    age = max(0, int((now if now is not None else time.time()) - since))
+    out["age_seconds"] = age
+    if age < ttl:
+        out["reason"] = "fresh"
+        return out
+    out["eligible"] = True
+    out["reason"] = "stale-automation-freeze"
+    return out
+
+
+def _parse_since(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 @dataclass(frozen=True)
@@ -172,6 +249,7 @@ class ProductionPause:
             return out
         out.update(
             {
+                "auto_resume": auto_resume_status(state),
                 "since": str(state.get("since") or ""),
                 "actor": str(state.get("actor") or ""),
                 "reason": str(state.get("reason") or ""),
@@ -325,26 +403,14 @@ def _legacy_hard_pause_auto_resume_status(payload: dict[str, Any]) -> dict[str, 
     out: dict[str, Any] = {"eligible": False, "reason": "not-hard-pause"}
     if payload.get("mode") != "hard":
         return out
-    try:
-        ttl = int(os.environ.get("TA_HARD_PAUSE_AUTO_RESUME_TTL_S", "2700"))
-    except ValueError:
-        ttl = 2700
-    ttl = max(0, ttl)
+    ttl = auto_resume_ttl_seconds()
     out["ttl_seconds"] = ttl
     if ttl <= 0:
         out["reason"] = "disabled"
         return out
-    actors = tuple(
-        item.strip()
-        for item in os.environ.get(
-            "TA_HARD_PAUSE_AUTO_RESUME_ACTORS",
-            "pipeline,secretary-backup,secretary,steward,curator,retro",
-        ).split(",")
-        if item.strip()
-    )
     actor = str(payload.get("actor") or "").strip()
     out["actor"] = actor
-    if actor not in actors:
+    if actor not in auto_resume_actors():
         out["reason"] = "manual-or-unknown-actor"
         return out
     out["eligible"] = True

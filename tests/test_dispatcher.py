@@ -4458,6 +4458,110 @@ class ProductionPauseTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime.production_tick()["status"], "skipped")
 
+    def age_the_pause(self, seconds: int) -> None:
+        state = self.runtime.pause.load()
+        state["since"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+        self.runtime.pause.save(state)
+
+    def test_an_expired_automation_freeze_is_resumed_by_the_next_tick(self) -> None:
+        """A backup killed before its `finally` must not freeze the dispatcher forever."""
+        self.runtime.production_tick()
+        workspace = self.record().workspace
+        self.runtime.pause_pipeline(
+            mode="freeze", actor="secretary-backup", reason="backup snapshot"
+        )
+        self.age_the_pause(3600)
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["auto_resume"]["reason"], "stale-automation-freeze")
+        self.assertEqual(result["auto_resume"]["relaunched"], [f"{self.ref}:worker"])
+        self.assertFalse(self.runtime.pause.path.exists())
+        self.assertNotEqual(result["status"], "skipped")
+        record = self.record()
+        self.assertEqual(record.handle, f"rework:{self.ref}")
+        self.assertEqual(record.workspace, workspace)
+        self.assertEqual(record.paused_worker_at, 0.0)
+
+    def test_a_fresh_automation_freeze_is_left_alone(self) -> None:
+        self.runtime.production_tick()
+        self.runtime.pause_pipeline(
+            mode="freeze", actor="secretary-backup", reason="backup snapshot"
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertIsNone(result.get("auto_resume"))
+        self.assertEqual(result["pause"]["auto_resume"]["reason"], "fresh")
+        self.assertTrue(self.runtime.pause.path.exists())
+
+    def test_an_operator_freeze_never_expires(self) -> None:
+        """A person holding a maintenance window decides when it ends, however long it runs."""
+        self.runtime.production_tick()
+        self.pause("freeze")
+        self.age_the_pause(3600 * 12)
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["pause"]["auto_resume"]["reason"], "manual-or-unknown-actor")
+        self.assertTrue(self.runtime.pause.path.exists())
+
+    def test_auto_resume_honours_the_ttl_override(self) -> None:
+        self.runtime.pause_pipeline(mode="freeze", actor="secretary-backup", reason="backup")
+        self.age_the_pause(3600)
+
+        with mock.patch.dict(os.environ, {"TA_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
+            self.assertEqual(self.runtime.production_tick()["status"], "skipped")
+
+        self.assertEqual(self.runtime.production_tick()["auto_resume"]["resumed"], True)
+
+    def test_a_failed_auto_resume_holds_the_freeze_and_says_why(self) -> None:
+        self.runtime.production_tick()
+        self.runtime.pause_pipeline(mode="freeze", actor="secretary-backup", reason="backup")
+        self.age_the_pause(3600)
+
+        with mock.patch.object(self.runtime.pause, "clear", side_effect=OSError("read-only fs")):
+            result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertFalse(result["auto_resume"]["resumed"])
+        self.assertIn("read-only fs", result["auto_resume"]["error"])
+        self.assertTrue(self.runtime.pause.path.exists())
+        # The retry on the next tick does not launch a second head on top of the one it just put back.
+        retry = self.runtime.production_tick()
+        self.assertEqual(retry["auto_resume"]["parked"], [f"{self.ref}:worker"])
+
+    def test_a_frozen_tick_still_writes_and_pushes_the_checkpoint(self) -> None:
+        """Freeze stops cards moving, not durability: a long freeze must not be a snapshot hole."""
+        self.runtime.checkpoint = FakeCheckpoint(
+            CheckpointResult(status="committed", commit="abc123", board_cards=2)
+        )
+        self.runtime.checkpoint_push = FakePusher({"status": "pushed", "last_push_commit": "abc123"})
+        self.pause("freeze")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["checkpoint"]["commit"], "abc123")
+        self.assertEqual(result["checkpoint_push"]["status"], "pushed")
+        payload = self.runtime.production_state.load()
+        self.assertEqual(payload["checkpoint"]["commit"], "abc123")
+        self.assertEqual(payload["checkpoint_push"]["last_push_commit"], "abc123")
+        # ...and the frozen tick still moved nothing.
+        self.assertEqual(self.reader.show(self.ref)["state"], "ready")
+
+    def test_a_failing_push_on_a_frozen_tick_is_reported_not_raised(self) -> None:
+        self.runtime.checkpoint_push = FakePusher(RuntimeError("ssh agent is gone"))
+        self.pause("freeze")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["checkpoint_push"]["status"], "failed")
+        self.assertIn("ssh agent is gone", result["checkpoint_push"]["reason"])
+
     def test_the_mirror_lands_where_the_background_roles_look(self) -> None:
         """resolve_pipeline_state_dir's own order: a mirror written elsewhere sheds nothing."""
         state_dir = self.data_dir / "ta-state"

@@ -140,6 +140,11 @@ python3 -m secretary pause-status --instance INSTANCE
 Оператор при freeze может исключить свой собственный воркспейс (`--exclude-workspace`): этим
 пользуется `secretary backup create`, который замораживает пайплайн из воркера.
 
+Freeze, поставленный автоматикой из allowlist `TA_HARD_PAUSE_AUTO_RESUME_ACTORS`, истекает через
+`TA_HARD_PAUSE_AUTO_RESUME_TTL_S` (по умолчанию 45 минут): тик проверяет это до freeze-skip и
+снимает паузу продуктовым `resume` под тем же tick lock. Freeze от человека держится до явного
+`resume`. Замороженный тик карточки не двигает, но checkpoint пишет и пушит.
+
 ## Подключение проекта
 
 Текущий низкоуровневый onboarding состоит из стадий:

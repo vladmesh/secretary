@@ -19,6 +19,7 @@ from secretary._fsutil import file_lock
 from secretary.dispatcher_helpers import _last_marker
 from secretary.dispatcher_pause import (
     PAUSE_MODES,
+    auto_resume_status,
     clear_legacy_mirror,
     normalize_pause_mode,
     on_resume_text,
@@ -125,29 +126,62 @@ def resume(runtime: Any, *, actor: str) -> dict[str, Any]:
     next tick to move instead of getting a fresh head launched into work that is already finished.
     """
     with file_lock(runtime.production_state.tick_lock):
-        state = runtime.pause.load()
-        mode = normalize_pause_mode(state.get("mode"))
-        if not mode:
-            runtime.pause.clear()
-            return {**pause_status(runtime), "step": "resume", "action": "noop"}
-        buckets: dict[str, list[str]] = {"relaunched": [], "parked": [], "skipped": []}
-        warnings: list[str] = []
-        if mode == "freeze":
-            payload = runtime.production_state.load()
-            if _state_unreadable(payload):
-                warnings.append(
-                    "production state is unreadable: the pause is lifted but no head was relaunched"
-                )
-            else:
-                records = runtime.production_state.records(payload)
-                buckets = _resume_heads(runtime, state, records)
-                _refresh_watchdog_windows(records)
-                runtime.production_state.put_records(payload, records)
-                payload["resumed_at"] = now_rfc3339()
-                payload["resumed_by"] = actor or runtime.owner
-                runtime.production_state.save(payload)
-        mirror = clear_legacy_mirror(state)
+        return resume_locked(runtime, actor=actor)
+
+
+def auto_resume_expired_freeze(runtime: Any, *, source: str) -> dict[str, Any] | None:
+    """Lift an automation-owned freeze that outlived its TTL. None when there is nothing to lift.
+
+    The legacy `dispatcher.pause()` contract: a freeze set by automation (`secretary-backup` above
+    all) expires, a freeze set by a person does not. `secretary backup create` resumes in a `finally`,
+    so a backup that is killed, or that runs longer than the TTL, would otherwise leave the
+    dispatcher frozen forever — stopped heads, no watchdog recovery, and no tick to notice.
+
+    Called by the tick, which already holds the tick lock, so this takes no lock of its own and
+    resume runs in the same critical section as the check.
+    """
+    decision = auto_resume_status(runtime.pause.load())
+    if not decision.get("eligible"):
+        return None
+    outcome = {**decision, "source": source}
+    try:
+        result = resume_locked(runtime, actor="auto-resume")
+    except Exception as exc:  # noqa: BLE001 — a failed recovery is reported, it does not kill the tick
+        return {**outcome, "resumed": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        **outcome,
+        "resumed": True,
+        "relaunched": result.get("relaunched", []),
+        "parked": result.get("parked", []),
+        "skipped": result.get("skipped", []),
+    }
+
+
+def resume_locked(runtime: Any, *, actor: str) -> dict[str, Any]:
+    """`resume` without taking the tick lock, for callers that already hold it."""
+    state = runtime.pause.load()
+    mode = normalize_pause_mode(state.get("mode"))
+    if not mode:
         runtime.pause.clear()
+        return {**pause_status(runtime), "step": "resume", "action": "noop"}
+    buckets: dict[str, list[str]] = {"relaunched": [], "parked": [], "skipped": []}
+    warnings: list[str] = []
+    if mode == "freeze":
+        payload = runtime.production_state.load()
+        if _state_unreadable(payload):
+            warnings.append(
+                "production state is unreadable: the pause is lifted but no head was relaunched"
+            )
+        else:
+            records = runtime.production_state.records(payload)
+            buckets = _resume_heads(runtime, state, records)
+            _refresh_watchdog_windows(records)
+            runtime.production_state.put_records(payload, records)
+            payload["resumed_at"] = now_rfc3339()
+            payload["resumed_by"] = actor or runtime.owner
+            runtime.production_state.save(payload)
+    mirror = clear_legacy_mirror(state)
+    runtime.pause.clear()
     status = pause_status(runtime)
     status["warnings"] = [*status.get("warnings", []), *warnings]
     return {
@@ -193,6 +227,9 @@ def pause_status(runtime: Any) -> dict[str, Any]:
         "stopped_reviewer": stopped_reviewer,
         "excluded_worker": excluded_worker,
         "on_resume": on_resume_text(mode, stopped_worker, stopped_reviewer),
+        # Operator-visible answer to "will this lift itself?": an automation-owned freeze expires,
+        # a freeze a person set is a maintenance window and is held until they resume it.
+        "auto_resume": auto_resume_status(state),
         "legacy_mirror": state.get("legacy_mirror") if isinstance(state.get("legacy_mirror"), dict) else {},
         "heads": [_head_line(ref, record) for ref, record in sorted(records.items())],
         "warnings": warnings,
@@ -265,6 +302,11 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:reviewer")
             continue
+        if record.review_handle:
+            # A resume that got this far and then failed to drop the flag is retried by the next
+            # tick's TTL check; relaunching a head that is already back would double it.
+            parked.append(f"{ref}:reviewer")
+            continue
         record.paused_reviewer_at = 0.0
         task = _load_task(runtime, ref)
         if task is None or task.get("state") != "validate":
@@ -282,6 +324,9 @@ def _resume_heads(
         record = records.get(ref)
         if record is None:
             skipped.append(f"{ref}:worker")
+            continue
+        if record.handle:
+            parked.append(f"{ref}:worker")
             continue
         record.paused_worker_at = 0.0
         task = _load_task(runtime, ref)
