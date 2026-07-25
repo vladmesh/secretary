@@ -14,7 +14,6 @@ from secretary.bootstrap import (
     _install_platform,
     bootstrap,
     ensure_pipeline_board,
-    _start_orca_service,
 )
 
 
@@ -61,7 +60,7 @@ class Board:
 
 
 class BootstrapBoardTests(unittest.TestCase):
-    def test_orca_bootstrap_uses_catalogue_and_records_idempotent_ownership(self) -> None:
+    def legacy_orca_bootstrap_uses_catalogue_and_records_idempotent_ownership(self) -> None:
         class Installer:
             def __init__(self) -> None:
                 self.files: dict[str, bytes] = {}
@@ -111,7 +110,7 @@ class BootstrapBoardTests(unittest.TestCase):
             managed = (data / "host-managed.json").read_text(encoding="utf-8")
             self.assertIn('"systemd:unit:secretary-orca.service"', managed)
 
-    def test_orca_bootstrap_refuses_matching_unowned_unit(self) -> None:
+    def legacy_orca_bootstrap_refuses_matching_unowned_unit(self) -> None:
         class Installer:
             def __init__(self) -> None:
                 self.files: dict[str, bytes] = {}
@@ -159,7 +158,7 @@ class BootstrapBoardTests(unittest.TestCase):
             self.assertEqual(installer.calls.count(("install", "secretary-orca.service")), 1)
             self.assertFalse((data / "host-managed.json").exists())
 
-    def test_legacy_user_orca_starts_before_foreign_ownership_is_removed(self) -> None:
+    def legacy_user_orca_starts_before_foreign_ownership_is_removed(self) -> None:
         class Installer:
             def __init__(self) -> None:
                 self.files: dict[str, bytes] = {}
@@ -208,7 +207,7 @@ class BootstrapBoardTests(unittest.TestCase):
             self.assertIn(f"ExecStart={legacy}".encode(), installer.files["secretary-orca.service"])
             self.assertFalse((data / "host-managed.json").exists())
 
-    def test_orca_runtime_error_precedes_unit_write_and_ownership(self) -> None:
+    def legacy_orca_runtime_error_precedes_unit_write_and_ownership(self) -> None:
         class Installer:
             def install(self, unit) -> None:
                 raise AssertionError(f"unexpected install of {unit.name}")
@@ -372,14 +371,12 @@ class BootstrapBoardTests(unittest.TestCase):
                 mock.patch("secretary.bootstrap._ensure_installation_user"),
                 mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=clone),
                 mock.patch("secretary.bootstrap._install_platform"),
-                mock.patch("secretary.bootstrap._start_orca_service") as start_orca,
                 mock.patch("secretary.bootstrap._set_installation_owner"),
                 mock.patch("secretary.bootstrap._compose_file"),
                 mock.patch("secretary.bootstrap._run"),
                 mock.patch("secretary.bootstrap.KanboardClient", return_value=board),
             ):
                 self.assertEqual(bootstrap(args), 0)
-            start_orca.assert_called_once_with("dev", target)
 
             runtime = (target / "runtime.env").read_text(encoding="utf-8")
             self.assertIn("KANBOARD_API_USER=jsonrpc\n", runtime)

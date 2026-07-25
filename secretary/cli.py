@@ -442,6 +442,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         print_host_inventory(
             report, args, expected=inspection.expected, collected=inspection.collected, diffs=inspection.diffs
         )
+        _print_external_orca_runtime(inspection.expected, inspection.collected)
 
     print_background_automations(inspect=inspect_host)
 
@@ -1179,6 +1180,19 @@ def _unit_runtime_findings(expected, collected: CollectResult) -> list[str]:
         if need_active and active != "active":
             findings.append(f"{name}: expected active, got {active}")
     return findings
+
+
+def _print_external_orca_runtime(expected, collected: CollectResult) -> None:
+    """Show the host-owned runtime separately from Secretary's unit parity."""
+    name = expected.external_runtime
+    if not name or "units" in collected.errors:
+        return
+    state = collected.inventory.unit_states.get(name)
+    if state is None:
+        print("Orca runtime: absent (external, not managed by Secretary)")
+        return
+    enabled, active = state
+    print(f"Orca runtime: external {name}, enabled={enabled}, active={active}")
 
 
 def print_background_automations(*, inspect: bool) -> None:

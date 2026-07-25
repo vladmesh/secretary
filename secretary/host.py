@@ -470,6 +470,7 @@ class Expectations:
     projects_root: str = ""
     foreign_units: set[str] = field(default_factory=set)
     unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
+    external_runtime: str = ""
     project_error: str = ""
 
 
@@ -569,6 +570,7 @@ def build_doctor_expectations(
             runtime[name] = (True, True)
         elif unit is None or not unit.oneshot:
             runtime[name] = (True, True)
+    runtime["orca-server.service"] = (False, True)
     return Expectations(
         projects=projects,
         units=units,
@@ -577,6 +579,10 @@ def build_doctor_expectations(
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
         foreign_units=foreign_units(host),
         unit_runtime=runtime,
+        # The headless server belongs to the Orca installation, not Secretary.
+        # Keep it out of unit ownership parity while still requiring it to be
+        # active before the scheduler can use the local runtime.
+        external_runtime="orca-server.service",
         project_error=project_error,
     )
 
@@ -805,8 +811,8 @@ class LiveHostSource(HostSource):
             if token.startswith(prefix):
                 names.add(token)
         states: dict[str, tuple[str, str]] = {}
-        for name in expected.units:
-            if name not in names:
+        for name in expected.unit_runtime:
+            if name not in names and name != expected.external_runtime:
                 continue
             enabled = self._run(["systemctl", "is-enabled", name])
             active = self._run(["systemctl", "is-active", name])

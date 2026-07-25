@@ -222,7 +222,7 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
-    def test_explicit_fixture_orca_executable_bypasses_runtime_lookup(self):
+    def test_packaged_units_do_not_depend_on_an_orca_executable(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,8 +238,7 @@ class ReconcilePlanTests(unittest.TestCase):
                     orca_executable=legacy_orca,
                 )
 
-        orca_service = next(unit for unit in packaged if unit.component == "orca")
-        self.assertIn(f"ExecStart={legacy_orca}".encode(), orca_service.content)
+        self.assertNotIn("orca", {unit.component for unit in packaged})
 
     def test_relative_direct_config_path_renders_canonical_absolute_layout(self):
         import tempfile
@@ -544,7 +543,7 @@ class ReconcilePlanTests(unittest.TestCase):
         for standard_dir in ("/usr/local/bin", "/usr/bin", "/bin"):
             self.assertIn(standard_dir, path_value.split(":"))
 
-    def test_scheduler_units_depend_on_the_rendered_orca_runtime(self):
+    def test_scheduler_units_order_after_the_external_orca_runtime_without_starting_it(self):
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd", "secretary-",
             SystemdLayout(REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")),
@@ -562,9 +561,9 @@ class ReconcilePlanTests(unittest.TestCase):
         for name in scheduler_services:
             content = rendered[name]
             self.assertIn(b"After=", content)
-            self.assertIn(b"Wants=", content)
-            self.assertIn(b"secretary-orca.service", content)
-            self.assertNotIn(b"orca-server.service", content)
+            self.assertIn(b"orca-server.service", content)
+            self.assertNotIn(b"Wants=orca-server.service", content)
+            self.assertNotIn(b"secretary-orca.service", content)
 
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
@@ -1242,8 +1241,7 @@ class DoctorHostCliTests(unittest.TestCase):
             fixture.mkdir()
             (fixture / "units.txt").write_text(
                 "secretary-dispatcher-production.service\n"
-                "secretary-dispatcher-production.timer\n"
-                "secretary-orca.service\n",
+                "secretary-dispatcher-production.timer\n",
                 encoding="utf-8",
             )
 
