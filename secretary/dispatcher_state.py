@@ -63,6 +63,11 @@ class DispatcherRecord:
     attempt_round: int = 0
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
+    # The reviewer profile the card asks for, kept unresolved. `review_head` holds what claim
+    # resolved and then what actually launched; the reviewer starts hours after the claim, so it
+    # resolves again from this ask at its own bring-up. Otherwise a resource that was red at claim
+    # pins the fallback head onto a reviewer that could have run on the requested one.
+    requested_review_head: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -80,6 +85,7 @@ class DispatcherRecord:
             "review_commit": self.review_commit,
             "review_handle": self.review_handle,
             "review_head": self.review_head,
+            "requested_review_head": self.requested_review_head,
             "review_leaf": self.review_leaf,
             "review_respawns": self.review_respawns,
             "review_waiting_since": self.review_waiting_since,
@@ -98,6 +104,7 @@ class DispatcherRecord:
             handle=str(payload.get("handle") or ""),
             head=str(payload.get("head") or ""),
             review_head=str(payload.get("review_head") or ""),
+            requested_review_head=str(payload.get("requested_review_head") or ""),
             attempt_id=str(payload.get("attempt_id") or ""),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),

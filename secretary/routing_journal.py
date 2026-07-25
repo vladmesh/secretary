@@ -52,6 +52,10 @@ class HeadRun:
     resolved_from: str = FROM_REQUESTED
     adapter: str = ""
     model: str = ""
+    # Where `model` was read from at bring-up: the head profile, or — for a claude profile that
+    # pins none — the settings the CLI resolves its own model through. `cli_default` means nothing
+    # pinned a model anywhere and the CLI's built-in default applied.
+    model_source: str = ""
     effort: str = ""
     codex_mode: str = ""
     resource: str = ""
@@ -73,6 +77,7 @@ class HeadRun:
             "fallback_chain": list(self.fallback_chain),
             "adapter": self.adapter,
             "model": self.model,
+            "model_source": self.model_source,
             "effort": self.effort,
             "codex_mode": self.codex_mode,
             "resource": self.resource,
@@ -90,6 +95,7 @@ class HeadRun:
             resolved_from=str(payload.get("resolved_from") or FROM_REQUESTED),
             adapter=str(payload.get("adapter") or ""),
             model=str(payload.get("model") or ""),
+            model_source=str(payload.get("model_source") or ""),
             effort=str(payload.get("effort") or ""),
             codex_mode=str(payload.get("codex_mode") or ""),
             resource=str(payload.get("resource") or ""),
@@ -109,9 +115,16 @@ def head_run_from_profile(
     codex_mode: str = "",
     resolved_from: str = "",
     fallback_chain: Iterable[str] | None = None,
+    model: str | None = None,
+    model_source: str = "",
 ) -> HeadRun:
     """Snapshot the profile that was launched. `codex_mode` overrides the profile's own launch mode
     (a card can pin `codex_launch_mode`), so the record shows the mode the head really started in.
+
+    `model` overrides the profile's own field for a head whose model the profile does not decide —
+    a claude profile with no `model` leaves the choice to the CLI, and the caller passes the model
+    that CLI will run under, with `model_source` naming where it read it. Without an override the
+    profile is the source.
 
     `fallback_chain` is the chain declared by the *requested* profile — the policy in force at this
     bring-up — and defaults to the launched profile's own chain when the caller has no better
@@ -129,6 +142,9 @@ def head_run_from_profile(
         mode = str(codex_mode or profile.get("codex_mode") or "exec")
         effort = str(profile.get("effort") or "default")
     chain = profile.get("fallback") if fallback_chain is None else fallback_chain
+    if model is None:
+        model = str(profile.get("model") or "")
+        model_source = model_source or ("profile" if model else "")
     return HeadRun(
         role=role,
         requested=requested,
@@ -136,7 +152,8 @@ def head_run_from_profile(
         requested_from=requested_from,
         resolved_from=resolved_from or (FROM_REQUESTED if resolved == requested else FROM_LAUNCH),
         adapter=adapter,
-        model=str(profile.get("model") or ""),
+        model=str(model),
+        model_source=model_source,
         effort=effort,
         codex_mode=mode,
         resource=resource,

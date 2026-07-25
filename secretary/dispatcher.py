@@ -19,6 +19,7 @@ from secretary import state_repo
 from secretary.dispatcher_launcher import (
     HeadLaunch,
     HeadLaunchError,
+    claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
@@ -211,7 +212,22 @@ class InstanceCatalog:
     def review_head(self, task: dict[str, Any]) -> str:
         return self.head_run(task, role="reviewer").resolved
 
-    def head_run(self, task: dict[str, Any], *, role: str, launched: str = "") -> HeadRun:
+    def requested_review_head(self, task: dict[str, Any]) -> str:
+        """The reviewer profile the card asks for, before any health resolution.
+
+        Claim keeps this rather than the head it would resolve to right then: the reviewer launches
+        hours later, and a resource that was red at claim may well be green by the time the card
+        reaches Validate. Resolving from the ask at the reviewer's own bring-up is what makes a
+        recorded fallback mean "the fallback fired at launch".
+        """
+        override = (task.get("routing") or {}).get("review_head_override")
+        if override:
+            return str(override)
+        return str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+
+    def head_run(
+        self, task: dict[str, Any], *, role: str, launched: str = "", workspace: str = ""
+    ) -> HeadRun:
         """The launch record for one head of `role`.
 
         `launched` is the profile the launcher actually brought up. Every record written after a
@@ -256,6 +272,13 @@ class InstanceCatalog:
             resolved_from = FROM_LAUNCH
         profile = self._head_profile(resolved)
         resources = self._heads.get("resources")
+        model: str | None = None
+        model_source = ""
+        if str(profile.get("adapter") or "") == "claude":
+            # A claude profile need not pin a model (`claude-default` does not), and then the CLI
+            # resolves one from its settings at startup. Read it here, at bring-up, so the record
+            # names the model that ran instead of an empty field.
+            model, model_source = _claude_launch_model(profile, workspace=workspace)
         return head_run_from_profile(
             role=role,
             requested=requested,
@@ -266,6 +289,8 @@ class InstanceCatalog:
             resources=resources if isinstance(resources, dict) else {},
             codex_mode=codex_mode,
             fallback_chain=self._declared_fallback(requested),
+            model=model,
+            model_source=model_source,
         )
 
     def resource_statuses(self) -> dict[str, str]:
@@ -487,7 +512,10 @@ class CommandHostRuntime:
         launched = self._launch(
             record.workspace,
             review_pane_label(task["ref"]),
-            record.review_head,
+            # The card's own ask, so the resolver runs against resource health as it is now. Handing
+            # it `record.review_head` would replay the resolution claim made hours ago and launch a
+            # fallback head onto a resource that has since recovered.
+            record.requested_review_head or record.review_head,
             "REVIEW.md",
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
@@ -845,7 +873,7 @@ class CommandHostRuntime:
         resolved = self.catalog.resolve_head(head).resolved
         if self.mode == "noop":
             return self._launched(
-                f"noop:{resolved}:{Path(workspace).name}:{prompt_file}", resolved, task, role
+                f"noop:{resolved}:{Path(workspace).name}:{prompt_file}", resolved, task, role, workspace
             )
         command = os.environ.get(env_name)
         launch = HeadLaunch(command, head=resolved) if command else None
@@ -877,10 +905,10 @@ class CommandHostRuntime:
             except HostError:
                 _close_tui_terminal(handle, run_json=self._run_json)
                 raise
-        return self._launched(handle, resolved, task, role)
+        return self._launched(handle, resolved, task, role, workspace)
 
     def _launched(
-        self, handle: str, head: str, task: dict[str, Any] | None, role: str
+        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = ""
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it.
 
@@ -892,7 +920,9 @@ class CommandHostRuntime:
         if task is None:
             return LaunchedHead(handle=handle, head=head)
         try:
-            run = self.catalog.head_run(task, role=role, launched=head).to_json()
+            run = self.catalog.head_run(
+                task, role=role, launched=head, workspace=workspace
+            ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
             run = HeadRun(role=role, requested=head, resolved=head, adapter="unknown").to_json()
         return LaunchedHead(handle=handle, head=head, run=run)
@@ -1482,6 +1512,7 @@ class DispatcherRuntime:
             handle="",
             head=head,
             review_head=review_head,
+            requested_review_head=self.catalog.requested_review_head(task),
             attempt_id=attempt_id,
             comment_baseline=len(claimed.get("comments") or []),
             review_baseline=0,
@@ -2174,7 +2205,9 @@ class DispatcherRuntime:
             f"в In progress — доработай и отчитайся заново."
         )
 
-    def head_run_snapshot(self, task: dict[str, Any], *, role: str, launched: str = "") -> dict[str, Any]:
+    def head_run_snapshot(
+        self, task: dict[str, Any], *, role: str, launched: str = "", workspace: str = ""
+    ) -> dict[str, Any]:
         """The launch snapshot of the head this bring-up put up, or a marked minimal record when its
         profile can no longer be read.
 
@@ -2185,7 +2218,9 @@ class DispatcherRuntime:
         `heads.toml` moves.
         """
         try:
-            return self.catalog.head_run(task, role=role, launched=launched).to_json()
+            return self.catalog.head_run(
+                task, role=role, launched=launched, workspace=workspace
+            ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
             profile = launched or (task.get("routing", {}).get("head_override") or "")
             return HeadRun(
@@ -2239,7 +2274,9 @@ class DispatcherRuntime:
         ref = task["ref"]
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
-        record.worker_run = run or self.head_run_snapshot(task, role="worker", launched=record.head)
+        record.worker_run = run or self.head_run_snapshot(
+            task, role="worker", launched=record.head, workspace=record.workspace
+        )
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
     def record_review_routing(
@@ -2257,7 +2294,7 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.review_run = run or self.head_run_snapshot(
-            task, role="reviewer", launched=record.review_head
+            task, role="reviewer", launched=record.review_head, workspace=record.workspace
         )
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 
@@ -2338,6 +2375,9 @@ class DispatcherRuntime:
             review_head=(
                 str(routing.get("resolved_review_head") or "") or self.catalog.review_head(task)
             ),
+            # The ask, not the resolution: an adopted card whose reviewer has not started yet still
+            # resolves at its own bring-up.
+            requested_review_head=self.catalog.requested_review_head(task),
             attempt_id=attempt_id,
             comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,

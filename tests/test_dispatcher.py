@@ -31,7 +31,11 @@ from secretary.dispatcher import (
     default_data_dir,
 )
 from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_claude_workspace_trusted
+from secretary.dispatcher_launcher import (
+    claude_launch_model,
+    ensure_claude_workspace_ready,
+    ensure_claude_workspace_trusted,
+)
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads, render_snapshot
@@ -179,7 +183,14 @@ class FakeCatalog:
     def review_head(self, task: dict) -> str:
         return self.head_run(task, role="reviewer").resolved
 
-    def head_run(self, task: dict, *, role: str, launched: str = "") -> HeadRun:
+    def requested_review_head(self, task: dict) -> str:
+        # The ask before resolution, as InstanceCatalog answers it: what the reviewer bring-up
+        # resolves from, so a claim-time fallback cannot stick to a reviewer that starts later.
+        return str((task.get("routing") or {}).get("review_head_override") or "codex-reviewer")
+
+    def head_run(
+        self, task: dict, *, role: str, launched: str = "", workspace: str = ""
+    ) -> HeadRun:
         """Mirror InstanceCatalog.head_run over a three-profile registry: `codex` for the worker,
         `codex-reviewer` for the reviewer, `claude-opus` as the other family — the pair a diversity
         question is actually about. Same resolution rules as the real catalog: the ask comes from the
@@ -208,13 +219,22 @@ class FakeCatalog:
             resolved_from = "health_fallback"
         else:
             resolved_from = "launch"
+        profile = self.profiles.get(resolved, {"adapter": "codex", "resource": "openai-sub"})
+        model: str | None = None
+        model_source = ""
+        if str(profile.get("adapter") or "") == "claude":
+            # Same as InstanceCatalog: a claude profile that pins no model leaves the choice to the
+            # CLI, and the snapshot names the model that CLI resolves at this bring-up.
+            model, model_source = claude_launch_model(profile, workspace=workspace)
         return head_run_from_profile(
             role=role,
             requested=requested,
             resolved=resolved,
             requested_from="retry_history" if switched else ("card" if override else "role_default"),
             resolved_from=resolved_from,
-            profile=self.profiles.get(resolved, {"adapter": "codex", "resource": "openai-sub"}),
+            profile=profile,
+            model=model,
+            model_source=model_source,
             resources=self.resources,
             codex_mode=codex_mode,
             fallback_chain=(self.profiles.get(requested) or {}).get("fallback") or (),
@@ -324,7 +344,14 @@ class FakeHost:
         # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
-        launched = self._launched(f"review:{task['ref']}", record.review_head, task, "reviewer")
+        # The reviewer resolves from the card's ask at its own bring-up, as the real host does.
+        launched = self._launched(
+            f"review:{task['ref']}",
+            record.requested_review_head or record.review_head,
+            task,
+            "reviewer",
+            record.workspace,
+        )
         return ReviewLaunch(
             handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
@@ -340,12 +367,16 @@ class FakeHost:
         self.prepared.append(task["ref"])
         return self._launched(f"rework:{task['ref']}", record.head, task, "worker")
 
-    def _launched(self, handle: str, head: str, task: dict, role: str) -> LaunchedHead:
+    def _launched(
+        self, handle: str, head: str, task: dict, role: str, workspace: str = ""
+    ) -> LaunchedHead:
         resolved = self.catalog.resolve_head(head).resolved
         return LaunchedHead(
             handle=handle,
             head=resolved,
-            run=self.catalog.head_run(task, role=role, launched=resolved).to_json(),
+            run=self.catalog.head_run(
+                task, role=role, launched=resolved, workspace=workspace
+            ).to_json(),
         )
 
     def review_running(self, task: dict, record) -> bool:
@@ -3155,7 +3186,8 @@ class DispatcherLauncherTests(unittest.TestCase):
             "role": "worker", "requested_head": "codex-extra", "head": "codex-extra",
             "requested_from": "card", "resolved_from": "requested",
             "fallback": False, "fallback_chain": [],
-            "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra",
+            "adapter": "codex", "model": "gpt-5.6-terra", "model_source": "profile",
+            "effort": "extra",
             # The card pinned the launch mode, so the record shows the mode the head really ran in.
             "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
         })
@@ -3163,6 +3195,54 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual((reviewer.resolved, reviewer.effort), ("codex-reviewer", "extra"))
         self.assertEqual(reviewer.fallback_chain, ("claude-opus",))
         self.assertFalse(reviewer.fallback)
+
+    def test_head_run_snapshots_the_cli_model_for_a_profile_that_pins_none(self) -> None:
+        """`claude-default` pins no model, so the CLI picks one from its settings at startup. The
+        record has to name that model: an empty field would make the profile id the only historical
+        key, which is exactly what this telemetry exists to avoid."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "claude-config"
+            config.mkdir()
+            (config / "settings.json").write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+            workspace = Path(tmp) / "workspace"
+            (workspace / ".claude").mkdir(parents=True)
+            catalog = object.__new__(InstanceCatalog)
+            catalog.instance_dir = Path("/nonexistent-instance")  # type: ignore[attr-defined]
+            catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+            card = {"routing": {"review_head_override": "claude-default"}}
+            env = {"CLAUDE_CONFIG_DIR": str(config), "CLAUDE_MANAGED_SETTINGS": str(config / "none.json")}
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("ANTHROPIC_MODEL", None)
+                user = catalog.head_run(card, role="reviewer", workspace=str(workspace))  # type: ignore[attr-defined]
+                # The workspace's own settings win over the user's, as they do for the CLI.
+                (workspace / ".claude" / "settings.json").write_text(
+                    json.dumps({"model": "sonnet"}), encoding="utf-8"
+                )
+                project = catalog.head_run(card, role="reviewer", workspace=str(workspace))  # type: ignore[attr-defined]
+
+        self.assertEqual((user.resolved, user.adapter), ("claude-default", "claude"))
+        self.assertEqual((user.model, user.model_source), ("opus", "user_settings"))
+        self.assertEqual((project.model, project.model_source), ("sonnet", "project_settings"))
+
+    def test_claude_launch_model_reports_the_cli_default_it_cannot_name(self) -> None:
+        """Nothing pinned anywhere: the CLI falls back to its own built-in default, which the
+        dispatcher has no way to read. The record says so instead of inventing a model id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CLAUDE_CONFIG_DIR": str(Path(tmp) / "empty"),
+                "CLAUDE_MANAGED_SETTINGS": str(Path(tmp) / "no-managed.json"),
+            }
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("ANTHROPIC_MODEL", None)
+                unpinned = claude_launch_model({"adapter": "claude"}, workspace=tmp)
+                os.environ["ANTHROPIC_MODEL"] = "opus"
+                from_env = claude_launch_model({"adapter": "claude"}, workspace=tmp)
+                pinned = claude_launch_model({"adapter": "claude", "model": "fable"}, workspace=tmp)
+
+        self.assertEqual(unpinned, ("", "cli_default"))
+        self.assertEqual(from_env, ("opus", "env:ANTHROPIC_MODEL"))
+        # A profile that pins a model renders `--model`, which outranks the environment.
+        self.assertEqual(pinned, ("fable", "profile"))
 
     def test_head_run_reports_the_real_fallback_the_retry_path_performed(self) -> None:
         """The production resolver, on the real registry: a card whose head was switched along
