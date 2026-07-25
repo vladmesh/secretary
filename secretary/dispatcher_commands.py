@@ -43,6 +43,7 @@ def add_dispatcher_subcommands(subparsers) -> None:
     for name, handler in (
         ("production-tick", run_dispatcher_production_tick),
         ("production-observe", run_dispatcher_production_observe),
+        ("resource-health", run_dispatcher_resource_health),
         ("production-run", run_dispatcher_production_run),
     ):
         command = commands.add_parser(name)
@@ -167,6 +168,12 @@ def run_dispatcher_production_tick(args: argparse.Namespace) -> int:
 
 def run_dispatcher_production_observe(args: argparse.Namespace) -> int:
     return _run_production(args, lambda runtime: runtime.production_observe())
+
+
+def run_dispatcher_resource_health(args: argparse.Namespace) -> int:
+    return _run_production(args, lambda runtime: {
+        "status": "ok", "step": "resource-health", "resources": runtime.head_health.snapshot(),
+    })
 
 
 def run_dispatcher_production_run(args: argparse.Namespace) -> int:

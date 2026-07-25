@@ -133,6 +133,18 @@ def start_review(
     action: str,
 ) -> dict[str, Any]:
     ref = task["ref"]
+    readiness = runtime.head_readiness(record.review_head)
+    if not readiness.launch_allowed:
+        record.state = "review_starting"
+        return {
+            "status": "skipped",
+            "step": "head-preflight",
+            "action": "review-resource-not-ready",
+            "pilot_ref": ref,
+            "head": record.review_head,
+            "readiness": readiness.to_json(),
+            "reason": readiness.reason,
+        }
     try:
         launch = runtime.host.start_review(task, record)
     except Exception as exc:
