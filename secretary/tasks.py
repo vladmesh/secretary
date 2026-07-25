@@ -117,6 +117,7 @@ _READY_RESET_METADATA = {
     "retry_switch": "",
     "retry_heads": "",
 }
+_ROUTING_PHASES = {"worker", "review", "verdict"}
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
 
@@ -343,6 +344,33 @@ class TaskAudit:
         if committed is not None:
             return committed
         return self.pending_event(request_id)
+
+    def events(self, reference: str = "", *, kind: str = "") -> list[dict[str, Any]]:
+        """Committed events in append order, optionally narrowed to one card and/or kind.
+
+        The card's own history lives here once it is Done: board metadata is reset on the way back
+        to Ready and cleared on the way out of Validate.
+        """
+        result: list[dict[str, Any]] = []
+        try:
+            with open(self.events_path, encoding="utf-8") as events:
+                for line in events:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if reference and event.get("ref") != reference:
+                        continue
+                    if kind and event.get("kind") != kind:
+                        continue
+                    result.append(event)
+        except FileNotFoundError:
+            return []
+        return result
 
     def committed_event(self, request_id: str) -> dict[str, Any] | None:
         try:
@@ -656,6 +684,32 @@ class TaskWriter:
             raise TaskError("validation", "red verdicts require a non-empty body", 2)
         marker = f"review:{kind}"
         return self._write("verdict", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
+
+    def routing(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        payload: dict[str, Any],
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one routing telemetry record for the card.
+
+        Journal-only: the board holds no per-attempt routing history (Ready resets it, leaving
+        Validate clears the reviewer head), so this write has no backend mutation. The event still
+        goes through the normal pending/commit path, which makes it idempotent per request id and
+        carries it into the recovery checkpoint with the rest of `events.ndjson`.
+        """
+        self._role(role, {"dispatcher"})
+        phase = _text(payload.get("phase"))
+        if phase not in _ROUTING_PHASES:
+            known = ", ".join(sorted(_ROUTING_PHASES))
+            raise TaskError("validation", f"unknown routing phase {phase!r} (known: {known})", 2)
+        heads = payload.get("heads")
+        if not isinstance(heads, list) or not heads:
+            raise TaskError("validation", "routing requires at least one head record", 2)
+        return self._write("routing", role, actor, reference, request_id, dict(payload), lambda task: None)
 
     def claim(
         self,

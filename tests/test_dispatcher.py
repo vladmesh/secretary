@@ -33,6 +33,7 @@ from secretary.dispatcher_launcher import ensure_claude_workspace_ready, ensure_
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
+from secretary.routing_journal import HeadRun, attempts as routing_attempts, head_run_from_profile
 from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
@@ -142,6 +143,21 @@ class FakeCatalog:
         # Checkpoint freshness reads the instance repo; the default is deliberately
         # not a repo, so tests that do not care read back empty git fields.
         self.instance_dir = instance_dir or Path("/nonexistent-instance")
+        # A trimmed stand-in for heads.yaml: enough profiles to tell two families apart in the
+        # routing journal, plus a fallback map a test can populate to model a red resource.
+        self.profiles = {
+            "codex": {"adapter": "codex", "model": "gpt-5.6-terra", "effort": "default", "resource": "openai-sub"},
+            "codex-reviewer": {
+                "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra",
+                "resource": "openai-sub", "fallback": ["claude-opus"],
+            },
+            "claude-opus": {"adapter": "claude", "model": "opus", "resource": "claude-sub"},
+        }
+        self.resources = {
+            "openai-sub": {"account": "openai-subscription"},
+            "claude-sub": {"account": "claude-subscription"},
+        }
+        self.fallbacks: dict[str, str] = {}
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
@@ -154,10 +170,33 @@ class FakeCatalog:
         # Routing overrides resolve ahead of the role default, as in InstanceCatalog: the resolved
         # head is written to the board at claim and re-resolved on adoption, so a fake that always
         # answers "codex" would hide an override that never propagates.
-        return str(task.get("routing", {}).get("head_override") or "codex")
+        return self.head_run(task, role="worker").resolved
 
     def review_head(self, task: dict) -> str:
-        return str(task.get("routing", {}).get("review_head_override") or "codex-reviewer")
+        return self.head_run(task, role="reviewer").resolved
+
+    def head_run(self, task: dict, *, role: str) -> HeadRun:
+        """Mirror InstanceCatalog.head_run over a two-profile registry: `codex` for the worker,
+        `codex-reviewer` for the reviewer, with `codex-reviewer` falling back to `claude-opus` when
+        the test asks for it — the pair a diversity question is actually about."""
+        if role == "worker":
+            requested = str(task.get("routing", {}).get("head_override") or "codex")
+            codex_mode = str(task.get("routing", {}).get("codex_launch_mode") or "")
+        else:
+            requested = str(task.get("routing", {}).get("review_head_override") or "codex-reviewer")
+            codex_mode = ""
+        resolved = self.fallbacks.get(requested, requested)
+        return head_run_from_profile(
+            role=role,
+            requested=requested,
+            resolved=resolved,
+            requested_from="card" if task.get("routing", {}).get(
+                "head_override" if role == "worker" else "review_head_override"
+            ) else "role_default",
+            profile=self.profiles.get(resolved, {"adapter": "codex", "resource": "openai-sub"}),
+            resources=self.resources,
+            codex_mode=codex_mode,
+        )
 
     def binding(self, project: str) -> dict:
         binding = {"repo": f"/home/dev/{project}"}
@@ -372,12 +411,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.host = FakeHost(self.data_dir / "workspaces")
         self.legacy_pause = FakeLegacyPause()
+        self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
             TaskAudit(self.data_dir),
             CutoverState(self.data_dir),
-            FakeCatalog(instance_dir=self.data_dir),  # type: ignore[arg-type]
+            self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=self.legacy_pause,  # type: ignore[arg-type]
@@ -1954,6 +1994,104 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record.head, "claude")
         self.assertEqual(record.review_head, "claude-reviewer")
 
+    def routing_history(self) -> list:
+        return routing_attempts(
+            TaskAudit(self.data_dir).events("secretary-510-pilot", kind="routing")
+        )
+
+    def test_both_attempts_keep_their_head_pair_in_the_journal(self) -> None:
+        """secretary-716: a finished card must still say who worked and who reviewed each attempt.
+
+        The board cannot answer this — `resolved_review_head` is cleared on the way out of Validate
+        and the whole routing block is reset on the way back to Ready — so the append-only journal
+        is the record, and a second round adds an attempt instead of overwriting the first.
+        """
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="first", request_id="worker-done-attempt-1",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="red", body="fix it", request_id="review-red-attempt-1",
+        )
+        # The registry is re-pinned between the two rounds. Attempt 1 keeps the model it actually
+        # ran on; only attempt 2 sees the new pin.
+        self.catalog.profiles["codex"] = dict(self.catalog.profiles["codex"], model="gpt-6-terra")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="done", body="reworked", request_id="worker-done-attempt-2",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="ok", request_id="review-green-attempt-2",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
+
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "done")
+        self.assertIsNone(
+            card["routing"]["resolved_review_head"],
+            "the board is expected to have dropped the reviewer head; the journal is the record",
+        )
+        history = self.routing_history()
+        self.assertEqual([attempt.attempt for attempt in history], [1, 2])
+        self.assertEqual([attempt.outcome for attempt in history], ["red", "green"])
+        first, second = history
+        self.assertEqual((first.worker.resolved, first.reviewer.resolved), ("codex", "codex-reviewer"))
+        self.assertEqual((second.worker.resolved, second.reviewer.resolved), ("codex", "codex-reviewer"))
+        self.assertEqual(first.worker.model, "gpt-5.6-terra")
+        self.assertEqual(second.worker.model, "gpt-6-terra", "the round must keep its own launch snapshot")
+        self.assertEqual(first.reviewer.effort, "extra")
+        self.assertEqual(first.reviewer.account, "openai-subscription")
+        self.assertEqual(first.worker.codex_mode, "exec")
+
+    def test_routing_record_names_the_head_that_actually_ran_after_a_fallback(self) -> None:
+        """A reviewer that fell back to another family must be distinguishable from the requested
+        one, or every later diversity reading silently counts the pair that never ran."""
+        self.start_pilot()
+        self.catalog.fallbacks = {"codex-reviewer": "claude-opus"}
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+
+        reviewer = self.routing_history()[-1].reviewer
+        self.assertEqual(reviewer.requested, "codex-reviewer")
+        self.assertEqual(reviewer.resolved, "claude-opus")
+        self.assertTrue(reviewer.fallback)
+        self.assertEqual((reviewer.adapter, reviewer.model), ("claude", "opus"))
+        self.assertEqual(reviewer.account, "claude-subscription")
+        self.assertFalse(self.routing_history()[-1].worker.fallback)
+
+    def test_card_requeued_to_ready_starts_a_new_attempt(self) -> None:
+        """An operator-approved retry is a second attempt, not a rewrite of the first: the Ready
+        reset wipes the card's routing metadata, so only the journal can tell the two apart."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="blocked", body="stuck", request_id="worker-blocked-attempt-1",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot",
+            target="ready", reason="retry", request_id="po-requeue-attempt-2",
+        )
+        self.board.metadata[12]["head"] = "claude-opus"
+
+        self.assertEqual(self.runtime.tick(self.selector)["step"], "claim")
+
+        history = self.routing_history()
+        self.assertEqual([attempt.attempt for attempt in history], [1, 2])
+        self.assertEqual(history[0].worker.resolved, "codex")
+        self.assertEqual(history[1].worker.resolved, "claude-opus")
+        self.assertEqual(history[1].worker.requested_from, "card")
+
     def test_reworked_card_reruns_the_gate_instead_of_coasting(self) -> None:
         """A gate-red bounce resets the pass; the next done report is fresh code and must be gated
         again. Reusing the stale green would ship exactly the regression the gate exists to stop."""
@@ -2703,6 +2841,30 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertEqual(head, "codex-terra")
         self.assertIn("-m gpt-5.6-terra", command)
+
+    def test_head_run_snapshots_the_real_registry_configuration(self) -> None:
+        """The launch record must carry the configuration, not just the profile id: `codex`,
+        `codex-terra` and `codex-extra` are one model with different effort, so the id alone
+        cannot answer which head reviewed what."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+
+        worker = catalog.head_run(  # type: ignore[attr-defined]
+            {"routing": {"head_override": "codex-extra", "codex_launch_mode": "tui"}}, role="worker"
+        )
+        reviewer = catalog.head_run({"routing": {}}, role="reviewer")  # type: ignore[attr-defined]
+
+        self.assertEqual(worker.to_json(), {
+            "role": "worker", "requested_head": "codex-extra", "head": "codex-extra",
+            "requested_from": "card", "fallback": False, "fallback_chain": [],
+            "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra",
+            # The card pinned the launch mode, so the record shows the mode the head really ran in.
+            "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
+        })
+        self.assertEqual(reviewer.requested_from, "role_default")
+        self.assertEqual((reviewer.resolved, reviewer.effort), ("codex-reviewer", "extra"))
+        self.assertEqual(reviewer.fallback_chain, ("claude-opus",))
+        self.assertFalse(reviewer.fallback)
 
     def test_unknown_explicit_head_is_rejected_before_claim(self) -> None:
         catalog = object.__new__(InstanceCatalog)

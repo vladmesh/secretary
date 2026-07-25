@@ -24,6 +24,7 @@ from secretary.installation import (
     provision_codex_home,
     provision_project_checkouts,
 )
+from secretary.routing_journal import attempts
 
 
 CARD = {
@@ -237,6 +238,46 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(cards["cards"], [CARD])
             self.assertFalse((data / "memory" / "index.sqlite").exists())
             self.assertFalse((data / "worktrees").exists())
+
+    def test_checkpoint_materialization_restores_the_routing_journal(self):
+        """secretary-716: per-attempt head telemetry lives only in the journal, so a recovery that
+        rebuilt the data plane without `events.ndjson` would lose every finished card's head pairs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data = root / "data"
+            instance.mkdir()
+            _checkpoint(instance, data)
+            event = {
+                "event_id": "evt_routing", "schema_version": 1, "kind": "routing",
+                "occurred_at": "2026-07-24T00:00:00Z", "outcome": "success",
+                "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
+                "task_id": "task_kanboard_1", "ref": "secretary-1",
+                "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
+                "request_id": "routing-verdict",
+                "payload": {
+                    "attempt": 1, "attempt_id": "attempt-1", "phase": "verdict", "outcome": "red",
+                    "heads": [
+                        {"role": "worker", "requested_head": "codex", "head": "codex"},
+                        {"role": "reviewer", "requested_head": "codex-reviewer", "head": "claude-opus"},
+                    ],
+                },
+            }
+            (instance / "state" / "board" / "events.ndjson").write_text(
+                json.dumps(event) + "\n", encoding="utf-8"
+            )
+
+            materialize_checkpoint(instance, data)
+
+            restored = [
+                json.loads(line)
+                for line in (data / "board" / "events.ndjson").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            history = attempts(restored, "secretary-1")
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0].reviewer.resolved, "claude-opus")
+            self.assertEqual(history[0].outcome, "red")
 
     def test_non_secretary_data_target_is_refused_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmpdir:

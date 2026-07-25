@@ -6,7 +6,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,14 @@ class DispatcherRecord:
     worker_respawns: int = 0
     review_waiting_since: float = 0.0
     review_respawns: int = 0
+    # Routing telemetry (secretary-716). attempt_round counts the card's worker rounds: claim opens
+    # round 1, every rework bounce (red verdict, red gate) opens the next one. worker_run/review_run
+    # are the launch snapshots of the heads currently serving that round — kept here so the verdict
+    # record reports the configuration the heads actually started with rather than re-reading a
+    # `heads.toml` that may have been edited since. Canon is the journal; this is the live copy.
+    attempt_round: int = 0
+    worker_run: dict[str, Any] = field(default_factory=dict)
+    review_run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -62,9 +70,12 @@ class DispatcherRecord:
             "comment_baseline": self.comment_baseline,
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
+            "attempt_round": self.attempt_round,
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
+            "review_run": self.review_run,
+            "worker_run": self.worker_run,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "review_handle": self.review_handle,
@@ -101,7 +112,14 @@ class DispatcherRecord:
             worker_respawns=int(payload.get("worker_respawns") or 0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
+            attempt_round=int(payload.get("attempt_round") or 0),
+            worker_run=_run_snapshot(payload.get("worker_run")),
+            review_run=_run_snapshot(payload.get("review_run")),
         )
+
+
+def _run_snapshot(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 class CutoverState:

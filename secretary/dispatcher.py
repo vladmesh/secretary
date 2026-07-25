@@ -84,6 +84,12 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.head_registry import HeadRegistryConfigError, assert_snapshot_current
+from secretary.routing_journal import (
+    HeadRun,
+    attempts as _routing_attempts,
+    head_run_from_profile,
+    routing_payload as _routing_payload,
+)
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -167,20 +173,40 @@ class InstanceCatalog:
         return str(branch or "main")
 
     def worker_head(self, task: dict[str, Any]) -> str:
-        requested = task.get("routing", {}).get("head_override")
-        head = str(requested) if requested else str(
-            self._heads.get("role_defaults", {}).get("new_card") or "codex"
-        )
-        self._head_profile(head)
-        return head
+        return self.head_run(task, role="worker").resolved
 
     def review_head(self, task: dict[str, Any]) -> str:
-        requested = task.get("routing", {}).get("review_head_override")
-        head = str(requested) if requested else str(
-            self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
+        return self.head_run(task, role="reviewer").resolved
+
+    def head_run(self, task: dict[str, Any], *, role: str) -> HeadRun:
+        """The head a bring-up for `role` will actually launch, with its launch configuration.
+
+        `requested` is what the card (or the role default) asked for and `resolved` is what runs.
+        This runtime has no health-driven fallback walk — a red resource is the legacy pipeline's
+        concern — so the two match today; keeping them separate is what lets a fallback show up as
+        an explicit fact in the journal instead of a silently different pair of heads.
+        """
+        if role == "worker":
+            override = task.get("routing", {}).get("head_override")
+            default = str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
+            codex_mode = str(task.get("routing", {}).get("codex_launch_mode") or "")
+        else:
+            override = task.get("routing", {}).get("review_head_override")
+            default = str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+            codex_mode = ""
+        requested = str(override) if override else default
+        resolved = requested
+        profile = self._head_profile(resolved)
+        resources = self._heads.get("resources")
+        return head_run_from_profile(
+            role=role,
+            requested=requested,
+            resolved=resolved,
+            requested_from="card" if override else "role_default",
+            profile=profile,
+            resources=resources if isinstance(resources, dict) else {},
+            codex_mode=codex_mode,
         )
-        self._head_profile(head)
-        return head
 
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
         return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
@@ -1288,6 +1314,9 @@ class DispatcherRuntime:
             state="claim_verified",
             claimed_at=time.time(),
         )
+        # A re-claimed card continues its own attempt numbering: the journal, not the board, knows
+        # how many rounds it has already had, so a return to Ready adds a round instead of resetting.
+        self._open_worker_round(claimed, record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self._save_records(payload, records)
         return self._launch_worker_after_claim(
@@ -1361,6 +1390,12 @@ class DispatcherRuntime:
             resume_workspaces.pop(ref, None)
         records[ref] = record
         self._save_records(payload, records)
+        # An adopted card whose claim predates this telemetry has no round yet; its bring-up opens
+        # one instead of leaving the attempt unrecorded.
+        if not record.attempt_round:
+            self._open_worker_round(claimed, record, round_number=self._journal_round(ref) + 1)
+            self._save_records(payload, records)
+        self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
@@ -1497,6 +1532,7 @@ class DispatcherRuntime:
                     str(len(task.get("comments") or [])),
                 ),
             )
+            self._record_verdict_routing(ref, record, "red")
             record.comment_baseline = len(task.get("comments") or [])
             record.gate_state = ""
             record.gate_pending_since = 0.0
@@ -1518,8 +1554,10 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
+            self._open_worker_round(moved, record)
             records[ref] = record
             self._save_records(payload, records)
+            self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
             return {
                 "status": "ok",
                 "step": "review",
@@ -1793,8 +1831,10 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
+        self._open_worker_round(moved, record)
         records[ref] = record
         self._save_records(payload, records)
+        self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
 
     def _block_failed_worker_restart(
@@ -1874,6 +1914,9 @@ class DispatcherRuntime:
         """Green review verdict. Re-run the mechanical gate right before merging so a non-green
         CI/local gate never lands: green merges, red bounces back to the worker, pending waits."""
         ref = task["ref"]
+        # The verdict is recorded before the merge gate runs: it is a fact about the head pair of
+        # this round, and it stays true even when the merge path bounces the card back afterwards.
+        self._record_verdict_routing(ref, record, "green")
         drift = self._review_drift(task, record)
         if drift:
             return self._gate_red_to_worker(
@@ -1947,6 +1990,87 @@ class DispatcherRuntime:
             f"в In progress — доработай и отчитайся заново."
         )
 
+    def head_run_snapshot(self, task: dict[str, Any], *, role: str, head: str = "") -> dict[str, Any]:
+        """The launch snapshot for one head, or a marked minimal record when the profile can no
+        longer be read. A registry edited between two rounds must leave a usable attempt record
+        rather than take the tick down: the point of the journal is that it keeps working when
+        `heads.toml` moves."""
+        try:
+            return self.catalog.head_run(task, role=role).to_json()
+        except (HostError, AttributeError, KeyError, TypeError):
+            profile = head or (task.get("routing", {}).get("head_override") or "")
+            return HeadRun(role=role, requested=str(profile), resolved=str(profile), adapter="unknown").to_json()
+
+    def _journal_round(self, ref: str) -> int:
+        """The last worker round the journal holds for this card. Survives a lost dispatcher record,
+        a restore, and a card that went back to Ready and was claimed again."""
+        history = _routing_attempts(self.audit.events(ref, kind="routing"))
+        return history[-1].attempt if history else 0
+
+    def _open_worker_round(
+        self, task: dict[str, Any], record: DispatcherRecord, *, round_number: int = 0
+    ) -> None:
+        """Start the card's next worker round: stamp its number and snapshot the worker head.
+
+        A round is one worker bring-up plus the review it earns. Claim opens round 1, each rework
+        bounce opens the next; a respawn of the same head continues the round it is already in.
+        """
+        record.attempt_round = round_number or (record.attempt_round + 1)
+        record.worker_run = self.head_run_snapshot(task, role="worker", head=record.head)
+        record.review_run = {}
+
+    def _record_routing(
+        self,
+        ref: str,
+        record: DispatcherRecord,
+        *,
+        phase: str,
+        heads: list[dict[str, Any]],
+        outcome: str = "",
+    ) -> None:
+        heads = [head for head in heads if head]
+        if not heads or not record.attempt_round:
+            return
+        suffix = f"{record.attempt_round}-{outcome}" if outcome else str(record.attempt_round)
+        self.writer.routing(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            payload=_routing_payload(
+                attempt=record.attempt_round,
+                attempt_id=record.attempt_id,
+                phase=phase,
+                heads=heads,
+                outcome=outcome,
+            ),
+            request_id=_attempt_request_id(record.attempt_id, f"routing-{phase}", ref, suffix),
+        )
+
+    def record_review_routing(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Snapshot the reviewer of the current round at its first bring-up.
+
+        A respawn or a recovery restart of the same round keeps the first snapshot: it is the same
+        head on the same code state, and a second record would read as a second reviewer.
+        """
+        ref = task["ref"]
+        if not record.attempt_round:
+            record.attempt_round = self._journal_round(ref) + 1
+        if record.review_run:
+            return
+        record.review_run = self.head_run_snapshot(task, role="reviewer", head=record.review_head)
+        self._record_routing(ref, record, phase="review", heads=[record.review_run])
+
+    def _record_verdict_routing(self, ref: str, record: DispatcherRecord, outcome: str) -> None:
+        """Tie the verdict to the round it judged, carrying both heads of that round so the
+        worker-reviewer pairs group by outcome without a join against the launch records."""
+        self._record_routing(
+            ref,
+            record,
+            phase="verdict",
+            heads=[record.worker_run, record.review_run],
+            outcome=outcome,
+        )
+
     def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         state = self.production_state if payload.get("mode") == "production" else self.state
         state.put_records(payload, records)
@@ -1958,7 +2082,13 @@ class DispatcherRuntime:
         review_baseline = _review_adoption_baseline(task)
         launched = self._review_launch_recorded(task, review_baseline)
         state = "review_starting" if launched else "adopted"
-        return DispatcherRecord(
+        # The routing round of a card whose dispatcher record was lost comes back from the journal,
+        # heads included: re-resolving would report today's `heads.toml` for a head launched hours
+        # ago. A card claimed before this telemetry existed has no round; it opens one on its next
+        # bring-up rather than inventing history for the round already running.
+        history = _routing_attempts(self.audit.events(task["ref"], kind="routing"))
+        resumed = history[-1] if history else None
+        record = DispatcherRecord(
             worker=worker,
             workspace=self.host.restore_workspace(task, worker),
             handle="",
@@ -1972,7 +2102,11 @@ class DispatcherRuntime:
             # A reviewer only launches once the gate is green, so an adopted card already in review
             # inherits a passed gate rather than re-running it before the recovery path.
             gate_state="green" if launched else "",
+            attempt_round=resumed.attempt if resumed else 0,
+            worker_run=resumed.worker.to_json() if resumed and resumed.worker else {},
+            review_run=resumed.reviewer.to_json() if resumed and resumed.reviewer else {},
         )
+        return record
 
     def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:
         if task.get("state") != "validate":
