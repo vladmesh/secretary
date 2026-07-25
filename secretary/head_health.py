@@ -68,7 +68,12 @@ class HeadHealth:
 
         verdict = self._run(resource, probe, now)
         cache[resource] = verdict.to_json()
-        self._save(cache)
+        try:
+            self._save(cache)
+        except RuntimeError:
+            # The preflight still has a useful verdict when its observability cache cannot be
+            # written.  A later dispatcher write will surface a broader data-dir failure.
+            pass
         return verdict
 
     def snapshot(self) -> dict[str, Any]:
@@ -81,7 +86,7 @@ class HeadHealth:
             )
         except subprocess.TimeoutExpired:
             return HeadReadiness(resource, "unknown", "probe timed out", now)
-        except OSError as exc:
+        except Exception as exc:  # a broken probe must not turn into a false resource outage
             return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
         if completed.returncode == 0:
             return HeadReadiness(resource, "ready", "probe succeeded", now)
