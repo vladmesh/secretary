@@ -29,10 +29,27 @@ with mock.patch("secretary.host_apply.find_orca_executable", return_value=Path("
 `tests/orca_fixtures.py:legacy_orca_runtime` goes one step further and creates a real,
 discoverable executable under a fixture-owned home directory, for tests that need
 `find_orca_executable`'s actual filesystem-probing behavior rather than a canned
-return value. Combine it with a local `find_orca_executable` patch when the test needs
-to name that discoverable path directly (see `tests/test_hermetic_orca.py` for a
-worked example of both: the same discoverable executable, once shadowed by the
-default fixture and once explicitly opted into).
+return value. To actually exercise that probing, restore the real resolver for the
+duration of the `with` block instead of stubbing a `return_value` — a `return_value`
+only proves mocking works, not that production code would have found the executable
+itself:
+
+```python
+from tests import _find_orca_patcher
+
+real_find_orca_executable = _find_orca_patcher.temp_original
+with legacy_orca_runtime(root) as discoverable:
+    with mock.patch(
+        "secretary.host_apply.find_orca_executable", side_effect=real_find_orca_executable,
+    ):
+        ...  # exercises the real filesystem probe against the fixture-owned home
+```
+
+(`temp_original` is `unittest.mock`'s handle on the object a patcher replaced; grabbing
+it off `tests/__init__.py`'s module-level patcher is how a test un-shadows the default
+without stopping it process-wide.) See `tests/test_hermetic_orca.py` for a worked
+example of both seams: the same discoverable executable, once shadowed by the default
+fixture and once explicitly opted into via the real resolver.
 
 Do not add a new blanket class-level or per-test patch that just re-establishes the
 default fixture path (`tests/fixtures/legacy-orca`) — that duplicates
