@@ -9,10 +9,20 @@ from pathlib import Path
 from . import memory_service
 
 
-def rebuild(canon, export, target_db, model, dim, document_embed=None, allow_empty=False) -> dict:
+def rebuild(
+    canon,
+    export,
+    target_db,
+    model,
+    dim,
+    document_embed=None,
+    allow_empty=False,
+    cache_dir: Path = memory_service.MODEL_CACHE_DIR,
+    threads: int = memory_service.THREADS,
+) -> dict:
     """Build an index from an explicit canon snapshot."""
     return memory_service.offline_rebuild(
-        canon, export, target_db, model, dim, document_embed, allow_empty
+        canon, export, target_db, model, dim, document_embed, allow_empty, cache_dir, threads
     )
 
 
@@ -23,6 +33,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-db", required=True, type=Path, help="sqlite index to replace")
     parser.add_argument("--model", required=True, help="fastembed model id")
     parser.add_argument("--dim", required=True, type=int, help="embedding dimension")
+    parser.add_argument(
+        "--cache-dir", type=Path, default=memory_service.MODEL_CACHE_DIR,
+        help="persistent fastembed cache directory",
+    )
+    parser.add_argument(
+        "--threads", type=int, default=memory_service.THREADS,
+        help="maximum ONNX Runtime inference threads",
+    )
     parser.add_argument("--allow-empty", action="store_true")
     return parser.parse_args(argv)
 

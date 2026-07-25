@@ -65,10 +65,12 @@ minute. `secretary doctor --instance INSTANCE` prints the cache path and warns w
 it below `/tmp` or `/var/tmp`.
 
 To move a live cache without downloading the 2.1 GB model again, stop the service and copy
-`/tmp/fastembed_cache` into `DATA_DIR/memory/fastembed-cache`. Then run
-`secretary reconcile apply --instance INSTANCE` and start `secretary-memory.service`. Verify the
-cache path with `secretary doctor --instance INSTANCE` before removing the old cache. The service
-must remain stopped during the copy so fastembed cannot create a partial second cache.
+`/tmp/fastembed_cache` into `DATA_DIR/memory/fastembed-cache`. If a previous restore created
+`DATA_DIR/memory/.fastembed-cache`, merge it into that same destination before deleting it. Then
+run `secretary reconcile apply --instance INSTANCE` and start `secretary-memory.service`. Verify
+the cache path with `secretary doctor --instance INSTANCE` before removing either old cache. The
+service must remain stopped during the copy so fastembed cannot create a partial second cache.
+Treat this migration as a required deployment step before the first restart with this release.
 
 Orca runtime принадлежит хосту. Secretary не создаёт `secretary-orca.service` и не запускает
 `orca serve`: scheduler units имеют только `After=orca-server.service`, без `Wants=` на runtime,

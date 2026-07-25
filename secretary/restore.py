@@ -113,7 +113,8 @@ DEFAULT_MEMORY_DIM = 1024
 
 def rebuild_memory_index(
     data_dir: Path, instance_dir: Path | None, *, python: Path | None = None,
-    script: Path | None = None, model: str | None = None, dim: int | None = None, runner=None,
+    script: Path | None = None, model: str | None = None, dim: int | None = None,
+    threads: int | None = None, runner=None,
 ) -> int:
     """Replace the derived index from restored canon.
 
@@ -143,7 +144,15 @@ def rebuild_memory_index(
                     str(memory_dir / "export.ndjson"), "--target-db",
                     str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
                 ],
-                text=True, capture_output=True, check=False, timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
+                env={
+                    **os.environ,
+                    "MEMORY_CACHE_DIR": str(memory_dir / "fastembed-cache"),
+                    "MEMORY_THREADS": str(threads or 1),
+                },
             )
             if completed.returncode:
                 raise RuntimeError(
@@ -165,7 +174,7 @@ def rebuild_memory_index(
                 selected_model,
                 dim or DEFAULT_MEMORY_DIM,
                 document_embed=build_document_embedder(
-                    selected_model, memory_dir / ".fastembed-cache"
+                    selected_model, memory_dir / "fastembed-cache", threads or 1
                 ),
             )
             count = int(result["parity"]["indexed"])

@@ -180,7 +180,8 @@ class RestoreTests(unittest.TestCase):
 
             memory_service.build_document_embedder.assert_called_once_with(
                 restore_module.DEFAULT_MEMORY_MODEL,
-                data_dir / "memory" / ".fastembed-cache",
+                data_dir / "memory" / "fastembed-cache",
+                1,
             )
             self.assertIs(memory_reindex.rebuild.call_args.kwargs["document_embed"], embed)
 
@@ -289,7 +290,8 @@ class RestoreTests(unittest.TestCase):
             with mock.patch("secretary.restore.subprocess.run", return_value=completed) as run:
                 self.assertEqual(
                     rebuild_memory_index(
-                        data_dir, instance, python=venv_python, script=script, model="test", dim=4
+                        data_dir, instance, python=venv_python, script=script, model="test", dim=4,
+                        threads=2,
                     ),
                     2,
                 )
@@ -297,6 +299,11 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(argv[0], str(venv_python.absolute()))
             # Canon is the private repo's state/memory/facts, not the data dir.
             self.assertEqual(argv[argv.index("--canon") + 1], str(facts))
+            self.assertEqual(
+                run.call_args.kwargs["env"]["MEMORY_CACHE_DIR"],
+                str(data_dir / "memory" / "fastembed-cache"),
+            )
+            self.assertEqual(run.call_args.kwargs["env"]["MEMORY_THREADS"], "2")
             self.assertEqual(restore_state(data_dir)["memory_index_count"], 2)
 
     def test_reindex_cli_reports_public_contract_error(self):
