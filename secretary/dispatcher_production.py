@@ -71,6 +71,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "cutover_phase": pilot.get("phase", "new"),
         "cutover_committed": pilot.get("phase") == "cutover_committed",
         "legacy_pause": legacy_pause.to_json(),
+        "pause": runtime.pause.summary(),
         "records": list((payload.get("records") or {}).keys()),
         "divergences": list((payload.get("controlled_divergences") or [])),
         "checkpoint": checkpoint_snapshot(
@@ -89,6 +90,14 @@ def production_tick(runtime: Any) -> dict[str, Any]:
                 "step": "production-tick",
                 "reason": "production dispatcher singleton lock is held",
             }
+        pause = runtime.pause.summary()
+        if pause.get("mode") == "freeze":
+            return {
+                "status": "skipped",
+                "step": "production-tick",
+                "reason": "pipeline is frozen by pause",
+                "pause": pause,
+            }
         payload = runtime.production_state.load()
         guard = _production_mutation_guard(runtime, payload)
         if guard is not None:
@@ -105,7 +114,9 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         payload["last_tick_started_at"] = now_rfc3339()
 
         outcomes, errors, active_blocked = _advance_active(runtime, records, payload)
-        if not active_blocked:
+        # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
+        claims_allowed = pause.get("mode") != "drain"
+        if claims_allowed and not active_blocked:
             try:
                 ready_outcome = _production_claim_ready(runtime, records, payload)
             except Exception as exc:
@@ -130,6 +141,8 @@ def production_tick(runtime: Any) -> dict[str, Any]:
             "actions": outcomes,
             "errors": errors,
         }
+        if pause.get("paused"):
+            result["pause"] = pause
         if checkpoint is not None:
             result["checkpoint"] = checkpoint
         if push is not None:
@@ -292,6 +305,19 @@ def production_probe(runtime: Any) -> dict[str, Any]:
                 "step": "production-probe",
                 "reason": "production dispatcher singleton lock is held",
             }
+        pause = runtime.pause.summary()
+        if pause.get("mode") == "freeze":
+            # A frozen pipeline is stopped on purpose, so the health gate reports it as such
+            # instead of as a dispatcher that cannot move cards.
+            return {
+                "status": "ok",
+                "step": "production-probe",
+                "owner": runtime.owner,
+                "reason": "pipeline is frozen by pause",
+                "pause": pause,
+                "would": [],
+                "errors": [],
+            }
         payload = runtime.production_state.load()
         guard = _production_mutation_guard(runtime, payload)
         if guard is not None:
@@ -316,7 +342,10 @@ def production_probe(runtime: Any) -> dict[str, Any]:
         # it when an active task blocks, but an aborted probe cannot know that a
         # task would have blocked, so this is always evaluated and reported as
         # its own entry rather than as a prediction of the next tick's one move.
-        would.append(_probe_ready(probe, dict(records), dict(payload)))
+        # Under a drain the tick would not reach the claim path at all, so probing it would report
+        # a move the next tick is not going to make.
+        if pause.get("mode") != "drain":
+            would.append(_probe_ready(probe, dict(records), dict(payload)))
         for entry in would:
             if entry.get("code"):
                 errors.append({"ref": entry["ref"], "code": entry["code"], "message": entry.get("message", "")})
@@ -327,6 +356,7 @@ def production_probe(runtime: Any) -> dict[str, Any]:
             "owner": runtime.owner,
             "active": [str(task.get("ref") or "") for task in active],
             "ready": [str(task.get("ref") or "") for task in ready],
+            "pause": pause,
             "would": would,
             "errors": errors,
         }

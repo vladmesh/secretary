@@ -13,6 +13,7 @@ from secretary.dispatcher import (
     PilotSelector,
     runtime_from_args,
 )
+from secretary.dispatcher_pause import PAUSE_MODES
 from secretary.dispatcher_state import DispatcherStateError
 from secretary.tasks import TaskError
 
@@ -59,6 +60,38 @@ def add_dispatcher_subcommands(subparsers) -> None:
             command.add_argument("--max-ticks", type=int)
 
     dispatcher.set_defaults(handler=not_implemented_dispatcher)
+
+
+def add_pause_commands(subparsers) -> None:
+    """The one door to the pipeline-wide pause.
+
+    Top level rather than under `dispatcher`, because pausing is an operator action on the pipeline
+    and not a step of the cutover the `dispatcher` group carries. The legacy `pipeline pause` entry
+    refuses and points here, so the two implementations cannot drift apart in silence.
+    """
+    pause = subparsers.add_parser(
+        "pause",
+        help="stop the pipeline: drain (no new claims) or freeze (heads stopped too)",
+    )
+    add_common(pause)
+    pause.add_argument("mode", choices=(*PAUSE_MODES, "soft", "hard"))
+    pause.add_argument("--reason", help="why the pipeline is paused; required")
+    pause.add_argument("--reason-file")
+    pause.add_argument(
+        "--exclude-workspace",
+        action="append",
+        default=[],
+        help="freeze: leave the head in this workspace running (initiator exception)",
+    )
+    pause.set_defaults(handler=run_pause)
+
+    resume = subparsers.add_parser("resume", help="clear the pause and put back what a freeze stopped")
+    add_common(resume)
+    resume.set_defaults(handler=run_resume)
+
+    status = subparsers.add_parser("pause-status", help="read the production dispatcher's pause state")
+    add_common(status)
+    status.set_defaults(handler=run_pause_status)
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
@@ -145,6 +178,30 @@ def run_dispatcher_production_run(args: argparse.Namespace) -> int:
             max_ticks=args.max_ticks,
         ),
     )
+
+
+def run_pause(args: argparse.Namespace) -> int:
+    reason = (args.reason or "").strip() or _read_optional(args.reason_file).strip()
+    if not reason:
+        print(json.dumps({"error": {"code": "usage", "message": "pause requires --reason or --reason-file"}}))
+        return 2
+    return _run_production(
+        args,
+        lambda runtime: runtime.pause_pipeline(
+            mode=args.mode,
+            actor=args.actor,
+            reason=reason,
+            exclude_workspaces=list(args.exclude_workspace or []),
+        ),
+    )
+
+
+def run_resume(args: argparse.Namespace) -> int:
+    return _run_production(args, lambda runtime: runtime.resume_pipeline(actor=args.actor))
+
+
+def run_pause_status(args: argparse.Namespace) -> int:
+    return _run_production(args, lambda runtime: runtime.pause_status())
 
 
 def _run(args: argparse.Namespace, operation) -> int:

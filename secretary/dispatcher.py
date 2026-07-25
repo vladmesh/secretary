@@ -40,7 +40,12 @@ from secretary.dispatcher_gate import (
     gate_check as _gate_check,
     validation_ci as _validation_ci,
 )
-from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot
+from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot, ProductionPause
+from secretary.dispatcher_pause_ops import (
+    pause as _pause_pipeline,
+    pause_status as _pause_status,
+    resume as _resume_pipeline,
+)
 from secretary.dispatcher_production import (
     ProductionState,
     production_observe as _production_observe,
@@ -918,6 +923,7 @@ class DispatcherRuntime:
         owner: str = "secretary-dispatcher",
         legacy_pause: FileLegacyPauseProbe | None = None,
         production_state: ProductionState | None = None,
+        pause: ProductionPause | None = None,
         checkpoint: CheckpointWriter | None = None,
         checkpoint_push: CheckpointPusher | None = None,
     ) -> None:
@@ -926,6 +932,7 @@ class DispatcherRuntime:
         self.audit = audit
         self.state = state
         self.production_state = production_state or ProductionState(state.root.parent)
+        self.pause = pause or ProductionPause(state.root.parent)
         self.catalog = catalog
         self.host = host
         self.owner = owner
@@ -1077,6 +1084,24 @@ class DispatcherRuntime:
             "records": list((payload.get("records") or {}).keys()),
             "divergences": list((payload.get("controlled_divergences") or [])),
         }
+
+    def pause_pipeline(
+        self,
+        *,
+        mode: str,
+        actor: str,
+        reason: str,
+        exclude_workspaces: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return _pause_pipeline(
+            self, mode=mode, actor=actor, reason=reason, exclude_workspaces=exclude_workspaces
+        )
+
+    def resume_pipeline(self, *, actor: str) -> dict[str, Any]:
+        return _resume_pipeline(self, actor=actor)
+
+    def pause_status(self) -> dict[str, Any]:
+        return _pause_status(self)
 
     def production_observe(self) -> dict[str, Any]:
         return _production_observe(self)

@@ -116,6 +116,30 @@ owner записан в dispatcher state; несовпадение owner, dirty 
 Старые pilot/cutover subcommands остаются compatibility recovery surface текущей версии, но не
 являются путём установки нового instance.
 
+## Пауза
+
+Пауза общая для пайплайна и живёт поверх продуктового диспетчера:
+
+```bash
+python3 -m secretary pause drain|freeze --instance INSTANCE --reason "почему"
+python3 -m secretary resume --instance INSTANCE
+python3 -m secretary pause-status --instance INSTANCE
+```
+
+Контракт режимов: `drain` останавливает claim новых карточек и диспатч фоновых ролей, но уже
+идущие карточки доезжают цикл; `freeze` дополнительно останавливает живые головы воркера и
+ревьюера (`stop`, никогда `teardown`) и замораживает тик целиком — ничего не продвигается и ни
+один вотчдог не срабатывает на голову, остановленную намеренно. `resume` поднимает остановленные
+головы в тех же воркспейсах, отдаёт карточку с уже поставленным отчётом ближайшему тику и
+перезапускает окна вотчдогов.
+
+Флаг: `<data_dir>/dispatcher/pause.json`, читается каждым `production-tick`. Зеркало для фоновых
+ролей — легаси `state/pipeline/pause.json`; его пишет и снимает та же команда. Легаси-вход
+`triggered_agents pipeline pause|resume` отказывает и указывает на продуктовую команду.
+
+Оператор при freeze может исключить свой собственный воркспейс (`--exclude-workspace`): этим
+пользуется `secretary backup create`, который замораживает пайплайн из воркера.
+
 ## Подключение проекта
 
 Текущий низкоуровневый onboarding состоит из стадий:

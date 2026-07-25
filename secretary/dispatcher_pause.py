@@ -1,4 +1,20 @@
-"""Legacy dispatcher pause probe for the pilot cutover."""
+"""Pause flags: the production dispatcher's own, plus the legacy probe kept from the cutover.
+
+`ProductionPause` is the working pause. It lives next to the production dispatcher's state in the
+live data plane (`<data_dir>/dispatcher/pause.json`), because that is the file the tick reads on
+every run. The legacy flag under the pipeline worktree is still read by the background roles
+(steward/curator/retro, `triggered_agents/runtime/dispatch.py`), so a pause mirrors itself there
+and a resume removes that mirror again — but only when the pause wrote it, never a file that was
+already on disk.
+
+Semantics come from the legacy `dispatcher.pause()` docstring and are unchanged:
+
+  drain  — no new claims and no background-role dispatch; cards already in flight keep riding
+           their cycle to the end.
+  freeze — drain, plus the live worker and reviewer heads are stopped and the tick advances
+           nothing at all. Workspaces and worktrees are never removed, so branches and
+           uncommitted work stay exactly as the heads left them.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +23,18 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from secretary._fsutil import write_json
+
+PAUSE_MODES = ("drain", "freeze")
+_PAUSE_MODE_ALIASES = {"drain": "drain", "soft": "drain", "freeze": "freeze", "hard": "freeze"}
+_LEGACY_MODES = {"drain": "soft", "freeze": "hard"}
+
+
+def normalize_pause_mode(mode: str | None) -> str:
+    """Public mode for a requested one, "" when it is not a pause mode. The legacy `soft`/`hard`
+    spellings keep parsing: operators and runbooks still carry them."""
+    return _PAUSE_MODE_ALIASES.get(str(mode or "").strip().lower(), "")
 
 
 @dataclass(frozen=True)
@@ -91,6 +119,173 @@ class FileLegacyPauseProbe:
                 **base,
             )
         return LegacyPauseSnapshot(True, "legacy dispatcher is freeze-paused", **base)
+
+
+class ProductionPause:
+    """The pause flag the production tick reads. Absent file = running."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.root = data_dir / "dispatcher"
+        self.path = self.root / "pause.json"
+
+    def load(self) -> dict[str, Any]:
+        """State, or {} when the pause is not set.
+
+        A corrupt file reads as "not paused" rather than wedging every tick, the same fail-open the
+        legacy flag chose. It is not silent: `mode()` still returns "" but `status()` carries the
+        warning, so an operator asking why the pipeline is running gets an answer.
+        """
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, UnicodeError):
+            return {"corrupt": True}
+        if not isinstance(payload, dict):
+            return {"corrupt": True}
+        return payload
+
+    def mode(self) -> str:
+        return normalize_pause_mode(self.load().get("mode"))
+
+    def save(self, payload: dict[str, Any]) -> None:
+        write_json(self.path, payload)
+
+    def clear(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def summary(self) -> dict[str, Any]:
+        """Compact pause state for a tick result: enough for the log to say why nothing moved."""
+        state = self.load()
+        mode = normalize_pause_mode(state.get("mode"))
+        out: dict[str, Any] = {
+            "paused": bool(mode),
+            "mode": mode,
+            "pause_file": str(self.path),
+        }
+        if state.get("corrupt"):
+            out["warnings"] = [f"pause file is unreadable and read as not paused: {self.path}"]
+        if not mode:
+            return out
+        out.update(
+            {
+                "since": str(state.get("since") or ""),
+                "actor": str(state.get("actor") or ""),
+                "reason": str(state.get("reason") or ""),
+                "stopped_worker": list(state.get("stopped_worker") or []),
+                "stopped_reviewer": list(state.get("stopped_reviewer") or []),
+                "excluded_worker": list(state.get("excluded_worker") or []),
+            }
+        )
+        return out
+
+
+def pause_payload(
+    *,
+    mode: str,
+    actor: str,
+    reason: str,
+    since: str,
+    stopped_worker: list[str],
+    stopped_reviewer: list[str],
+    excluded_worker: list[str],
+    legacy_mirror: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "mode": mode,
+        "since": since,
+        "actor": actor,
+        "reason": reason,
+        "stopped_worker": sorted(stopped_worker),
+        "stopped_reviewer": sorted(stopped_reviewer),
+        "excluded_worker": sorted(excluded_worker),
+        "legacy_mirror": legacy_mirror,
+    }
+
+
+def on_resume_text(mode: str, stopped_worker: list[str], stopped_reviewer: list[str]) -> str:
+    if mode == "freeze":
+        return (
+            f"resume clears the freeze, relaunches {len(stopped_worker)} stopped worker head(s) and "
+            f"{len(stopped_reviewer)} stopped reviewer head(s) in their existing workspaces, and "
+            "gives every wait watchdog a fresh window"
+        )
+    if mode == "drain":
+        return (
+            "resume clears the drain and lets the tick claim Ready cards again; cards already in "
+            "flight kept running through the pause"
+        )
+    return "not paused, resume is a no-op"
+
+
+def legacy_mirror_path() -> Path:
+    """Where a mirrored legacy flag is written.
+
+    Resolved the way the background roles resolve their own state dir
+    (`triggered_agents/runtime/shared_state.resolve_pipeline_state_dir`), not the wider candidate
+    list the probe reads: a mirror written anywhere else is a file nobody checks.
+    """
+    explicit = os.environ.get("SECRETARY_LEGACY_PAUSE_FILE")
+    if explicit:
+        return Path(explicit)
+    for name in ("SECRETARY_LEGACY_PIPELINE_STATE_DIR", "TA_PIPELINE_STATE_DIR"):
+        value = os.environ.get(name)
+        if value:
+            return Path(value) / "pause.json"
+    workspaces_root = Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
+    return workspaces_root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
+
+
+def write_legacy_mirror(*, mode: str, actor: str, reason: str, since: str) -> dict[str, Any]:
+    """Mirror the pause into the legacy flag so steward/curator/retro keep shedding.
+
+    Best effort by design: the product dispatcher is paused by its own file, and a legacy path that
+    cannot be written must not fail the pause. The result records what happened either way, and an
+    existing legacy flag is never overwritten — someone else owns it, and clearing it on resume
+    would lift a pause this command did not set.
+    """
+    path = legacy_mirror_path()
+    out: dict[str, Any] = {"path": str(path), "written": False}
+    if path.exists():
+        out["reason"] = "a legacy pause file already exists and is left untouched"
+        return out
+    payload = {
+        "mode": _LEGACY_MODES.get(mode, "soft"),
+        "since": since,
+        "reason": reason,
+        "actor": actor,
+        "stopped_worker": [],
+        "stopped_reviewer": [],
+        "excluded_worker": [],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, payload)
+    except OSError as exc:
+        out["reason"] = f"legacy mirror could not be written: {exc}"
+        return out
+    out["written"] = True
+    return out
+
+
+def clear_legacy_mirror(state: dict[str, Any]) -> dict[str, Any]:
+    """Remove a mirror this pause wrote. A mirror it did not write is left where it is."""
+    mirror = state.get("legacy_mirror")
+    mirror = mirror if isinstance(mirror, dict) else {}
+    path = str(mirror.get("path") or "")
+    if not mirror.get("written") or not path:
+        return {"path": path, "cleared": False, "reason": "no legacy mirror was written by this pause"}
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        return {"path": path, "cleared": False, "reason": "legacy mirror is already gone"}
+    except OSError as exc:
+        return {"path": path, "cleared": False, "reason": f"legacy mirror could not be removed: {exc}"}
+    return {"path": path, "cleared": True}
 
 
 def _legacy_pause_candidates() -> list[Path]:

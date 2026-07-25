@@ -281,29 +281,33 @@ class BackupTests(unittest.TestCase):
             with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
                 from secretary.backup import _pipeline_action, _pipeline_status
 
-                _pipeline_status(pipeline_worktree=root, command=["pipeline"])
-                _pipeline_action("pause", pipeline_worktree=root, command=["pipeline"])
-                _pipeline_action("resume", pipeline_worktree=root, command=["pipeline"])
+                instance_file = instance / "instance.yaml"
+                _pipeline_status(instance_file=instance_file, command=["secretary"])
+                _pipeline_action("pause", instance_file=instance_file, command=["secretary"])
+                _pipeline_action("resume", instance_file=instance_file, command=["secretary"])
 
             self.assertEqual(
                 calls[0],
-                ["pipeline", "--role", "steward", "pause-status"],
+                ["secretary", "pause-status", "--instance", str(instance_file)],
             )
             self.assertEqual(
                 calls[1],
                 [
-                    "pipeline",
-                    "--role",
-                    "steward",
+                    "secretary",
                     "pause",
                     "freeze",
+                    "--instance",
+                    str(instance_file),
                     "--reason",
                     "secretary backup create",
                     "--actor",
                     "secretary-backup",
                 ],
             )
-            self.assertEqual(calls[2], ["pipeline", "--role", "steward", "resume"])
+            self.assertEqual(
+                calls[2],
+                ["secretary", "resume", "--instance", str(instance_file), "--actor", "secretary-backup"],
+            )
             self.assertNotIn("--exclude-workspace", calls[1])
 
     def test_pipeline_pause_appends_exclude_workspace(self):
@@ -318,19 +322,19 @@ class BackupTests(unittest.TestCase):
 
             _pipeline_action(
                 "pause",
-                pipeline_worktree=Path("/tmp"),
-                command=["pipeline"],
+                instance_file=Path("/tmp/instance.yaml"),
+                command=["secretary"],
                 exclude_workspace=Path("/ws/backup"),
             )
 
         self.assertEqual(
             calls[0],
             [
-                "pipeline",
-                "--role",
-                "steward",
+                "secretary",
                 "pause",
                 "freeze",
+                "--instance",
+                "/tmp/instance.yaml",
                 "--reason",
                 "secretary backup create",
                 "--actor",
@@ -347,7 +351,7 @@ class BackupTests(unittest.TestCase):
             raise subprocess.CalledProcessError(
                 returncode=2,
                 cmd=args,
-                stderr="pipeline pause: error: unrecognized arguments: "
+                stderr="secretary pause: error: unrecognized arguments: "
                 "--exclude-workspace /ws/backup\n",
             )
 
@@ -357,8 +361,8 @@ class BackupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "refusing to pause"):
                 _pipeline_action(
                     "pause",
-                    pipeline_worktree=Path("/tmp"),
-                    command=["pipeline"],
+                    instance_file=Path("/tmp/instance.yaml"),
+                    command=["secretary"],
                     exclude_workspace=Path("/ws/backup"),
                 )
 

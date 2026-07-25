@@ -55,6 +55,12 @@ class DispatcherRecord:
     worker_respawns: int = 0
     review_waiting_since: float = 0.0
     review_respawns: int = 0
+    # Pause (secretary-731): when a freeze stopped this card's worker / reviewer head, 0.0 when it
+    # did not. A head with an empty handle is otherwise indistinguishable from one that died, so
+    # these are what let the tick log and pause-status say "stopped on purpose". Cleared on resume,
+    # by the relaunch or by the decision not to relaunch.
+    paused_worker_at: float = 0.0
+    paused_reviewer_at: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -65,6 +71,8 @@ class DispatcherRecord:
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
+            "paused_reviewer_at": self.paused_reviewer_at,
+            "paused_worker_at": self.paused_worker_at,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "review_handle": self.review_handle,
@@ -101,6 +109,8 @@ class DispatcherRecord:
             worker_respawns=int(payload.get("worker_respawns") or 0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
+            paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
+            paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
         )
 
 

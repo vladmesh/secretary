@@ -24,8 +24,8 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
-from secretary.dispatcher_commands import add_dispatcher_subcommands
-from secretary.dispatcher_pause import FileLegacyPauseProbe
+from secretary.dispatcher_commands import add_dispatcher_subcommands, add_pause_commands
+from secretary.dispatcher_pause import FileLegacyPauseProbe, ProductionPause
 from secretary.host import (
     CollectResult,
     FixtureHostSource,
@@ -82,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="secretary")
     subparsers = parser.add_subparsers(dest="command")
     add_dispatcher_subcommands(subparsers)
+    add_pause_commands(subparsers)
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
@@ -520,6 +521,11 @@ def print_dispatcher_status(
     print(f"  pilot phase: {pilot_phase}")
     print(f"  production phase: {production_phase}")
     print(f"  production owner: {production_owner or '(none)'}")
+    pause = ProductionPause(data_dir).summary()
+    if pause.get("paused"):
+        print(f"  pause: {pause['mode']} since {pause.get('since') or '(unknown)'} by {pause.get('actor') or '(unknown)'}")
+    else:
+        print("  pause: none")
 
     if cutover_committed and inspect_live:
         legacy_decommissioned = bool(pilot.get("legacy_decommissioned"))
