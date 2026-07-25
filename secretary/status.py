@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatcher_pause import ProductionPause
+from secretary.dispatcher_review import command_terminal_status
+from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatcher_types import HostError
 from secretary.host import CollectResult, FixtureHostSource, LiveHostSource, build_doctor_expectations
 from secretary.host_apply import resolve_packaged
 
@@ -37,16 +42,18 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "instance": str(report.instance_path),
             "projects": report.projects,
             "heads": _heads(report.instance),
-            "cards": _card_count(data_dir),
+            "cards": {"total": _card_count(data_dir), "active": len(_attempts(production, probe_panels=False))},
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
+            "schedules": _schedules(expected, collected, offline=offline),
             "inventory_errors": collected.errors,
             "resources": _host_resources(data_dir),
         },
         "dispatcher": {
             "phase": _text(production.get("phase")) or "new",
-            "active_attempts": _attempts(production),
+            "active_attempts": _attempts(production, probe_panels=not offline and host_fixture is None),
+            "pause": _pause_status(data_dir, production),
         },
         "checkpoint": checkpoint_snapshot(
             report.instance_path.parent,
@@ -89,7 +96,11 @@ def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[st
     return rows
 
 
-def _attempts(production: dict[str, Any]) -> list[dict[str, Any]]:
+def _schedules(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:
+    return [row for row in _units(expected, collected, offline=offline) if row["kind"] == "timer"]
+
+
+def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[str, Any]]:
     records = production.get("records")
     if not isinstance(records, dict):
         return []
@@ -97,6 +108,8 @@ def _attempts(production: dict[str, Any]) -> list[dict[str, Any]]:
     for reference, record in sorted(records.items()):
         if not isinstance(reference, str) or not isinstance(record, dict):
             continue
+        worker = _watchdog(record, reference, "worker", probe_panels)
+        reviewer = _watchdog(record, reference, "review", probe_panels)
         attempts.append({
             "reference": reference,
             "attempt_id": _text(record.get("attempt_id")) or None,
@@ -105,8 +118,73 @@ def _attempts(production: dict[str, Any]) -> list[dict[str, Any]]:
             "head": _text(record.get("head")) or None,
             "review_head": _text(record.get("review_head")) or None,
             "workspace": _text(record.get("workspace")) or None,
+            "watchdogs": {"worker": worker, "reviewer": reviewer},
+            "paused": {
+                "worker": _float(record.get("paused_worker_at")) > 0,
+                "reviewer": _float(record.get("paused_reviewer_at")) > 0,
+            },
         })
     return attempts
+
+
+def _watchdog(record: dict[str, Any], reference: str, kind: str, probe_panels: bool) -> dict[str, Any]:
+    prefix = "review" if kind == "review" else "worker"
+    panel: dict[str, Any] = {"known": False, "live": None, "reason": "not-probed"}
+    if probe_panels:
+        try:
+            panel = command_terminal_status(
+                _StatusWatchdogHost(), {"ref": reference}, DispatcherRecord.from_json(record), kind=kind
+            )
+        except (HostError, OSError, OverflowError, TypeError, ValueError) as exc:
+            panel = {"known": False, "live": None, "reason": str(exc)}
+    return {
+        "panel": panel,
+        "last_progress_at": _epoch(_float(record.get(f"{prefix}_progress_at"))),
+        "waiting_since": _epoch(_float(record.get(f"{prefix}_waiting_since"))),
+        "respawns": int(_float(record.get(f"{prefix}_respawns"))),
+    }
+
+
+class _StatusWatchdogHost:
+    """Read-only adapter for the same pane probe used by the dispatcher watchdog."""
+
+    mode = "real"
+
+    def _run_json(self, args: list[str]) -> dict[str, Any]:
+        try:
+            completed = subprocess.run(args, text=True, capture_output=True, timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HostError(f"terminal inventory unavailable: {exc}") from None
+        if completed.returncode:
+            raise HostError("terminal inventory failed")
+        try:
+            payload = json.loads(completed.stdout or "{}")
+        except ValueError:
+            raise HostError("terminal inventory returned invalid JSON") from None
+        return payload.get("result", payload) if isinstance(payload, dict) else {}
+
+    def codex_tui_activity(self, _task, _record, _kind):
+        return None
+
+
+def _pause_status(data_dir: Path, production: dict[str, Any]) -> dict[str, Any]:
+    pause = ProductionPause(data_dir).summary()
+    paused = {
+        ref: {
+            "worker": _float(record.get("paused_worker_at")) > 0,
+            "reviewer": _float(record.get("paused_reviewer_at")) > 0,
+        }
+        for ref, record in production.get("records", {}).items()
+        if isinstance(ref, str) and isinstance(record, dict)
+    }
+    return {
+        "paused": bool(pause.get("paused")), "mode": _text(pause.get("mode")) or None,
+        "since": _text(pause.get("since")) or None, "actor": _text(pause.get("actor")) or None,
+        "reason": _text(pause.get("reason")) or None,
+        "auto_resume": pause.get("auto_resume") if isinstance(pause.get("auto_resume"), dict) else None,
+        "cards": paused,
+        "warnings": pause.get("warnings") if isinstance(pause.get("warnings"), list) else [],
+    }
 
 
 def _memory_status(data_dir: Path) -> dict[str, Any]:
@@ -189,3 +267,16 @@ def _object(value: Any) -> dict[str, Any] | None:
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _float(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _epoch(value: float) -> str | None:
+    if value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None

@@ -94,6 +94,19 @@ Memory writer независимо коммитит `state/memory` при `propo
 пересекается с tick-writer, а общий instance-repo lock сериализует оба writer'а и publish reviewed
 изменений instance repo.
 
+## Status and doctor
+
+`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe
+to poll: it reports managed services and timers, projects and configured heads, active dispatcher
+attempts, their workspace, watchdog pane/progress/respawn state, pause state, checkpoint freshness,
+memory index state and host disk, memory and load. A live invocation uses the dispatcher's own pane
+probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
+
+`secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and
+returns structured findings with a non-zero exit status for a broken or unavailable host. Use
+`status` to answer what is running now, and `doctor` to decide what needs repair. The default
+human-readable `doctor` output remains available for incident work.
+
 ## Checkpoint push
 
 Push идёт на том же тике, но по своему окну: раз в 30 минут, только fast-forward, без

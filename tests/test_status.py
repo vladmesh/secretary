@@ -23,7 +23,7 @@ class StatusCliTests(unittest.TestCase):
             )
             (data_dir / "dispatcher" / "production-state.json").write_text(
                 json.dumps({"phase": "production", "records": {
-                    "secretary-727": {"attempt_id": "a1", "head": "codex", "workspace": "/work"}
+                    "secretary-727": {"attempt_id": "a1", "head": "codex", "workspace": "/work", "worker_progress_at": 1, "worker_respawns": 1, "paused_worker_at": 1}
                 }}), encoding="utf-8"
             )
             instance = root / "instance.yaml"
@@ -41,6 +41,8 @@ class StatusCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(validate(payload, "status", "status.json"), [])
         self.assertEqual(payload["dispatcher"]["active_attempts"][0]["head"], "codex")
+        self.assertEqual(payload["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["respawns"], 1)
+        self.assertTrue(payload["dispatcher"]["active_attempts"][0]["paused"]["worker"])
 
     def test_doctor_json_has_structured_findings(self):
         root = Path(__file__).resolve().parents[1]
