@@ -16,6 +16,7 @@ from secretary.secret_store import (
     CATALOG_NAME,
     GITIGNORE_ENTRY,
     KEY_NAME,
+    KEY_PARAMS_NAME,
     RecoveryPhraseError,
     SecretStoreError,
     SecretStoreStateError,
@@ -1071,6 +1072,39 @@ class ObservabilityCase(SecretStoreCase):
         (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").unlink()
         findings = secret_store.store_findings(self.instance_dir)
         self.assertIn("secret store: kanboard.api-token: catalogued with no value", findings)
+
+    def test_missing_key_params_with_a_non_empty_catalog_is_a_finding(self) -> None:
+        """Reproduces a store where `init` ran and a secret was set, then only
+        installation-key.json was lost. Catalog and envelope survive, but the
+        raw key can no longer be checked against a verifier, so it must read
+        as unusable, not as a store that was never initialized."""
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        (self.instance_dir / "secrets" / KEY_PARAMS_NAME).unlink()
+        health = secret_store.store_health(self.instance_dir)
+        self.assertFalse(health["initialized"])
+        self.assertEqual(health["secret_count"], 1)
+        self.assertEqual(health["installation_key"], {"present": True, "usable": False})
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("installation key is missing or unusable", findings[0])
+
+    def test_missing_catalog_with_key_params_present_is_a_finding_not_absence(self) -> None:
+        self.initialize()
+        (self.instance_dir / "secrets" / CATALOG_NAME).unlink()
+        health = secret_store.store_health(self.instance_dir)
+        self.assertFalse(health["initialized"])
+        self.assertEqual(health["secret_count"], 0)
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("secret store:", findings[0])
 
     def test_malformed_catalog_is_a_finding_not_a_crash(self) -> None:
         self.initialize()

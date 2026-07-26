@@ -204,6 +204,25 @@ def is_initialized(instance_dir: Path) -> bool:
     return key_params_path(instance_dir).exists() and catalog_path(instance_dir).exists()
 
 
+def _store_exists(instance_dir: Path) -> bool:
+    """Whether `secrets/` holds any trace of a store, complete or not.
+
+    `is_initialized` requires the catalog and the key params together, so a
+    store missing just one of those files reads as fully absent to it. Health
+    and findings need to tell that apart from a directory that was never
+    touched, so this checks each file that `init` can produce independently,
+    plus a non-empty values directory.
+    """
+    if (
+        catalog_path(instance_dir).exists()
+        or key_params_path(instance_dir).exists()
+        or key_path(instance_dir).exists()
+    ):
+        return True
+    values_dir = secrets_dir(instance_dir) / VALUES_DIRNAME
+    return values_dir.is_dir() and any(values_dir.iterdir())
+
+
 # ---------------------------------------------------------------------------
 # Recovery phrase
 
@@ -518,11 +537,14 @@ def _catalog_text(catalog: dict[str, Any]) -> str:
 def store_health(instance_dir: Path) -> dict[str, Any]:
     """Non-secret snapshot of the store for `secretary status --json`.
 
-    A store that was never initialized reports as absent rather than raising:
-    an installation with no secrets in it yet is a valid state, not a defect.
+    A `secrets/` directory holding none of catalog, key params or key file
+    reports as absent rather than raising: an installation with no secrets in
+    it yet is a valid state, not a defect. Any other partial shape reports as
+    present, with `initialized` reflecting whether catalog and key params are
+    both there.
     """
     instance_dir = Path(instance_dir)
-    if not is_initialized(instance_dir):
+    if not _store_exists(instance_dir):
         return {
             "initialized": False,
             "secret_count": 0,
@@ -536,7 +558,7 @@ def store_health(instance_dir: Path) -> dict[str, Any]:
         secrets = ()
     present, usable = _key_presence(instance_dir)
     return {
-        "initialized": True,
+        "initialized": is_initialized(instance_dir),
         "secret_count": len(secrets),
         "last_modified_at": _mtime(catalog_path(instance_dir)),
         "installation_key": {"present": present, "usable": usable},
@@ -547,14 +569,15 @@ def store_health(instance_dir: Path) -> dict[str, Any]:
 def store_findings(instance_dir: Path) -> tuple[str, ...]:
     """Everything wrong with the store on disk, for `secretary doctor`.
 
-    A store that was never initialized gives no findings: absence is a valid
-    state. One that was initialized is checked against the four ways it can be
+    An empty `secrets/` directory gives no findings: absence is a valid state.
+    Any other shape, including a partial one where only some of catalog, key
+    params or key file exist, is checked against the four ways it can be
     unhealthy: a divergence between the catalog and the values directory, an
     installation key with permissions wider than 0600, and an installation key
     that is missing or does not open the store while the catalog is not empty.
     """
     instance_dir = Path(instance_dir)
-    if not is_initialized(instance_dir):
+    if not _store_exists(instance_dir):
         return ()
     findings: list[str] = []
     try:
