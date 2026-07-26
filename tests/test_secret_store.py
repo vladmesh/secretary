@@ -1,6 +1,8 @@
+import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -1214,12 +1216,32 @@ class CatalogSchemaCase(unittest.TestCase):
 
 
 class SecretCliCase(SecretStoreCase):
-    def run_cli(self, argv: list[str], stdin: bytes = b"") -> tuple[int, str, str]:
+    def run_cli(
+        self,
+        argv: list[str],
+        stdin: bytes = b"",
+        *,
+        interactive: bool = True,
+        clear_ok: bool = True,
+    ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         stream = io.TextIOWrapper(io.BytesIO(stdin), encoding="utf-8")
-        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err), mock.patch(
-            "sys.stdin", stream
-        ):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("sys.stdout", out))
+            stack.enter_context(mock.patch("sys.stderr", err))
+            stack.enter_context(mock.patch("sys.stdin", stream))
+            if interactive:
+                stack.enter_context(
+                    mock.patch.object(
+                        secret_commands, "_stdin_and_stderr_are_interactive", return_value=True
+                    )
+                )
+            if clear_ok:
+                stack.enter_context(
+                    mock.patch.object(
+                        secret_commands, "_clear_screen_and_scrollback", return_value=True
+                    )
+                )
             code = main(argv)
         return code, out.getvalue(), err.getvalue()
 
@@ -1227,18 +1249,23 @@ class SecretCliCase(SecretStoreCase):
         answers: list[str] = []
         phrase = " ".join(RECOVERY_WORDS[64:80])
 
-        def fake_input(prompt: str) -> str:
-            position = int(prompt.split()[1].rstrip(":")) - 1
+        def fake_prompt(prompt: str, *, hide: bool) -> str:
             answers.append(prompt)
+            if prompt.startswith("Type 'yes'"):
+                self.assertFalse(hide)
+                return "yes"
+            self.assertTrue(hide)
+            position = int(prompt.split()[1].rstrip(":")) - 1
             return phrase.split()[position]
 
         with mock.patch.object(secret_commands, "generate_recovery_phrase", return_value=phrase):
-            with mock.patch("builtins.input", side_effect=fake_input):
+            with mock.patch.object(secret_commands, "_prompt", side_effect=fake_prompt):
                 code, out, err = self.run_cli(
                     ["secret", "init", "--instance", str(self.instance_dir)]
                 )
         self.assertEqual(code, 0)
-        self.assertEqual(len(answers), secret_store.CONFIRM_WORDS)
+        # One "written it down" acknowledgement plus one question per confirmed word.
+        self.assertEqual(len(answers), secret_store.CONFIRM_WORDS + 1)
         # The phrase is shown on stderr, so a redirected stdout cannot capture it.
         self.assertIn(phrase.split()[0], err)
         self.assertNotIn(phrase.split()[0], out)
@@ -1246,18 +1273,104 @@ class SecretCliCase(SecretStoreCase):
         self.assertTrue(secret_store.is_initialized(self.instance_dir))
 
     def test_init_without_a_correct_confirmation_initializes_nothing(self) -> None:
-        with mock.patch("builtins.input", return_value="wrong"):
-            code, out, _ = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
+        def fake_prompt(prompt: str, *, hide: bool) -> str:
+            return "yes" if prompt.startswith("Type 'yes'") else "wrong"
+
+        with mock.patch.object(secret_commands, "_prompt", side_effect=fake_prompt):
+            code, out, err = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 2)
         self.assertFalse(json.loads(out)["ok"])
         self.assertFalse(secret_store.is_initialized(self.instance_dir))
         self.assertFalse((self.instance_dir / "secrets" / KEY_NAME).exists())
+        # A wrong answer must not get the phrase printed again, nor the right word hinted.
+        self.assertEqual(err.count("Recovery phrase."), 1)
+        self.assertNotIn("wrong", out)
 
     def test_second_init_refuses_through_the_cli(self) -> None:
         self.initialize()
         code, out, _ = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 3)
         self.assertIn("already initialized", json.loads(out)["message"])
+
+    def test_init_refuses_when_not_interactive_before_generating_a_phrase(self) -> None:
+        with mock.patch.object(secret_commands, "generate_recovery_phrase") as generate:
+            code, out, err = self.run_cli(
+                ["secret", "init", "--instance", str(self.instance_dir)], interactive=False
+            )
+        generate.assert_not_called()
+        self.assertEqual(code, 2)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertIn("interactive", payload["message"])
+        self.assertFalse(secret_store.is_initialized(self.instance_dir))
+        combined_words = set(re.findall(r"[a-z]+", (out + err).lower()))
+        self.assertFalse(combined_words & set(RECOVERY_WORDS))
+
+    def test_init_refuses_if_the_screen_cannot_be_cleared(self) -> None:
+        def fake_prompt(prompt: str, *, hide: bool) -> str:
+            return "yes"
+
+        with mock.patch.object(secret_commands, "_prompt", side_effect=fake_prompt):
+            with mock.patch.object(
+                secret_commands, "_clear_screen_and_scrollback", return_value=False
+            ):
+                code, out, _ = self.run_cli(
+                    ["secret", "init", "--instance", str(self.instance_dir)], clear_ok=False
+                )
+        self.assertEqual(code, 2)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        self.assertIn("clear", payload["message"])
+        self.assertFalse(secret_store.is_initialized(self.instance_dir))
+
+    def test_init_sequence_is_show_then_acknowledge_then_clear_then_questions(self) -> None:
+        order: list[str] = []
+
+        def show(_phrase: str) -> None:
+            order.append("show")
+
+        def acknowledge() -> bool:
+            order.append("acknowledge")
+            return True
+
+        def clear() -> bool:
+            order.append("clear")
+            return True
+
+        def confirm(_phrase: str) -> bool:
+            order.append("confirm")
+            return True
+
+        with mock.patch.object(secret_commands, "_show_phrase", side_effect=show), mock.patch.object(
+            secret_commands, "_acknowledge_written_down", side_effect=acknowledge
+        ), mock.patch.object(
+            secret_commands, "_clear_screen_and_scrollback", side_effect=clear
+        ), mock.patch.object(
+            secret_commands, "_confirm_phrase", side_effect=confirm
+        ):
+            code, _out, _err = self.run_cli(
+                ["secret", "init", "--instance", str(self.instance_dir)], clear_ok=False
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(order, ["show", "acknowledge", "clear", "confirm"])
+
+    def test_clear_screen_and_scrollback_refuses_on_a_dumb_terminal(self) -> None:
+        err = io.StringIO()
+        err.isatty = lambda: True
+        with mock.patch("sys.stderr", err), mock.patch.dict(os.environ, {"TERM": "dumb"}):
+            self.assertFalse(secret_commands._clear_screen_and_scrollback())
+
+    def test_clear_screen_and_scrollback_refuses_when_stderr_is_not_a_tty(self) -> None:
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err), mock.patch.dict(os.environ, {"TERM": "xterm"}):
+            self.assertFalse(secret_commands._clear_screen_and_scrollback())
+
+    def test_clear_screen_and_scrollback_writes_the_full_clear_sequence(self) -> None:
+        err = io.StringIO()
+        err.isatty = lambda: True
+        with mock.patch("sys.stderr", err), mock.patch.dict(os.environ, {"TERM": "xterm-256color"}):
+            self.assertTrue(secret_commands._clear_screen_and_scrollback())
+        self.assertIn("\033[3J", err.getvalue())
 
     def test_set_reads_stdin_and_list_prints_metadata_only(self) -> None:
         self.initialize()
