@@ -2,21 +2,31 @@
 
 The private instance repository is the only portable input.  This module turns
 its normalized checkpoint into a new local data plane and then calls the same
-materializer used by ``secretary upgrade``.  It deliberately does not install
-Kanboard or Orca: their package transport and supported versions are product
-decision gates, so a missing runtime is reported before any live state is
-written.
+materializer used by ``secretary upgrade``.
+
+The secret store opens before anything reads ``runtime.env``, because on a clean
+host that file does not exist yet: it is what the store writes once the recovery
+phrase rebuilds the installation key.  Without the phrase the recovery still
+brings back everything that needs no credentials and reports which secrets stayed
+locked or went missing, and only an installation with no store at all is told to
+write ``runtime.env`` by hand.
+
+It deliberately does not install Kanboard or Orca: their package transport and
+supported versions are product decision gates, so a missing runtime is reported
+before any live state is written.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import pwd
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -35,6 +45,14 @@ from secretary.restore import (
     rebuild_memory_index,
     restore_findings,
 )
+from secretary.secret_recover import SecretRecovery, recover_secrets
+from secretary.secret_store import (
+    SecretStoreError,
+    is_initialized,
+    key_path,
+    normalize_phrase,
+)
+from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import UpgradeContext, default_product_root, run_steps
 
@@ -218,6 +236,110 @@ def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str
     if missing:
         raise InstallError("runtime.env is missing required Kanboard credentials: " + ", ".join(missing))
     return values
+
+
+def _runtime_env_file(instance_dir: Path, override: str | None) -> Path:
+    """The env file this installation runs on, override included."""
+    return Path(override).expanduser() if override else instance_dir / "runtime.env"
+
+
+def _recovery_phrase(args: argparse.Namespace, instance_dir: Path) -> str | None:
+    """Read the phrase the same way a secret value is read: never from argv.
+
+    A phrase on the command line lands in the process table and the shell
+    history, and a phrase in the environment is inherited by everything this
+    command starts, so the only inputs are a file, standard input and a terminal
+    prompt that does not echo. No flag and no terminal means no phrase, which is
+    the branch that recovers everything else and reports what stayed locked.
+
+    The prompt only appears when it would change something: a store that is there
+    and a key file that is not.
+    """
+    path = getattr(args, "recovery_phrase_file", None)
+    if path:
+        source = Path(path).expanduser()
+        try:
+            raw = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise InstallError(f"could not read the recovery phrase file: {exc}") from None
+        return _clean_phrase(raw, f"{source} holds no recovery phrase")
+    if getattr(args, "recovery_phrase_stdin", False):
+        return _clean_phrase(sys.stdin.read(), "no recovery phrase on standard input")
+    if is_initialized(instance_dir) and not key_path(instance_dir).exists() and sys.stdin.isatty():
+        answer = getpass.getpass("Recovery phrase (empty to continue without it): ")
+        if answer.strip():
+            return _clean_phrase(answer, "no recovery phrase entered")
+    return None
+
+
+def _clean_phrase(raw: str, empty: str) -> str:
+    try:
+        return normalize_phrase(raw)
+    except SecretStoreError:
+        raise InstallError(empty) from None
+
+
+def _open_secret_store(
+    instance_dir: Path, runtime_env: Path, *, phrase: str | None, dry_run: bool
+) -> SecretRecovery:
+    """Open the store before anything asks for credentials.
+
+    The catalog says a secret materializes into `runtime-env`; which file that is
+    belongs to the installation being recovered, not to the host default, so the
+    resolution override is pinned to this target for the duration of the write.
+    That is also what keeps a recovery drill off a live installation's env file.
+    """
+    try:
+        with _runtime_environment({"SECRETARY_RUNTIME_ENV_FILE": str(runtime_env)}):
+            return recover_secrets(instance_dir, phrase=phrase, dry_run=dry_run)
+    except (SecretStoreError, StateRepoError) as exc:
+        raise InstallError(f"secret store: {exc}") from None
+
+
+def _secret_store_step(recovery: SecretRecovery) -> tuple[str, str]:
+    if not recovery.store_present:
+        return "skipped", "no secret store in the instance repo"
+    if not recovery.unlocked:
+        return "unchanged", recovery.summary()
+    return "changed" if recovery.changed else "unchanged", recovery.summary()
+
+
+def _add_secret_steps(result: InstallResult, recovery: SecretRecovery) -> None:
+    """One line per secret that did not come back, ids and targets only.
+
+    These ride in the step list rather than in a print, so `--json` carries the
+    same report a human reads, and nothing downstream has to infer from a green
+    run that every secret is in place.
+    """
+    for status, entries in (("locked", recovery.locked), ("missing", recovery.missing)):
+        for entry in entries:
+            where = entry.get("path") or entry.get("target") or "not materialized"
+            result.add(
+                f"secret:{entry['id']}", status, f"{entry.get('environment', '-')} -> {where}"
+            )
+    for path in recovery.withheld:
+        result.add(f"secret-file:{path}", "withheld", "a secret this file needs is not readable")
+
+
+def _blocked_by_secrets(
+    cause: InstallError, recovery: SecretRecovery, runtime_env: Path
+) -> InstallError:
+    """Say what is still closed instead of asking for a hand-written file.
+
+    The old refusal told the operator to create runtime.env themselves. That
+    answer only fits an installation with no store at all; once the store is
+    there, the file is the store's output, and the useful thing to print is which
+    secrets did not open. A file that is there but unusable keeps its own reason,
+    which is about the file and not about the store.
+    """
+    reason = (
+        str(cause)
+        if runtime_env.exists()
+        else f"{runtime_env} is not there, and the store is what writes it"
+    )
+    lines = [f"recovery is incomplete: {recovery.summary()}", f"  cause: {reason}"]
+    lines.extend(recovery.render())
+    return InstallError("\n".join(lines))
 
 
 @contextmanager
@@ -454,6 +576,60 @@ def provision_codex_home(product_root: Path, installation_user: str | None) -> i
     return changed
 
 
+def _validated_instance(instance_dir: Path):
+    report = validate_instance(instance_dir)
+    if not report.ok:
+        raise InstallError("invalid cloned instance: " + "; ".join(map(str, report.errors)))
+    return report
+
+
+def _product_root(args: argparse.Namespace) -> Path:
+    if args.product_root:
+        return Path(args.product_root).expanduser().resolve()
+    return default_product_root()
+
+
+def _restore_without_credentials(
+    args: argparse.Namespace, target: Path, result: InstallResult
+) -> None:
+    """Recover everything that does not go through Kanboard.
+
+    A locked store costs the operator their credentials, not their installation:
+    the config, the knowledge plane and the state repo came back with the clone,
+    and the checkpoint, the memory index and the project checkouts are local work
+    that needs no board. What is left undone is named as skipped rather than
+    quietly attempted with half a configuration, and the caller then fails with
+    the secret report.
+    """
+    report = _validated_instance(target)
+    data_dir = Path(report.instance["data_dir"]).expanduser().resolve()
+    cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
+    if args.dry_run:
+        result.add(
+            "checkpoint",
+            "would-change",
+            f"would materialize {cards} board card(s), {runs} run record(s)",
+        )
+        return
+    _set_installation_owner(data_dir, args.installation_user)
+    result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
+    host = report.host if isinstance(report.host, dict) else {}
+    threads = host.get("memory_threads", 1)
+    count = rebuild_memory_index(
+        data_dir, target, threads=threads if isinstance(threads, int) else None
+    )
+    result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
+    cloned = provision_project_checkouts(report.bindings, args.installation_user)
+    seeded = provision_codex_home(_product_root(args), args.installation_user)
+    result.add(
+        "runtime",
+        "changed" if cloned or seeded else "unchanged",
+        f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
+    )
+    result.add("board", "skipped", "needs the Kanboard credentials that stayed locked")
+    result.add("host", "skipped", "needs the Kanboard credentials that stayed locked")
+
+
 def install(args: argparse.Namespace) -> InstallResult:
     result = InstallResult()
     target = Path(args.instance_dir).expanduser().resolve()
@@ -489,16 +665,35 @@ def install(args: argparse.Namespace) -> InstallResult:
         if detail.startswith("cloned"):
             _set_installation_owner(target, args.installation_user)
         if args.dry_run and not target.exists():
+            result.add("secret-store", "skipped", "available only after clone")
             result.add("runtime-env", "skipped", "available only after clone")
             return result
-        values = _read_runtime_env(target, args.runtime_env)
+        # The store opens before anything reads runtime.env, because on a clean
+        # host that file is the store's output and does not exist yet.
+        runtime_env = _runtime_env_file(target, args.runtime_env)
+        secrets = _open_secret_store(
+            target,
+            runtime_env,
+            phrase=_recovery_phrase(args, target),
+            dry_run=args.dry_run,
+        )
+        result.add("secret-store", *_secret_store_step(secrets))
+        _add_secret_steps(result, secrets)
+
+        try:
+            values = _read_runtime_env(target, args.runtime_env)
+        except InstallError as exc:
+            if not secrets.store_present:
+                # No store: the operator still owns this file, and the refusal
+                # that tells them so is the right one.
+                raise
+            _restore_without_credentials(args, target, result)
+            raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         result.add("runtime-env", "unchanged", "credentials loaded from host-only file")
         with _runtime_environment(values):
             check_prerequisites(args.installation_user)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
-            report = validate_instance(target)
-            if not report.ok:
-                raise InstallError("invalid cloned instance: " + "; ".join(map(str, report.errors)))
+            report = _validated_instance(target)
             data_dir = Path(report.instance["data_dir"]).expanduser().resolve()
             cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
             if args.dry_run:
@@ -526,11 +721,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 data_dir, target, threads=threads if isinstance(threads, int) else None
             )
             result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
-            product_root = (
-                Path(args.product_root).expanduser().resolve()
-                if args.product_root
-                else default_product_root()
-            )
+            product_root = _product_root(args)
             cloned = provision_project_checkouts(report.bindings, args.installation_user)
             seeded = provision_codex_home(product_root, args.installation_user)
             result.add(
@@ -556,7 +747,13 @@ def install(args: argparse.Namespace) -> InstallResult:
                 raise InstallError("status findings: " + "; ".join(findings))
             if not recovery:
                 (target / ".secretary-bootstrap").unlink(missing_ok=True)
-            result.add("status", "unchanged", "board, memory and operational configuration are ready")
+            result.add(
+                "status",
+                "unchanged",
+                "board, memory and operational configuration are ready"
+                if secrets.complete
+                else f"board and memory are ready, but {secrets.summary()}",
+            )
             _set_installation_owner(data_dir, args.installation_user)
             _set_installation_owner(target, args.installation_user)
     except (InstallError, RestoreError, RuntimeError) as exc:
@@ -584,6 +781,16 @@ def add_install_commands(subparsers) -> None:
         parser.add_argument(
             "--runtime-env",
             help="host-only credentials file (default: INSTANCE/runtime.env)",
+        )
+        phrase = parser.add_mutually_exclusive_group()
+        phrase.add_argument(
+            "--recovery-phrase-file",
+            help="read the recovery phrase from this file; never pass it on the command line",
+        )
+        phrase.add_argument(
+            "--recovery-phrase-stdin",
+            action="store_true",
+            help="read the recovery phrase from standard input",
         )
         parser.add_argument("--product-root", help="installed product checkout")
         parser.add_argument("--recover", action="store_true", default=recovery_default,
