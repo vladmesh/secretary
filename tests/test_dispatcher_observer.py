@@ -187,6 +187,70 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.host.stopped_observers, [])
         self.assertIn("sprint:1", self.observers())
 
+    def test_a_refused_stop_keeps_the_record_and_the_next_tick_retries(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.close_sprint()
+        self.host.fail_stop_observer_reason = "orca refused to close the pane"
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-stop-failed"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "stop-pending")
+        self.assertEqual(record.handle, "observer:sprint:1")
+        # The head is still alive, so nothing may claim it was stopped.
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+
+        self.host.fail_stop_observer_reason = ""
+        retry = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(retry)], ["observer-stopped"]
+        )
+        self.assertEqual(self.observers(), {})
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_LAUNCHED, EVENT_STOPPED],
+        )
+
+    def test_a_refused_stop_never_yields_a_second_head_when_the_sprint_reopens(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.close_sprint()
+        self.host.fail_stop_observer_reason = "orca refused to close the pane"
+        self.runtime.production_tick()
+
+        self.board.metadata[
+            int(next(item for item in self.board.sprints if item["reference"] == "sprint:1")["id"])
+        ]["sprint_status"] = "open"
+        self.host.fail_stop_observer_reason = ""
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].state, "running")
+
+    def test_a_refused_stop_before_a_relaunch_defers_instead_of_doubling_the_head(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.host.fail_stop_observer_reason = "orca refused to close the pane"
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
+        )
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.handle, "observer:sprint:1")
+        self.assertIn("could not be stopped", record.deferred_reason)
+
     # readiness ---------------------------------------------------------------
 
     def test_unready_resource_defers_the_launch_and_keeps_the_sprint(self) -> None:
@@ -260,6 +324,53 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.handle, "")
         self.assertIn("host maintenance", record.stopped_reason)
         self.assertGreater(record.paused_at, 0)
+
+    def test_a_refused_freeze_stop_is_reported_and_retried_by_the_frozen_tick(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.host.fail_stop_observer_reason = "orca refused to close the pane"
+
+        status = self.runtime.pause_pipeline(
+            mode="freeze", actor="operator", reason="host maintenance"
+        )
+
+        self.assertEqual(status["stopped_observer"], [])
+        self.assertTrue(any("sprint:1" in warning for warning in status["warnings"]))
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "pause-stop-pending")
+        self.assertEqual(record.handle, "observer:sprint:1")
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+
+        self.host.fail_stop_observer_reason = ""
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "stopped-by-pause")
+        self.assertEqual(record.handle, "")
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_LAUNCHED, EVENT_STOPPED],
+        )
+
+    def test_a_head_that_survived_a_refused_freeze_stop_is_not_relaunched_on_resume(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.host.fail_stop_observer_reason = "orca refused to close the pane"
+        self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
+
+        resumed = self.runtime.resume_pipeline(actor="operator")
+        result = self.runtime.production_tick()
+
+        self.assertEqual(resumed["observers_resumed"], ["sprint:1"])
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.paused_at, 0.0)
 
     def test_resume_brings_the_observer_back_on_the_next_tick(self) -> None:
         self.open_sprint()

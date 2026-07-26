@@ -10,7 +10,11 @@ from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
 from secretary.checkpoint import checkpoint_snapshot
-from secretary.dispatcher_observer import observer_snapshot, reconcile_observers
+from secretary.dispatcher_observer import (
+    observer_snapshot,
+    reconcile_observers,
+    retry_pending_observer_stops,
+)
 from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -209,6 +213,15 @@ def _frozen_tick(
             "reason": str(guard.get("reason") or "production state is not writable"),
         }
         return result
+    # Reconciliation does not run while frozen, so this is the only place a stop the host refused
+    # during the freeze is retried. Nothing else about an observer is touched here.
+    try:
+        observer_stops = retry_pending_observer_stops(runtime, payload)
+    except Exception as exc:
+        observer_stops = []
+        result["observer_stop_error"] = _unexpected_error("", exc)
+    if observer_stops:
+        result["observer_stops"] = observer_stops
     checkpoint = _write_checkpoint(runtime)
     if checkpoint is not None:
         payload["checkpoint"] = checkpoint
@@ -217,7 +230,7 @@ def _frozen_tick(
     if push is not None:
         payload["checkpoint_push"] = push
         result["checkpoint_push"] = push
-    if checkpoint is not None or push is not None:
+    if checkpoint is not None or push is not None or observer_stops:
         payload["last_frozen_tick_at"] = now_rfc3339()
         runtime.production_state.save(payload)
     return result

@@ -366,6 +366,8 @@ class FakeHost:
         self.stopped_observers: list[str] = []
         self.observer_pid = os.getpid()
         self.fail_observer_reason = ""
+        # Orca refusing to close an observer pane: the head must be assumed alive afterwards.
+        self.fail_stop_observer_reason = ""
 
     def prepare_worker(
         self,
@@ -415,6 +417,8 @@ class FakeHost:
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")
+        if self.fail_stop_observer_reason:
+            raise HostError(self.fail_stop_observer_reason)
         self.stopped_observers.append(record.handle)
 
     def pane_leaf(self, workspace: str, handle: str) -> str:

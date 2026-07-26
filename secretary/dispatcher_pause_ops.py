@@ -103,9 +103,17 @@ def pause(
                 )
                 # Observer heads stop with everything else, with the freeze's own reason on the
                 # record. The next tick after the resume brings them back.
-                stopped_observer = freeze_observers(
+                observer_stops = freeze_observers(
                     runtime, payload, reason=f"pipeline freeze by {actor}: {reason}"
                 )
+                stopped_observer = observer_stops["stopped"]
+                if observer_stops["failed"]:
+                    # The head is still alive and still on the books as a pending stop, which the
+                    # frozen tick retries. The operator hears it now rather than from the log.
+                    warnings.append(
+                        "observer heads could not be stopped and are retried by the next tick: "
+                        + ", ".join(observer_stops["failed"])
+                    )
                 runtime.production_state.put_records(payload, records)
                 runtime.production_state.save(payload)
         mirror = write_legacy_mirror(mode=resolved, actor=actor, reason=reason, since=since)

@@ -12,6 +12,10 @@ The tick reconciles the observer records against the sprint board on every run:
   open sprint, no record   -> launch
   closed or gone sprint    -> stop the head and drop the record
 
+A stop the host refused is not a stop. The record then stays as `stop-pending` with its terminal
+handle, the tick retries it, and `observer_stopped` is written only once the terminal is actually
+gone: dropping the record on a failed stop would leave a live head with nothing pointing at it.
+
 Liveness is the same pid heartbeat the worker/reviewer watchdog uses (`head_process_status` over
 `pid_file_path`). A pid file that does not exist yet is not evidence of death: a head that has just
 been launched has not written it, so an unknown pid counts as alive for a short grace window and as
@@ -50,6 +54,13 @@ EVENT_LAUNCHED = "observer_launched"
 EVENT_RELAUNCHED = "observer_relaunched"
 EVENT_STOPPED = "observer_stopped"
 EVENT_DEFERRED = "observer_launch_deferred"
+
+# A stop that the host refused. The head may still be running, so the record survives with its
+# handle and the tick keeps retrying until the terminal is gone.
+STATE_STOP_PENDING = "stop-pending"
+STATE_PAUSE_STOP_PENDING = "pause-stop-pending"
+STATE_STOPPED_BY_PAUSE = "stopped-by-pause"
+PENDING_STOP_STATES = (STATE_STOP_PENDING, STATE_PAUSE_STOP_PENDING)
 
 
 def observer_pid_file(reference: str) -> str:
@@ -214,6 +225,12 @@ def _reconcile_open_sprint(
 ) -> dict[str, Any]:
     record = observers.get(ref)
     if record is not None and record.handle and observer_alive(record)["alive"]:
+        if record.state in PENDING_STOP_STATES:
+            # The sprint is open again and the head that was to be stopped is still the head of
+            # this sprint: the pending stop is moot, so the record reads as running once more.
+            record.state = "running"
+            record.stopped_reason = ""
+            record.paused_at = 0.0
         return {
             "status": "ok",
             "step": "observer-reconcile",
@@ -256,8 +273,13 @@ def _launch_observer(
     if record is not None and record.handle:
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
-        # next one, or every respawn leaves a ghost pane in the observer's workspace.
-        stop_observer_head(runtime, record)
+        # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
+        # refuses to close parks the relaunch: two heads on one sprint is worse than none.
+        if not stop_observer_head(runtime, record):
+            return _defer(
+                runtime, observers, ref, record, head=head,
+                reason="previous observer terminal could not be stopped",
+            )
         record.handle = ""
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
@@ -348,8 +370,18 @@ def _defer(
 def _stop_observer(
     runtime: Any, observers: dict[str, ObserverRecord], ref: str, *, reason: str
 ) -> dict[str, Any]:
-    record = observers.pop(ref)
-    stop_observer_head(runtime, record)
+    record = observers[ref]
+    if not stop_observer_head(runtime, record):
+        _mark_stop_pending(record, STATE_STOP_PENDING, reason)
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-stop-failed",
+            "head": record.head,
+            "reason": f"{reason}, and the observer terminal could not be stopped",
+        }
+    observers.pop(ref)
     record_event(
         runtime,
         EVENT_STOPPED,
@@ -367,10 +399,25 @@ def _stop_observer(
     }
 
 
+def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
+    """Keep the head on the books after a refused stop, handle included, so the retry can find it."""
+    now = time.time()
+    record.state = state
+    record.stopped_reason = reason
+    record.last_action = "stop-failed"
+    record.last_action_at = now
+    if state == STATE_PAUSE_STOP_PENDING:
+        record.paused_at = now
+
+
 def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
-    """Stop one observer head. A host that cannot be reached is not a failed tick."""
+    """Stop one observer head. True when nothing of it is left running.
+
+    A record with no terminal handle is already stopped. False means the host refused the request
+    and the head must be assumed alive, so the caller keeps the record and retries.
+    """
     if not record.handle:
-        return False
+        return True
     try:
         runtime.host.stop_observer(record)
     except HostError:
@@ -378,33 +425,84 @@ def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
     return True
 
 
-def freeze_observers(runtime: Any, payload: dict[str, Any], *, reason: str) -> list[str]:
-    """Stop every observer head and say in the record why it is gone. Returns the stopped sprints."""
+def freeze_observers(runtime: Any, payload: dict[str, Any], *, reason: str) -> dict[str, list[str]]:
+    """Stop every observer head and say in the record why it is gone.
+
+    Returns the sprints whose head is down under `stopped` and those whose stop the host refused
+    under `failed`. A refused stop keeps its handle and is retried by the frozen tick.
+    """
     observers = load_observers(payload)
     if not observers:
-        return []
+        return {"stopped": [], "failed": []}
     stopped: list[str] = []
-    now = time.time()
+    failed: list[str] = []
     for ref, record in sorted(observers.items()):
         if not record.handle:
             continue
-        stop_observer_head(runtime, record)
-        record.handle = ""
-        record.state = "stopped-by-pause"
-        record.stopped_reason = reason
-        record.paused_at = now
-        record.last_action = "stopped-by-pause"
-        record.last_action_at = now
+        if not stop_observer_head(runtime, record):
+            _mark_stop_pending(record, STATE_PAUSE_STOP_PENDING, reason)
+            failed.append(ref)
+            continue
+        _mark_stopped_by_pause(runtime, ref, record, reason)
+        stopped.append(ref)
+    put_observers(payload, observers)
+    return {"stopped": stopped, "failed": failed}
+
+
+def _mark_stopped_by_pause(
+    runtime: Any, ref: str, record: ObserverRecord, reason: str
+) -> None:
+    now = time.time()
+    record.handle = ""
+    record.state = STATE_STOPPED_BY_PAUSE
+    record.stopped_reason = reason
+    record.paused_at = now
+    record.last_action = "stopped-by-pause"
+    record.last_action_at = now
+    record_event(
+        runtime,
+        EVENT_STOPPED,
+        ref,
+        observer_request_id("freeze-stop", ref, record.launches),
+        {"head": record.head, "reason": reason, "launches": record.launches},
+    )
+
+
+def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Retry the stops the host refused. Returns one row per pending stop it tried.
+
+    The reconciliation pass does not run while the pipeline is frozen, so without this a head the
+    freeze failed to stop would sit alive and unattended until the resume.
+    """
+    observers = load_observers(payload)
+    pending = {
+        ref: record
+        for ref, record in sorted(observers.items())
+        if record.state in PENDING_STOP_STATES and record.handle
+    }
+    if not pending:
+        return []
+    rows: list[dict[str, Any]] = []
+    for ref, record in pending.items():
+        reason = record.stopped_reason
+        if not stop_observer_head(runtime, record):
+            rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+            continue
+        if record.state == STATE_PAUSE_STOP_PENDING:
+            _mark_stopped_by_pause(runtime, ref, record, reason)
+            rows.append({"sprint": ref, "action": "observer-stopped-by-pause", "reason": reason})
+            continue
+        observers.pop(ref)
         record_event(
             runtime,
             EVENT_STOPPED,
             ref,
-            observer_request_id("freeze-stop", ref, record.launches),
+            observer_request_id("stop", ref, record.launches),
             {"head": record.head, "reason": reason, "launches": record.launches},
         )
-        stopped.append(ref)
+        rows.append({"sprint": ref, "action": "observer-stopped", "reason": reason})
     put_observers(payload, observers)
-    return stopped
+    return rows
 
 
 def resume_observers(payload: dict[str, Any]) -> list[str]:
@@ -418,7 +516,9 @@ def resume_observers(payload: dict[str, Any]) -> list[str]:
         return []
     resumed: list[str] = []
     for ref, record in sorted(observers.items()):
-        if record.state != "stopped-by-pause":
+        # A freeze-stop the host refused is cleared too: the sprint is running again, so the head
+        # that survived the freeze is the head of this sprint and the tick can find it alive.
+        if record.state not in (STATE_STOPPED_BY_PAUSE, STATE_PAUSE_STOP_PENDING):
             continue
         record.state = "pending"
         record.paused_at = 0.0
