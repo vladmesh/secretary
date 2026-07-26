@@ -68,7 +68,12 @@ def command_terminal_status(
         )
         if supplemental:
             activity = max(activity or 0.0, float(supplemental))
-        return {"known": True, "live": True, "reason": "live", "last_activity": activity}
+        return {
+            "known": True, "live": True, "reason": "live", "last_activity": activity,
+            # A pid-heartbeat that proves this exact process still runs; only this — not a
+            # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
+            "pid_confirmed": bool(pid_status.get("known") and pid_status.get("alive")),
+        }
     return {"known": True, "live": False, "reason": "missing-terminal"}
 
 

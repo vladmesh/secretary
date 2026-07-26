@@ -1814,6 +1814,46 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["action"], "review-respawned")
 
+    def test_pid_confirmed_worker_silent_past_first_output_window_is_not_respawned(self) -> None:
+        """secretary-751: a runtime that can prove liveness via pid must not be respawned or
+        blocked for silence alone. Only an actual exit (already covered by the process-exited
+        path) may end this wait for it."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
+        record["worker_started_at"] = started
+        record["worker_progress_at"] = started
+        self.runtime.state.save(payload)
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": started,
+            "pid_confirmed": True,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_pid_confirmed_reviewer_silent_past_the_long_ceiling_is_not_blocked(self) -> None:
+        """A pid-confirmed live reviewer must survive even the long inactivity ceiling: the pid
+        heartbeat is the stronger signal, so the timing fallback never applies to it."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.review_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": None,
+            "pid_confirmed": True,
+        }
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-review-verdict")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
     def test_runtime_inventory_failure_is_degraded_not_a_head_death(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)

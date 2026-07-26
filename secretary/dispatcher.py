@@ -1996,9 +1996,15 @@ class DispatcherRuntime:
                 progress_at = updated
                 setattr(record, f"{kind}_progress_at", progress_at)
                 self._save_records(payload, records)
+        now = time.time()
+        if status.get("pid_confirmed"):
+            # The pid heartbeat proves this exact head process is still running. Silence is not
+            # evidence of anything for a runtime that can prove liveness this way, so none of the
+            # timing ceilings below apply; only an actual exit (handled above) ends this wait. The
+            # long inactivity ceiling stays live only for runtimes that cannot expose this signal.
+            return unavailable() if runtime_reason else None
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
-        now = time.time()
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
         if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
             return self._trigger_wait_watchdog(
