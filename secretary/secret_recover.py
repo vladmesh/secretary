@@ -26,6 +26,7 @@ from typing import Any
 
 from secretary.secret_store import (
     MaterializeResult,
+    RecoveryPhraseError,
     SecretStoreStateError,
     is_initialized,
     list_secrets,
@@ -122,9 +123,9 @@ def recover_secrets(
 ) -> SecretRecovery:
     """Open the store with the phrase, or report what stays closed without it.
 
-    A wrong phrase raises out of `restore_installation_key`, which writes nothing,
-    so a failed attempt leaves the clone exactly as it was. An installation whose
-    key file survived opens without a phrase at all: recovery is then the same
+    A wrong phrase is rejected by the verifier before anything is written, so a
+    failed attempt leaves the clone exactly as it was. An installation whose key
+    file survived opens without a phrase at all: recovery is then the same
     idempotent materialization a running host does.
 
     `dry_run` still checks the phrase against the verifier, so the preview cannot
@@ -168,17 +169,27 @@ def recover_secrets(
 
 
 def _unlock(instance_dir: Path, phrase: str | None, *, dry_run: bool) -> bool:
-    """Make the installation key usable, from the phrase if one was given."""
+    """Make the installation key usable, from the phrase if one was given.
+
+    The phrase is checked first, against the verifier and without touching a
+    file, so a wrong one fails the same way whether or not a key file is lying
+    around. A key file that already opens the store is then left alone: a second
+    recover with the same phrase has nothing to rebuild, and rewriting the file
+    would only move its mtime.
+    """
     if phrase is not None:
-        # Both raise RecoveryPhraseError on a phrase that does not open this
-        # installation, before any file is written.
-        if dry_run:
-            verify_recovery_phrase(instance_dir, phrase)
+        verify_recovery_phrase(instance_dir, phrase)
+        if dry_run or _key_usable(instance_dir):
             return True
         restore_installation_key(instance_dir, phrase)
+    return _key_usable(instance_dir)
+
+
+def _key_usable(instance_dir: Path) -> bool:
+    """Whether the key file on disk is there and opens this installation."""
     try:
         load_installation_key(instance_dir)
-    except SecretStoreStateError:
+    except (SecretStoreStateError, RecoveryPhraseError):
         return False
     return True
 

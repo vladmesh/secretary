@@ -168,6 +168,28 @@ class PhraseBranchCase(RecoveryCase):
         self.assertEqual(self.restored.stat().st_mtime_ns, stamp)
         self.assertIn("unchanged secret-store: 1 env file(s) written", second_output)
 
+    def test_a_second_recovery_leaves_the_installation_key_alone(self) -> None:
+        self.recover("--recovery-phrase-file", str(self.phrase_file))
+        key = secret_store.key_path(self.target)
+        material, stamp = key.read_bytes(), key.stat().st_mtime_ns
+
+        code, output = self.recover("--recovery-phrase-file", str(self.phrase_file))
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(key.read_bytes(), material)
+        self.assertEqual(key.stat().st_mtime_ns, stamp)
+
+    def test_an_unusable_key_file_is_rebuilt_from_the_phrase(self) -> None:
+        self.recover("--recovery-phrase-file", str(self.phrase_file))
+        key = secret_store.key_path(self.target)
+        material = key.read_bytes()
+        key.unlink()
+
+        code, output = self.recover("--recovery-phrase-file", str(self.phrase_file))
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(key.read_bytes(), material)
+
     def test_a_wrong_phrase_refuses_and_leaves_nothing_behind(self) -> None:
         wrong = self.phrase_file.parent / "wrong.txt"
         wrong.write_text(" ".join(RECOVERY_WORDS[16:32]) + "\n", encoding="utf-8")
