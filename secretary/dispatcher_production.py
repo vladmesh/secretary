@@ -125,6 +125,11 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
         active_refs = {str(task.get("ref") or "") for task in active_tasks}
         reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
+        # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
+        # reconciliation did: those are stamped by every tick regardless of code version, so a
+        # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
+        # on the strength of a field that predates the reconciliation pass itself.
+        payload["last_reconciled_at"] = now_rfc3339()
         outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
         outcomes = reconcile_outcomes + outcomes
         # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
@@ -556,8 +561,12 @@ def _reconcile_production(
         return state_cache[ref]
 
     for ref in sorted(ref for ref in records if ref not in active_refs):
+        # `active_refs` is a snapshot taken before this pass; the board can move the card back
+        # into the active cycle between that snapshot and this loop (a PO race). The snapshot is
+        # only ever a reason to look, never proof of anything: only the live state fetched right
+        # here, immediately before removal, decides whether the record is actually orphaned.
         state = card_state(ref)
-        if state is None:
+        if state is None or state in ("in_progress", "validate"):
             continue
         record = records.pop(ref)
         outcomes.append({
@@ -578,7 +587,7 @@ def _reconcile_production(
     } if isinstance(divergences, list) else set()
     for ref in sorted(open_refs - active_refs):
         state = card_state(ref)
-        if state is None:
+        if state is None or state in ("in_progress", "validate"):
             continue
         closed_ids = _close_divergences_for_ref(payload, ref, state)
         if closed_ids:

@@ -101,7 +101,11 @@ class ExpectationTests(unittest.TestCase):
         expected = build_doctor_expectations({"host": {"unit_prefix": "secretary-"}}, [])
         self.assertEqual(expected.unit_runtime["secretary-memory.service"], (True, True))
         self.assertEqual(expected.unit_runtime["secretary-curator.timer"], (True, True))
-        self.assertNotIn("secretary-curator.service", expected.unit_runtime)
+        # A oneshot unit fired by its timer has no [Install] section and is only briefly active
+        # around the run, so neither is required. It still gets an entry: without one the live
+        # collector never probes it, and a completed run would read to status/doctor as an
+        # unprobed unit instead of the truthful, if transient, state it actually has.
+        self.assertEqual(expected.unit_runtime["secretary-curator.service"], (False, False))
 
     def test_project_name_from_repo_path(self):
         exp = build_expectations(

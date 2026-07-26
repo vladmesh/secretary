@@ -129,6 +129,11 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["dispatcher"]["divergences"]["open"][0]["pilot_ref"], "secretary-730")
         self.assertIsNotNone(payload["dispatcher"]["reconciliation"]["last_tick_finished_at"])
         self.assertEqual(payload["dispatcher"]["reconciliation"]["records_tracked"], 1)
+        # This fixture's state predates the reconciliation pass (no "last_reconciled_at" key was
+        # written): a pre-deployment host must read as "unknown", not borrow the pre-existing
+        # "last_tick_finished_at" as if it were reconciliation evidence.
+        self.assertIsNone(payload["dispatcher"]["reconciliation"]["last_reconciled_at"])
+        self.assertIn("external_runtime", payload["host"])
 
     def test_status_human_output_and_live_watchdog_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,6 +227,43 @@ class StatusCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 1, payload)
         self.assertTrue(any(finding["code"] == "unit_runtime" for finding in payload["findings"]))
+
+    def test_status_json_reports_oneshot_and_external_runtime_state(self):
+        # secretary-755: a completed one-shot dispatcher unit and the host-owned Orca server
+        # must both carry real, non-null evidence — not the "unprobed" (None, None) an operator
+        # cannot distinguish from "we never looked".
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            report = validate_instance(root / "examples" / "instance")
+            expected = build_doctor_expectations(
+                report.instance, report.bindings,
+                packaged=resolve_packaged(report.instance, instance_path=root / "examples" / "instance"),
+            )
+            oneshot = next(
+                name for name, (need_enabled, need_active) in expected.unit_runtime.items()
+                if not need_enabled and not need_active
+            )
+            (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
+            (fixture / "unit-states.txt").write_text(
+                "\n".join([
+                    *(f"{name} enabled active" for name in sorted(expected.units) if name != oneshot),
+                    f"{oneshot} static inactive",
+                    "orca-server.service enabled active",
+                ]),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["status", "--json", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance")])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0, payload)
+        oneshot_row = next(row for row in payload["host"]["units"] if row["name"] == oneshot)
+        self.assertEqual(oneshot_row["active"], "inactive")
+        self.assertEqual(oneshot_row["enabled"], "static")
+        self.assertEqual(payload["host"]["external_runtime"]["name"], "orca-server.service")
+        self.assertEqual(payload["host"]["external_runtime"]["enabled"], "enabled")
+        self.assertEqual(payload["host"]["external_runtime"]["active"], "active")
 
     def test_doctor_json_reports_an_unresolved_divergence_even_offline(self):
         root = Path(__file__).resolve().parents[1]

@@ -701,6 +701,65 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.torn_down, [])
         self.assertNotIn("secretary-510-pilot", self.host.prepared)
 
+    def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
+        # secretary-755 reviewer finding: `active_refs` is a snapshot taken at the top of the
+        # tick, before reconciliation runs. If a PO moves the card out and back between that
+        # snapshot and the moment reconciliation asks the board directly, the ref is missing from
+        # the snapshot even though the card is live again. Only the state fetched immediately
+        # before removal may decide the record is orphaned.
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ideas",
+            reason="PO pulled it back out of the cycle",
+            request_id="move-to-ideas-race",
+        )
+        self.host.calls.clear()
+        self.host.prepared.clear()
+
+        real_show = self.reader.show
+        raced = {"done": False}
+
+        def racing_show(reference: str):
+            if reference == "secretary-510-pilot" and not raced["done"]:
+                raced["done"] = True
+                self.writer.move(
+                    role="po",
+                    actor="operator",
+                    reference="secretary-510-pilot",
+                    target="in_progress",
+                    reason="PO put it right back before the tick finished looking",
+                    request_id="move-back-to-in-progress-race",
+                )
+            return real_show(reference)
+
+        with mock.patch.object(self.reader, "show", side_effect=racing_show):
+            result = self.runtime.production_tick()
+
+        reconcile_actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        self.assertEqual(reconcile_actions, [])
+        payload = self.runtime.production_state.load()
+        self.assertIn("secretary-510-pilot", payload["records"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_production_tick_stamps_last_reconciled_at_distinctly_from_last_tick_finished_at(self) -> None:
+        # secretary-755 reviewer finding: `last_tick_finished_at` predates reconciliation and is
+        # stamped by every tick regardless of dispatcher version, so it cannot serve as evidence
+        # that this tick's code actually ran the new reconciliation pass.
+        self.commit_cutover()
+        self.assertNotIn("last_reconciled_at", self.runtime.production_state.load())
+
+        self.runtime.production_tick()
+
+        payload = self.runtime.production_state.load()
+        self.assertIsInstance(payload.get("last_reconciled_at"), str)
+        self.assertTrue(payload["last_reconciled_at"])
+
     def test_production_tick_leaves_in_progress_and_validate_records_intact(self) -> None:
         self.commit_cutover()
         self.runtime.production_tick()

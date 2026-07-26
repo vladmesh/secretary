@@ -574,7 +574,15 @@ def build_doctor_expectations(
         unit = packaged_by_name.get(name)
         if name.endswith(".timer"):
             runtime[name] = (True, True)
-        elif unit is None or not unit.oneshot:
+        elif unit is not None and unit.oneshot:
+            # A oneshot unit fired by its timer has no [Install] section (`is-enabled` reports
+            # "static", not "enabled") and is only briefly active around the run, so neither is
+            # required here. It still needs an entry: the live collector only probes
+            # `systemctl is-enabled`/`is-active` for names present in this dict, and without one
+            # a completed run reads to status/doctor as an unprobed unit (`active: null`) instead
+            # of the truthful, if transient, state it actually has.
+            runtime[name] = (False, False)
+        else:
             runtime[name] = (True, True)
     runtime["orca-server.service"] = (False, True)
     return Expectations(
