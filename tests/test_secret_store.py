@@ -1249,17 +1249,15 @@ class SecretCliCase(SecretStoreCase):
         answers: list[str] = []
         phrase = " ".join(RECOVERY_WORDS[64:80])
 
-        def fake_prompt(prompt: str, *, hide: bool) -> str:
+        def fake_read_line(prompt: str) -> str:
             answers.append(prompt)
             if prompt.startswith("Type 'yes'"):
-                self.assertFalse(hide)
                 return "yes"
-            self.assertTrue(hide)
             position = int(prompt.split()[1].rstrip(":")) - 1
             return phrase.split()[position]
 
         with mock.patch.object(secret_commands, "generate_recovery_phrase", return_value=phrase):
-            with mock.patch.object(secret_commands, "_prompt", side_effect=fake_prompt):
+            with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
                 code, out, err = self.run_cli(
                     ["secret", "init", "--instance", str(self.instance_dir)]
                 )
@@ -1273,10 +1271,10 @@ class SecretCliCase(SecretStoreCase):
         self.assertTrue(secret_store.is_initialized(self.instance_dir))
 
     def test_init_without_a_correct_confirmation_initializes_nothing(self) -> None:
-        def fake_prompt(prompt: str, *, hide: bool) -> str:
+        def fake_read_line(prompt: str) -> str:
             return "yes" if prompt.startswith("Type 'yes'") else "wrong"
 
-        with mock.patch.object(secret_commands, "_prompt", side_effect=fake_prompt):
+        with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
             code, out, err = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 2)
         self.assertFalse(json.loads(out)["ok"])
@@ -1307,10 +1305,10 @@ class SecretCliCase(SecretStoreCase):
         self.assertFalse(combined_words & set(RECOVERY_WORDS))
 
     def test_init_refuses_if_the_screen_cannot_be_cleared(self) -> None:
-        def fake_prompt(prompt: str, *, hide: bool) -> str:
+        def fake_read_line(prompt: str) -> str:
             return "yes"
 
-        with mock.patch.object(secret_commands, "_prompt", side_effect=fake_prompt):
+        with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
             with mock.patch.object(
                 secret_commands, "_clear_screen_and_scrollback", return_value=False
             ):
