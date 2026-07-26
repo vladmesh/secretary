@@ -64,7 +64,13 @@ Board export держим только в `cards.ndjson` (построчный d
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
     knowledge/**   брейнштормы, журналы решений, разборы инцидентов
+  secrets/                                                           хранилище секретов, см. ниже
+    catalog.yaml, installation-key.json, values/<id>.enc.json
 ```
+
+`secrets/installation.key` — сырой installation key, `0600`, вне git (`.gitignore`), в checkpoint
+не входит. Хранилище описано подробнее в разделе «Секреты» ниже и в
+[Протоколах](PROTOCOLS.md#секреты).
 
 Memory facts хранятся плоско в едином репозитории. Вложенный git-журнал `memory/facts` убирается;
 writer памяти коммитит `propose/commit/supersede` в общий репозиторий. Единая история, один HEAD.
@@ -85,17 +91,21 @@ writer памяти коммитит `propose/commit/supersede` в общий р
 
 ## Writer
 
-В репозиторий пишут трое, каждый своим pathspec:
+В репозиторий пишут четверо, каждый своим pathspec:
 
 - tick-writer: `state/board`, `state/runs`, в конце тика диспетчера под `tick_lock`;
 - memory-writer: `state/memory`, по факту `propose/commit/supersede` (`curator memory-write`);
-- knowledge-writer: `state/knowledge`, по факту `secretary knowledge write`.
+- knowledge-writer: `state/knowledge`, по факту `secretary knowledge write`;
+- secret-writer: `secrets/` (плюс `.gitignore` при первом `init`), на `secret init/set/import/remove`.
+  `secret list` и `secret materialize` в этот writer не входят: `list` только читает каталог, а
+  `materialize` пишет env-файлы вне `secrets/` и коммита не делает (подробности —
+  [Протоколы](PROTOCOLS.md#секреты)).
 
 Pathspec'ы не пересекаются, поэтому чужое недописанное дерево ни один из них не подхватит.
 `git add -A` не использует никто: ручные незакоммиченные правки конфига остаются нетронутыми.
-Индекс git не рассчитан на параллельную запись, поэтому все три стороны берут общий
-`state_repo_lock` на время staging+commit. Memory- и knowledge-writer коммитят сразу, не дожидаясь
-тика: запись попадает в HEAD, и 30-минутный push уносит её вместе с остальным checkpoint.
+Индекс git не рассчитан на параллельную запись, поэтому все писатели берут общий
+`state_repo_lock` на время staging+commit. Memory-, knowledge- и secret-writer коммитят сразу, не
+дожидаясь тика: запись попадает в HEAD, и 30-минутный push уносит её вместе с остальным checkpoint.
 
 Миграция с вложенного журнала одноразовая и идемпотентная: дерево `memory/facts` сначала
 переносится и коммитится в `state/memory/facts`, вложенный `.git` удаляется только после этого.
@@ -196,21 +206,28 @@ sudo secretary install \
 ```
 
 `runtime.env` остаётся gitignored обычным файлом с mode `0600` и содержит как минимум
-`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`. Bootstrap генерирует его и не печатает
-значения и не добавляет файл в Git.
+`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`. Bootstrap генерирует его на fresh
+install и не печатает значения и не добавляет файл в Git.
 
 `recover` выполняет одну поддержанную последовательность:
 
-1. Проверяет remote/checkout, credentials, доступность Kanboard и установленный Orca.
-2. Материализует `state/board` и `state/runs` из checkpoint в новый local data plane. Из
+1. Открывает хранилище секретов (если оно инициализировано в этом instance-репо) раньше, чем
+   читает `runtime.env`: с `--recovery-phrase-file` / `--recovery-phrase-stdin` (или интерактивным
+   prompt на TTY, если ключа ещё нет на диске) installation key пересобирается и материализует
+   значения в файлы, которые называет каталог, включая `runtime.env`, если в нём материализован
+   какой-то секрет. Без фразы этот шаг ничего не пишет и репортит locked/missing, а `runtime.env`
+   остаётся тем, что уже на диске. Раздел «Секреты» ниже разбирает это подробнее.
+2. Проверяет remote/checkout, credentials, доступность Kanboard и установленный Orca. Если
+   `runtime.env` не появился на шаге 1 и хранилища нет вовсе, это по-прежнему ручной ввод оператора.
+3. Материализует `state/board` и `state/runs` из checkpoint в новый local data plane. Из
    `cards.ndjson` строится производный `cards.json`; счётчики проверяются до live writes.
-3. Идемпотентно импортирует доску и пересобирает `memory/export.ndjson` и `memory/index.sqlite` из
+4. Идемпотентно импортирует доску и пересобирает `memory/export.ndjson` и `memory/index.sqlite` из
    `state/memory/facts`.
-4. Клонирует отсутствующие project checkouts по `remote` из registry и создаёт
+5. Клонирует отсутствующие project checkouts по `remote` из registry и создаёт
    не-секретные `AGENTS.md` и `config.toml` в managed CODEX_HOME. OAuth остаётся ручным.
-5. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
+6. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
    регистрирует Orca resources и применяет automations.
-5. Проверяет restore status. Головы подключаются после bootstrap отдельно (Milestone 3).
+7. Проверяет restore status. Головы подключаются после bootstrap отдельно (Milestone 3).
 
 Повторный `secretary recover` безопасен: checkout fast-forward-only, board restore сверяет parity,
 memory index строится заново, materializer на втором проходе не имеет изменений. Терминалы,

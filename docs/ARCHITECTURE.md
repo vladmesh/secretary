@@ -97,8 +97,10 @@ writer lock и проверяет документ на секреты, поэт
 - `doctor` читает config, data и host inventory, но не меняет host.
 - `reconcile plan` строит desired state. Имя или prefix не дают ownership без managed manifest или
   secretary-owned marker.
-- Secrets принадлежат host `runtime.env`; в instance git, facts, exports, checkpoint, archives и
-  diagnostics они не попадают.
+- Секреты, заведённые в хранилище (`secretary-instance/secrets/`), попадают в instance git как
+  зашифрованные envelope и уезжают с checkpoint; сырой installation key и recovery phrase — нет
+  (см. [Recovery](RECOVERY.md), раздел «Секреты»). Host `runtime.env` вне хранилища, facts, exports
+  и diagnostics секретов не несут.
 - Task audit и pending writes fail-closed: незавершённая board mutation блокирует согласованный
   export и recovery checkpoint.
 

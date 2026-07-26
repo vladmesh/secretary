@@ -295,4 +295,64 @@ python3 -m secretary knowledge list --instance INSTANCE
 Документ с секретом отклоняется с кодом 2, и на диск ничего не попадает. Повторная запись того же
 содержимого возвращает `changed: false` и нового коммита не делает.
 
+## Секреты
+
+```bash
+python3 -m secretary secret init --instance INSTANCE
+python3 -m secretary secret set --instance INSTANCE --id ID --scope SCOPE --purpose PURPOSE \
+  --stdin [--environment VAR] [--materialize runtime-env|file [--materialize-path PATH]]
+python3 -m secretary secret list --instance INSTANCE
+python3 -m secretary secret import --instance INSTANCE --file ENV_FILE --scope SCOPE \
+  --purpose PURPOSE [--materialize runtime-env|file [--materialize-path PATH]]
+python3 -m secretary secret remove --instance INSTANCE --id ID
+python3 -m secretary secret materialize --instance INSTANCE [--target runtime-env|file]
+```
+
+Значение секрета никогда не идёт через argv: `set` читает его из stdin или `--file`, `import` берёт
+`KEY=VALUE` env-файл (LF, без комментариев и пустых строк; заводит один секрет на переменную).
+Ни одна команда не печатает значение — `list` отдаёт только метаданные каталога, `import` и
+`materialize` печатают id и имена переменных. Чтение значения (`read_secret`) остаётся внутренним
+API, пока у него нет безопасного потребителя вроде broker-карточки.
+
+`secret init` интерактивен по замыслу: он отказывается работать, если stdin или stderr не терминал,
+и делает эту проверку до генерации recovery phrase, а не только перед её печатью — фраза не должна
+успеть попасть в pipe, файл или лог. Фраза печатается один раз на stderr, оператор подтверждает, что
+её записал, экран и scrollback очищаются, и только после этого `init` спрашивает несколько слов
+фразы обратно, прежде чем создать хранилище.
+
+Раскладка `secrets/` в instance-репозитории:
+
+```text
+secrets/
+  catalog.yaml            открытые метаданные: id, scope, purpose, materialize — трекается git
+  installation-key.json   открытые KDF-параметры installation key и verifier — трекается git
+  values/<id>.enc.json    один зашифрованный envelope на секрет — трекается git
+  installation.key        сырой installation key, 0600, вне git (.gitignore)
+```
+
+Хранилище — четвёртый писатель instance-репозитория рядом с board/runs, memory и knowledge:
+`init`, `set`, `import` и `remove` берут тот же `state_repo.state_repo_lock` и коммитят свой
+pathspec (`secrets/`, плюс `.gitignore` при `init`) одним коммитом, так что каталог и значения,
+которые он называет, не могут разойтись в истории. `list` не берёт lock и ничего не коммитит: он
+только читает `catalog.yaml`. `materialize` тоже берёт lock — чтобы не пересечься с writer'ом
+посреди чтения каталога и расшифровки, — но пишет только материализованные файлы (`runtime.env`
+или указанный `--materialize-path`) вне `secrets/` и `state_repo.commit` не вызывает: сами цели
+материализации в instance-репозиторий не входят. Открытая часть — `catalog.yaml` и
+`installation-key.json` — проходит тот же redact-гейт, что и `state/`: секрет, случайно попавший в
+поле `purpose`, останавливает запись, а не уходит в коммит. Зашифрованный envelope этот скан не
+проходит — его тело это ciphertext плюс открытые параметры расшифровки, совпадение с паттерном
+redact там было бы случайностью base64, а значение, которое redact распознал бы, это ровно то, что
+хранилище существует хранить.
+
+Восстановление описано в [Recovery](RECOVERY.md), раздел «Секреты», и в [DRILL.md](DRILL.md). С
+recovery phrase installation key пересобирается заново и цели материализации переписываются из
+каталога. Без фразы восстанавливается всё несекретное, а `recover` печатает отчёт `locked`/`missing`
+и ничего не пишет: `locked` — значение зашифровано, но ключа нет, `missing` — каталог называет
+секрет, чей envelope отсутствует в репозитории.
+
+Installation key принадлежит installation user — тому же пользователю, что владеет хостом и
+инсталляцией, не отдельной более узкой роли. Хранилище не обещает worker isolation: у него нет
+своего broker или grants, и installation key открывает все секреты сразу, теми же правами, что и
+раньше читали `runtime.env`.
+
 Data-plane, archive restore и unit runbooks находятся в [Operations](OPERATIONS.md).
