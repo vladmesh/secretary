@@ -12,9 +12,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets as pysecrets
 import sys
 from pathlib import Path
+
+try:
+    import termios
+except ImportError:  # pragma: no cover - POSIX only, this product runs on Linux hosts
+    termios = None
 
 from secretary.secret_store import (
     CONFIRM_WORDS,
@@ -151,6 +157,14 @@ def _usage(parser: argparse.ArgumentParser) -> int:
 
 
 def run_secret_init(args: argparse.Namespace) -> int:
+    if not _stdin_and_stderr_are_interactive():
+        return _fail(
+            "init",
+            "validation",
+            "secret init is interactive by design: stdin and stderr must both be a "
+            "terminal, so the phrase and its confirmation never land in a pipe, file, "
+            "or log",
+        )
     instance_dir = _instance_dir(args.instance)
     if is_initialized(instance_dir):
         return _fail(
@@ -165,6 +179,19 @@ def run_secret_init(args: argparse.Namespace) -> int:
         return _fail("init", "validation", str(exc))
 
     _show_phrase(phrase)
+    if not _acknowledge_written_down():
+        return _fail(
+            "init",
+            "validation",
+            "recovery phrase not confirmed; the store was not initialized",
+        )
+    if not _clear_screen_and_scrollback():
+        return _fail(
+            "init",
+            "validation",
+            "could not clear the terminal and its scrollback; refusing to ask the "
+            "confirmation questions while the phrase might still be visible",
+        )
     if not _confirm_phrase(phrase):
         return _fail(
             "init",
@@ -354,6 +381,20 @@ def _read_value(args: argparse.Namespace) -> bytes:
     return value
 
 
+def _stdin_and_stderr_are_interactive() -> bool:
+    """Whether both ends of the confirmation dialog are a real terminal.
+
+    `secret init` prints the phrase and reads the confirmation, so a
+    non-interactive stdin or stderr means the phrase would land in a pipe,
+    file, or log before anything asks a single question. That check has to
+    run before the phrase is generated, not just before it is printed.
+    """
+    try:
+        return sys.stdin.isatty() and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _show_phrase(phrase: str) -> None:
     """Show the phrase once, on stderr so a redirected stdout cannot capture it."""
     words = phrase.split()
@@ -367,17 +408,100 @@ def _show_phrase(phrase: str) -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
+def _acknowledge_written_down() -> bool:
+    """The explicit "I wrote it down" step between the phrase and the clear.
+
+    Without a step here, the screen clear could race a distracted operator
+    who has not actually copied the phrase yet. Requiring the literal word
+    "yes" means an empty Enter or a stray keystroke does not silently pass.
+    """
+    try:
+        answer = _prompt(
+            "Type 'yes' once you have written the phrase down, to clear the "
+            "screen and continue: ",
+            hide=False,
+        )
+    except EOFError:
+        return False
+    return answer.strip().lower() == "yes"
+
+
+def _clear_screen_and_scrollback() -> bool:
+    """Clear the visible screen and the scrollback, not just the viewport.
+
+    `\\033[3J` is the part a plain `clear screen` sequence omits: without it
+    the phrase is one scroll-up away for the rest of the session. A dumb
+    terminal (or no terminal at all) cannot be trusted to have honored it, so
+    this reports failure rather than guessing.
+    """
+    term = os.environ.get("TERM", "")
+    if not term or term == "dumb" or not sys.stderr.isatty():
+        return False
+    try:
+        sys.stderr.write("\033[H\033[2J\033[3J")
+        sys.stderr.flush()
+    except OSError:
+        return False
+    return True
+
+
 def _confirm_phrase(phrase: str) -> bool:
     words = phrase.split()
     positions = sorted(_confirmation_positions(len(words)))
     for position in positions:
         try:
-            answer = input(f"word {position + 1}: ")
+            answer = _prompt(f"word {position + 1}: ", hide=True)
         except EOFError:
             return False
         if normalize_phrase_or_empty(answer) != words[position]:
             return False
     return True
+
+
+def _prompt(prompt: str, *, hide: bool) -> str:
+    """The one seam all interactive reads go through, hidden or not."""
+    if hide:
+        return _read_hidden_line(prompt)
+    return _read_line(prompt)
+
+
+def _read_line(prompt: str) -> str:
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    line = sys.stdin.readline()
+    if line == "":
+        raise EOFError
+    return line.rstrip("\n")
+
+
+def _read_hidden_line(prompt: str) -> str:
+    """Read one line with the terminal's echo off, when the terminal allows it.
+
+    Confirmation words are the phrase itself, so letting them echo defeats
+    the point of clearing the screen first. Echo suppression only works on a
+    real POSIX tty; anywhere else this falls back to a plain read rather than
+    failing the whole flow over cosmetics.
+    """
+    old_attrs = None
+    fd = None
+    if termios is not None:
+        try:
+            fd = sys.stdin.fileno()
+            old_attrs = termios.tcgetattr(fd)
+        except (AttributeError, OSError, ValueError, termios.error):
+            fd, old_attrs = None, None
+    if old_attrs is not None:
+        new_attrs = termios.tcgetattr(fd)
+        new_attrs[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSANOW, new_attrs)
+    try:
+        line = _read_line(prompt)
+    finally:
+        if old_attrs is not None:
+            termios.tcsetattr(fd, termios.TCSANOW, old_attrs)
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+    return line
 
 
 def normalize_phrase_or_empty(answer: str) -> str:
