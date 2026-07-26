@@ -17,11 +17,6 @@ import secrets as pysecrets
 import sys
 from pathlib import Path
 
-try:
-    import termios
-except ImportError:  # pragma: no cover - POSIX only, this product runs on Linux hosts
-    termios = None
-
 from secretary.secret_store import (
     CONFIRM_WORDS,
     MATERIALIZE_FILE,
@@ -416,10 +411,9 @@ def _acknowledge_written_down() -> bool:
     "yes" means an empty Enter or a stray keystroke does not silently pass.
     """
     try:
-        answer = _prompt(
+        answer = _read_line(
             "Type 'yes' once you have written the phrase down, to clear the "
-            "screen and continue: ",
-            hide=False,
+            "screen and continue: "
         )
     except EOFError:
         return False
@@ -450,7 +444,7 @@ def _confirm_phrase(phrase: str) -> bool:
     positions = sorted(_confirmation_positions(len(words)))
     for position in positions:
         try:
-            answer = _prompt(f"word {position + 1}: ", hide=True)
+            answer = _read_line(f"word {position + 1}: ")
         except EOFError:
             return False
         if normalize_phrase_or_empty(answer) != words[position]:
@@ -458,50 +452,14 @@ def _confirm_phrase(phrase: str) -> bool:
     return True
 
 
-def _prompt(prompt: str, *, hide: bool) -> str:
-    """The one seam all interactive reads go through, hidden or not."""
-    if hide:
-        return _read_hidden_line(prompt)
-    return _read_line(prompt)
-
-
 def _read_line(prompt: str) -> str:
+    """The one seam all interactive reads go through."""
     sys.stderr.write(prompt)
     sys.stderr.flush()
     line = sys.stdin.readline()
     if line == "":
         raise EOFError
     return line.rstrip("\n")
-
-
-def _read_hidden_line(prompt: str) -> str:
-    """Read one line with the terminal's echo off, when the terminal allows it.
-
-    Confirmation words are the phrase itself, so letting them echo defeats
-    the point of clearing the screen first. Echo suppression only works on a
-    real POSIX tty; anywhere else this falls back to a plain read rather than
-    failing the whole flow over cosmetics.
-    """
-    old_attrs = None
-    fd = None
-    if termios is not None:
-        try:
-            fd = sys.stdin.fileno()
-            old_attrs = termios.tcgetattr(fd)
-        except (AttributeError, OSError, ValueError, termios.error):
-            fd, old_attrs = None, None
-    if old_attrs is not None:
-        new_attrs = termios.tcgetattr(fd)
-        new_attrs[3] &= ~termios.ECHO
-        termios.tcsetattr(fd, termios.TCSANOW, new_attrs)
-    try:
-        line = _read_line(prompt)
-    finally:
-        if old_attrs is not None:
-            termios.tcsetattr(fd, termios.TCSANOW, old_attrs)
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-    return line
 
 
 def normalize_phrase_or_empty(answer: str) -> str:
