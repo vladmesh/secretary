@@ -26,6 +26,13 @@ HKDF, ChaCha20-Poly1305); there is no cryptographic math of our own here.
 
 Writes go through `state_repo.state_repo_lock` and land as one commit, so the
 catalog and the values it names can never diverge in the history.
+
+A secret that some process reads as an environment variable also carries a
+`materialize` record: the variable name and which file it belongs to. That
+record is what lets a recovered installation put its env files back without a
+human listing paths. `materialize_secrets` writes each file whole and by rename,
+because the one file this exists for, `runtime.env`, is read by systemd on every
+unit start and may never be seen missing or half-written.
 """
 
 from __future__ import annotations
@@ -33,8 +40,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import secrets as pysecrets
 import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +56,7 @@ from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-from secretary import state_repo
+from secretary import role_env, state_repo
 from secretary._fsutil import publish_state_atomic
 from secretary.config import validate
 from secretary.secret_words import RECOVERY_WORDS
@@ -93,7 +102,15 @@ CONFIRM_WORDS = 3
 INSTALLATION_SCOPE = "installation"
 PROJECT_SCOPE_PREFIX = "project:"
 
+# Where a value goes when it is materialized. `runtime-env` is the installation's
+# own env file, whose path only `role_env.runtime_env_path()` may answer; `file`
+# names any other env file, and carries the path in the catalog.
+MATERIALIZE_RUNTIME_ENV = "runtime-env"
+MATERIALIZE_FILE = "file"
+MATERIALIZE_TARGETS = (MATERIALIZE_RUNTIME_ENV, MATERIALIZE_FILE)
+
 _ID_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SecretStoreError(RuntimeError):
@@ -126,6 +143,31 @@ class SetResult:
     path: Path
     commit: str
     created: bool
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    secret_id: str
+    path: Path
+    commit: str
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    """What one `import` did, per secret id. Values never appear here."""
+
+    created: tuple[str, ...]
+    updated: tuple[str, ...]
+    unchanged: tuple[str, ...]
+    commit: str
+
+
+@dataclass(frozen=True)
+class MaterializeResult:
+    target: str
+    path: Path
+    variables: tuple[str, ...]
+    changed: bool
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +547,7 @@ def set_secret(
     purpose: str,
     actor: str,
     environment: str | None = None,
+    materialize: dict[str, Any] | None = None,
 ) -> SetResult:
     """Seal one value and record its metadata, as a single commit."""
     actor = _clean_actor(actor)
@@ -512,10 +555,8 @@ def set_secret(
     scope = _clean_scope(scope)
     purpose = _clean_purpose(purpose)
     environment = _clean_environment(environment)
-    if not isinstance(value, (bytes, bytearray)):
-        raise SecretStoreValidationError("secret value must be bytes")
-    if not value:
-        raise SecretStoreValidationError("secret value is empty")
+    materialize = _clean_materialize(materialize)
+    _check_value(value)
 
     instance_dir = state_repo.require_repo(instance_dir)
     with state_repo.state_repo_lock(instance_dir):
@@ -526,22 +567,15 @@ def set_secret(
         catalog = load_catalog(instance_dir)
         entries = {entry["id"]: dict(entry) for entry in catalog["secrets"]}
         existing = entries.get(secret_id)
-        entry = {
-            "id": secret_id,
-            "scope": scope,
-            "purpose": purpose,
-            "created_at": existing["created_at"] if existing else _now(),
-        }
-        if environment:
-            entry["environment"] = environment
-        entries[secret_id] = entry
-        catalog = {
-            "version": CATALOG_VERSION,
-            "secrets": [entries[name] for name in sorted(entries)],
-        }
-        errors = validate(catalog, "secret-catalog", f"secrets/{CATALOG_NAME}")
-        if errors:
-            raise SecretStoreValidationError(f"catalog entry is invalid: {errors[0]}")
+        entries[secret_id] = _entry(
+            secret_id,
+            scope=scope,
+            purpose=purpose,
+            environment=environment,
+            materialize=materialize,
+            existing=existing,
+        )
+        catalog = _catalog(entries)
 
         catalog_text = _catalog_text(catalog)
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
@@ -580,6 +614,276 @@ def read_secret(instance_dir: Path, secret_id: str) -> bytes:
     instance_dir = state_repo.require_repo(instance_dir)
     if not any(entry["id"] == secret_id for entry in list_secrets(instance_dir)):
         raise SecretStoreStateError(f"no secret named {secret_id!r} in the catalog")
+    return _read_value(instance_dir, secret_id, load_installation_key(instance_dir))
+
+
+def remove_secret(instance_dir: Path, *, secret_id: str, actor: str) -> RemoveResult:
+    """Drop the catalog entry and its envelope in one commit.
+
+    A missing id is an error, not a quiet success: the caller asked for a state
+    that never existed, and hiding that turns a typo into a secret nobody knows
+    is still stored under its real name.
+    """
+    actor = _clean_actor(actor)
+    secret_id = _clean_secret_id(secret_id)
+    instance_dir = state_repo.require_repo(instance_dir)
+    with state_repo.state_repo_lock(instance_dir):
+        catalog = load_catalog(instance_dir)
+        entries = {entry["id"]: dict(entry) for entry in catalog["secrets"]}
+        if secret_id not in entries:
+            raise SecretStoreStateError(f"no secret named {secret_id!r} in the catalog")
+        del entries[secret_id]
+        catalog_text = _catalog_text(_catalog(entries))
+        _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
+        path = value_path(instance_dir, secret_id)
+        try:
+            publish_state_atomic([(catalog_path(instance_dir), catalog_text)], removes=[path])
+        except (OSError, RuntimeError) as exc:
+            raise SecretStoreError(f"could not remove {secret_id!r}: {exc}") from None
+        commit = state_repo.commit(
+            instance_dir, SECRETS_PATHSPEC, _commit_message("remove", secret_id, actor)
+        )
+        if commit is None:
+            commit = state_repo.head(instance_dir) or ""
+    return RemoveResult(secret_id=secret_id, path=path, commit=commit)
+
+
+def import_env_file(
+    instance_dir: Path,
+    *,
+    source: Path,
+    scope: str,
+    purpose: str,
+    actor: str,
+    materialize: dict[str, Any] | None = None,
+) -> ImportResult:
+    """Take an existing env file into the store, one secret per variable.
+
+    Idempotent by content: a variable whose sealed value and metadata already
+    match is left alone, envelope bytes included, so re-importing the same file
+    adds no duplicates and no commit. The report says which ids moved.
+    """
+    actor = _clean_actor(actor)
+    scope = _clean_scope(scope)
+    purpose = _clean_purpose(purpose)
+    materialize = _clean_materialize(materialize)
+    source = Path(source).expanduser()
+    try:
+        text = source.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise SecretStoreValidationError(f"env file not found: {source}") from None
+    except (OSError, UnicodeError) as exc:
+        raise SecretStoreValidationError(f"could not read {source}: {exc}") from None
+    variables = parse_env_file(text, source=str(source))
+    if not variables:
+        raise SecretStoreValidationError(f"{source} defines no variables")
+
+    instance_dir = state_repo.require_repo(instance_dir)
+    created: list[str] = []
+    updated: list[str] = []
+    unchanged: list[str] = []
+    with state_repo.state_repo_lock(instance_dir):
+        key = load_installation_key(instance_dir)
+        _assert_key_ignored(instance_dir)
+        entries = {entry["id"]: dict(entry) for entry in load_catalog(instance_dir)["secrets"]}
+        writes: list[tuple[Path, str]] = []
+        for name, raw in variables.items():
+            secret_id = secret_id_for_variable(name)
+            value = raw.encode("utf-8")
+            if not value:
+                raise SecretStoreValidationError(
+                    f"{source}: {name} has an empty value; the store holds no empty secrets"
+                )
+            existing = entries.get(secret_id)
+            entry = _entry(
+                secret_id,
+                scope=scope,
+                purpose=purpose,
+                environment=name,
+                materialize=dict(materialize) if materialize else None,
+                existing=existing,
+            )
+            if existing is None:
+                created.append(secret_id)
+            elif existing == entry and _stored_value(instance_dir, secret_id, key) == value:
+                unchanged.append(secret_id)
+                continue
+            else:
+                updated.append(secret_id)
+            entries[secret_id] = entry
+            writes.append(
+                (
+                    value_path(instance_dir, secret_id),
+                    json.dumps(seal_value(key, secret_id, value), indent=2, sort_keys=True) + "\n",
+                )
+            )
+
+        if not writes:
+            return ImportResult(
+                created=(),
+                updated=(),
+                unchanged=tuple(unchanged),
+                commit=state_repo.head(instance_dir) or "",
+            )
+        catalog_text = _catalog_text(_catalog(entries))
+        _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
+        _publish([*writes, (catalog_path(instance_dir), catalog_text)])
+        commit = state_repo.commit(
+            instance_dir,
+            SECRETS_PATHSPEC,
+            _commit_message("import", f"{len(writes)} secrets from {source.name}", actor),
+        )
+        if commit is None:
+            commit = state_repo.head(instance_dir) or ""
+    return ImportResult(
+        created=tuple(created),
+        updated=tuple(updated),
+        unchanged=tuple(unchanged),
+        commit=commit,
+    )
+
+
+def materialize_secrets(
+    instance_dir: Path, *, target: str | None = None
+) -> tuple[MaterializeResult, ...]:
+    """Write every materializing secret into its env file.
+
+    One file per target, written whole: the values that belong there are the
+    values that end up there, and a variable dropped from the catalog is gone
+    from the file. Callers that only want one file pass `target`.
+    """
+    if target is not None and target not in MATERIALIZE_TARGETS:
+        raise SecretStoreValidationError(
+            f"unknown materialization target {target!r}; expected one of "
+            + ", ".join(MATERIALIZE_TARGETS)
+        )
+    instance_dir = state_repo.require_repo(instance_dir)
+    with state_repo.state_repo_lock(instance_dir):
+        key = load_installation_key(instance_dir)
+        groups: dict[Path, list[dict[str, Any]]] = {}
+        for entry in list_secrets(instance_dir):
+            instruction = entry.get("materialize")
+            if not instruction:
+                continue
+            if target is not None and instruction.get("target") != target:
+                continue
+            groups.setdefault(materialize_path(instance_dir, entry), []).append(entry)
+
+        results = []
+        for path in sorted(groups):
+            entries = sorted(groups[path], key=lambda item: item["environment"])
+            _assert_one_secret_per_variable(path, entries)
+            _assert_writable_target(instance_dir, path)
+            lines = []
+            for entry in entries:
+                value = _read_value(instance_dir, entry["id"], key)
+                lines.append(f"{entry['environment']}={_env_value(entry, value)}\n")
+            changed = _publish_env_file(path, "".join(lines))
+            results.append(
+                MaterializeResult(
+                    target=entries[0]["materialize"]["target"],
+                    path=path,
+                    variables=tuple(entry["environment"] for entry in entries),
+                    changed=changed,
+                )
+            )
+    return tuple(results)
+
+
+def materialize_path(instance_dir: Path, entry: dict[str, Any]) -> Path:
+    """Resolve one catalog entry's materialization target to a path.
+
+    `runtime-env` never carries a path of its own: the installation's env file is
+    whatever `role_env` says it is, override included, so the store and a
+    launched head always mean the same file.
+    """
+    instruction = entry.get("materialize") or {}
+    target = instruction.get("target")
+    if target == MATERIALIZE_RUNTIME_ENV:
+        return role_env.runtime_env_path()
+    if target == MATERIALIZE_FILE:
+        path = Path(str(instruction.get("path", ""))).expanduser()
+        if not str(path):
+            raise SecretStoreStateError(
+                f"secret {entry.get('id')!r} materializes to a file with no path"
+            )
+        return path if path.is_absolute() else instance_dir / path
+    raise SecretStoreStateError(
+        f"secret {entry.get('id')!r} has an unknown materialization target {target!r}"
+    )
+
+
+def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
+    """Read `KEY=VALUE` lines exactly as `installation._read_runtime_env` reads them.
+
+    Values are taken literally, with no unquoting: whatever bytes stood to the
+    right of the first `=` are the value, so materializing the parse back out
+    reproduces the line it came from.
+    """
+    values: dict[str, str] = {}
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export ") or "=" not in line:
+            raise SecretStoreValidationError(f"{source} line {number} must use KEY=VALUE syntax")
+        name, value = line.split("=", 1)
+        if not _ENV_NAME_RE.match(name):
+            raise SecretStoreValidationError(f"{source} line {number} has an invalid variable name")
+        if name in values:
+            raise SecretStoreValidationError(f"{source} defines {name} twice")
+        values[name] = value
+    return values
+
+
+def secret_id_for_variable(name: str) -> str:
+    """`KANBOARD_API_TOKEN` -> `kanboard_api_token`, and back by upper-casing."""
+    return _clean_secret_id(str(name).strip().lower())
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+
+
+def _entry(
+    secret_id: str,
+    *,
+    scope: str,
+    purpose: str,
+    environment: str | None,
+    materialize: dict[str, Any] | None,
+    existing: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """One catalog entry. `created_at` belongs to the first write, not this one."""
+    if materialize and not environment:
+        raise SecretStoreValidationError(
+            "a secret that materializes needs the environment variable it materializes into"
+        )
+    entry: dict[str, Any] = {
+        "id": secret_id,
+        "scope": scope,
+        "purpose": purpose,
+        "created_at": existing["created_at"] if existing else _now(),
+    }
+    if environment:
+        entry["environment"] = environment
+    if materialize:
+        entry["materialize"] = materialize
+    return entry
+
+
+def _catalog(entries: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    catalog = {
+        "version": CATALOG_VERSION,
+        "secrets": [entries[name] for name in sorted(entries)],
+    }
+    errors = validate(catalog, "secret-catalog", f"secrets/{CATALOG_NAME}")
+    if errors:
+        raise SecretStoreValidationError(f"catalog entry is invalid: {errors[0]}")
+    return catalog
+
+
+def _read_value(instance_dir: Path, secret_id: str, key: bytes) -> bytes:
     path = value_path(instance_dir, secret_id)
     try:
         envelope = json.loads(path.read_text(encoding="utf-8"))
@@ -589,11 +893,112 @@ def read_secret(instance_dir: Path, secret_id: str) -> bytes:
         ) from None
     except (OSError, ValueError) as exc:
         raise SecretStoreStateError(f"could not read the value for {secret_id!r}: {exc}") from None
-    return open_value(load_installation_key(instance_dir), envelope)
+    return open_value(key, envelope)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
+def _stored_value(instance_dir: Path, secret_id: str, key: bytes) -> bytes | None:
+    """The value already in the store, or None if it is not readable as one."""
+    try:
+        return _read_value(instance_dir, secret_id, key)
+    except SecretStoreStateError:
+        return None
+
+
+def _env_value(entry: dict[str, Any], value: bytes) -> str:
+    """The right-hand side of one env line, or a refusal.
+
+    An env file has no escaping this format can rely on: `installation` reads the
+    rest of the line literally, so a value with a newline in it would silently
+    become a different variable, or a truncated one.
+    """
+    try:
+        text = value.decode("utf-8")
+    except UnicodeError:
+        raise SecretStoreValidationError(
+            f"secret {entry['id']!r} is not text and cannot go into an env file"
+        ) from None
+    if any(char in text for char in "\n\r\x00"):
+        raise SecretStoreValidationError(
+            f"secret {entry['id']!r} contains a newline and cannot go into an env file"
+        )
+    return text
+
+
+def _assert_one_secret_per_variable(path: Path, entries: list[dict[str, Any]]) -> None:
+    """Two secrets claiming one variable is a store fault, not a write order."""
+    seen: dict[str, str] = {}
+    for entry in entries:
+        name = entry["environment"]
+        if name in seen:
+            raise SecretStoreStateError(
+                f"{seen[name]} and {entry['id']} both materialize {name} into {path}"
+            )
+        seen[name] = entry["id"]
+
+
+def _assert_writable_target(instance_dir: Path, path: Path) -> None:
+    """Refuse a target that git would track, or that is not a plain file."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        raise SecretStoreStateError(
+            f"materialization target {path} is not a regular file; refusing to replace it"
+        )
+    try:
+        relative = path.resolve().relative_to(instance_dir.resolve())
+    except ValueError:
+        return
+    try:
+        state_repo.git(
+            instance_dir,
+            ["check-ignore", "--quiet", "--", str(relative)],
+            label="verify the materialization target is gitignored",
+        )
+    except state_repo.StateRepoError:
+        raise SecretStoreError(
+            f"materialization target {relative} is inside the instance repo but is not "
+            "gitignored; refusing to write plaintext where git can pick it up"
+        ) from None
+
+
+def _publish_env_file(path: Path, text: str) -> bool:
+    """Replace the env file in one step, or leave it exactly as it was.
+
+    systemd reads this file on every unit start, so there is no moment it may be
+    missing, empty or half-written: the content is written to a neighbour, given
+    its mode there, and only then renamed over the target. A rename is the whole
+    swap; a crash before it leaves the old file untouched.
+    """
+    desired = text.encode("utf-8")
+    try:
+        if path.exists() and path.read_bytes() == desired:
+            return False
+    except OSError as exc:
+        raise SecretStoreError(f"could not read the materialization target {path}: {exc}") from None
+
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(desired)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+    except OSError as exc:
+        raise SecretStoreError(f"could not write {path}: {exc}") from None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+    return True
 
 
 def _publish(writes: list[tuple[Path, str]]) -> None:
@@ -692,9 +1097,39 @@ def _clean_environment(environment: str | None) -> str | None:
     value = str(environment).strip()
     if not value:
         return None
-    if len(value) > 64 or not value.replace("_", "").isalnum():
+    if len(value) > 64 or not _ENV_NAME_RE.match(value):
         raise SecretStoreValidationError("environment must be an environment variable name")
     return value
+
+
+def _clean_materialize(materialize: dict[str, Any] | None) -> dict[str, Any] | None:
+    if materialize is None:
+        return None
+    if not isinstance(materialize, dict):
+        raise SecretStoreValidationError("materialize must be a mapping")
+    target = str(materialize.get("target", "")).strip()
+    if target not in MATERIALIZE_TARGETS:
+        raise SecretStoreValidationError(
+            f"materialization target must be one of {', '.join(MATERIALIZE_TARGETS)}"
+        )
+    if target == MATERIALIZE_RUNTIME_ENV:
+        if materialize.get("path"):
+            raise SecretStoreValidationError(
+                f"the {MATERIALIZE_RUNTIME_ENV} target carries no path; "
+                "it is resolved at write time"
+            )
+        return {"target": target}
+    path = str(materialize.get("path", "")).strip()
+    if not path:
+        raise SecretStoreValidationError(f"the {MATERIALIZE_FILE} target needs a path")
+    return {"target": target, "path": path}
+
+
+def _check_value(value: bytes) -> None:
+    if not isinstance(value, (bytes, bytearray)):
+        raise SecretStoreValidationError("secret value must be bytes")
+    if not value:
+        raise SecretStoreValidationError("secret value is empty")
 
 
 def _commit_message(operation: str, subject: str, actor: str) -> str:

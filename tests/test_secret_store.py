@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -8,8 +9,9 @@ from unittest import mock
 
 import yaml
 
-from secretary import secret_commands, secret_store, state_repo
+from secretary import installation, secret_commands, secret_store, state_repo
 from secretary.cli import main
+from secretary.config import validate
 from secretary.secret_store import (
     CATALOG_NAME,
     GITIGNORE_ENTRY,
@@ -19,10 +21,13 @@ from secretary.secret_store import (
     SecretStoreStateError,
     SecretStoreValidationError,
     generate_recovery_phrase,
+    import_env_file,
     initialize_store,
     list_secrets,
     load_installation_key,
+    materialize_secrets,
     read_secret,
+    remove_secret,
     restore_installation_key,
     set_secret,
     store_divergence,
@@ -487,6 +492,386 @@ class InterruptedWriteCase(SecretStoreCase):
         )
 
 
+# The three keys the live installation's runtime.env holds, in the order
+# materialize writes them: sorted by variable name, KEY=VALUE, one LF each.
+LIVE_RUNTIME_ENV = (
+    "KANBOARD_API_TOKEN=1f2e3d4c5b6a\n"
+    "KANBOARD_API_USER=secretary\n"
+    "KANBOARD_URL=https://board.example.invalid/jsonrpc.php\n"
+)
+
+
+class EnvStoreCase(SecretStoreCase):
+    """An initialized store plus a runtime.env shaped like the live one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.initialize()
+        self.source = Path(self.tmpdir.name) / "runtime.env"
+        self.source.write_text(LIVE_RUNTIME_ENV, encoding="utf-8")
+        os.chmod(self.source, 0o600)
+        self.target = Path(self.tmpdir.name) / "materialized" / "runtime.env"
+        override = mock.patch.dict(
+            os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.target)}
+        )
+        override.start()
+        self.addCleanup(override.stop)
+
+    def do_import(self, source: Path | None = None, **overrides):
+        request = {
+            "source": source or self.source,
+            "scope": "installation",
+            "purpose": "board api",
+            "actor": "tester",
+            "materialize": {"target": "runtime-env"},
+            **overrides,
+        }
+        return import_env_file(self.instance_dir, **request)
+
+
+class ImportCase(EnvStoreCase):
+    def test_import_makes_one_secret_per_variable(self) -> None:
+        result = self.do_import()
+        self.assertEqual(
+            result.created, ("kanboard_api_token", "kanboard_api_user", "kanboard_url")
+        )
+        entries = list_secrets(self.instance_dir)
+        self.assertEqual(
+            [(entry["id"], entry["environment"]) for entry in entries],
+            [
+                ("kanboard_api_token", "KANBOARD_API_TOKEN"),
+                ("kanboard_api_user", "KANBOARD_API_USER"),
+                ("kanboard_url", "KANBOARD_URL"),
+            ],
+        )
+        self.assertEqual(entries[0]["materialize"], {"target": "runtime-env"})
+        self.assertEqual(read_secret(self.instance_dir, "kanboard_api_user"), b"secretary")
+        self.assertEqual(store_divergence(self.instance_dir), ())
+
+    def test_import_lands_as_one_commit(self) -> None:
+        before = state_repo.head(self.instance_dir)
+        result = self.do_import()
+        self.assertNotEqual(result.commit, before)
+        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(
+            sorted(touched),
+            [
+                "secrets/catalog.yaml",
+                "secrets/values/kanboard_api_token.enc.json",
+                "secrets/values/kanboard_api_user.enc.json",
+                "secrets/values/kanboard_url.enc.json",
+            ],
+        )
+
+    def test_reimporting_the_same_file_duplicates_nothing_and_writes_nothing(self) -> None:
+        self.do_import()
+        head = state_repo.head(self.instance_dir)
+        envelope = self.instance_dir / "secrets" / "values" / "kanboard_url.enc.json"
+        sealed = envelope.read_bytes()
+
+        result = self.do_import()
+        self.assertEqual(result.created, ())
+        self.assertEqual(result.updated, ())
+        self.assertEqual(
+            result.unchanged, ("kanboard_api_token", "kanboard_api_user", "kanboard_url")
+        )
+        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(envelope.read_bytes(), sealed)
+        self.assertEqual(len(list_secrets(self.instance_dir)), 3)
+
+    def test_reimport_names_the_variable_that_moved(self) -> None:
+        self.do_import()
+        self.source.write_text(
+            LIVE_RUNTIME_ENV.replace("=secretary\n", "=secretary-two\n"), encoding="utf-8"
+        )
+        result = self.do_import()
+        self.assertEqual(result.updated, ("kanboard_api_user",))
+        self.assertEqual(result.created, ())
+        self.assertEqual(result.unchanged, ("kanboard_api_token", "kanboard_url"))
+        self.assertEqual(read_secret(self.instance_dir, "kanboard_api_user"), b"secretary-two")
+        # Only the rotated envelope moves: the catalog says the same thing it did
+        # before, so the commit does not restate it.
+        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(touched, ["secrets/values/kanboard_api_user.enc.json"])
+
+    def test_import_keeps_created_at_across_a_rotation(self) -> None:
+        self.do_import()
+        created_at = list_secrets(self.instance_dir)[0]["created_at"]
+        self.source.write_text(
+            LIVE_RUNTIME_ENV.replace("=1f2e3d4c5b6a\n", "=rotated\n"), encoding="utf-8"
+        )
+        self.do_import()
+        self.assertEqual(list_secrets(self.instance_dir)[0]["created_at"], created_at)
+
+    def test_a_file_import_cannot_read_is_refused_before_anything_is_written(self) -> None:
+        head = state_repo.head(self.instance_dir)
+        cases = [
+            "export KANBOARD_URL=https://board\n",
+            "KANBOARD URL\n",
+            "1BAD=value\n",
+            "KANBOARD_URL=a\nKANBOARD_URL=b\n",
+            "KANBOARD_URL=\n",
+            "# only a comment\n",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.source.write_text(text, encoding="utf-8")
+                with self.assertRaises(SecretStoreValidationError):
+                    self.do_import()
+        self.assertEqual(list_secrets(self.instance_dir), ())
+        self.assertEqual(state_repo.head(self.instance_dir), head)
+
+    def test_import_does_not_read_a_file_that_is_not_there(self) -> None:
+        with self.assertRaises(SecretStoreValidationError) as caught:
+            self.do_import(source=Path(self.tmpdir.name) / "absent.env")
+        self.assertIn("not found", str(caught.exception))
+
+
+class RemoveCase(EnvStoreCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.do_import()
+
+    def test_remove_drops_the_entry_and_the_envelope_in_one_commit(self) -> None:
+        envelope = self.instance_dir / "secrets" / "values" / "kanboard_url.enc.json"
+        result = remove_secret(self.instance_dir, secret_id="kanboard_url", actor="tester")
+        self.assertEqual(result.commit, state_repo.head(self.instance_dir))
+        self.assertFalse(envelope.exists())
+        self.assertEqual(
+            [entry["id"] for entry in list_secrets(self.instance_dir)],
+            ["kanboard_api_token", "kanboard_api_user"],
+        )
+        self.assertEqual(store_divergence(self.instance_dir), ())
+        self.assertEqual(state_repo.status(self.instance_dir, ("secrets",)), "")
+        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(
+            sorted(touched),
+            ["secrets/catalog.yaml", "secrets/values/kanboard_url.enc.json"],
+        )
+        self.assertNotIn(
+            "secrets/values/kanboard_url.enc.json",
+            git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split(),
+        )
+
+    def test_removing_a_secret_that_is_not_there_is_an_error(self) -> None:
+        head = state_repo.head(self.instance_dir)
+        with self.assertRaises(SecretStoreStateError) as caught:
+            remove_secret(self.instance_dir, secret_id="never.stored", actor="tester")
+        self.assertIn("no secret named", str(caught.exception))
+        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(len(list_secrets(self.instance_dir)), 3)
+
+
+class MaterializeCase(EnvStoreCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.do_import()
+
+    def test_materialize_writes_the_env_file_0600(self) -> None:
+        results = materialize_secrets(self.instance_dir)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].target, "runtime-env")
+        self.assertEqual(results[0].path, self.target)
+        self.assertTrue(results[0].changed)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV)
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
+
+    def test_the_target_path_comes_from_role_env_not_from_a_constant(self) -> None:
+        moved = Path(self.tmpdir.name) / "elsewhere" / "runtime.env"
+        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(moved)}):
+            results = materialize_secrets(self.instance_dir)
+        self.assertEqual(results[0].path, moved)
+        self.assertEqual(moved.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV)
+        self.assertFalse(self.target.exists())
+
+    def test_a_second_run_leaves_the_file_byte_for_byte_the_same(self) -> None:
+        materialize_secrets(self.instance_dir)
+        first = self.target.read_bytes()
+        before = self.target.stat().st_ino
+        results = materialize_secrets(self.instance_dir)
+        self.assertEqual(self.target.read_bytes(), first)
+        self.assertFalse(results[0].changed)
+        # Unchanged means untouched: systemd never sees a rename it did not need.
+        self.assertEqual(self.target.stat().st_ino, before)
+
+    def test_an_interrupted_swap_leaves_the_previous_file_in_place(self) -> None:
+        materialize_secrets(self.instance_dir)
+        before = self.target.read_bytes()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard_api_user",
+            value=b"rotated",
+            scope="installation",
+            purpose="board api",
+            environment="KANBOARD_API_USER",
+            materialize={"target": "runtime-env"},
+            actor="tester",
+        )
+
+        def fail_replace(source, destination):
+            raise OSError("interrupted between the temporary file and the target")
+
+        with mock.patch.object(secret_store.os, "replace", side_effect=fail_replace):
+            with self.assertRaises(SecretStoreError):
+                materialize_secrets(self.instance_dir)
+
+        self.assertEqual(self.target.read_bytes(), before)
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
+        leftovers = [path.name for path in self.target.parent.iterdir()]
+        self.assertEqual(leftovers, [self.target.name])
+
+    def test_the_generated_file_passes_the_installation_validator(self) -> None:
+        materialize_secrets(self.instance_dir)
+        values = installation._read_runtime_env(self.instance_dir, str(self.target))
+        self.assertEqual(
+            values,
+            {
+                "KANBOARD_API_TOKEN": "1f2e3d4c5b6a",
+                "KANBOARD_API_USER": "secretary",
+                "KANBOARD_URL": "https://board.example.invalid/jsonrpc.php",
+            },
+        )
+
+    def test_import_then_materialize_reproduces_the_original_bytes(self) -> None:
+        materialize_secrets(self.instance_dir)
+        self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
+
+    def test_a_file_target_is_written_where_the_catalog_says(self) -> None:
+        elsewhere = Path(self.tmpdir.name) / "other" / "app.env"
+        set_secret(
+            self.instance_dir,
+            secret_id="app.token",
+            value=b"app-value",
+            scope="project:secretary",
+            purpose="app credentials",
+            environment="APP_TOKEN",
+            materialize={"target": "file", "path": str(elsewhere)},
+            actor="tester",
+        )
+        results = materialize_secrets(self.instance_dir)
+        self.assertEqual({result.path for result in results}, {self.target, elsewhere})
+        self.assertEqual(elsewhere.read_text(encoding="utf-8"), "APP_TOKEN=app-value\n")
+
+        only_runtime = materialize_secrets(self.instance_dir, target="runtime-env")
+        self.assertEqual([result.path for result in only_runtime], [self.target])
+
+    def test_materialize_refuses_a_target_git_would_pick_up(self) -> None:
+        inside = self.instance_dir / "tracked.env"
+        set_secret(
+            self.instance_dir,
+            secret_id="app.token",
+            value=b"app-value",
+            scope="installation",
+            purpose="app credentials",
+            environment="APP_TOKEN",
+            materialize={"target": "file", "path": "tracked.env"},
+            actor="tester",
+        )
+        with self.assertRaises(SecretStoreError) as caught:
+            materialize_secrets(self.instance_dir, target="file")
+        self.assertIn("not gitignored", str(caught.exception))
+        self.assertFalse(inside.exists())
+
+        (self.instance_dir / ".gitignore").write_text(
+            f"{GITIGNORE_ENTRY}\ntracked.env\n", encoding="utf-8"
+        )
+        materialize_secrets(self.instance_dir, target="file")
+        self.assertEqual(inside.read_text(encoding="utf-8"), "APP_TOKEN=app-value\n")
+
+    def test_a_value_with_a_newline_never_becomes_an_env_line(self) -> None:
+        set_secret(
+            self.instance_dir,
+            secret_id="app.key",
+            value=b"-----BEGIN KEY-----\nbody\n",
+            scope="installation",
+            purpose="pem body",
+            environment="APP_KEY",
+            materialize={"target": "runtime-env"},
+            actor="tester",
+        )
+        with self.assertRaises(SecretStoreValidationError) as caught:
+            materialize_secrets(self.instance_dir)
+        self.assertIn("newline", str(caught.exception))
+        self.assertFalse(self.target.exists())
+
+    def test_two_secrets_claiming_one_variable_stop_the_write(self) -> None:
+        materialize_secrets(self.instance_dir)
+        before = self.target.read_bytes()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.url.copy",
+            value=b"https://other.example.invalid/jsonrpc.php",
+            scope="installation",
+            purpose="a second claim on the same variable",
+            environment="KANBOARD_URL",
+            materialize={"target": "runtime-env"},
+            actor="tester",
+        )
+        with self.assertRaises(SecretStoreStateError) as caught:
+            materialize_secrets(self.instance_dir)
+        self.assertIn("KANBOARD_URL", str(caught.exception))
+        self.assertEqual(self.target.read_bytes(), before)
+
+    def test_a_secret_with_no_materialize_record_stays_in_the_store(self) -> None:
+        set_secret(
+            self.instance_dir,
+            secret_id="offline.note",
+            value=b"not an env var",
+            scope="installation",
+            purpose="kept for recovery only",
+            actor="tester",
+        )
+        materialize_secrets(self.instance_dir)
+        self.assertNotIn("offline", self.target.read_text(encoding="utf-8"))
+
+
+class CatalogSchemaCase(unittest.TestCase):
+    """The materialization record is only as good as the schema that guards it."""
+
+    def catalog(self, entry: dict) -> dict:
+        return {
+            "version": secret_store.CATALOG_VERSION,
+            "secrets": [
+                {
+                    "id": "kanboard_url",
+                    "scope": "installation",
+                    "purpose": "board api",
+                    "created_at": "2026-07-26T10:00:00Z",
+                    **entry,
+                }
+            ],
+        }
+
+    def test_a_usable_record_validates(self) -> None:
+        for instruction in (
+            {"target": "runtime-env"},
+            {"target": "file", "path": "/etc/secretary/app.env"},
+        ):
+            with self.subTest(instruction=instruction):
+                catalog = self.catalog(
+                    {"environment": "KANBOARD_URL", "materialize": instruction}
+                )
+                self.assertEqual(validate(catalog, "secret-catalog", "catalog.yaml"), [])
+
+    def test_a_record_nothing_could_act_on_is_rejected(self) -> None:
+        cases = [
+            {"environment": "KANBOARD_URL", "materialize": {"target": "elsewhere"}},
+            {"environment": "KANBOARD_URL", "materialize": {"target": "file"}},
+            {
+                "environment": "KANBOARD_URL",
+                "materialize": {"target": "runtime-env", "path": "/etc/runtime.env"},
+            },
+            # Without a variable name there is nothing to write on the left of '='.
+            {"materialize": {"target": "runtime-env"}},
+            {"environment": "not-an-env-name", "materialize": {"target": "runtime-env"}},
+        ]
+        for entry in cases:
+            with self.subTest(entry=entry):
+                self.assertNotEqual(
+                    validate(self.catalog(entry), "secret-catalog", "catalog.yaml"), []
+                )
+
+
 class SecretCliCase(SecretStoreCase):
     def run_cli(self, argv: list[str], stdin: bytes = b"") -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -609,6 +994,79 @@ class SecretCliCase(SecretStoreCase):
                     "secret",
                 ]
             )
+        self.assertEqual(list_secrets(self.instance_dir), ())
+
+    def test_import_materialize_and_remove_through_the_cli(self) -> None:
+        self.initialize()
+        source = Path(self.tmpdir.name) / "runtime.env"
+        source.write_text(LIVE_RUNTIME_ENV, encoding="utf-8")
+        target = Path(self.tmpdir.name) / "out" / "runtime.env"
+
+        code, out, _ = self.run_cli(
+            [
+                "secret",
+                "import",
+                "--instance",
+                str(self.instance_dir),
+                "--file",
+                str(source),
+                "--scope",
+                "installation",
+                "--purpose",
+                "board api",
+            ]
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(len(report["created"]), 3)
+        # The report names ids and nothing else; no value reaches stdout.
+        self.assertNotIn("1f2e3d4c5b6a", out)
+        self.assertNotIn("secretary-instance/secrets/values", out)
+
+        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(target)}):
+            code, out, _ = self.run_cli(
+                ["secret", "materialize", "--instance", str(self.instance_dir)]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["targets"][0]["path"], str(target))
+        self.assertNotIn("1f2e3d4c5b6a", out)
+        self.assertEqual(target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV)
+
+        code, out, _ = self.run_cli(
+            ["secret", "remove", "--instance", str(self.instance_dir), "--id", "kanboard_url"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)],
+                         ["kanboard_api_token", "kanboard_api_user"])
+
+        code, out, _ = self.run_cli(
+            ["secret", "remove", "--instance", str(self.instance_dir), "--id", "kanboard_url"]
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("no secret named", json.loads(out)["message"])
+
+    def test_a_file_target_needs_its_path_on_the_command_line(self) -> None:
+        self.initialize()
+        source = Path(self.tmpdir.name) / "runtime.env"
+        source.write_text(LIVE_RUNTIME_ENV, encoding="utf-8")
+        code, out, _ = self.run_cli(
+            [
+                "secret",
+                "import",
+                "--instance",
+                str(self.instance_dir),
+                "--file",
+                str(source),
+                "--scope",
+                "installation",
+                "--purpose",
+                "board api",
+                "--materialize",
+                "file",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--materialize-path", json.loads(out)["message"])
         self.assertEqual(list_secrets(self.instance_dir), ())
 
     def test_list_before_init_says_so_instead_of_failing_obscurely(self) -> None:
