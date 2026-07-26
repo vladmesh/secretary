@@ -16,6 +16,11 @@ repo, checkpoint writer и pusher сериализованы одним writer l
 `secretary-data` хранит mutable/derived runtime state и пересоздаваемый memory index, отдельным
 recovery-репозиторием не является.
 
+Восстановимое хранилище секретов (`secretary secret init/set/import`, `secretary-instance/secrets/`)
+держит installation credentials в том же instance-репозитории рядом с board и memory: канон
+значений зашифрован, восстанавливается одной recovery phrase и уезжает тем же push. Секреты стали
+частью recovery-контракта наравне с board, memory и operational configuration.
+
 Фоновые роли материализуются из продуктового канона: packaged units и `automation.toml` управляют
 curator, steward и retro, их timers и Orca automations без ручного копирования generated files.
 Live instance содержит переносимый desired config для materializer. Archive backup, offsite и
@@ -90,7 +95,7 @@ optional cold archive, а не вторым равноправным контр�
 ```text
 install secretary
   -> recover from private remote
-  -> fill credentials/.env
+  -> enter recovery phrase
   -> rebuild derived state
   -> status
 ```
@@ -116,7 +121,8 @@ install secretary
 - Vector index, терминалы, worktrees, generated units и host-local caches не считаются каноном.
 - Snapshot проходит validation до commit и push; remote divergence и push failure остаются
   fail-closed и видны в status вместе с checkpoint lag.
-- Потеря исходного VPS не мешает восстановить доску, память и operational configuration из remote.
+- Потеря исходного VPS не мешает восстановить доску, память, operational configuration и
+  статические секреты установки из remote.
 - После подтверждённой parity основной UX и документация больше не требуют archive bundle/offsite
   transport.
 
