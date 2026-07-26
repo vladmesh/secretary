@@ -64,7 +64,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from secretary import role_env, state_repo
 from secretary._fsutil import publish_state_atomic
-from secretary.config import validate
+from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.state_repo import SECRETS_PATHSPEC
 
@@ -202,6 +202,25 @@ def value_path(instance_dir: Path, secret_id: str) -> Path:
 
 def is_initialized(instance_dir: Path) -> bool:
     return key_params_path(instance_dir).exists() and catalog_path(instance_dir).exists()
+
+
+def _store_exists(instance_dir: Path) -> bool:
+    """Whether `secrets/` holds any trace of a store, complete or not.
+
+    `is_initialized` requires the catalog and the key params together, so a
+    store missing just one of those files reads as fully absent to it. Health
+    and findings need to tell that apart from a directory that was never
+    touched, so this checks each file that `init` can produce independently,
+    plus a non-empty values directory.
+    """
+    if (
+        catalog_path(instance_dir).exists()
+        or key_params_path(instance_dir).exists()
+        or key_path(instance_dir).exists()
+    ):
+        return True
+    values_dir = secrets_dir(instance_dir) / VALUES_DIRNAME
+    return values_dir.is_dir() and any(values_dir.iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +387,8 @@ def _read_key_params(instance_dir: Path) -> dict[str, Any]:
         raise SecretStoreStateError(f"{KEY_PARAMS_NAME} is not an installation key file")
     if params.get("version") != KEY_PARAMS_VERSION:
         raise SecretStoreStateError(
-            f"{KEY_PARAMS_NAME} has format version {params.get('version')!r}, "
-            f"this product reads {KEY_PARAMS_VERSION}"
+            f"{KEY_PARAMS_NAME} has an unsupported format version; "
+            f"this product reads version {KEY_PARAMS_VERSION}"
         )
     return params
 
@@ -464,8 +483,14 @@ def load_catalog(instance_dir: Path) -> dict[str, Any]:
         raise SecretStoreStateError(
             "secret store is not initialized; run `secretary secret init` first"
         ) from None
-    except (OSError, yaml.YAMLError) as exc:
-        raise SecretStoreStateError(f"could not read {CATALOG_NAME}: {exc}") from None
+    except yaml.YAMLError as exc:
+        raise SecretStoreStateError(
+            f"{CATALOG_NAME} is invalid: {_safe_yaml_error(exc)}"
+        ) from None
+    except OSError as exc:
+        raise SecretStoreStateError(
+            f"could not read {CATALOG_NAME}: {exc.strerror or 'unreadable'}"
+        ) from None
     errors = validate(data, "secret-catalog", f"secrets/{CATALOG_NAME}")
     if errors:
         raise SecretStoreStateError(f"{CATALOG_NAME} is invalid: {errors[0]}")
@@ -503,6 +528,124 @@ def store_divergence(instance_dir: Path) -> tuple[str, ...]:
 
 def _catalog_text(catalog: dict[str, Any]) -> str:
     return yaml.safe_dump(catalog, sort_keys=True, allow_unicode=True, default_flow_style=False)
+
+
+# ---------------------------------------------------------------------------
+# Observability
+#
+# `store_health` and `store_findings` are the only two functions in this module
+# that `status` and `doctor` call. Both read the catalog and the key's own
+# metadata (mode, presence, whether it opens the store); neither ever touches
+# `read_secret` or `open_value`, so no value, sealed or otherwise, and no key
+# material can reach either report.
+
+
+def store_health(instance_dir: Path) -> dict[str, Any]:
+    """Non-secret snapshot of the store for `secretary status --json`.
+
+    A `secrets/` directory holding none of catalog, key params or key file
+    reports as absent rather than raising: an installation with no secrets in
+    it yet is a valid state, not a defect. Any other partial shape reports as
+    present, with `initialized` reflecting whether catalog and key params are
+    both there.
+    """
+    instance_dir = Path(instance_dir)
+    if not _store_exists(instance_dir):
+        return {
+            "initialized": False,
+            "secret_count": 0,
+            "last_modified_at": None,
+            "installation_key": {"present": False, "usable": None},
+            "materialize": [],
+        }
+    try:
+        secrets = list_secrets(instance_dir)
+    except SecretStoreError:
+        secrets = ()
+    present, usable = _key_presence(instance_dir)
+    return {
+        "initialized": is_initialized(instance_dir),
+        "secret_count": len(secrets),
+        "last_modified_at": _mtime(catalog_path(instance_dir)),
+        "installation_key": {"present": present, "usable": usable},
+        "materialize": _materialize_summary(secrets),
+    }
+
+
+def store_findings(instance_dir: Path) -> tuple[str, ...]:
+    """Everything wrong with the store on disk, for `secretary doctor`.
+
+    An empty `secrets/` directory gives no findings: absence is a valid state.
+    Any other shape, including a partial one where only some of catalog, key
+    params or key file exist, is checked against the four ways it can be
+    unhealthy: a divergence between the catalog and the values directory, an
+    installation key with permissions wider than 0600, and an installation key
+    that is missing or does not open the store while the catalog is not empty.
+    """
+    instance_dir = Path(instance_dir)
+    if not _store_exists(instance_dir):
+        return ()
+    findings: list[str] = []
+    try:
+        secrets = list_secrets(instance_dir)
+    except SecretStoreError as exc:
+        findings.append(f"secret store: {exc}")
+        secrets = ()
+    else:
+        findings.extend(f"secret store: {item}" for item in store_divergence(instance_dir))
+
+    path = key_path(instance_dir)
+    wide_permissions = False
+    try:
+        info = path.lstat()
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISREG(info.st_mode) and (info.st_mode & 0o077):
+        wide_permissions = True
+        findings.append(
+            f"secret store: installation key permissions are too broad; run chmod 0600 {path}"
+        )
+
+    if secrets and not wide_permissions:
+        try:
+            load_installation_key(instance_dir)
+        except SecretStoreError as exc:
+            findings.append(f"secret store: installation key is missing or unusable: {exc}")
+    return tuple(findings)
+
+
+def _key_presence(instance_dir: Path) -> tuple[bool, bool | None]:
+    """Whether a key file is there, and whether it opens this store.
+
+    `usable` is `None` when there is no key file to judge, so a status reader
+    cannot mistake "absent" for "present but broken".
+    """
+    try:
+        path = key_path(instance_dir)
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return True, False
+    except OSError:
+        return False, None
+    try:
+        load_installation_key(instance_dir)
+    except SecretStoreError:
+        return True, False
+    return True, True
+
+
+def _materialize_summary(secrets: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    """One row per materialization target, counted, never with a secret's name."""
+    counts: dict[tuple[str, str], int] = {}
+    for entry in secrets:
+        instruction = entry.get("materialize")
+        if not instruction:
+            continue
+        slot = _materialize_slot(instruction)
+        counts[slot] = counts.get(slot, 0) + 1
+    return [
+        {"target": target, "path": path or None, "count": count}
+        for (target, path), count in sorted(counts.items())
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1336,6 +1479,14 @@ def _commit_message(operation: str, subject: str, actor: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _mtime(path: Path) -> str | None:
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _b64(raw: bytes) -> str:

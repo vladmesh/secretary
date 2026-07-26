@@ -16,10 +16,13 @@ secretary-data            локальный mutable/derived runtime data plane
 ```
 
 Product repository не хранит bindings реальных проектов, credentials, карточки или host-local
-state. Instance содержит persona, project bindings, adapters, policies и head profiles. Секреты
-живут только в host `runtime.env` с правами `0600`; файл gitignored в instance repo и не входит в
-git checkpoint или archive payload. Структурированный реестр проектов живёт только в
-`secretary-instance/projects/`.
+state. Instance содержит persona, project bindings, adapters, policies и head profiles.
+Восстановимое хранилище секретов (`secretary-instance/secrets/`) держит каталог метаданных и
+sealed values в git рядом с board и memory; единственное, что репо никогда не содержит — сырой
+installation key и recovery phrase, см. [Recovery](RECOVERY.md), раздел «Секреты». Host
+`runtime.env` остаётся отдельным файлом с правами `0600`, gitignored и вне checkpoint или archive
+payload; миграция его текущего содержимого в хранилище — отдельный шаг с участием оператора.
+Структурированный реестр проектов живёт только в `secretary-instance/projects/`.
 
 `secretary-instance/state/` хранит нормализованный recovery-канон: board, runs, memory facts и
 knowledge-документы.

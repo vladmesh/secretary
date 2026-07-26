@@ -16,6 +16,7 @@ from secretary.secret_store import (
     CATALOG_NAME,
     GITIGNORE_ENTRY,
     KEY_NAME,
+    KEY_PARAMS_NAME,
     RecoveryPhraseError,
     SecretStoreError,
     SecretStoreStateError,
@@ -948,6 +949,209 @@ class MaterializeCase(EnvStoreCase):
         )
         materialize_secrets(self.instance_dir)
         self.assertNotIn("offline", self.target.read_text(encoding="utf-8"))
+
+
+class ObservabilityCase(SecretStoreCase):
+    """`store_health` and `store_findings` are the surface `status`/`doctor` use."""
+
+    def test_uninitialized_store_is_absent_and_finding_free(self) -> None:
+        health = secret_store.store_health(self.instance_dir)
+        self.assertEqual(
+            health,
+            {
+                "initialized": False,
+                "secret_count": 0,
+                "last_modified_at": None,
+                "installation_key": {"present": False, "usable": None},
+                "materialize": [],
+            },
+        )
+        self.assertEqual(secret_store.store_findings(self.instance_dir), ())
+
+    def test_healthy_store_reports_counts_and_no_findings(self) -> None:
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            environment="KANBOARD_API_TOKEN",
+            materialize={"target": "runtime-env"},
+            actor="tester",
+        )
+        health = secret_store.store_health(self.instance_dir)
+        self.assertTrue(health["initialized"])
+        self.assertEqual(health["secret_count"], 1)
+        self.assertIsNotNone(health["last_modified_at"])
+        self.assertEqual(health["installation_key"], {"present": True, "usable": True})
+        self.assertEqual(
+            health["materialize"], [{"target": "runtime-env", "path": None, "count": 1}]
+        )
+        self.assertEqual(secret_store.store_findings(self.instance_dir), ())
+
+    def test_health_never_carries_a_value_or_the_recovery_phrase(self) -> None:
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"super-secret-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        dump = json.dumps(secret_store.store_health(self.instance_dir))
+        self.assertNotIn("super-secret-value", dump)
+        self.assertNotIn(self.phrase, dump)
+
+    def test_initialized_empty_store_gives_no_finding_for_a_missing_key(self) -> None:
+        self.initialize()
+        (self.instance_dir / "secrets" / KEY_NAME).unlink()
+        self.assertEqual(secret_store.store_findings(self.instance_dir), ())
+        self.assertEqual(
+            secret_store.store_health(self.instance_dir)["installation_key"],
+            {"present": False, "usable": None},
+        )
+
+    def test_missing_key_with_a_non_empty_catalog_is_a_finding(self) -> None:
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        (self.instance_dir / "secrets" / KEY_NAME).unlink()
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("installation key is missing or unusable", findings[0])
+        self.assertEqual(
+            secret_store.store_health(self.instance_dir)["installation_key"],
+            {"present": False, "usable": None},
+        )
+
+    def test_wide_key_permissions_are_a_finding_even_with_an_empty_catalog(self) -> None:
+        self.initialize()
+        key_path = self.instance_dir / "secrets" / KEY_NAME
+        os.chmod(key_path, 0o644)
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("permissions are too broad", findings[0])
+        self.assertEqual(
+            secret_store.store_health(self.instance_dir)["installation_key"],
+            {"present": True, "usable": False},
+        )
+
+    def test_wide_key_permissions_do_not_duplicate_the_unusable_finding(self) -> None:
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        os.chmod(self.instance_dir / "secrets" / KEY_NAME, 0o644)
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("permissions are too broad", findings[0])
+
+    def test_catalog_value_divergence_is_a_finding(self) -> None:
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").unlink()
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertIn("secret store: kanboard.api-token: catalogued with no value", findings)
+
+    def test_missing_key_params_with_a_non_empty_catalog_is_a_finding(self) -> None:
+        """Reproduces a store where `init` ran and a secret was set, then only
+        installation-key.json was lost. Catalog and envelope survive, but the
+        raw key can no longer be checked against a verifier, so it must read
+        as unusable, not as a store that was never initialized."""
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        (self.instance_dir / "secrets" / KEY_PARAMS_NAME).unlink()
+        health = secret_store.store_health(self.instance_dir)
+        self.assertFalse(health["initialized"])
+        self.assertEqual(health["secret_count"], 1)
+        self.assertEqual(health["installation_key"], {"present": True, "usable": False})
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("installation key is missing or unusable", findings[0])
+
+    def test_corrupted_key_params_version_does_not_leak_the_installation_key(self) -> None:
+        """A key-params file with the raw installation key stuffed into its
+        `version` field (as `restore_installation_key` or manual tampering
+        could produce) must not have that value echoed back by a finding."""
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        key_path = self.instance_dir / "secrets" / KEY_NAME
+        raw_key = key_path.read_text(encoding="utf-8").strip()
+        params_path = self.instance_dir / "secrets" / KEY_PARAMS_NAME
+        params = json.loads(params_path.read_text(encoding="utf-8"))
+        params["version"] = raw_key
+        params_path.write_text(json.dumps(params), encoding="utf-8")
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertNotIn(raw_key, findings[0])
+        self.assertIn("installation key is missing or unusable", findings[0])
+
+    def test_missing_catalog_with_key_params_present_is_a_finding_not_absence(self) -> None:
+        self.initialize()
+        (self.instance_dir / "secrets" / CATALOG_NAME).unlink()
+        health = secret_store.store_health(self.instance_dir)
+        self.assertFalse(health["initialized"])
+        self.assertEqual(health["secret_count"], 0)
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("secret store:", findings[0])
+
+    def test_malformed_catalog_is_a_finding_not_a_crash(self) -> None:
+        self.initialize()
+        (self.instance_dir / "secrets" / CATALOG_NAME).write_text(
+            "bad: catalog\n", encoding="utf-8"
+        )
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("secret store:", findings[0])
+        health = secret_store.store_health(self.instance_dir)
+        self.assertTrue(health["initialized"])
+
+    def test_a_malformed_scalar_does_not_leak_its_content_into_a_finding(self) -> None:
+        self.initialize()
+        sentinel = "sentinel-secret-do-not-leak"
+        (self.instance_dir / "secrets" / CATALOG_NAME).write_text(
+            f'version: 1\nsecrets: "{sentinel}\n', encoding="utf-8"
+        )
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("secret store:", findings[0])
+        for finding in findings:
+            self.assertNotIn(sentinel, finding)
 
 
 class CatalogSchemaCase(unittest.TestCase):

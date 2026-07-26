@@ -17,6 +17,7 @@ from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HostError
 from secretary.host import CollectResult, FixtureHostSource, LiveHostSource, build_doctor_expectations
 from secretary.host_apply import resolve_packaged
+from secretary.secret_store import store_health
 
 
 STATUS_SCHEMA_VERSION = 1
@@ -64,6 +65,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             push_state=_object(production.get("checkpoint_push")),
         ),
         "memory": _memory_status(data_dir),
+        "secret_store": store_health(report.instance_path.parent),
     }
 
 

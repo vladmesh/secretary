@@ -499,6 +499,48 @@ class CheckpointPusherTests(unittest.TestCase):
         self.assertIn("no remote", state["reason"])
         self.assertEqual(state["failures"], 0)
 
+    def test_a_secret_store_commit_rides_the_same_push_as_the_rest_of_the_canon(self):
+        """secretary-777: the store's own writer commits separately, but there is
+        only one HEAD and one push; nothing routes a secret commit around it."""
+        from secretary.secret_store import initialize_store, set_secret
+
+        fast_params = {
+            "format": "secretary.installation-key",
+            "version": 1,
+            "kdf": {"id": "scrypt", "salt": "", "length": 32, "n": 2**8, "r": 8, "p": 1},
+        }
+
+        def fast_key_params():
+            from secretary import secret_store
+
+            params = json.loads(json.dumps(fast_params))
+            params["kdf"]["salt"] = secret_store._b64(b"0123456789abcdef")
+            return params
+
+        with mock.patch("secretary.secret_store._new_key_params", side_effect=fast_key_params):
+            initialize_store(self.instance_dir, phrase="one two three four", actor="tester")
+            before_secret = git(self.instance_dir, "rev-parse", "HEAD").strip()
+            set_secret(
+                self.instance_dir,
+                secret_id="kanboard.api-token",
+                value=b"token-value",
+                scope="installation",
+                purpose="board api",
+                actor="tester",
+            )
+        head = git(self.instance_dir, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(head, before_secret)
+
+        snapshot_before_push = checkpoint_snapshot(self.instance_dir)
+        self.assertGreaterEqual(snapshot_before_push["lag_commits"], 1)
+
+        state = self.pusher().push()
+
+        self.assertEqual(state["status"], "pushed")
+        self.assertEqual(self.remote_head(), head)
+        snapshot = checkpoint_snapshot(self.instance_dir, push_state=state)
+        self.assertEqual(snapshot["lag_commits"], 0)
+
 
 class CheckpointSnapshotTests(unittest.TestCase):
     """Contract: docs/RECOVERY.md, "Observability"."""
