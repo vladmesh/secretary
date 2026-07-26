@@ -1072,6 +1072,17 @@ class ObservabilityCase(SecretStoreCase):
         findings = secret_store.store_findings(self.instance_dir)
         self.assertIn("secret store: kanboard.api-token: catalogued with no value", findings)
 
+    def test_malformed_catalog_is_a_finding_not_a_crash(self) -> None:
+        self.initialize()
+        (self.instance_dir / "secrets" / CATALOG_NAME).write_text(
+            "bad: catalog\n", encoding="utf-8"
+        )
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("secret store:", findings[0])
+        health = secret_store.store_health(self.instance_dir)
+        self.assertTrue(health["initialized"])
+
 
 class CatalogSchemaCase(unittest.TestCase):
     """The materialization record is only as good as the schema that guards it."""

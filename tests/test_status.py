@@ -515,3 +515,36 @@ class SecretStoreObservabilityTests(unittest.TestCase):
         payload = json.loads(json_output.getvalue())
         self.assertEqual(json_code, 1, payload)
         self.assertTrue(any(f["code"] == "secret_store" for f in payload["findings"]))
+
+    def test_doctor_reports_a_malformed_catalog_as_a_finding_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+            initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
+            (instance_dir / "secrets" / "catalog.yaml").write_text("bad: catalog\n", encoding="utf-8")
+            (instance_dir / "secrets" / "installation-key.json").write_text("{}", encoding="utf-8")
+
+            text_output = io.StringIO()
+            with contextlib.redirect_stdout(text_output):
+                text_code = main([
+                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                json_code = main([
+                    "doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+            status_output = io.StringIO()
+            with contextlib.redirect_stdout(status_output):
+                status_code = main([
+                    "status", "--json", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(text_code, 1, text_output.getvalue())
+        self.assertIn("secret store findings:", text_output.getvalue())
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(json_code, 1, payload)
+        self.assertTrue(any(f["code"] == "secret_store" for f in payload["findings"]))
+        self.assertEqual(status_code, 0, status_output.getvalue())

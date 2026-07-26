@@ -556,12 +556,14 @@ def store_findings(instance_dir: Path) -> tuple[str, ...]:
     instance_dir = Path(instance_dir)
     if not is_initialized(instance_dir):
         return ()
-    findings = [f"secret store: {item}" for item in store_divergence(instance_dir)]
+    findings: list[str] = []
     try:
         secrets = list_secrets(instance_dir)
     except SecretStoreError as exc:
         findings.append(f"secret store: {exc}")
         secrets = ()
+    else:
+        findings.extend(f"secret store: {item}" for item in store_divergence(instance_dir))
 
     path = key_path(instance_dir)
     wide_permissions = False
