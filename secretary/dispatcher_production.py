@@ -10,6 +10,7 @@ from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatcher_observer import observer_snapshot, reconcile_observers
 from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -76,6 +77,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "legacy_pause": legacy_pause.to_json(),
         "pause": runtime.pause.summary(),
         "records": list((payload.get("records") or {}).keys()),
+        "observers": observer_snapshot(payload),
         "resource_health": runtime.head_health.snapshot(),
         "divergences": list((payload.get("controlled_divergences") or [])),
         "open_divergences": [
@@ -125,6 +127,15 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
         active_refs = {str(task.get("ref") or "") for task in active_tasks}
         reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
+        observer_errors: list[dict[str, str]] = []
+        # Observer heads are reconciled against the sprint board, not the card board, and hold no
+        # card record: a live observer never occupies the per-project claim gate below.
+        try:
+            reconcile_outcomes += reconcile_observers(
+                runtime, payload, pause_mode=str(pause.get("mode") or "")
+            )
+        except Exception as exc:
+            observer_errors.append(_unexpected_error("", exc))
         # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
         # reconciliation did: those are stamped by every tick regardless of code version, so a
         # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
@@ -132,6 +143,7 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         payload["last_reconciled_at"] = now_rfc3339()
         outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
         outcomes = reconcile_outcomes + outcomes
+        errors = observer_errors + errors
         # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
         claims_allowed = pause.get("mode") != "drain"
         if claims_allowed and not active_blocked:
@@ -303,6 +315,8 @@ class _ProbeHost:
 
     EFFECTS = (
         "prepare_worker",
+        "prepare_observer",
+        "stop_observer",
         "restart_worker",
         "verify_worker_result",
         "gate_check",

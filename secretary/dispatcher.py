@@ -47,6 +47,13 @@ from secretary.dispatcher_gate import (
     gate_check as _gate_check,
     validation_ci as _validation_ci,
 )
+from secretary.dispatcher_observer import (
+    OBSERVER_HEAD_FALLBACK,
+    OBSERVER_PROMPT_FILE,
+    OBSERVER_ROLE,
+    observer_launch_prompt as _observer_launch_prompt,
+    observer_pid_file as _observer_pid_file,
+)
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot, ProductionPause
 from secretary.dispatcher_pause_ops import (
     pause as _pause_pipeline,
@@ -111,6 +118,7 @@ from secretary.routing_journal import (
     run_key as _run_key,
 )
 from secretary.head_health import HeadHealth, HeadReadiness
+from secretary.sprints import SprintReader
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -302,6 +310,38 @@ class InstanceCatalog:
             model_source=model_source,
         )
 
+    def observer_head(self) -> str:
+        """The head profile a sprint observer is launched with.
+
+        Its own `role_defaults` key, never the worker's: an observer is a different role with a
+        different job, and repointing the worker default must not move it. The fallback is a named
+        profile rather than a silent reuse of another role's default, and it is validated here, so
+        a registry that has neither the key nor the fallback profile fails loudly at bring-up.
+        """
+        head = str(self._heads.get("role_defaults", {}).get("observer") or OBSERVER_HEAD_FALLBACK)
+        self._head_profile(head)
+        return head
+
+    def observer_run(self, head: str, *, workspace: str = "") -> HeadRun:
+        """The launch record for an observer head, read from the same snapshot as its command."""
+        profile = self._head_profile(head)
+        resources = self._heads.get("resources")
+        model: str | None = None
+        model_source = ""
+        if str(profile.get("adapter") or "") == "claude":
+            model, model_source = _claude_launch_model(
+                profile, workspace=workspace, env=_role_launch_env(OBSERVER_ROLE)
+            )
+        return head_run_from_profile(
+            role=OBSERVER_ROLE,
+            head=head,
+            head_source=HEAD_FROM_ROLE_DEFAULT,
+            profile=profile,
+            resources=resources if isinstance(resources, dict) else {},
+            model=model,
+            model_source=model_source,
+        )
+
     def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
         return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
 
@@ -441,6 +481,79 @@ class CommandHostRuntime:
             launch_prompt=self._worker_launch_prompt(),
             task=task,
         )
+
+    def observer_workspace(self, reference: str) -> str:
+        """Where one sprint observer runs. Its own directory, never a card workspace and never the
+        interactive secretary session's checkout: the observer reads reports and slices cards, it
+        does not own a branch."""
+        if self.mode == "noop":
+            return str(self.data_dir / "dispatcher" / "observers" / _request_token(reference))
+        root = Path(
+            os.environ.get(
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")
+            )
+        )
+        return str(root / "observers" / _request_token(reference))
+
+    def prepare_observer(self, sprint: dict[str, Any], head: str, *, prompt: str) -> dict[str, Any]:
+        """Bring one observer head up on its own workspace and terminal.
+
+        Same rendering and role environment as any other dispatcher-launched head: the command
+        comes from the catalog launcher, the process runs through `role_env exec --role observer`,
+        and the pid heartbeat wrapper writes the head's own pid where the tick reads it back.
+        """
+        reference = str(sprint.get("ref") or "")
+        workspace = Path(self.observer_workspace(reference))
+        workspace.mkdir(parents=True, exist_ok=True)
+        self._write_prompt(workspace / OBSERVER_PROMPT_FILE, prompt)
+        pid_file = _observer_pid_file(reference)
+        run = self._observer_run(head, str(workspace))
+        if self.mode == "noop":
+            return {
+                "workspace": str(workspace),
+                "handle": f"noop:{head}:{workspace.name}:{OBSERVER_PROMPT_FILE}",
+                "pid_file": pid_file,
+                "run": run,
+            }
+        # Drop a predecessor's pid before the new head can be read as this launch's liveness.
+        Path(pid_file).unlink(missing_ok=True)
+        launch = self.catalog.head_launch(
+            head,
+            OBSERVER_PROMPT_FILE,
+            workspace=str(workspace),
+            role=OBSERVER_ROLE,
+            launch_prompt=_observer_launch_prompt(),
+        )
+        handle = self._create_terminal(
+            str(workspace), f"{reference} observer", _with_pid_heartbeat(launch.command, pid_file)
+        )
+        if launch.prompt_after_start:
+            try:
+                _deliver_tui_prompt(
+                    handle,
+                    str(workspace),
+                    OBSERVER_PROMPT_FILE,
+                    run_json=self._run_json,
+                    prompt_text=_observer_launch_prompt(),
+                )
+            except (TuiDeliveryError, HostError) as exc:
+                _close_tui_terminal(handle, run_json=self._run_json)
+                raise HostError(str(exc)) from None
+        return {"workspace": str(workspace), "handle": handle, "pid_file": pid_file, "run": run}
+
+    def stop_observer(self, record: Any) -> None:
+        """End one observer head. Its pane only: nothing else runs in that workspace."""
+        if self.mode == "noop" or not record.handle:
+            return
+        _close_tui_terminal(record.handle, run_json=self._run_json)
+
+    def _observer_run(self, head: str, workspace: str) -> dict[str, Any]:
+        try:
+            return self.catalog.observer_run(head, workspace=workspace).to_json()
+        except (HostError, AttributeError, KeyError, TypeError):
+            return HeadRun(
+                role=OBSERVER_ROLE, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
+            ).to_json()
 
     def pane_leaf(self, workspace: str, handle: str) -> str:
         return self._pane_leaf(workspace, handle)
@@ -1146,6 +1259,7 @@ class DispatcherRuntime:
         pause: ProductionPause | None = None,
         checkpoint: CheckpointWriter | None = None,
         checkpoint_push: CheckpointPusher | None = None,
+        sprints: Any | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -1160,6 +1274,9 @@ class DispatcherRuntime:
         self.checkpoint = checkpoint
         self.checkpoint_push = checkpoint_push
         self.head_health = HeadHealth(catalog, state.root.parent)
+        # Sprint entities live on their own board, so the observer pass reads them through their
+        # own reader rather than the card reader.
+        self.sprints = sprints if sprints is not None else SprintReader(reader.client)
 
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)

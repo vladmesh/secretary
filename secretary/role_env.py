@@ -26,12 +26,16 @@ NONSECRET_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),
+    # The sprint observer is a dispatcher-launched head like the other two: it reads the sprint
+    # entity and its cards off the board and gets nothing else out of runtime.env.
+    "observer": (*BOARD_ENV, *NONSECRET_ENV),
 }
 ROLE_REQUIRED: dict[str, tuple[str, ...]] = {
     "worker": BOARD_ENV,
     "reviewer": BOARD_ENV,
+    "observer": BOARD_ENV,
 }
-BOARD_ROLES = {"worker", "reviewer"}
+BOARD_ROLES = {"worker", "reviewer", "observer"}
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_NAME_RE = re.compile(

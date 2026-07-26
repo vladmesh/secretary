@@ -539,6 +539,9 @@ def run_status(args: argparse.Namespace) -> int:
         return 0
     print(f"Secretary status: {snapshot['installation']['name'] or 'unnamed'}")
     print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
+    observers = snapshot["dispatcher"]["observers"]
+    live = sum(1 for observer in observers if observer["alive"])
+    print(f"sprint observers: {live} live of {len(observers)}")
     print(f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}")
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0

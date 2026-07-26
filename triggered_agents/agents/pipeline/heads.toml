@@ -180,6 +180,19 @@ model = "gpt-5.6-terra"
 effort = "high"
 fallback = ["claude-default"]
 
+[profiles.codex-observer]
+# Sprint observer: one long-lived head per open sprint, launched by the dispatcher and held until
+# the sprint closes. Terra xhigh like the other watcher roles: it slices cards and judges drift from
+# the sprint goal, which is planning work rather than implementation. TUI rather than exec, because
+# the observer is one continuous session for the whole sprint: a one-shot `codex exec` would exit
+# after its first turn and the tick would read that as a dead head every time.
+resource = "openai-sub"
+adapter = "codex"
+model = "gpt-5.6-terra"
+effort = "extra"
+codex_mode = "tui"
+fallback = []
+
 [profiles.claude-default]
 # The historical curator/retro launch shape before role agents got explicit head profiles:
 # bare `claude --dangerously-skip-permissions <skill>`, no --model flag.
@@ -233,3 +246,4 @@ reviewer = "codex-reviewer"
 curator = "codex-curator"
 steward = "codex-steward"
 retro = "codex-retro"
+observer = "codex-observer"

@@ -133,7 +133,7 @@ Memory writer независимо коммитит `state/memory` при `propo
 
 `secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe
 to poll: it reports managed services and timers, projects and configured heads, active dispatcher
-attempts, their workspace, watchdog pane/progress/respawn state, pause state, checkpoint freshness,
+attempts, their workspace, watchdog pane/progress/respawn state, sprint observer heads, pause state, checkpoint freshness,
 memory index state and host disk, memory and load. A live invocation uses the dispatcher's own pane
 probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
 
@@ -199,6 +199,53 @@ Controlled divergence — сигнал о расхождении между те
 самого запуска — от них не требуется ни `enabled`, ни `active`, но их состояние всё равно
 опрашивается и попадает в `host.units`, а не остаётся `null` как для unit'а, который никогда не
 проверяли.
+
+## Головы-наблюдатели спринтов
+
+Тот же production tick, тем же проходом реконсиляции, держит по одной голове-наблюдателю на каждый
+открытый спринт с board `Secretary sprints`. Наблюдатель не участвует в claim карточек: он не
+занимает project slot, не появляется в `records` и на очередь Ready не влияет.
+
+Решение тика на спринт видно в `actions` под `{"step": "observer-reconcile"}`:
+
+- `observer-launched` — открытый спринт без записи получил голову;
+- `observer-live` — голова жива, тик ничего не делал;
+- `observer-relaunched` — pid головы мёртв, поднята новая (в записи растёт `launches`);
+- `observer-stopped` — спринт закрыт или исчез с доски, голова остановлена, запись снята;
+- `observer-launch-deferred` — запуск отложен (ресурс головы не готов, или bring-up не удался);
+  спринт остаётся в записи с причиной, следующий тик пробует снова;
+- `observer-launch-skipped` — идёт `drain`, новых голов не поднимаем;
+- `sprint-board-unavailable` — доску спринтов не удалось прочитать; ни одна живая голова при этом
+  не останавливается.
+
+Профиль головы берётся из `role_defaults.observer` (`heads/heads.yaml`, генерится
+`secretary upgrade` из `triggered_agents/agents/pipeline/heads.toml`). Перед запуском отрабатывает
+тот же гейт готовности ресурса, что и перед claim карточки, с теми же вердиктами (см. «Готовность
+голов»). Голова запускается через `role_env exec --role observer` в собственном воркспейсе
+`<workspaces root>/observers/<ref>` с собственным терминалом; промпт `SPRINT.md` рендерится из живой
+сущности спринта в момент запуска.
+
+Живость — тот же pid-heartbeat, что у воркера и ревьюера
+(`$SECRETARY_DISPATCHER_BODY_DIR/secretary-observer-pid-<ref>.pid`, по умолчанию под `/tmp`).
+Свежезапущенная голова ещё не успела записать pid, поэтому нечитаемый pid-файл считается живым в
+течение окна `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` (по умолчанию 180 секунд) и мёртвым после.
+Автоматического ремонта зависшей (в отличие от мёртвой) головы нет: такой случай разбирает оператор.
+
+События жизненного цикла (`observer_launched`, `observer_relaunched`, `observer_stopped`,
+`observer_launch_deferred`) лежат в общем durable audit-логе (`board/events.ndjson`) с reference
+спринта; повтор с тем же `request_id` второго события не создаёт.
+
+Состояние снаружи, без чтения транскрипта:
+
+```bash
+secretary status --json --instance INSTANCE           # .dispatcher.observers
+secretary dispatcher production-observe --instance INSTANCE   # .observers
+secretary pause-status --instance INSTANCE            # .observers, .stopped_observer
+```
+
+Строка наблюдателя отдаёт спринт, профиль головы, состояние (`running` / `deferred` /
+`stopped-by-pause` / `pending`), живость pid (`alive`, `pid_known`), число запусков, воркспейс,
+время и вид последнего действия и причину отложенного запуска.
 
 ## Checkpoint push
 
@@ -318,15 +365,17 @@ python3 -m secretary pause-status --instance INSTANCE
 воркер дописывает, ревьюер судит, зелёный PR мержится. Берётся, когда нужно остановить приток, не
 обрывая работу.
 
-`freeze` — то же плюс живые головы воркера и ревьюера останавливаются, и тик после этого не
-продвигает ничего. Воркспейсы, worktree и незакоммиченная работа не трогаются: останавливаются
-только терминалы. Берётся, когда хост нужно освободить прямо сейчас (бэкап, перезагрузка, разбор
-аварии).
+`freeze` — то же плюс живые головы воркера, ревьюера и наблюдателей спринтов останавливаются, и тик
+после этого не продвигает ничего. Воркспейсы, worktree и незакоммиченная работа не трогаются:
+останавливаются только терминалы. Берётся, когда хост нужно освободить прямо сейчас (бэкап,
+перезагрузка, разбор аварии).
 
-`resume` снимает паузу, поднимает остановленные freeze'ом головы в тех же воркспейсах и выдаёт
-вотчдогам ожиданий свежее окно, чтобы длинная пауза не прочиталась потом как молчание головы.
-Карточка, чья голова успела отчитаться во время freeze, head'а не получает: её двигает ближайший
-тик по уже записанному отчёту.
+`resume` снимает паузу, поднимает остановленные freeze'ом головы воркеров и ревьюеров в тех же
+воркспейсах и выдаёт вотчдогам ожиданий свежее окно, чтобы длинная пауза не прочиталась потом как
+молчание головы. Карточка, чья голова успела отчитаться во время freeze, head'а не получает: её
+двигает ближайший тик по уже записанному отчёту. Наблюдателей `resume` сам не поднимает: он снимает
+с них пометку паузы (`observers_resumed` в ответе), и ближайший тик поднимает их обычной
+реконсиляцией. При `drain` живую голову наблюдателя не трогает никто, и новых не поднимают.
 
 Смена режима на весу запрещена: сначала `resume`, потом пауза в другом режиме. Повторная пауза в
 том же режиме — no-op.
@@ -543,7 +592,7 @@ guards, сканирует те же состояния карточек и пр
 
 ### Готовность голов
 
-Перед новым worker- или reviewer-запуском диспетчер читает ресурс профиля из `heads/heads.yaml`
+Перед новым worker-, reviewer- или observer-запуском диспетчер читает ресурс профиля из `heads/heads.yaml`
 и выполняет его `probe`. Вердикты лежат в
 `<data_dir>/dispatcher/resource_health.json`; их можно посмотреть без запуска карточки:
 
@@ -556,7 +605,9 @@ secretary dispatcher resource-health --instance <dir>
 `unauthenticated` и `unavailable` оставляют новую карточку в Ready до следующей проверки, без
 claim и без занятия project slot. Такой выбор не создаёт цикл claim/отказ и не превращает
 временную проблему провайдера в операторскую Blocked-карточку. Для уже взятой карточки повторный
-worker launch блокирует её с причиной, сохраняя контекст попытки.
+worker launch блокирует её с причиной, сохраняя контекст попытки. Для головы-наблюдателя те же два
+вердикта означают отложенный запуск: спринт остаётся открытым, причина видна в записи наблюдателя,
+следующий тик пробует снова.
 
 `unknown` означает, что сам probe не удалось надёжно выполнить или классифицировать. Он виден в
 снимке, но не запрещает запуск: сбой наблюдения не доказывает отказ ресурса и не может навсегда
