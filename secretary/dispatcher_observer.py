@@ -16,6 +16,13 @@ A stop the host refused is not a stop. The record then stays as `stop-pending` w
 handle, the tick retries it, and `observer_stopped` is written only once the terminal is actually
 gone: dropping the record on a failed stop would leave a live head with nothing pointing at it.
 
+Every lifecycle event is staged on disk before the host call it describes and committed to the log
+after it, the same order `TaskWriter` uses for a card. Storage that refuses the commit does not
+propagate: the staged copy is what `TaskAudit.reconcile()` repairs later, the record is written
+regardless, and the outcome says `audit: pending`. An exception escaping here instead would leave a
+terminal that is running with no record pointing at it, and the next tick would open a second head
+on the same sprint.
+
 Liveness is the same pid heartbeat the worker/reviewer watchdog uses (`head_process_status` over
 `pid_file_path`). A pid file that does not exist yet is not evidence of death: a head that has just
 been launched has not written it, so an unknown pid counts as alive for a short grace window and as
@@ -219,11 +226,18 @@ def reconcile_observers(
         return []
 
     outcomes: list[dict[str, Any]] = []
-    for ref in sorted(set(observers) - set(open_sprints)):
-        outcomes.append(_stop_observer(runtime, observers, ref, reason="sprint is no longer open"))
-    for ref in sorted(open_sprints):
-        outcomes.append(_reconcile_open_sprint(runtime, observers, ref, pause_mode=pause_mode))
-    put_observers(payload, observers)
+    try:
+        for ref in sorted(set(observers) - set(open_sprints)):
+            outcomes.append(
+                _stop_observer(runtime, observers, ref, reason="sprint is no longer open")
+            )
+        for ref in sorted(open_sprints):
+            outcomes.append(_reconcile_open_sprint(runtime, observers, ref, pause_mode=pause_mode))
+    finally:
+        # Whatever went wrong above, the heads that were started or stopped before it are already
+        # real. The records go back into the payload so the caller saves them: a lost record means
+        # an unattended terminal and a second head on the same sprint next tick.
+        put_observers(payload, observers)
     return outcomes
 
 
@@ -282,7 +296,8 @@ def _launch_observer(
     ref: str,
     record: ObserverRecord | None,
 ) -> dict[str, Any]:
-    relaunch = record is not None and record.launches > 0
+    record = record or ObserverRecord(sprint=ref)
+    relaunch = record.launches > 0
     try:
         head = runtime.catalog.observer_head()
     except HostError as exc:
@@ -294,7 +309,7 @@ def _launch_observer(
             reason=f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}",
             readiness=readiness.to_json(),
         )
-    if record is not None and record.handle:
+    if record.handle:
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
@@ -309,14 +324,35 @@ def _launch_observer(
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
         # when the sprint was created: goal, DoD, repositories and current card all move.
         sprint = runtime.sprints.show(ref, include_cards=False)
-        launched = runtime.host.prepare_observer(sprint, head, prompt=render_observer_prompt(sprint))
     except (HostError, TaskError) as exc:
         return _defer(
             runtime, observers, ref, record, head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
         )
+    kind = EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED
+    attempt = record.launches + 1
+    request_id = observer_request_id(
+        "relaunch" if relaunch else "launch", ref, record.generation, attempt
+    )
+    try:
+        # Staged before the host is asked for anything, so a head that comes up while the process
+        # dies mid-launch still has its event on disk for `TaskAudit.reconcile()` to pick up.
+        event = stage_event(runtime, kind, ref, request_id, {"head": head, "launches": attempt})
+    except OSError as exc:
+        return _defer(
+            runtime, observers, ref, record, head=head,
+            reason=f"observer lifecycle event could not be staged: {exc}",
+        )
+    try:
+        launched = runtime.host.prepare_observer(sprint, head, prompt=render_observer_prompt(sprint))
+    except (HostError, TaskError) as exc:
+        # Nothing came up, so the staged event describes a launch that never happened.
+        discard_event(runtime, request_id)
+        return _defer(
+            runtime, observers, ref, record, head=head,
+            reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
+        )
     now = time.time()
-    record = record or ObserverRecord(sprint=ref)
     record.head = head
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
@@ -331,14 +367,9 @@ def _launch_observer(
     record.stopped_reason = ""
     record.paused_at = 0.0
     observers[ref] = record
-    record_event(
-        runtime,
-        EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED,
-        ref,
-        observer_request_id("relaunch" if relaunch else "launch", ref, record.generation, record.launches),
-        {"head": head, "workspace": record.workspace, "launches": record.launches},
-    )
-    return {
+    if event is not None:
+        event["payload"]["workspace"] = record.workspace
+    outcome = {
         "status": "ok",
         "step": "observer-reconcile",
         "sprint": ref,
@@ -347,6 +378,7 @@ def _launch_observer(
         "workspace": record.workspace,
         "launches": record.launches,
     }
+    return _with_audit(outcome, commit_event(runtime, event))
 
 
 def _defer(
@@ -372,7 +404,7 @@ def _defer(
     record.last_action = "launch-deferred"
     record.last_action_at = time.time()
     observers[ref] = record
-    record_event(
+    audited = record_event(
         runtime,
         EVENT_DEFERRED,
         ref,
@@ -389,14 +421,36 @@ def _defer(
     }
     if readiness is not None:
         outcome["readiness"] = readiness
-    return outcome
+    return _with_audit(outcome, audited)
 
 
 def _stop_observer(
     runtime: Any, observers: dict[str, ObserverRecord], ref: str, *, reason: str
 ) -> dict[str, Any]:
     record = observers[ref]
+    request_id = observer_request_id("stop", ref, record.generation, record.launches)
+    try:
+        event = stage_event(
+            runtime,
+            EVENT_STOPPED,
+            ref,
+            request_id,
+            {"head": record.head, "reason": reason, "launches": record.launches},
+        )
+    except OSError as exc:
+        # The event has to be on disk before the terminal is gone, so an unwritable audit parks
+        # the stop rather than performing an unrecordable one. The head stays up and is retried.
+        _mark_stop_pending(record, STATE_STOP_PENDING, reason)
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-stop-failed",
+            "head": record.head,
+            "reason": f"{reason}, and the stop could not be staged in the audit log: {exc}",
+        }
     if not stop_observer_head(runtime, record):
+        discard_event(runtime, request_id)
         _mark_stop_pending(record, STATE_STOP_PENDING, reason)
         return {
             "status": "degraded",
@@ -407,14 +461,7 @@ def _stop_observer(
             "reason": f"{reason}, and the observer terminal could not be stopped",
         }
     observers.pop(ref)
-    record_event(
-        runtime,
-        EVENT_STOPPED,
-        ref,
-        observer_request_id("stop", ref, record.generation, record.launches),
-        {"head": record.head, "reason": reason, "launches": record.launches},
-    )
-    return {
+    outcome = {
         "status": "ok",
         "step": "observer-reconcile",
         "sprint": ref,
@@ -422,6 +469,7 @@ def _stop_observer(
         "head": record.head,
         "reason": reason,
     }
+    return _with_audit(outcome, commit_event(runtime, event))
 
 
 def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
@@ -461,22 +509,43 @@ def freeze_observers(runtime: Any, payload: dict[str, Any], *, reason: str) -> d
         return {"stopped": [], "failed": []}
     stopped: list[str] = []
     failed: list[str] = []
-    for ref, record in sorted(observers.items()):
-        if not record.handle:
-            continue
-        if not stop_observer_head(runtime, record):
-            _mark_stop_pending(record, STATE_PAUSE_STOP_PENDING, reason)
-            failed.append(ref)
-            continue
-        _mark_stopped_by_pause(runtime, ref, record, reason)
-        stopped.append(ref)
-    put_observers(payload, observers)
+    try:
+        for ref, record in sorted(observers.items()):
+            if not record.handle:
+                continue
+            if _stop_for_pause(runtime, ref, record, reason):
+                stopped.append(ref)
+            else:
+                failed.append(ref)
+    finally:
+        put_observers(payload, observers)
     return {"stopped": stopped, "failed": failed}
 
 
-def _mark_stopped_by_pause(
-    runtime: Any, ref: str, record: ObserverRecord, reason: str
-) -> None:
+def _stop_for_pause(runtime: Any, ref: str, record: ObserverRecord, reason: str) -> bool:
+    """Take one head down for a freeze. False leaves it on the books as a pending stop."""
+    request_id = observer_request_id("freeze-stop", ref, record.generation, record.launches)
+    try:
+        event = stage_event(
+            runtime,
+            EVENT_STOPPED,
+            ref,
+            request_id,
+            {"head": record.head, "reason": reason, "launches": record.launches},
+        )
+    except OSError:
+        _mark_stop_pending(record, STATE_PAUSE_STOP_PENDING, reason)
+        return False
+    if not stop_observer_head(runtime, record):
+        discard_event(runtime, request_id)
+        _mark_stop_pending(record, STATE_PAUSE_STOP_PENDING, reason)
+        return False
+    _mark_stopped_by_pause(record, reason)
+    commit_event(runtime, event)
+    return True
+
+
+def _mark_stopped_by_pause(record: ObserverRecord, reason: str) -> None:
     now = time.time()
     record.handle = ""
     record.state = STATE_STOPPED_BY_PAUSE
@@ -484,13 +553,6 @@ def _mark_stopped_by_pause(
     record.paused_at = now
     record.last_action = "stopped-by-pause"
     record.last_action_at = now
-    record_event(
-        runtime,
-        EVENT_STOPPED,
-        ref,
-        observer_request_id("freeze-stop", ref, record.generation, record.launches),
-        {"head": record.head, "reason": reason, "launches": record.launches},
-    )
 
 
 def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -508,25 +570,38 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
     if not pending:
         return []
     rows: list[dict[str, Any]] = []
-    for ref, record in pending.items():
-        reason = record.stopped_reason
-        if not stop_observer_head(runtime, record):
-            rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
-            continue
-        if record.state == STATE_PAUSE_STOP_PENDING:
-            _mark_stopped_by_pause(runtime, ref, record, reason)
-            rows.append({"sprint": ref, "action": "observer-stopped-by-pause", "reason": reason})
-            continue
-        observers.pop(ref)
-        record_event(
-            runtime,
-            EVENT_STOPPED,
-            ref,
-            observer_request_id("stop", ref, record.generation, record.launches),
-            {"head": record.head, "reason": reason, "launches": record.launches},
-        )
-        rows.append({"sprint": ref, "action": "observer-stopped", "reason": reason})
-    put_observers(payload, observers)
+    try:
+        for ref, record in pending.items():
+            reason = record.stopped_reason
+            if record.state == STATE_PAUSE_STOP_PENDING:
+                if _stop_for_pause(runtime, ref, record, reason):
+                    rows.append(
+                        {"sprint": ref, "action": "observer-stopped-by-pause", "reason": reason}
+                    )
+                else:
+                    rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+                continue
+            request_id = observer_request_id("stop", ref, record.generation, record.launches)
+            try:
+                event = stage_event(
+                    runtime,
+                    EVENT_STOPPED,
+                    ref,
+                    request_id,
+                    {"head": record.head, "reason": reason, "launches": record.launches},
+                )
+            except OSError:
+                rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+                continue
+            if not stop_observer_head(runtime, record):
+                discard_event(runtime, request_id)
+                rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+                continue
+            observers.pop(ref)
+            commit_event(runtime, event)
+            rows.append({"sprint": ref, "action": "observer-stopped", "reason": reason})
+    finally:
+        put_observers(payload, observers)
     return rows
 
 
@@ -560,16 +635,18 @@ def observer_request_id(action: str, reference: str, generation: str, launches: 
     )
 
 
-def record_event(
+def stage_event(
     runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any]
-) -> str:
-    """Append one lifecycle event to the durable task audit log, once per request id."""
+) -> dict[str, Any] | None:
+    """Put one lifecycle event on durable disk before the host call it describes.
+
+    Returns the staged event for `commit_event`, or None when there is nothing to commit: no audit
+    at all, or this request id is already in the log because the tick is a retry. Raises OSError
+    when the pending copy cannot be written, which the caller answers by not touching the host.
+    """
     audit = getattr(runtime, "audit", None)
-    if audit is None:
-        return ""
-    committed = audit.committed_event(request_id)
-    if committed is not None:
-        return str(committed.get("event_id") or "")
+    if audit is None or audit.committed_event(request_id) is not None:
+        return None
     event = {
         "event_id": "evt_" + uuid.uuid4().hex,
         "schema_version": 1,
@@ -583,7 +660,59 @@ def record_event(
         "request_id": request_id,
         "payload": payload,
     }
-    return audit.append(request_id, event)
+    audit.stage(request_id, event)
+    return event
+
+
+def commit_event(runtime: Any, event: dict[str, Any] | None) -> bool:
+    """Move a staged event into the log. False means the pending copy is what carries it now.
+
+    A refused commit is never raised at the caller: the effect the event describes has already
+    happened, and losing the record of it costs more than a late audit line. `TaskAudit.reconcile()`
+    appends the pending copy on the next repair pass.
+    """
+    audit = getattr(runtime, "audit", None)
+    if audit is None or event is None:
+        return True
+    request_id = str(event["request_id"])
+    try:
+        # Re-staged first: the pending copy then carries the post-effect payload too, so a repair
+        # pass writes the same line this commit would have.
+        audit.stage(request_id, event)
+        audit.append(request_id, event)
+    except Exception:
+        return False
+    return True
+
+
+def discard_event(runtime: Any, request_id: str) -> None:
+    """Drop a staged event whose effect never happened, so no repair pass invents it."""
+    audit = getattr(runtime, "audit", None)
+    if audit is None:
+        return
+    try:
+        audit.discard(request_id)
+    except OSError:
+        pass
+
+
+def record_event(
+    runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any]
+) -> bool:
+    """Stage and commit an event with no host call to protect. False when neither landed."""
+    try:
+        event = stage_event(runtime, kind, reference, request_id, payload)
+    except OSError:
+        return False
+    return commit_event(runtime, event)
+
+
+def _with_audit(outcome: dict[str, Any], audited: bool) -> dict[str, Any]:
+    """Say in the outcome when the event is only staged, so the tick does not read as clean."""
+    if not audited:
+        outcome["audit"] = "pending"
+        outcome["status"] = "degraded"
+    return outcome
 
 
 def render_observer_prompt(sprint: dict[str, Any]) -> str:

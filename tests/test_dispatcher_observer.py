@@ -331,6 +331,168 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.launches, 0)
         self.assertIn("orca refused the terminal", record.deferred_reason)
 
+    # audit durability --------------------------------------------------------
+
+    def broken_append(self):
+        """Audit storage that takes a staged event but refuses to commit it."""
+        def explode(_request_id, _event):
+            raise OSError("audit log is not writable")
+
+        return mock.patch.object(self.audit, "append", explode)
+
+    def broken_stage(self):
+        """Audit storage that cannot even take the staged event."""
+        def explode(_request_id, _event):
+            raise OSError("pending audit directory is not writable")
+
+        return mock.patch.object(self.audit, "stage", explode)
+
+    def test_a_refused_audit_append_still_leaves_the_launched_head_on_the_books(self) -> None:
+        self.open_sprint()
+
+        with self.broken_append():
+            result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-launched")
+        self.assertEqual(action["audit"], "pending")
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.state, "running")
+        self.assertTrue(record.handle)
+        # The event is not lost: it waits on disk for the repair pass.
+        pending = self.audit.pending_events()
+        self.assertEqual([event["kind"] for event in pending], [EVENT_LAUNCHED])
+        self.assertEqual(pending[0]["payload"]["workspace"], record.workspace)
+        self.audit.reconcile()
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+
+    def test_a_refused_audit_append_does_not_yield_a_second_head(self) -> None:
+        self.open_sprint()
+        with self.broken_append():
+            self.runtime.production_tick()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_an_unwritable_audit_defers_the_launch_instead_of_opening_a_head(self) -> None:
+        self.open_sprint()
+
+        with self.broken_stage():
+            result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
+        )
+        self.assertEqual(self.host.observers, [])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 0)
+        self.assertIn("could not be staged", record.deferred_reason)
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_a_refused_audit_append_still_drops_the_stopped_record(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.close_sprint()
+
+        with self.broken_append():
+            result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-stopped")
+        self.assertEqual(action["audit"], "pending")
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        # The terminal is gone, so no record may keep pointing at it.
+        self.assertEqual(self.observers(), {})
+        self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_STOPPED])
+        self.audit.reconcile()
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_LAUNCHED, EVENT_STOPPED],
+        )
+
+    def test_an_unwritable_audit_parks_the_stop_instead_of_performing_it(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.close_sprint()
+
+        with self.broken_stage():
+            result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-stop-failed"]
+        )
+        self.assertEqual(self.host.stopped_observers, [])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "stop-pending")
+        self.assertEqual(record.handle, "observer:sprint:1")
+
+        retry = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(retry)], ["observer-stopped"])
+        self.assertEqual(self.observers(), {})
+
+    def test_the_repair_pass_commits_a_staged_event_of_a_sprint_that_is_gone(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.sprints.clear()
+        with self.broken_append():
+            self.runtime.production_tick()
+
+        repaired, unresolved = self.writer.reconcile()
+
+        self.assertEqual((repaired, unresolved), (1, 0))
+        self.assertEqual(self.audit.pending_events(), [])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_LAUNCHED, EVENT_STOPPED],
+        )
+
+    def test_a_refused_audit_append_still_records_the_freeze_stop(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+
+        with self.broken_append():
+            status = self.runtime.pause_pipeline(
+                mode="freeze", actor="operator", reason="host maintenance"
+            )
+
+        self.assertEqual(status["stopped_observer"], ["sprint:1"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "stopped-by-pause")
+        self.assertEqual(record.handle, "")
+        self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_STOPPED])
+
+    def test_an_unwritable_audit_keeps_the_freeze_stop_pending(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+
+        with self.broken_stage():
+            status = self.runtime.pause_pipeline(
+                mode="freeze", actor="operator", reason="host maintenance"
+            )
+
+        self.assertEqual(status["stopped_observer"], [])
+        self.assertEqual(self.host.stopped_observers, [])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "pause-stop-pending")
+        self.assertEqual(record.handle, "observer:sprint:1")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"]
+        )
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+
     # pause -------------------------------------------------------------------
 
     def test_freeze_stops_the_observer_and_records_the_reason(self) -> None:

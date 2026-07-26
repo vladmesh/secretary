@@ -244,6 +244,20 @@ Controlled divergence — сигнал о расхождении между те
 поколения записи (`generation`) и счётчика запусков, поэтому спринт, вернувшийся на доску после снятия
 записи, пишет свои события заново, а не растворяется в дедупликации первого цикла.
 
+Событие стейджится в `board/pending-audit/` до вызова хоста и коммитится после него. Если audit-лог
+не пишется, видно это так:
+
+- `observer-launch-deferred` с причиной `observer lifecycle event could not be staged` или
+  `observer-stop-failed` с упоминанием staging — хранилище отказало до действия, голову не поднимали
+  и терминал не закрывали, следующий тик пробует снова;
+- любой outcome с полем `audit: pending` (статус `degraded`) — действие выполнено и записано в
+  `production-state.json`, но событие осталось в pending. Дописывает его ремонт:
+
+```bash
+secretary task verify-audit --instance INSTANCE     # .pending
+secretary task reconcile-audit --instance INSTANCE  # repaired/unresolved
+```
+
 Состояние снаружи, без чтения транскрипта:
 
 ```bash
