@@ -43,6 +43,7 @@ from secretary.dispatcher_helpers import (
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
     GateResult,
+    _fingerprint as _gate_fingerprint,
     gate_check as _gate_check,
     validation_ci as _validation_ci,
 )
@@ -2231,11 +2232,16 @@ class DispatcherRuntime:
         record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
-        repeat = _gate_red_repeat_count(task, detail)
+        # A caller that skips the sha-aware summary (GateResult built without `fingerprint`, e.g.
+        # the review-freeze drift check) still gets a usable, SHA-independent identity here rather
+        # than losing repeat detection outright.
+        fingerprint = result.fingerprint or _gate_fingerprint("fallback", log or detail)
+        repeat = _gate_red_repeat_count(task, fingerprint)
         prefix = f"Повторный возврат (заход {repeat + 1}, причина не изменилась). " if repeat else ""
         body = f"{prefix}Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
         if log:
             body += f"\nХвост:\n```\n{log}\n```"
+        body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
         # No-op unless a reviewer pane is up; when one is, drop it before the worker head comes
         # back so no stale reviewer handle survives into the rework round.
         _end_review_pane(self.host, record)

@@ -34,6 +34,11 @@ def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str 
 
 
 _GATE_RED_PREFIX = "Механический гейт валидации красный"
+# Hidden marker line carrying the SHA-independent failure fingerprint (secretary-766): a visible
+# GitHub `detail` always contains the head SHA, which changes on every rework commit, so repeat
+# detection cannot key off the rendered text itself. Stripped back out before the body reaches
+# the worker's TASK.md.
+_GATE_FINGERPRINT_PREFIX = "<!-- gate-fingerprint: "
 
 
 def _last_gate_red_body(task: dict[str, Any]) -> str | None:
@@ -52,17 +57,22 @@ def _last_gate_red_body(task: dict[str, Any]) -> str | None:
     lines = body.splitlines()
     if lines and lines[0].strip() == "[dispatcher]":
         lines = lines[1:]
+    lines = [line for line in lines if not line.startswith(_GATE_FINGERPRINT_PREFIX)]
     return "\n".join(lines).strip() or None
 
 
-def _gate_red_repeat_count(task: dict[str, Any], detail: str) -> int:
-    """How many times this exact gate-failure reason has already bounced this card.
+def _gate_red_repeat_count(task: dict[str, Any], fingerprint: str) -> int:
+    """How many times this exact gate-failure fingerprint has already bounced this card.
 
     A worker stuck reproducing the same failure needs to see that the reason did not change
     since last time, or an identical silent bounce reads as the rework round having done
-    nothing at all.
+    nothing at all. Keyed on the fingerprint rather than the rendered detail text: a GitHub
+    `detail` always carries the head SHA, which changes on every rework commit, so matching on
+    detail text alone would never recognise a repeat (secretary-766).
     """
-    needle = f"{_GATE_RED_PREFIX}: {detail}."
+    if not fingerprint:
+        return 0
+    needle = f"{_GATE_FINGERPRINT_PREFIX}{fingerprint} -->"
     return sum(
         1
         for comment in task.get("comments") or []

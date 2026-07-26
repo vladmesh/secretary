@@ -24,6 +24,7 @@ FakeHost in tests can stub gate_check without touching git/gh.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -49,6 +50,11 @@ _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ST
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
 # `gh run view --log[-failed]` emits one line per log entry as `<job>\t<step>\t<content>`.
 _ERROR_MARK_RE = re.compile(r"##\[error\]")
+# The runner's own generic completion echo — posted with the same `##[error]` marker as a real
+# cause, by both a failing step and a `needs: [...]` aggregator's summary script. A filter that
+# just keeps `##[error]` lines happily lands on this instead of the actual error above it
+# (secretary-766); it is never the cause, only noise the runner always appends.
+_RUNNER_BOILERPLATE_RE = re.compile(r"(?i)process completed with exit code \d+")
 # Content-level signs of a preparation/infra failure rather than a test/assertion failure — the
 # gate can't run the code under test if the registry, network, or dependency install is down, and
 # a worker that reads that as "my code is broken" edits the wrong thing (secretary-766).
@@ -65,6 +71,9 @@ class GateResult:
     status: str  # "green" | "red" | "pending"
     summary: str
     log: str = ""
+    # Stable identity of the failure, independent of the head SHA (which changes on every rework
+    # commit): what the repeat-bounce check compares round to round. Empty for green/pending.
+    fingerprint: str = ""
 
 
 @dataclass
@@ -77,6 +86,13 @@ class _LogFragment:
     text: str = ""
     infra: bool = False
     reason: str = ""
+
+
+def _fingerprint(*parts: str) -> str:
+    """Short stable digest of `parts` for repeat-bounce comparison. A GitHub `detail` always
+    carries the head SHA (secretary-766); hashing job/step/error text instead of the rendered
+    summary keeps the same underlying failure recognisable across rework commits."""
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8", "surrogateescape")).hexdigest()[:16]
 
 
 def gate_check(host, task: dict, record) -> GateResult:
@@ -96,6 +112,7 @@ def gate_check(host, task: dict, record) -> GateResult:
             "red",
             f"branch fell behind base {base!r} and the merge conflicts — resolve it in the "
             f"workspace and report done again",
+            fingerprint=_fingerprint("base-conflict", base),
         )
     if ci == "local":
         return _local_gate(host, task, record, workspace)
@@ -147,7 +164,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     summary = "local validation failed"
     if _INFRA_MARK_RE.search(tail):
         summary += " — похоже на инфраструктурный отказ подготовки, а не провал теста"
-    return GateResult("red", summary, tail)
+    return GateResult("red", summary, tail, fingerprint=_fingerprint("local", tail))
 
 
 def _github_gate(host, task: dict, workspace: str, base: str) -> GateResult:
@@ -170,7 +187,9 @@ def _github_gate(host, task: dict, workspace: str, base: str) -> GateResult:
         if fragment.infra:
             summary += " — похоже на инфраструктурный отказ подготовки, а не провал теста"
         log = fragment.text if fragment.available else f"лог недоступен: {fragment.reason}"
-        return GateResult("red", summary, log)
+        cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
+        fingerprint = _fingerprint("github", job, fragment.step, cause)
+        return GateResult("red", summary, log, fingerprint=fingerprint)
     return GateResult("pending", f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet")
 
 
@@ -309,8 +328,12 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     `--log-failed` interleaves every failed job in the run, including any job that only
     aggregates other jobs' results (`needs: [...]`, a bash script that echoes a summary and
     exits non-zero); a blind tail of the whole dump often lands on that echo instead of the
-    actual error further up. Scoping to the job GitHub's rollup reported as failed, then
-    preferring lines gh itself marks `##[error]` within it, keeps the fragment on the failure.
+    actual error further up. Scoping to the job GitHub's rollup reported as failed removes the
+    aggregator's own lines. Within that job, the fragment is a window ending at the last
+    `##[error]` line that isn't just the runner's generic completion echo (that echo carries the
+    same marker as a real cause, and a filter that keeps any `##[error]` line happily lands on it
+    instead — secretary-766); a job whose real error was never marked `##[error]` at all (plain
+    stdout, e.g. a bare Python traceback) falls back to the job's own tail, same as before.
     """
     match = _RUN_URL_RE.search(str(item.get("details_url") or item.get("html_url") or item.get("targetUrl") or ""))
     if not match:
@@ -326,9 +349,16 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
         return _LogFragment(available=False, reason="гейт получил пустой лог")
     job_name = str(item.get("name") or item.get("context") or "")
     scoped = [entry for entry in entries if not job_name or entry[0] == job_name] or entries
-    error_lines = [entry for entry in scoped if _ERROR_MARK_RE.search(entry[2])]
-    source = error_lines or scoped
-    tail = source[-lines:]
+    cause_idx = next(
+        (
+            i
+            for i in range(len(scoped) - 1, -1, -1)
+            if _ERROR_MARK_RE.search(scoped[i][2]) and not _RUNNER_BOILERPLATE_RE.search(scoped[i][2])
+        ),
+        len(scoped) - 1,
+    )
+    start = max(0, cause_idx - lines + 1)
+    tail = scoped[start : cause_idx + 1]
     step = next((entry[1] for entry in reversed(tail) if entry[1]), "")
     text = "\n".join(entry[2] for entry in tail).strip()
     if not text:
