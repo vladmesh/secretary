@@ -208,6 +208,9 @@ def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
             # A live pid here belongs to a bring-up that failed with its terminal still up, not to
             # a working observer: without this flag `alive: true` would read as a watched sprint.
             "abandoned_handle": row["abandoned_handle"],
+            # False for a head adopted from a launch intent: it is watching its sprint, but its
+            # terminal handle died with the tick that opened it and its stop goes by workspace.
+            "handle_known": row["handle_known"],
             "workspace": row["workspace"] or None,
             "last_action": row["last_action"] or None,
             "last_action_at": _epoch(row["last_action_at"]),

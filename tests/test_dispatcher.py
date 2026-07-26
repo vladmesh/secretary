@@ -362,6 +362,8 @@ class FakeHost:
         # reads as alive; point it at a free pid to model a head that died.
         self.observers: list[str] = []
         self.stopped_observers: list[str] = []
+        # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
+        self.observer_terminals: dict[str, str] = {}
         self.observer_pid = os.getpid()
         self.fail_observer_reason = ""
         # A bring-up failure the caller has to read for more than its message, e.g. an
@@ -397,6 +399,9 @@ class FakeHost:
     def observer_workspace(self, reference: str) -> str:
         return str(self.root / "observers" / reference.replace(":", "-"))
 
+    def observer_pid_file(self, reference: str) -> str:
+        return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
+
     def prepare_observer(self, sprint: dict, head: str, *, prompt: str) -> dict:
         self.calls.append("prepare_observer")
         if self.fail_observer_error is not None:
@@ -408,12 +413,16 @@ class FakeHost:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "SPRINT.md").write_text(prompt, encoding="utf-8")
         self.observers.append(reference)
-        pid_file = self.root / "observers" / f"{reference.replace(':', '-')}.pid"
+        pid_file = Path(self.observer_pid_file(reference))
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(self.observer_pid), encoding="utf-8")
+        handle = f"observer:{reference}"
+        # Like Orca: the terminal is findable by its workspace, which is how a head whose handle
+        # was lost with its tick still gets stopped.
+        self.observer_terminals[str(workspace)] = handle
         return {
             "workspace": str(workspace),
-            "handle": f"observer:{reference}",
+            "handle": handle,
             "pid_file": str(pid_file),
             "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
         }
@@ -422,7 +431,10 @@ class FakeHost:
         self.calls.append("stop_observer")
         if self.fail_stop_observer_reason:
             raise HostError(self.fail_stop_observer_reason)
-        self.stopped_observers.append(record.handle)
+        handle = record.handle or self.observer_terminals.get(str(record.workspace) or "", "")
+        self.observer_terminals.pop(str(record.workspace) or "", None)
+        if handle:
+            self.stopped_observers.append(handle)
 
     def pane_leaf(self, workspace: str, handle: str) -> str:
         return f"leaf:{handle}"

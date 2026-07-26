@@ -500,6 +500,15 @@ class CommandHostRuntime:
         )
         return str(root / "observers" / _request_token(reference))
 
+    def observer_pid_file(self, reference: str) -> str:
+        """Where this sprint's observer heartbeat writes its pid.
+
+        Path arithmetic over the reference, like `observer_workspace`: the lifecycle records both
+        before it calls `prepare_observer`, so a tick that dies mid-launch still leaves behind
+        enough to read the head's liveness and find its terminal.
+        """
+        return _observer_pid_file(reference)
+
     def prepare_observer(self, sprint: dict[str, Any], head: str, *, prompt: str) -> dict[str, Any]:
         """Bring one observer head up on its own workspace and terminal.
 
@@ -560,19 +569,28 @@ class CommandHostRuntime:
         return {"workspace": str(workspace), "handle": handle, "pid_file": pid_file, "run": run}
 
     def stop_observer(self, record: Any) -> None:
-        """End one observer head. Its pane only: nothing else runs in that workspace.
+        """End one observer head. Its panes only: nothing else runs in that workspace.
 
-        Raises HostError when Orca refuses to close the pane: the record is the only pointer to
-        that head, so the lifecycle keeps it and retries instead of losing a live terminal.
+        A record with no handle is a head adopted from a launch intent, whose handle died with the
+        tick that opened it. The observer workspace belongs to that one sprint, so its terminals
+        are that head and closing them is the same stop by another name.
+
+        Raises HostError when Orca refuses to close a pane: the record is the only pointer to that
+        head, so the lifecycle keeps it and retries instead of losing a live terminal.
         """
-        if self.mode == "noop" or not record.handle:
+        if self.mode == "noop":
             return
-        try:
-            _close_tui_terminal_strict(record.handle, run_json=self._run_json)
-        except HostError:
-            raise
-        except Exception as exc:
-            raise HostError(f"observer terminal close failed: {exc}") from None
+        handles = [record.handle] if record.handle else [
+            str(terminal.get("handle") or "")
+            for terminal in self._worktree_terminals(str(getattr(record, "workspace", "") or ""))
+        ]
+        for handle in [handle for handle in handles if handle]:
+            try:
+                _close_tui_terminal_strict(handle, run_json=self._run_json)
+            except HostError:
+                raise
+            except Exception as exc:
+                raise HostError(f"observer terminal close failed: {exc}") from None
 
     def _observer_run(self, head: str, workspace: str) -> dict[str, Any]:
         try:

@@ -28,6 +28,15 @@ regardless, and the outcome says `audit: pending`. An exception escaping here in
 terminal that is running with no record pointing at it, and the next tick would open a second head
 on the same sprint.
 
+The record itself is fixed the same way, and for the same reason. A launch intent — sprint,
+generation, head, attempt, the workspace and pid file the head will get — is written into the
+production state and flushed to disk *before* `prepare_observer` is called, not with the rest of the
+tick at the end of it. State that cannot be written means no head is launched at all, so a failing
+data plane costs the sprint a tick rather than putting a second head on it; a tick that dies between
+the host call and its own end leaves the intent behind, and the next tick resolves it from the pid
+file: a live pid is adopted as the head of that sprint (its handle is gone, so the stop goes by
+workspace), and anything else is relaunched after the workspace's terminals are closed.
+
 Liveness is the same pid heartbeat the worker/reviewer watchdog uses (`head_process_status` over
 `pid_file_path`). A pid file that does not exist yet is not evidence of death: a head that has just
 been launched has not written it, so an unknown pid counts as alive for a short grace window and as
@@ -121,6 +130,13 @@ class ObserverRecord:
     # How many times a head has been brought up for this sprint. 1 is the first launch, every
     # value above it is a respawn after a dead pid, which is what tells the two apart in the record.
     launches: int = 0
+    # The attempt number of a launch that is on disk but whose outcome is not. Non-zero only in
+    # `launching` state: the tick writes it before it calls the host and clears it when the host
+    # has answered, so a record found with it set is a bring-up whose tick did not survive.
+    pending_launch: int = 0
+    # A terminal of this head may still be up. True from the launch intent until a stop confirms
+    # the head is gone, so the head is never left running with nothing willing to close it.
+    head_possible: bool = False
     # The recorded terminal is the leftover of a bring-up that failed and could not be closed. Its
     # head never got its prompt, so a live pid there is not a working observer: the terminal has to
     # be closed before this sprint counts as headed again.
@@ -143,6 +159,8 @@ class ObserverRecord:
             "handle": self.handle,
             "pid_file": self.pid_file,
             "launches": self.launches,
+            "pending_launch": self.pending_launch,
+            "head_possible": self.head_possible,
             "abandoned_handle": self.abandoned_handle,
             "state": self.state,
             "launched_at": self.launched_at,
@@ -165,6 +183,10 @@ class ObserverRecord:
             handle=str(payload.get("handle") or ""),
             pid_file=str(payload.get("pid_file") or ""),
             launches=_int(payload.get("launches")),
+            pending_launch=_int(payload.get("pending_launch")),
+            # A record written before this field existed carries a handle when a head is up, so
+            # the handle is what it falls back to rather than a blanket "nothing is running".
+            head_possible=bool(payload.get("head_possible", bool(payload.get("handle")))),
             abandoned_handle=bool(payload.get("abandoned_handle")),
             state=str(payload.get("state") or "pending"),
             launched_at=_float(payload.get("launched_at")),
@@ -223,6 +245,9 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "launches": record.launches,
             "alive": liveness["alive"],
             "pid_known": liveness["pid_known"],
+            # A head adopted from a launch intent is watching its sprint, but its terminal handle
+            # died with the tick that started it: it is stopped by workspace, not by handle.
+            "handle_known": bool(record.handle),
             "abandoned_handle": record.abandoned_handle,
             "last_action": record.last_action,
             "last_action_at": record.last_action_at,
@@ -266,10 +291,12 @@ def reconcile_observers(
     try:
         for ref in sorted(set(observers) - set(open_sprints)):
             outcomes.append(
-                _stop_observer(runtime, observers, ref, reason="sprint is no longer open")
+                _stop_observer(runtime, payload, observers, ref, reason="sprint is no longer open")
             )
         for ref in sorted(open_sprints):
-            outcomes.append(_reconcile_open_sprint(runtime, observers, ref, pause_mode=pause_mode))
+            outcomes.append(
+                _reconcile_open_sprint(runtime, payload, observers, ref, pause_mode=pause_mode)
+            )
     finally:
         # Whatever went wrong above, the heads that were started or stopped before it are already
         # real. The records go back into the payload so the caller saves them: a lost record means
@@ -279,15 +306,30 @@ def reconcile_observers(
 
 
 def _reconcile_open_sprint(
-    runtime: Any, observers: dict[str, ObserverRecord], ref: str, *, pause_mode: str
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    *,
+    pause_mode: str,
 ) -> dict[str, Any]:
     record = observers.get(ref)
+    # A record still in `launching` is a bring-up whose tick did not live to record the outcome.
+    # It is resolved before anything else, because until it is, neither "a head is running here"
+    # nor "this sprint is headless" is known.
+    unresolved_intent = record is not None and record.state == "launching"
+    if record is not None and unresolved_intent:
+        adopted = _adopt_launch_intent(runtime, payload, observers, ref, record)
+        if adopted is not None:
+            return adopted
+        _abandon_launch_intent(runtime, ref, record)
     # A terminal left over from an aborted bring-up is skipped here whatever its pid says: that
     # head never received its sprint, and reading it as the live observer would park the sprint
     # forever on a head that is doing nothing.
     if (
         record is not None
-        and record.handle
+        and not unresolved_intent
+        and _head_may_be_running(record)
         and not record.abandoned_handle
         and observer_alive(record)["alive"]
     ):
@@ -313,14 +355,104 @@ def _reconcile_open_sprint(
         # the host is touched here — only the head profile is resolved, to fill the record.
         return _defer(
             runtime,
+            payload,
             observers,
             ref,
             record,
             head=_observer_head_or_blank(runtime),
             reason="pipeline is draining",
             action="observer-launch-skipped",
+            # An intent nobody could resolve stays an intent through the drain: the resume then
+            # closes what it may have started instead of opening a head beside it.
+            keep_state=unresolved_intent,
         )
-    return _launch_observer(runtime, observers, ref, record)
+    return _launch_observer(runtime, payload, observers, ref, record)
+
+
+def _head_may_be_running(record: ObserverRecord) -> bool:
+    """Whether a terminal of this record's head may still be up.
+
+    A launch intent counts. It is written before the host is called, so a record that carries one
+    may well have a head behind it, and the workspace is where that head is, handle or no handle.
+    """
+    return bool(record.handle) or (record.head_possible and bool(record.workspace))
+
+
+def _bring_up_request_id(ref: str, generation: str, attempt: int) -> str:
+    """The id `_launch_observer` gave attempt number `attempt`. The first one is a launch."""
+    return observer_request_id(
+        "relaunch" if attempt > 1 else "launch", ref, generation, attempt
+    )
+
+
+def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> None:
+    """Close the books on an intent whose head could not be found alive.
+
+    An attempt the log already carries is a head that came up and has since died: it is spent, and
+    the next bring-up is a relaunch with its own request id and its own line. An attempt that never
+    got past its pending copy was not observed to launch anything, so it is simply retried as
+    itself. Either way the record still says a terminal may be up, so the relaunch closes the
+    workspace first.
+    """
+    attempt = record.pending_launch
+    record.state = "pending"
+    record.pending_launch = 0
+    if not attempt:
+        return
+    request_id = _bring_up_request_id(ref, record.generation, attempt)
+    audit = getattr(runtime, "audit", None)
+    if audit is None:
+        return
+    try:
+        committed = audit.committed_event(request_id) is not None
+    except Exception:
+        committed = False
+    if committed:
+        record.launches = max(record.launches, attempt)
+
+
+def _adopt_launch_intent(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+) -> dict[str, Any] | None:
+    """Resolve a launch whose tick died before it could record the outcome.
+
+    A pid that is readable and alive is this sprint's head: it is adopted with the attempt number
+    the intent reserved, and the event staged before the host call is committed now. Anything else
+    (no pid file, a dead pid) is not evidence of a head, so None is returned and the caller
+    relaunches — closing whatever the intent may have left in the workspace first.
+    """
+    liveness = observer_alive(record)
+    if not (liveness["pid_known"] and liveness["alive"]):
+        return None
+    attempt = record.pending_launch or record.launches or 1
+    now = time.time()
+    record.launches = max(record.launches, attempt)
+    record.pending_launch = 0
+    record.head_possible = True
+    record.abandoned_handle = False
+    record.state = "running"
+    record.last_action = "adopted"
+    record.last_action_at = now
+    record.deferred_reason = ""
+    observers[ref] = record
+    audited = commit_staged_event(runtime, _bring_up_request_id(ref, record.generation, attempt))
+    _persist_quietly(runtime, payload, observers)
+    return _with_audit(
+        {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-adopted",
+            "reason": "a launch intent was left by a tick that did not finish; its head is alive",
+            "head": record.head,
+            "launches": record.launches,
+        },
+        audited,
+    )
 
 
 def _observer_head_or_blank(runtime: Any) -> str:
@@ -337,6 +469,7 @@ def _observer_head_or_blank(runtime: Any) -> str:
 
 def _launch_observer(
     runtime: Any,
+    payload: dict[str, Any],
     observers: dict[str, ObserverRecord],
     ref: str,
     record: ObserverRecord | None,
@@ -346,48 +479,53 @@ def _launch_observer(
     try:
         head = runtime.catalog.observer_head()
     except HostError as exc:
-        return _defer(runtime, observers, ref, record, head="", reason=str(exc))
+        return _defer(runtime, payload, observers, ref, record, head="", reason=str(exc))
     readiness = runtime.head_readiness(head)
     if not readiness.launch_allowed:
         return _defer(
-            runtime, observers, ref, record, head=head,
+            runtime, payload, observers, ref, record, head=head,
             reason=f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}",
             readiness=readiness.to_json(),
         )
-    if record.handle:
+    if _head_may_be_running(record):
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
         # refuses to close parks the relaunch: two heads on one sprint is worse than none.
         if not stop_observer_head(runtime, record):
             return _defer(
-                runtime, observers, ref, record, head=head,
+                runtime, payload, observers, ref, record, head=head,
                 reason="previous observer terminal could not be stopped",
             )
-        record.handle = ""
-        record.abandoned_handle = False
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
         # when the sprint was created: goal, DoD, repositories and current card all move.
         sprint = runtime.sprints.show(ref, include_cards=False)
     except (HostError, TaskError) as exc:
         return _defer(
-            runtime, observers, ref, record, head=head,
+            runtime, payload, observers, ref, record, head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
         )
     kind = EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED
     attempt = record.launches + 1
-    request_id = observer_request_id(
-        "relaunch" if relaunch else "launch", ref, record.generation, attempt
-    )
+    request_id = _bring_up_request_id(ref, record.generation, attempt)
     try:
         # Staged before the host is asked for anything, so a head that comes up while the process
         # dies mid-launch still has its event on disk for `TaskAudit.reconcile()` to pick up.
         event = stage_event(runtime, kind, ref, request_id, {"head": head, "launches": attempt})
     except OSError as exc:
         return _defer(
-            runtime, observers, ref, record, head=head,
+            runtime, payload, observers, ref, record, head=head,
             reason=f"observer lifecycle event could not be staged: {exc}",
+        )
+    intent = _write_launch_intent(runtime, payload, observers, ref, record, head, attempt)
+    if intent is not None:
+        # State that cannot be written means no head: a launch nobody can record is exactly how a
+        # sprint ends up with two of them.
+        discard_event(runtime, request_id)
+        return _defer(
+            runtime, payload, observers, ref, record, head=head,
+            reason=f"observer launch intent could not be persisted: {intent}",
         )
     try:
         launched = runtime.host.prepare_observer(sprint, head, prompt=render_observer_prompt(sprint))
@@ -396,6 +534,7 @@ def _launch_observer(
         # observer was launched, but the handle is kept so the next tick closes that terminal
         # first and only then opens the replacement.
         discard_event(runtime, request_id)
+        _clear_launch_intent(record, head_possible=bool(exc.handle))
         if exc.handle:
             record.handle = exc.handle
             record.workspace = exc.workspace or record.workspace
@@ -403,14 +542,17 @@ def _launch_observer(
             record.run = exc.run or record.run
             record.abandoned_handle = True
         return _defer(
-            runtime, observers, ref, record, head=head,
+            runtime, payload, observers, ref, record, head=head,
             reason=f"observer bring-up failed: {exc}",
         )
     except (HostError, TaskError) as exc:
-        # Nothing came up, so the staged event describes a launch that never happened.
+        # Nothing came up, so the staged event describes a launch that never happened. A host that
+        # got as far as opening a terminal reports it as `ObserverLaunchAborted` above, so there is
+        # nothing left to close here either.
         discard_event(runtime, request_id)
+        _clear_launch_intent(record, head_possible=False)
         return _defer(
-            runtime, observers, ref, record, head=head,
+            runtime, payload, observers, ref, record, head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
         )
     now = time.time()
@@ -420,7 +562,9 @@ def _launch_observer(
     record.abandoned_handle = False
     record.pid_file = str(launched.get("pid_file") or observer_pid_file(ref))
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}
-    record.launches += 1
+    record.launches = attempt
+    record.pending_launch = 0
+    record.head_possible = True
     record.state = "running"
     record.launched_at = now
     record.last_action = "relaunched" if relaunch else "launched"
@@ -440,11 +584,72 @@ def _launch_observer(
         "workspace": record.workspace,
         "launches": record.launches,
     }
+    # A failure here is not a lost head: the intent on disk still names this launch, and the next
+    # tick adopts the head it started instead of opening a second one.
+    if not _persist_quietly(runtime, payload, observers):
+        outcome["state"] = "pending"
+        outcome["status"] = "degraded"
     return _with_audit(outcome, commit_event(runtime, event))
+
+
+def _write_launch_intent(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    head: str,
+    attempt: int,
+) -> str | None:
+    """Fix this launch on disk before the host is called. Returns the failure, or None on success.
+
+    The workspace and the pid file are asked of the host rather than taken from its answer: they
+    are pure path arithmetic over the sprint reference, and the answer is exactly what a tick that
+    dies mid-launch never gets to see. With them in the record, the next tick can read the head's
+    liveness and close its terminal without ever having held its handle.
+    """
+    previous = record.to_json()
+    now = time.time()
+    try:
+        workspace = record.workspace or str(runtime.host.observer_workspace(ref))
+        pid_file = record.pid_file or str(runtime.host.observer_pid_file(ref))
+    except Exception as exc:
+        # Without the workspace the head could not be found again, and without the pid file its
+        # liveness could not be read: an intent that names neither is not worth launching against.
+        return f"{type(exc).__name__}: {exc}"
+    record.head = head
+    record.workspace = workspace
+    record.pid_file = pid_file
+    record.pending_launch = attempt
+    record.head_possible = True
+    record.state = "launching"
+    record.launched_at = now
+    record.last_action = "launching"
+    record.last_action_at = now
+    record.deferred_reason = ""
+    record.stopped_reason = ""
+    record.paused_at = 0.0
+    observers[ref] = record
+    try:
+        put_observers(payload, observers)
+        runtime.production_state.save(payload)
+    except Exception as exc:
+        for name, value in previous.items():
+            setattr(record, name, value)
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _clear_launch_intent(record: ObserverRecord, *, head_possible: bool) -> None:
+    """Take back a launch intent whose host call answered. `head_possible` is what it answered."""
+    record.pending_launch = 0
+    record.head_possible = head_possible
+    record.state = "pending"
 
 
 def _defer(
     runtime: Any,
+    payload: dict[str, Any],
     observers: dict[str, ObserverRecord],
     ref: str,
     record: ObserverRecord | None,
@@ -453,15 +658,19 @@ def _defer(
     reason: str,
     action: str = "observer-launch-deferred",
     readiness: dict[str, Any] | None = None,
+    keep_state: bool = False,
 ) -> dict[str, Any]:
     """Park a launch without losing the sprint or damaging an existing record.
 
     Only the deferral fields are written: the head, workspace, handle and launch counter of a
     record that already exists stay as they were, so the next tick retries from the same state.
+    `keep_state` leaves even the state alone, for a record whose unresolved launch intent is the
+    one thing the next tick must still see.
     """
     record = record or ObserverRecord(sprint=ref)
     record.head = record.head or head
-    record.state = "deferred"
+    if not keep_state:
+        record.state = "deferred"
     record.deferred_reason = reason
     record.last_action = "launch-deferred"
     record.last_action_at = time.time()
@@ -483,11 +692,17 @@ def _defer(
     }
     if readiness is not None:
         outcome["readiness"] = readiness
+    _persist_quietly(runtime, payload, observers)
     return _with_audit(outcome, audited)
 
 
 def _stop_observer(
-    runtime: Any, observers: dict[str, ObserverRecord], ref: str, *, reason: str
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    *,
+    reason: str,
 ) -> dict[str, Any]:
     record = observers[ref]
     request_id = observer_request_id("stop", ref, record.generation, record.launches)
@@ -531,6 +746,7 @@ def _stop_observer(
         "head": record.head,
         "reason": reason,
     }
+    _persist_quietly(runtime, payload, observers)
     return _with_audit(outcome, commit_event(runtime, event))
 
 
@@ -548,15 +764,19 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
 def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
     """Stop one observer head. True when nothing of it is left running.
 
-    A record with no terminal handle is already stopped. False means the host refused the request
-    and the head must be assumed alive, so the caller keeps the record and retries.
+    A record that points at neither a terminal nor a workspace with a head possibly in it is
+    already stopped. False means the host refused the request and the head must be assumed alive,
+    so the caller keeps the record and retries.
     """
-    if not record.handle:
+    if not _head_may_be_running(record):
         return True
     try:
         runtime.host.stop_observer(record)
     except HostError:
         return False
+    record.handle = ""
+    record.head_possible = False
+    record.abandoned_handle = False
     return True
 
 
@@ -573,7 +793,7 @@ def freeze_observers(runtime: Any, payload: dict[str, Any], *, reason: str) -> d
     failed: list[str] = []
     try:
         for ref, record in sorted(observers.items()):
-            if not record.handle:
+            if not _head_may_be_running(record):
                 continue
             if _stop_for_pause(runtime, ref, record, reason):
                 stopped.append(ref)
@@ -628,7 +848,7 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
     pending = {
         ref: record
         for ref, record in sorted(observers.items())
-        if record.state in PENDING_STOP_STATES and record.handle
+        if record.state in PENDING_STOP_STATES and _head_may_be_running(record)
     }
     if not pending:
         return []
@@ -725,6 +945,43 @@ def stage_event(
     }
     audit.stage(request_id, event)
     return event
+
+
+def _persist_quietly(
+    runtime: Any, payload: dict[str, Any], observers: dict[str, ObserverRecord]
+) -> bool:
+    """Flush the observer records mid-tick. False means only the tick's own save carries them now.
+
+    Never raised at the caller: the head this record describes is already up or already gone, and
+    the launch intent that precedes every bring-up is what keeps that decision recoverable.
+    """
+    put_observers(payload, observers)
+    try:
+        runtime.production_state.save(payload)
+    except Exception:
+        return False
+    return True
+
+
+def commit_staged_event(runtime: Any, request_id: str) -> bool:
+    """Append an event that was staged by a tick which did not live to commit it.
+
+    False when the log has neither a committed nor a pending copy, or refuses the append: the
+    outcome then says `audit: pending` rather than claiming a line that is not in the log.
+    """
+    audit = getattr(runtime, "audit", None)
+    if audit is None:
+        return True
+    try:
+        if audit.committed_event(request_id) is not None:
+            return True
+        event = audit.pending_event(request_id)
+        if event is None:
+            return False
+        audit.append(request_id, event)
+    except Exception:
+        return False
+    return True
 
 
 def commit_event(runtime: Any, event: dict[str, Any] | None) -> bool:

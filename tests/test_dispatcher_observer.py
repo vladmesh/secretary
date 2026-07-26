@@ -21,6 +21,7 @@ from secretary.dispatcher_observer import (
     ObserverLaunchAborted,
     ObserverRecord,
     load_observers,
+    observer_pid_file,
     observer_request_id,
     render_observer_prompt,
     stop_observer_head,
@@ -494,6 +495,164 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
         self.assertEqual(self.host.observers, ["sprint:1"])
 
+    # crash-safe launch intent ------------------------------------------------
+
+    def failing_state_save(self, *, after: int = 0):
+        """Production state that stops accepting writes after `after` of them landed.
+
+        `after=0` is a data plane that is down before the tick touches the host; `after=1` lets
+        the launch intent land and then kills every write after it, which is a tick that dies
+        between opening the head and recording that it did.
+        """
+        real = self.runtime.production_state.save
+        landed = {"count": 0}
+
+        def save(payload):
+            if landed["count"] >= after:
+                raise OSError("production state is not writable")
+            landed["count"] += 1
+            real(payload)
+
+        return mock.patch.object(self.runtime.production_state, "save", save)
+
+    def test_the_launch_intent_is_on_disk_before_the_host_is_called(self) -> None:
+        self.open_sprint()
+        seen: list = []
+        real = self.host.prepare_observer
+
+        def spy(sprint, head, *, prompt):
+            seen.append(load_observers(self.runtime.production_state.load()).get("sprint:1"))
+            return real(sprint, head, prompt=prompt)
+
+        with mock.patch.object(self.host, "prepare_observer", spy):
+            self.runtime.production_tick()
+
+        intent = seen[0]
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.state, "launching")
+        self.assertEqual(intent.pending_launch, 1)
+        self.assertEqual(intent.launches, 0)
+        # Workspace and pid file are the head's own, known before the head exists.
+        self.assertEqual(intent.workspace, self.host.observer_workspace("sprint:1"))
+        self.assertEqual(intent.pid_file, self.host.observer_pid_file("sprint:1"))
+
+    def test_state_that_cannot_be_written_launches_no_head_at_all(self) -> None:
+        self.open_sprint()
+
+        with self.failing_state_save():
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+
+        self.assertEqual(self.host.observers, [])
+        self.assertEqual(self.observers(), {})
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].launches, 1)
+
+    def test_a_launch_intent_that_outlived_its_tick_is_adopted_not_doubled(self) -> None:
+        self.open_sprint()
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+
+        intent = self.observers()["sprint:1"]
+        self.assertEqual((intent.state, intent.pending_launch, intent.handle), ("launching", 1, ""))
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-adopted"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "running")
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.pending_launch, 0)
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+
+        live = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(live)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_an_adopted_head_is_stopped_through_its_workspace(self) -> None:
+        self.open_sprint()
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+        self.runtime.production_tick()
+        self.close_sprint()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-stopped"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(self.observers(), {})
+
+    def test_a_freeze_takes_an_adopted_head_down_too(self) -> None:
+        self.open_sprint()
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+        self.runtime.production_tick()
+
+        status = self.runtime.pause_pipeline(
+            mode="freeze", actor="operator", reason="host maintenance"
+        )
+
+        self.assertEqual(status["stopped_observer"], ["sprint:1"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].state, "stopped-by-pause")
+
+    def test_an_intent_whose_head_died_before_the_next_tick_is_a_relaunch(self) -> None:
+        self.open_sprint()
+        # The heartbeat writes a pid nobody is running under, so the head of the lost tick is dead.
+        self.host.observer_pid = DEAD_PID
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+
+        self.host.observer_pid = os.getpid()
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-relaunched"]
+        )
+        # Whatever the lost tick opened is closed before the replacement head opens.
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 2)
+        self.assertEqual(record.state, "running")
+        # The attempt the log already carries is spent, so the new head gets its own line.
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_LAUNCHED, EVENT_RELAUNCHED],
+        )
+
+    def test_a_tick_killed_before_the_host_answered_retries_the_same_attempt(self) -> None:
+        self.open_sprint()
+
+        with mock.patch.object(self.host, "prepare_observer", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.runtime.production_tick()
+
+        self.assertEqual(self.host.observers, [])
+        intent = self.observers()["sprint:1"]
+        self.assertEqual((intent.state, intent.pending_launch), ("launching", 1))
+        # The event of that attempt never made it out of pending, so nothing was observed to launch.
+        self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_LAUNCHED])
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].launches, 1)
+        self.assertEqual(self.audit.pending_events(), [])
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+
     def test_a_refused_audit_append_still_drops_the_stopped_record(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
@@ -922,6 +1081,48 @@ class RealHostStopObserverTests(unittest.TestCase):
             CommandHostRuntime, "_run_json", lambda _self, args: self._run_json_refusing(args)
         ):
             self.assertFalse(stop_observer_head(runtime, self.record))
+
+    def test_a_head_with_no_handle_is_stopped_through_its_workspace(self) -> None:
+        """A head adopted from a launch intent: the handle died with the tick that opened it, and
+        the observer workspace is the only pointer left to its terminals."""
+        adopted = ObserverRecord(
+            sprint="sprint:1", head="observer", workspace="/ws/observers/sprint-1",
+            head_possible=True,
+        )
+
+        def run_json(args: list[str]) -> dict[str, object]:
+            self.calls.append(args)
+            if args[1] == "terminal" and args[2] == "list":
+                return {"terminals": [{"handle": "term-9"}, {"handle": "term-10"}]}
+            return {}
+
+        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
+            self.host.stop_observer(adopted)
+
+        self.assertEqual(
+            self.calls[1:],
+            [
+                ["orca", "terminal", "close", "--terminal", "term-9", "--json"],
+                ["orca", "terminal", "close", "--terminal", "term-10", "--json"],
+            ],
+        )
+
+    def test_a_workspace_with_no_terminals_is_already_stopped(self) -> None:
+        adopted = ObserverRecord(
+            sprint="sprint:1", head="observer", workspace="/ws/observers/sprint-1",
+            head_possible=True,
+        )
+        with mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
+        ):
+            self.host.stop_observer(adopted)
+
+        self.assertEqual([args[2] for args in self.calls], ["list"])
+
+    def test_the_pid_file_is_named_before_the_head_exists(self) -> None:
+        self.assertEqual(
+            self.host.observer_pid_file("sprint:1"), observer_pid_file("sprint:1")
+        )
 
 
 class RealHostTuiObserverLaunchTests(unittest.TestCase):
