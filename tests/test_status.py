@@ -516,6 +516,49 @@ class SecretStoreObservabilityTests(unittest.TestCase):
         self.assertEqual(json_code, 1, payload)
         self.assertTrue(any(f["code"] == "secret_store" for f in payload["findings"]))
 
+    def test_doctor_does_not_leak_key_material_from_a_corrupted_version_field(self):
+        """A key-params file whose `version` field holds the raw installation
+        key (e.g. from tampering, or a botched manual edit) must not have that
+        value echoed back by `doctor`, in either the text or JSON report."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+            initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
+            set_secret(
+                instance_dir,
+                secret_id="kanboard.api-token",
+                value=b"token-value",
+                scope="installation",
+                purpose="board api",
+                actor="tester",
+            )
+            raw_key = (instance_dir / "secrets" / "installation.key").read_text(
+                encoding="utf-8"
+            ).strip()
+            params_path = instance_dir / "secrets" / "installation-key.json"
+            params = json.loads(params_path.read_text(encoding="utf-8"))
+            params["version"] = raw_key
+            params_path.write_text(json.dumps(params), encoding="utf-8")
+
+            text_output = io.StringIO()
+            with contextlib.redirect_stdout(text_output):
+                text_code = main([
+                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                json_code = main([
+                    "doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(text_code, 1, text_output.getvalue())
+        self.assertNotIn(raw_key, text_output.getvalue())
+        self.assertIn("installation key is missing or unusable", text_output.getvalue())
+        self.assertEqual(json_code, 1, json_output.getvalue())
+        self.assertNotIn(raw_key, json_output.getvalue())
+
     def test_doctor_reports_a_malformed_catalog_as_a_finding_not_a_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

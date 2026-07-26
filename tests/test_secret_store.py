@@ -1096,6 +1096,30 @@ class ObservabilityCase(SecretStoreCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("installation key is missing or unusable", findings[0])
 
+    def test_corrupted_key_params_version_does_not_leak_the_installation_key(self) -> None:
+        """A key-params file with the raw installation key stuffed into its
+        `version` field (as `restore_installation_key` or manual tampering
+        could produce) must not have that value echoed back by a finding."""
+        self.initialize()
+        set_secret(
+            self.instance_dir,
+            secret_id="kanboard.api-token",
+            value=b"token-value",
+            scope="installation",
+            purpose="board api",
+            actor="tester",
+        )
+        key_path = self.instance_dir / "secrets" / KEY_NAME
+        raw_key = key_path.read_text(encoding="utf-8").strip()
+        params_path = self.instance_dir / "secrets" / KEY_PARAMS_NAME
+        params = json.loads(params_path.read_text(encoding="utf-8"))
+        params["version"] = raw_key
+        params_path.write_text(json.dumps(params), encoding="utf-8")
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertNotIn(raw_key, findings[0])
+        self.assertIn("installation key is missing or unusable", findings[0])
+
     def test_missing_catalog_with_key_params_present_is_a_finding_not_absence(self) -> None:
         self.initialize()
         (self.instance_dir / "secrets" / CATALOG_NAME).unlink()

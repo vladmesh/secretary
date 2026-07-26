@@ -387,8 +387,8 @@ def _read_key_params(instance_dir: Path) -> dict[str, Any]:
         raise SecretStoreStateError(f"{KEY_PARAMS_NAME} is not an installation key file")
     if params.get("version") != KEY_PARAMS_VERSION:
         raise SecretStoreStateError(
-            f"{KEY_PARAMS_NAME} has format version {params.get('version')!r}, "
-            f"this product reads {KEY_PARAMS_VERSION}"
+            f"{KEY_PARAMS_NAME} has an unsupported format version; "
+            f"this product reads version {KEY_PARAMS_VERSION}"
         )
     return params
 
