@@ -49,11 +49,14 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "schedules": _schedules(expected, collected, offline=offline),
             "inventory_errors": collected.errors,
             "resources": _host_resources(data_dir),
+            "external_runtime": _external_runtime(expected, collected, offline=offline),
         },
         "dispatcher": {
             "phase": _text(production.get("phase")) or "new",
             "active_attempts": _attempts(production, probe_panels=not offline and host_fixture is None),
             "pause": _pause_status(data_dir, production),
+            "divergences": _divergences(production),
+            "reconciliation": _reconciliation(production),
         },
         "checkpoint": checkpoint_snapshot(
             report.instance_path.parent,
@@ -101,6 +104,19 @@ def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[st
 
 def _schedules(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:
     return [row for row in _units(expected, collected, offline=offline) if row["kind"] == "timer"]
+
+
+def _external_runtime(expected, collected: CollectResult, *, offline: bool) -> dict[str, Any]:
+    """The host-owned Orca server: outside Secretary's unit ownership parity (`host.units`),
+
+    but the local scheduler depends on it, so status/doctor need its own non-null evidence
+    instead of a silent absence from that list.
+    """
+    name = str(getattr(expected, "external_runtime", "") or "")
+    enabled, active = (None, None)
+    if not offline and "units" not in collected.errors:
+        enabled, active = collected.inventory.unit_states.get(name, (None, None))
+    return {"name": name or None, "enabled": enabled, "active": active}
 
 
 def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[str, Any]]:
@@ -168,6 +184,50 @@ class _StatusWatchdogHost:
 
     def codex_tui_activity(self, _task, _record, _kind):
         return None
+
+
+def _divergences(production: dict[str, Any]) -> dict[str, Any]:
+    """Explicit counts and rows, never null, so a reader cannot mistake "we have not looked"
+
+    for "there are none". A divergence closes once its card leaves the active dispatcher cycle
+    (`dispatcher_production._reconcile_production`); one still open is either tied to a card
+    still in flight or is genuinely unresolved.
+    """
+    raw = production.get("controlled_divergences")
+    items = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    open_items = [item for item in items if item.get("status") != "closed"]
+    return {
+        "open_count": len(open_items),
+        "total_count": len(items),
+        "open": [
+            {
+                "id": _text(item.get("id")),
+                "pilot_ref": _text(item.get("pilot_ref")),
+                "step": _text(item.get("step")),
+                "reason": _text(item.get("reason")),
+                "opened_at": _text(item.get("at")),
+            }
+            for item in open_items
+        ],
+    }
+
+
+def _reconciliation(production: dict[str, Any]) -> dict[str, Any]:
+    """Evidence that the production tick has actually run its reconciliation pass.
+
+    `last_tick_finished_at` predates reconciliation and is stamped by every tick regardless of
+    dispatcher version, so it cannot tell a reconciled host from a pre-deployment one still
+    running the old code. `last_reconciled_at` is only ever written by the reconciliation pass
+    itself (`dispatcher_production._reconcile_production`), so it stays null, honestly reporting
+    "unknown", until a tick running the new code has actually completed one.
+    """
+    records = production.get("records")
+    records = records if isinstance(records, dict) else {}
+    return {
+        "last_tick_finished_at": _text(production.get("last_tick_finished_at")) or None,
+        "last_reconciled_at": _text(production.get("last_reconciled_at")) or None,
+        "records_tracked": len(records),
+    }
 
 
 def _pause_status(data_dir: Path, production: dict[str, Any]) -> dict[str, Any]:

@@ -695,15 +695,39 @@ def dispatcher_findings(report, collected_host: CollectResult | None, *, inspect
     data_dir = Path(data_dir_value).expanduser()
     pilot = _load_dispatcher_state(data_dir / "dispatcher" / "pilot-state.json")
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
-    if str(pilot.get("phase") or "new") != "cutover_committed" or not inspect_live:
+    if str(pilot.get("phase") or "new") != "cutover_committed":
         return []
-    findings: list[str] = []
+    # Unresolved divergences are read from the state snapshot itself, not the live host, so they
+    # surface under --offline too: an operator diagnosing a broken host still needs to see them.
+    findings: list[str] = _divergence_findings(production)
+    if not inspect_live:
+        return findings
     production_owner = str(production.get("owner") or "")
     if not bool(pilot.get("legacy_decommissioned")) and production_owner and not FileLegacyPauseProbe().snapshot().sufficient:
         findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
     if not production_owner:
         findings.append("production owner fence is missing after cutover")
     findings.extend(_production_host_findings(report, data_dir, collected_host))
+    return findings
+
+
+def _divergence_findings(production: dict[str, object]) -> list[str]:
+    """Every controlled divergence still open in the production state snapshot.
+
+    Reconciliation (`secretary/dispatcher_production.py`) closes a divergence once its card leaves
+    the active dispatcher cycle, so one still open here is either tied to a card still in flight or
+    is genuinely stuck and needs an operator.
+    """
+    raw = production.get("controlled_divergences")
+    items = raw if isinstance(raw, list) else []
+    findings: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("status") == "closed":
+            continue
+        ref = str(item.get("pilot_ref") or "?")
+        reason = str(item.get("reason") or "unknown")
+        divergence_id = str(item.get("id") or "?")
+        findings.append(f"unresolved controlled divergence {divergence_id}: ref={ref} reason={reason}")
     return findings
 
 
