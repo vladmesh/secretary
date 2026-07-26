@@ -55,8 +55,9 @@ ideas → ready → in_progress → validate → done
 ```bash
 python3 -m secretary task list --project PROJECT
 python3 -m secretary task show --ref PROJECT-N
+python3 -m secretary task list --sprint sprint:ID
 python3 -m secretary task create --role po --project PROJECT --type code \
-  --title TITLE --state ready --head codex-extra --codex-mode exec
+  --title TITLE --state ready --head codex-extra --codex-mode exec --sprint sprint:ID
 python3 -m secretary task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
 python3 -m secretary task edit --role po --ref PROJECT-N \
@@ -80,6 +81,40 @@ Done остаётся выполненной зависимостью; закр�
 preempt/requeue, а не через тихую подмену. Audit event `edited` хранит старый и новый digest;
 полный текст прошлых версий восстанавливается из git-истории `state/board/cards.ndjson` в
 checkpoint. Комменты остаются диалогом попытки, спека живёт только в description.
+
+## Спринты
+
+Спринт является data-сущностью на отдельном Kanboard board `Secretary sprints`, а не карточкой
+Pipeline. Один Kanboard task на этом board представляет один спринт. Board создаётся лениво и
+идемпотентно, поэтому повторный вызов не создаёт дубликат. Reference имеет форму `sprint:ID`; это
+отдельное пространство имён от convention карточек `PROJECT-N`.
+
+```bash
+python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
+  --repository REPO --request-id REQUEST_ID
+python3 -m secretary sprint list --status open
+python3 -m secretary sprint show --ref sprint:ID
+python3 -m secretary sprint comment --role worker --ref sprint:ID --body-file NOTE.md
+python3 -m secretary sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
+python3 -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
+python3 -m secretary sprint close --role po --ref sprint:ID
+```
+
+Stored fields are goal, Definition of Done text, repositories, open/closed status, budget counter
+by event type, and current card. The six valid budget event types are `red_review`, `blocked`,
+`red_ci`, `preempt`, `recreated_task`, and `hotfix`; completed green cards and observer research do
+not have a budget command and do not change the counter. `show` returns the total and every type
+count, including zeroes.
+
+`task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
+`task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives
+its `cards` list from this live Pipeline metadata, rather than storing a duplicate card list in the
+sprint. New links and comments are refused after a sprint is closed. `current-task` also requires
+that the selected Pipeline card already carries this sprint reference.
+
+Sprint mutations share `secretary-data/board/events.ndjson` and pending-audit recovery with card
+mutations. They carry the sprint reference as `ref`, and a repeated `--request-id` returns the
+committed event without another event record.
 
 Все write-команды проходят role guards и transition checks. Mutation сначала получает
 append-only pending audit event, затем сверяется с live board и только после этого считается
