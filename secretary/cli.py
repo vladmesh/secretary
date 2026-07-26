@@ -60,6 +60,7 @@ from secretary.memory_write import (
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
+from secretary.secret_commands import add_secret_subcommands
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
 from secretary.state_repo import StateRepoError
@@ -427,6 +428,8 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_list.add_argument("--instance", required=True)
     knowledge_list.set_defaults(handler=run_knowledge_list)
     knowledge.set_defaults(handler=not_implemented("knowledge"))
+
+    add_secret_subcommands(subparsers)
 
     return parser
 

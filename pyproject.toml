@@ -11,6 +11,10 @@ requires-python = ">=3.11"
 dependencies = [
     "PyYAML>=6.0",
     "jsonschema>=4.10",
+    # The secret store is part of the product, not an extra: an installation that
+    # cannot open its own secrets is not recoverable. 41.0 is the first release
+    # with the AEAD and KDF surface secretary/secret_store.py uses.
+    "cryptography>=41.0",
 ]
 
 [project.optional-dependencies]
