@@ -74,8 +74,19 @@ Treat this migration as a required deployment step before the first restart with
 
 Orca runtime принадлежит хосту. Secretary не создаёт `secretary-orca.service` и не запускает
 `orca serve`: scheduler units имеют только `After=orca-server.service`, без `Wants=` на runtime,
-поэтому минутный dispatcher tick не может его перезапустить. `secretary doctor` показывает этот
-runtime как external, not managed by Secretary, и отличает отсутствующий сервис от неактивного.
+поэтому минутный dispatcher tick не может его перезапустить. `packaging/systemd` не содержит
+`secretary-orca.*`, и `reconcile`/`resolve_packaged` больше не проверяют наличие Orca-исполняемого
+файла: тот check был мёртвым (никакой packaged unit никогда не имел `component == "orca"`) и удалён
+в secretary-756.
+
+`secretary doctor` показывает `orca-server.service` как external, not managed by Secretary, и
+отличает отсутствующий сервис от неактивного. На реальном systemd (проверено на 255)
+`systemctl is-enabled`/`is-active` для никогда не установленного unit'а не падают и не молчат —
+они выходят с ненулевым кодом и печатают в stdout `not-found`/`inactive`. Поэтому `status --json`
+видит `host.external_runtime.enabled == "not-found"` как обычное (не-null) значение, а
+человекочитаемый `doctor` печатает это состояние как `Orca runtime: absent (external, not managed
+by Secretary)`, а не сырой токен `not-found`.
+
 При миграции старый `secretary-orca.service` и его временный drop-in нужно удалить через обычный
 systemd change после того, как `orca-server.service` подтверждён active; сам `orca-server.service`
 не останавливать и не перезапускать.
