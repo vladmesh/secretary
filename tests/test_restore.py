@@ -45,11 +45,18 @@ from tests.restore_fixtures import (
 from tests.orca_fixtures import legacy_orca_runtime
 
 
-LEGACY_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+_UNSET = object()
 
 
-def main(argv: list[str], *, orca_executable: Path = LEGACY_ORCA) -> int:
-    """Run CLI fixtures with their checked-in legacy Orca executable."""
+def main(argv: list[str], *, orca_executable: Path | object = _UNSET) -> int:
+    """Run the CLI, relying on the suite-wide hermetic Orca default.
+
+    Pass ``orca_executable`` only to model a deliberately alternate or
+    unavailable executable; the default leaves the suite's fixture patch
+    (tests/__init__.py) in place instead of shadowing it with the same value.
+    """
+    if orca_executable is _UNSET:
+        return cli_main(argv)
     with mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable):
         return cli_main(argv)
 
