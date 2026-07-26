@@ -51,6 +51,7 @@ from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
+    ObserverLaunchAborted,
     observer_launch_prompt as _observer_launch_prompt,
     observer_pid_file as _observer_pid_file,
 )
@@ -541,8 +542,21 @@ class CommandHostRuntime:
                     prompt_text=_observer_launch_prompt(),
                 )
             except (TuiDeliveryError, HostError) as exc:
-                _close_tui_terminal(handle, run_json=self._run_json)
-                raise HostError(str(exc)) from None
+                try:
+                    _close_tui_terminal_strict(handle, run_json=self._run_json)
+                except Exception as close_exc:
+                    # The pane is still up. Its handle goes back with the failure, because this
+                    # dict is the only pointer to it: reporting a plain bring-up failure would
+                    # leave the sprint reading as headless and the next tick would open a second
+                    # head beside a head that is already running.
+                    raise ObserverLaunchAborted(
+                        f"{exc}; observer terminal close failed: {close_exc}",
+                        handle=handle,
+                        workspace=str(workspace),
+                        pid_file=pid_file,
+                        run=run,
+                    ) from None
+                raise ObserverLaunchAborted(str(exc)) from None
         return {"workspace": str(workspace), "handle": handle, "pid_file": pid_file, "run": run}
 
     def stop_observer(self, record: Any) -> None:

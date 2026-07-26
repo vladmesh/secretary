@@ -12,6 +12,11 @@ The tick reconciles the observer records against the sprint board on every run:
   open sprint, no record   -> launch
   closed or gone sprint    -> stop the head and drop the record
 
+A bring-up that fails once its terminal is already up is not a headless sprint either. The host
+hands the handle back with the failure (`ObserverLaunchAborted`), the record keeps it marked as an
+abandoned handle, and the next tick closes that terminal before it opens the replacement. A live
+pid behind an abandoned handle does not read as a working observer: that head never got its sprint.
+
 A stop the host refused is not a stop. The record then stays as `stop-pending` with its terminal
 handle, the tick retries it, and `observer_stopped` is written only once the terminal is actually
 gone: dropping the record on a failed stop would leave a live head with nothing pointing at it.
@@ -74,6 +79,31 @@ def observer_pid_file(reference: str) -> str:
     return pid_file_path(OBSERVER_WATCHDOG_KIND, reference)
 
 
+class ObserverLaunchAborted(HostError):
+    """A bring-up that failed after the head's terminal had already been created.
+
+    An empty `handle` means nothing of that head is left running. A non-empty one means the host
+    could not close the terminal it opened, so the head has to be assumed alive: the caller keeps
+    the handle in the record and retries the stop. Dropping it would leave a running head with
+    nothing pointing at it, and the next tick would put a second head on the same sprint.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        handle: str = "",
+        workspace: str = "",
+        pid_file: str = "",
+        run: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.handle = handle
+        self.workspace = workspace
+        self.pid_file = pid_file
+        self.run = dict(run or {})
+
+
 @dataclass
 class ObserverRecord:
     """One observer head as the dispatcher last left it."""
@@ -91,6 +121,10 @@ class ObserverRecord:
     # How many times a head has been brought up for this sprint. 1 is the first launch, every
     # value above it is a respawn after a dead pid, which is what tells the two apart in the record.
     launches: int = 0
+    # The recorded terminal is the leftover of a bring-up that failed and could not be closed. Its
+    # head never got its prompt, so a live pid there is not a working observer: the terminal has to
+    # be closed before this sprint counts as headed again.
+    abandoned_handle: bool = False
     state: str = "pending"
     launched_at: float = 0.0
     last_action: str = ""
@@ -109,6 +143,7 @@ class ObserverRecord:
             "handle": self.handle,
             "pid_file": self.pid_file,
             "launches": self.launches,
+            "abandoned_handle": self.abandoned_handle,
             "state": self.state,
             "launched_at": self.launched_at,
             "last_action": self.last_action,
@@ -130,6 +165,7 @@ class ObserverRecord:
             handle=str(payload.get("handle") or ""),
             pid_file=str(payload.get("pid_file") or ""),
             launches=_int(payload.get("launches")),
+            abandoned_handle=bool(payload.get("abandoned_handle")),
             state=str(payload.get("state") or "pending"),
             launched_at=_float(payload.get("launched_at")),
             last_action=str(payload.get("last_action") or ""),
@@ -187,6 +223,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "launches": record.launches,
             "alive": liveness["alive"],
             "pid_known": liveness["pid_known"],
+            "abandoned_handle": record.abandoned_handle,
             "last_action": record.last_action,
             "last_action_at": record.last_action_at,
             "deferred_reason": record.deferred_reason,
@@ -245,7 +282,15 @@ def _reconcile_open_sprint(
     runtime: Any, observers: dict[str, ObserverRecord], ref: str, *, pause_mode: str
 ) -> dict[str, Any]:
     record = observers.get(ref)
-    if record is not None and record.handle and observer_alive(record)["alive"]:
+    # A terminal left over from an aborted bring-up is skipped here whatever its pid says: that
+    # head never received its sprint, and reading it as the live observer would park the sprint
+    # forever on a head that is doing nothing.
+    if (
+        record is not None
+        and record.handle
+        and not record.abandoned_handle
+        and observer_alive(record)["alive"]
+    ):
         if record.state in PENDING_STOP_STATES:
             # The sprint is open again and the head that was to be stopped is still the head of
             # this sprint: the pending stop is moot, so the record reads as running once more.
@@ -320,6 +365,7 @@ def _launch_observer(
                 reason="previous observer terminal could not be stopped",
             )
         record.handle = ""
+        record.abandoned_handle = False
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
         # when the sprint was created: goal, DoD, repositories and current card all move.
@@ -345,6 +391,21 @@ def _launch_observer(
         )
     try:
         launched = runtime.host.prepare_observer(sprint, head, prompt=render_observer_prompt(sprint))
+    except ObserverLaunchAborted as exc:
+        # The bring-up failed with its terminal still up. The staged event is dropped, because no
+        # observer was launched, but the handle is kept so the next tick closes that terminal
+        # first and only then opens the replacement.
+        discard_event(runtime, request_id)
+        if exc.handle:
+            record.handle = exc.handle
+            record.workspace = exc.workspace or record.workspace
+            record.pid_file = exc.pid_file or record.pid_file
+            record.run = exc.run or record.run
+            record.abandoned_handle = True
+        return _defer(
+            runtime, observers, ref, record, head=head,
+            reason=f"observer bring-up failed: {exc}",
+        )
     except (HostError, TaskError) as exc:
         # Nothing came up, so the staged event describes a launch that never happened.
         discard_event(runtime, request_id)
@@ -356,6 +417,7 @@ def _launch_observer(
     record.head = head
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
+    record.abandoned_handle = False
     record.pid_file = str(launched.get("pid_file") or observer_pid_file(ref))
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}
     record.launches += 1
@@ -548,6 +610,7 @@ def _stop_for_pause(runtime: Any, ref: str, record: ObserverRecord, reason: str)
 def _mark_stopped_by_pause(record: ObserverRecord, reason: str) -> None:
     now = time.time()
     record.handle = ""
+    record.abandoned_handle = False
     record.state = STATE_STOPPED_BY_PAUSE
     record.stopped_reason = reason
     record.paused_at = now

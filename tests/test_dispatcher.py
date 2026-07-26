@@ -364,6 +364,9 @@ class FakeHost:
         self.stopped_observers: list[str] = []
         self.observer_pid = os.getpid()
         self.fail_observer_reason = ""
+        # A bring-up failure the caller has to read for more than its message, e.g. an
+        # ObserverLaunchAborted that carries the handle of a terminal that stayed up.
+        self.fail_observer_error: Exception | None = None
         # Orca refusing to close an observer pane: the head must be assumed alive afterwards.
         self.fail_stop_observer_reason = ""
 
@@ -396,6 +399,8 @@ class FakeHost:
 
     def prepare_observer(self, sprint: dict, head: str, *, prompt: str) -> dict:
         self.calls.append("prepare_observer")
+        if self.fail_observer_error is not None:
+            raise self.fail_observer_error
         if self.fail_observer_reason:
             raise HostError(self.fail_observer_reason)
         reference = str(sprint["ref"])

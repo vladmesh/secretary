@@ -205,6 +205,9 @@ def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
             "alive": row["alive"],
             "pid_known": row["pid_known"],
             "launches": row["launches"],
+            # A live pid here belongs to a bring-up that failed with its terminal still up, not to
+            # a working observer: without this flag `alive: true` would read as a watched sprint.
+            "abandoned_handle": row["abandoned_handle"],
             "workspace": row["workspace"] or None,
             "last_action": row["last_action"] or None,
             "last_action_at": _epoch(row["last_action_at"]),

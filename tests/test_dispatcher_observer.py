@@ -8,13 +8,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import dispatcher as dispatcher_module
 from secretary.dispatcher import CommandHostRuntime, CutoverState, DispatcherRuntime
+from secretary.dispatcher_launcher import HeadLaunch
+from secretary.dispatcher_tui import TuiDeliveryError
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
     EVENT_STOPPED,
     OBSERVER_HEAD_FALLBACK,
+    ObserverLaunchAborted,
     ObserverRecord,
     load_observers,
     observer_request_id,
@@ -274,6 +278,99 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.launches, 1)
         self.assertEqual(record.handle, "observer:sprint:1")
         self.assertIn("could not be stopped", record.deferred_reason)
+
+    def test_a_bring_up_that_left_its_terminal_up_keeps_the_handle_on_the_record(self) -> None:
+        self.open_sprint()
+        pid_file = self.data_dir / "observers" / "aborted.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        # The abandoned head is a live process: only the record's own mark tells it apart from a
+        # working observer.
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.host.fail_observer_error = ObserverLaunchAborted(
+            "TUI prompt was not delivered; observer terminal close failed: pane is busy",
+            handle="observer:sprint:1",
+            workspace=str(self.data_dir / "observers" / "sprint-1"),
+            pid_file=str(pid_file),
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.handle, "observer:sprint:1")
+        self.assertTrue(record.abandoned_handle)
+        self.assertEqual(record.launches, 0)
+        self.assertIn("terminal close failed", record.deferred_reason)
+        # Nothing was launched, so no launch event may be in the log.
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+
+    def test_an_abandoned_terminal_that_will_not_close_never_yields_a_second_head(self) -> None:
+        self.open_sprint()
+        pid_file = self.data_dir / "observers" / "aborted.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.host.fail_observer_error = ObserverLaunchAborted(
+            "TUI prompt was not delivered; observer terminal close failed: pane is busy",
+            handle="observer:sprint:1",
+            workspace=str(self.data_dir / "observers" / "sprint-1"),
+            pid_file=str(pid_file),
+        )
+        self.runtime.production_tick()
+        self.host.fail_stop_observer_reason = "orca refused to close the pane"
+
+        result = self.runtime.production_tick()
+
+        # Not "observer-live": the pid behind that handle belongs to a head that never got its
+        # sprint. The tick retries the close and brings nothing new up until it succeeds.
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
+        )
+        self.assertEqual(self.host.calls.count("prepare_observer"), 1)
+        self.assertEqual(self.host.observers, [])
+        record = self.observers()["sprint:1"]
+        self.assertTrue(record.abandoned_handle)
+        self.assertEqual(record.handle, "observer:sprint:1")
+        self.assertIn("could not be stopped", record.deferred_reason)
+
+    def test_a_closed_abandoned_terminal_frees_the_sprint_for_a_launch(self) -> None:
+        self.open_sprint()
+        self.host.fail_observer_error = ObserverLaunchAborted(
+            "TUI prompt was not delivered; observer terminal close failed: pane is busy",
+            handle="observer:sprint:1",
+            workspace=str(self.data_dir / "observers" / "sprint-1"),
+            pid_file=str(self.data_dir / "observers" / "aborted.pid"),
+        )
+        self.runtime.production_tick()
+        self.host.fail_observer_error = None
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertFalse(record.abandoned_handle)
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.state, "running")
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")][-1], EVENT_LAUNCHED)
+
+    def test_a_freeze_takes_an_abandoned_terminal_down_with_the_rest(self) -> None:
+        self.open_sprint()
+        self.host.fail_observer_error = ObserverLaunchAborted(
+            "TUI prompt was not delivered; observer terminal close failed: pane is busy",
+            handle="observer:sprint:1",
+            workspace=str(self.data_dir / "observers" / "sprint-1"),
+            pid_file=str(self.data_dir / "observers" / "aborted.pid"),
+        )
+        self.runtime.production_tick()
+
+        self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
+
+        record = self.observers()["sprint:1"]
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(record.handle, "")
+        self.assertFalse(record.abandoned_handle)
 
     # readiness ---------------------------------------------------------------
 
@@ -825,6 +922,83 @@ class RealHostStopObserverTests(unittest.TestCase):
             CommandHostRuntime, "_run_json", lambda _self, args: self._run_json_refusing(args)
         ):
             self.assertFalse(stop_observer_head(runtime, self.record))
+
+
+class RealHostTuiObserverLaunchTests(unittest.TestCase):
+    """The real host on the TUI bring-up path: what a failed prompt delivery hands back."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        env = mock.patch.dict(
+            os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces")}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.host = CommandHostRuntime(_TuiCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.closes: list[str] = []
+        self.close_refused = False
+        delivery = mock.patch.object(
+            dispatcher_module,
+            "_deliver_tui_prompt",
+            mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered")),
+        )
+        delivery.start()
+        self.addCleanup(delivery.stop)
+        run_json = mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
+        )
+        run_json.start()
+        self.addCleanup(run_json.stop)
+
+    def _run_json(self, args: list[str]) -> dict[str, object]:
+        if args[:3] == ["orca", "terminal", "create"]:
+            return {"handle": "term-obs"}
+        if args[:3] == ["orca", "terminal", "close"]:
+            self.closes.append(args[4])
+            if self.close_refused:
+                raise HostError("orca terminal close failed: pane is busy")
+            return {}
+        return {}
+
+    def _prepare(self) -> None:
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+
+    def test_a_closed_terminal_reports_a_bring_up_with_nothing_left_running(self) -> None:
+        with self.assertRaises(ObserverLaunchAborted) as caught:
+            self._prepare()
+
+        self.assertEqual(self.closes, ["term-obs"])
+        self.assertEqual(caught.exception.handle, "")
+
+    def test_a_terminal_that_will_not_close_hands_its_handle_back(self) -> None:
+        self.close_refused = True
+
+        with self.assertRaises(ObserverLaunchAborted) as caught:
+            self._prepare()
+
+        self.assertEqual(self.closes, ["term-obs"])
+        self.assertEqual(caught.exception.handle, "term-obs")
+        self.assertTrue(caught.exception.workspace)
+        self.assertTrue(caught.exception.pid_file)
+        self.assertIn("close failed", str(caught.exception))
+
+
+class _TuiCatalog(FakeCatalog):
+    """An observer profile whose head takes its prompt after the terminal is already up."""
+
+    def head_launch(
+        self,
+        head: str,
+        prompt_file: str,
+        *,
+        workspace: str,
+        role: str,
+        codex_mode: str | None = None,
+        launch_prompt: str | None = None,
+    ):
+        return HeadLaunch(f"run-{role}", prompt_after_start=True)
 
 
 if __name__ == "__main__":
