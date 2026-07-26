@@ -49,6 +49,7 @@ import re
 import secrets as pysecrets
 import stat
 import tempfile
+from collections.abc import Container
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,6 +312,17 @@ def load_installation_key(instance_dir: Path) -> bytes:
         raise SecretStoreStateError("installation key has the wrong length")
     _check_verifier(material, _read_key_params(instance_dir))
     return material
+
+
+def verify_recovery_phrase(instance_dir: Path, phrase: str) -> None:
+    """Answer whether the phrase opens this store, touching no file.
+
+    A preview run has to say what a real run would do without doing it, and the
+    only honest way to promise the store would open is to derive the key and put
+    it against the verifier. The derived key is dropped here; nothing is written.
+    """
+    params = _read_key_params(instance_dir)
+    _check_verifier(_derive_key(phrase, params), params)
 
 
 def restore_installation_key(instance_dir: Path, phrase: str) -> Path:
@@ -772,13 +784,16 @@ def import_env_file(
 
 
 def materialize_secrets(
-    instance_dir: Path, *, target: str | None = None
+    instance_dir: Path, *, target: str | None = None, paths: Container[Path] | None = None
 ) -> tuple[MaterializeResult, ...]:
     """Write every materializing secret into its env file.
 
     One file per target, written whole: the values that belong there are the
     values that end up there, and a variable dropped from the catalog is gone
-    from the file. Callers that only want one file pass `target`.
+    from the file. Callers that only want one file pass `target`, and a caller
+    that already knows which files it may write whole passes `paths`; recovery
+    uses that to leave a file alone when one of its secrets is unreadable, rather
+    than publish an env file with a line missing.
 
     Line order is the catalog's `materialize.order`, so a file that `import`
     took in comes back byte for byte, and two runs over an unchanged store write
@@ -799,7 +814,10 @@ def materialize_secrets(
                 continue
             if target is not None and instruction.get("target") != target:
                 continue
-            groups.setdefault(materialize_path(instance_dir, entry), []).append(entry)
+            path = materialize_path(instance_dir, entry)
+            if paths is not None and path not in paths:
+                continue
+            groups.setdefault(path, []).append(entry)
 
         results = []
         for path in sorted(groups):
