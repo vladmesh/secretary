@@ -492,12 +492,14 @@ class InterruptedWriteCase(SecretStoreCase):
         )
 
 
-# The three keys the live installation's runtime.env holds, in the order
-# materialize writes them: sorted by variable name, KEY=VALUE, one LF each.
+# The three keys the live installation's runtime.env holds, in the order the live
+# file holds them, which is not alphabetical: URL, user, token. The token ends in
+# '=' padding so a value that looks like another KEY=VALUE split has to survive
+# the round trip too.
 LIVE_RUNTIME_ENV = (
-    "KANBOARD_API_TOKEN=1f2e3d4c5b6a\n"
-    "KANBOARD_API_USER=secretary\n"
     "KANBOARD_URL=https://board.example.invalid/jsonrpc.php\n"
+    "KANBOARD_API_USER=secretary\n"
+    "KANBOARD_API_TOKEN=1f2e3d4c5b6a==\n"
 )
 
 
@@ -533,7 +535,7 @@ class ImportCase(EnvStoreCase):
     def test_import_makes_one_secret_per_variable(self) -> None:
         result = self.do_import()
         self.assertEqual(
-            result.created, ("kanboard_api_token", "kanboard_api_user", "kanboard_url")
+            result.created, ("kanboard_url", "kanboard_api_user", "kanboard_api_token")
         )
         entries = list_secrets(self.instance_dir)
         self.assertEqual(
@@ -544,7 +546,16 @@ class ImportCase(EnvStoreCase):
                 ("kanboard_url", "KANBOARD_URL"),
             ],
         )
-        self.assertEqual(entries[0]["materialize"], {"target": "runtime-env"})
+        # The catalog is sorted by id, the file is not: each entry carries the
+        # line it came from, so the file's own order survives the store.
+        self.assertEqual(
+            [(entry["id"], entry["materialize"]) for entry in entries],
+            [
+                ("kanboard_api_token", {"target": "runtime-env", "order": 2}),
+                ("kanboard_api_user", {"target": "runtime-env", "order": 1}),
+                ("kanboard_url", {"target": "runtime-env", "order": 0}),
+            ],
+        )
         self.assertEqual(read_secret(self.instance_dir, "kanboard_api_user"), b"secretary")
         self.assertEqual(store_divergence(self.instance_dir), ())
 
@@ -573,7 +584,7 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(result.created, ())
         self.assertEqual(result.updated, ())
         self.assertEqual(
-            result.unchanged, ("kanboard_api_token", "kanboard_api_user", "kanboard_url")
+            result.unchanged, ("kanboard_url", "kanboard_api_user", "kanboard_api_token")
         )
         self.assertEqual(state_repo.head(self.instance_dir), head)
         self.assertEqual(envelope.read_bytes(), sealed)
@@ -587,7 +598,7 @@ class ImportCase(EnvStoreCase):
         result = self.do_import()
         self.assertEqual(result.updated, ("kanboard_api_user",))
         self.assertEqual(result.created, ())
-        self.assertEqual(result.unchanged, ("kanboard_api_token", "kanboard_url"))
+        self.assertEqual(result.unchanged, ("kanboard_url", "kanboard_api_token"))
         self.assertEqual(read_secret(self.instance_dir, "kanboard_api_user"), b"secretary-two")
         # Only the rotated envelope moves: the catalog says the same thing it did
         # before, so the commit does not restate it.
@@ -620,6 +631,61 @@ class ImportCase(EnvStoreCase):
                     self.do_import()
         self.assertEqual(list_secrets(self.instance_dir), ())
         self.assertEqual(state_repo.head(self.instance_dir), head)
+
+    def test_a_file_the_store_could_not_reproduce_is_refused(self) -> None:
+        """Anything the catalog cannot record is refused rather than dropped.
+
+        The store keeps names, values and line order. A comment, a blank line, a
+        padded line, a CR or a missing final newline would come back out as
+        different bytes, so the import says so instead.
+        """
+        head = state_repo.head(self.instance_dir)
+        cases = {
+            "no trailing newline": "KANBOARD_URL=https://board\nKANBOARD_API_USER=x",
+            "blank line between": "KANBOARD_URL=https://board\n\nKANBOARD_API_USER=x\n",
+            "blank line at the end": "KANBOARD_URL=https://board\n\n",
+            "comment above": "# board\nKANBOARD_URL=https://board\n",
+            "padded name": "  KANBOARD_URL=https://board\n",
+            "space around the equals": "KANBOARD_URL = https://board\n",
+            "trailing space in the value": "KANBOARD_URL=https://board \n",
+            "crlf": "KANBOARD_URL=https://board\r\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(case=name):
+                self.source.write_text(text, encoding="utf-8", newline="")
+                with self.assertRaises(SecretStoreValidationError):
+                    self.do_import()
+        self.assertEqual(list_secrets(self.instance_dir), ())
+        self.assertEqual(state_repo.head(self.instance_dir), head)
+
+    def test_import_moves_an_earlier_variable_below_the_imported_block(self) -> None:
+        set_secret(
+            self.instance_dir,
+            secret_id="extra.flag",
+            value=b"on",
+            scope="installation",
+            purpose="added by hand",
+            environment="EXTRA_FLAG",
+            materialize={"target": "runtime-env"},
+            actor="tester",
+        )
+        self.do_import()
+        orders = {
+            entry["id"]: entry["materialize"]["order"] for entry in list_secrets(self.instance_dir)
+        }
+        self.assertEqual(
+            orders,
+            {
+                "kanboard_url": 0,
+                "kanboard_api_user": 1,
+                "kanboard_api_token": 2,
+                "extra.flag": 3,
+            },
+        )
+        materialize_secrets(self.instance_dir)
+        self.assertEqual(
+            self.target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV + "EXTRA_FLAG=on\n"
+        )
 
     def test_import_does_not_read_a_file_that_is_not_there(self) -> None:
         with self.assertRaises(SecretStoreValidationError) as caught:
@@ -726,7 +792,7 @@ class MaterializeCase(EnvStoreCase):
         self.assertEqual(
             values,
             {
-                "KANBOARD_API_TOKEN": "1f2e3d4c5b6a",
+                "KANBOARD_API_TOKEN": "1f2e3d4c5b6a==",
                 "KANBOARD_API_USER": "secretary",
                 "KANBOARD_URL": "https://board.example.invalid/jsonrpc.php",
             },
@@ -735,6 +801,27 @@ class MaterializeCase(EnvStoreCase):
     def test_import_then_materialize_reproduces_the_original_bytes(self) -> None:
         materialize_secrets(self.instance_dir)
         self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
+        # Not by accident of sorting: the file's order is not alphabetical, and
+        # the last line carries '=' padding that a re-split would mangle.
+        written = self.target.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(written[0].split("=", 1)[0], "KANBOARD_URL")
+        self.assertNotEqual(written, sorted(written))
+        self.assertTrue(written[-1].endswith("1f2e3d4c5b6a=="))
+
+    def test_a_reordered_source_moves_the_lines_and_nothing_else(self) -> None:
+        materialize_secrets(self.instance_dir)
+        reordered = "".join(reversed(LIVE_RUNTIME_ENV.splitlines(keepends=True)))
+        self.source.write_text(reordered, encoding="utf-8")
+        result = self.do_import()
+        # Same values, new layout: only the catalog moves, no envelope is resealed.
+        self.assertEqual(result.created, ())
+        # The middle line did not move, so only the two that swapped are updated.
+        self.assertEqual(result.updated, ("kanboard_api_token", "kanboard_url"))
+        self.assertEqual(result.unchanged, ("kanboard_api_user",))
+        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(touched, ["secrets/catalog.yaml"])
+        materialize_secrets(self.instance_dir)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), reordered)
 
     def test_a_file_target_is_written_where_the_catalog_says(self) -> None:
         elsewhere = Path(self.tmpdir.name) / "other" / "app.env"
@@ -844,8 +931,8 @@ class CatalogSchemaCase(unittest.TestCase):
 
     def test_a_usable_record_validates(self) -> None:
         for instruction in (
-            {"target": "runtime-env"},
-            {"target": "file", "path": "/etc/secretary/app.env"},
+            {"target": "runtime-env", "order": 0},
+            {"target": "file", "path": "/etc/secretary/app.env", "order": 7},
         ):
             with self.subTest(instruction=instruction):
                 catalog = self.catalog(
@@ -855,15 +942,27 @@ class CatalogSchemaCase(unittest.TestCase):
 
     def test_a_record_nothing_could_act_on_is_rejected(self) -> None:
         cases = [
-            {"environment": "KANBOARD_URL", "materialize": {"target": "elsewhere"}},
-            {"environment": "KANBOARD_URL", "materialize": {"target": "file"}},
+            {"environment": "KANBOARD_URL", "materialize": {"target": "elsewhere", "order": 0}},
+            {"environment": "KANBOARD_URL", "materialize": {"target": "file", "order": 0}},
             {
                 "environment": "KANBOARD_URL",
-                "materialize": {"target": "runtime-env", "path": "/etc/runtime.env"},
+                "materialize": {
+                    "target": "runtime-env", "path": "/etc/runtime.env", "order": 0
+                },
             },
             # Without a variable name there is nothing to write on the left of '='.
-            {"materialize": {"target": "runtime-env"}},
-            {"environment": "not-an-env-name", "materialize": {"target": "runtime-env"}},
+            {"materialize": {"target": "runtime-env", "order": 0}},
+            {
+                "environment": "not-an-env-name",
+                "materialize": {"target": "runtime-env", "order": 0},
+            },
+            # Without a line number the file layout is not recorded at all.
+            {"environment": "KANBOARD_URL", "materialize": {"target": "runtime-env"}},
+            {"environment": "KANBOARD_URL", "materialize": {"target": "runtime-env", "order": -1}},
+            {
+                "environment": "KANBOARD_URL",
+                "materialize": {"target": "runtime-env", "order": "first"},
+            },
         ]
         for entry in cases:
             with self.subTest(entry=entry):

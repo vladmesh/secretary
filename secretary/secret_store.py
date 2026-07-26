@@ -28,11 +28,16 @@ Writes go through `state_repo.state_repo_lock` and land as one commit, so the
 catalog and the values it names can never diverge in the history.
 
 A secret that some process reads as an environment variable also carries a
-`materialize` record: the variable name and which file it belongs to. That
-record is what lets a recovered installation put its env files back without a
-human listing paths. `materialize_secrets` writes each file whole and by rename,
-because the one file this exists for, `runtime.env`, is read by systemd on every
-unit start and may never be seen missing or half-written.
+`materialize` record: the variable name, which file it belongs to and which line
+of that file it is. That record is what lets a recovered installation put its env
+files back without a human listing paths. `materialize_secrets` writes each file
+whole and by rename, because the one file this exists for, `runtime.env`, is read
+by systemd on every unit start and may never be seen missing or half-written.
+
+The env-file format the store round-trips is `KEY=VALUE` lines, LF, one variable
+per line, nothing else: no comments, no blank lines, no padding, and a final
+newline. `import` refuses anything outside it rather than take in a file it would
+hand back as different bytes.
 """
 
 from __future__ import annotations
@@ -572,7 +577,9 @@ def set_secret(
             scope=scope,
             purpose=purpose,
             environment=environment,
-            materialize=materialize,
+            materialize=_assign_order(
+                entries, secret_id=secret_id, materialize=materialize, existing=existing
+            ),
             existing=existing,
         )
         catalog = _catalog(entries)
@@ -659,6 +666,10 @@ def import_env_file(
 ) -> ImportResult:
     """Take an existing env file into the store, one secret per variable.
 
+    The file's own line order is what the catalog records, so `materialize` puts
+    the same bytes back; a variable that already materializes into the same file
+    but is not in this import keeps its value and moves after the imported block.
+
     Idempotent by content: a variable whose sealed value and metadata already
     match is left alone, envelope bytes included, so re-importing the same file
     adds no duplicates and no commit. The report says which ids moved.
@@ -669,7 +680,9 @@ def import_env_file(
     materialize = _clean_materialize(materialize)
     source = Path(source).expanduser()
     try:
-        text = source.read_text(encoding="utf-8")
+        # Bytes, then decode: read_text would translate CRLF into LF and hide a
+        # file whose bytes this store cannot give back.
+        text = source.read_bytes().decode("utf-8")
     except FileNotFoundError:
         raise SecretStoreValidationError(f"env file not found: {source}") from None
     except (OSError, UnicodeError) as exc:
@@ -685,9 +698,13 @@ def import_env_file(
     with state_repo.state_repo_lock(instance_dir):
         key = load_installation_key(instance_dir)
         _assert_key_ignored(instance_dir)
-        entries = {entry["id"]: dict(entry) for entry in load_catalog(instance_dir)["secrets"]}
+        before = {entry["id"]: dict(entry) for entry in load_catalog(instance_dir)["secrets"]}
+        entries = {name: dict(entry) for name, entry in before.items()}
+        imported = {secret_id_for_variable(name) for name in variables}
+        if materialize:
+            _shift_foreign_lines(entries, materialize, len(variables), keep=imported)
         writes: list[tuple[Path, str]] = []
-        for name, raw in variables.items():
+        for line, (name, raw) in enumerate(variables.items()):
             secret_id = secret_id_for_variable(name)
             value = raw.encode("utf-8")
             if not value:
@@ -700,17 +717,22 @@ def import_env_file(
                 scope=scope,
                 purpose=purpose,
                 environment=name,
-                materialize=dict(materialize) if materialize else None,
+                materialize={**materialize, "order": line} if materialize else None,
                 existing=existing,
             )
+            entries[secret_id] = entry
+            stored = None if existing is None else _stored_value(instance_dir, secret_id, key)
             if existing is None:
                 created.append(secret_id)
-            elif existing == entry and _stored_value(instance_dir, secret_id, key) == value:
+            elif existing == entry and stored == value:
                 unchanged.append(secret_id)
                 continue
             else:
                 updated.append(secret_id)
-            entries[secret_id] = entry
+            if stored == value:
+                # Metadata moved, the value did not. Resealing would rewrite the
+                # envelope with a fresh nonce for nothing.
+                continue
             writes.append(
                 (
                     value_path(instance_dir, secret_id),
@@ -718,7 +740,7 @@ def import_env_file(
                 )
             )
 
-        if not writes:
+        if not writes and entries == before:
             return ImportResult(
                 created=(),
                 updated=(),
@@ -731,7 +753,7 @@ def import_env_file(
         commit = state_repo.commit(
             instance_dir,
             SECRETS_PATHSPEC,
-            _commit_message("import", f"{len(writes)} secrets from {source.name}", actor),
+            _commit_message("import", f"{len(variables)} secrets from {source.name}", actor),
         )
         if commit is None:
             commit = state_repo.head(instance_dir) or ""
@@ -751,6 +773,10 @@ def materialize_secrets(
     One file per target, written whole: the values that belong there are the
     values that end up there, and a variable dropped from the catalog is gone
     from the file. Callers that only want one file pass `target`.
+
+    Line order is the catalog's `materialize.order`, so a file that `import`
+    took in comes back byte for byte, and two runs over an unchanged store write
+    the same bytes.
     """
     if target is not None and target not in MATERIALIZE_TARGETS:
         raise SecretStoreValidationError(
@@ -771,8 +797,12 @@ def materialize_secrets(
 
         results = []
         for path in sorted(groups):
-            entries = sorted(groups[path], key=lambda item: item["environment"])
+            entries = sorted(
+                groups[path],
+                key=lambda item: (item["materialize"].get("order", 0), item["environment"]),
+            )
             _assert_one_secret_per_variable(path, entries)
+            _assert_one_secret_per_line(path, entries)
             _assert_writable_target(instance_dir, path)
             lines = []
             for entry in entries:
@@ -814,17 +844,39 @@ def materialize_path(instance_dir: Path, entry: dict[str, Any]) -> Path:
 
 
 def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
-    """Read `KEY=VALUE` lines exactly as `installation._read_runtime_env` reads them.
+    """Read the env-file format the store can hand back byte for byte.
 
-    Values are taken literally, with no unquoting: whatever bytes stood to the
-    right of the first `=` are the value, so materializing the parse back out
-    reproduces the line it came from.
+    That is the whole point of being strict here. The store keeps variable names,
+    values and line order, and nothing else; a comment, a blank line, a stray
+    space or a CR would be dropped on the way in and could not be put back on the
+    way out, so a file carrying one is refused instead of round-tripped into a
+    different file. Values are taken literally, with no unquoting: whatever stood
+    to the right of the first `=` is the value.
+
+    Returns the variables in file order.
     """
+    if not text:
+        return {}
+    if "\r" in text:
+        raise SecretStoreValidationError(
+            f"{source} has CR line endings; the store keeps env files in LF only"
+        )
+    if not text.endswith("\n"):
+        raise SecretStoreValidationError(f"{source} does not end with a newline")
     values: dict[str, str] = {}
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
+    for number, line in enumerate(text[:-1].split("\n"), 1):
+        if not line.strip():
+            raise SecretStoreValidationError(
+                f"{source} line {number} is blank; the store keeps no blank lines"
+            )
+        if line.startswith("#"):
+            raise SecretStoreValidationError(
+                f"{source} line {number} is a comment; the store keeps no comments"
+            )
+        if line != line.strip():
+            raise SecretStoreValidationError(
+                f"{source} line {number} is padded with whitespace; write it as KEY=VALUE"
+            )
         if line.startswith("export ") or "=" not in line:
             raise SecretStoreValidationError(f"{source} line {number} must use KEY=VALUE syntax")
         name, value = line.split("=", 1)
@@ -934,6 +986,22 @@ def _assert_one_secret_per_variable(path: Path, entries: list[dict[str, Any]]) -
                 f"{seen[name]} and {entry['id']} both materialize {name} into {path}"
             )
         seen[name] = entry["id"]
+
+
+def _assert_one_secret_per_line(path: Path, entries: list[dict[str, Any]]) -> None:
+    """Two secrets claiming one line means the recorded file layout is not a file."""
+    seen: dict[int, str] = {}
+    for entry in entries:
+        order = entry["materialize"].get("order")
+        if order is None:
+            raise SecretStoreStateError(
+                f"secret {entry['id']} materializes into {path} without a line number"
+            )
+        if order in seen:
+            raise SecretStoreStateError(
+                f"{seen[order]} and {entry['id']} both claim line {order} of {path}"
+            )
+        seen[order] = entry["id"]
 
 
 def _assert_writable_target(instance_dir: Path, path: Path) -> None:
@@ -1103,6 +1171,7 @@ def _clean_environment(environment: str | None) -> str | None:
 
 
 def _clean_materialize(materialize: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize one materialization instruction. `order` may be filled in later."""
     if materialize is None:
         return None
     if not isinstance(materialize, dict):
@@ -1112,17 +1181,94 @@ def _clean_materialize(materialize: dict[str, Any] | None) -> dict[str, Any] | N
         raise SecretStoreValidationError(
             f"materialization target must be one of {', '.join(MATERIALIZE_TARGETS)}"
         )
+    cleaned: dict[str, Any] = {"target": target}
     if target == MATERIALIZE_RUNTIME_ENV:
         if materialize.get("path"):
             raise SecretStoreValidationError(
                 f"the {MATERIALIZE_RUNTIME_ENV} target carries no path; "
                 "it is resolved at write time"
             )
-        return {"target": target}
-    path = str(materialize.get("path", "")).strip()
-    if not path:
-        raise SecretStoreValidationError(f"the {MATERIALIZE_FILE} target needs a path")
-    return {"target": target, "path": path}
+    else:
+        path = str(materialize.get("path", "")).strip()
+        if not path:
+            raise SecretStoreValidationError(f"the {MATERIALIZE_FILE} target needs a path")
+        cleaned["path"] = path
+    order = materialize.get("order")
+    if order is not None:
+        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+            raise SecretStoreValidationError("materialization order must be a line number from 0")
+        cleaned["order"] = order
+    return cleaned
+
+
+def _materialize_slot(materialize: dict[str, Any]) -> tuple[str, str]:
+    """The file an instruction writes into, as far as the catalog can tell.
+
+    Two instructions with the same slot land in the same file, so they compete
+    for line numbers; `runtime-env` resolves to one path per host, `file` to its
+    own written path.
+    """
+    return (str(materialize.get("target", "")), str(materialize.get("path", "")))
+
+
+def _shift_foreign_lines(
+    entries: dict[str, dict[str, Any]],
+    materialize: dict[str, Any],
+    imported_lines: int,
+    *,
+    keep: set[str],
+) -> None:
+    """Move whatever else writes into this file below the imported block.
+
+    An import owns the top of the file it came from, line for line. Anything a
+    `set` had already put there stays in the file and keeps its relative order,
+    just after, so no two secrets end up claiming the same line.
+    """
+    slot = _materialize_slot(materialize)
+    foreign = [
+        name
+        for name, entry in entries.items()
+        if name not in keep
+        and entry.get("materialize")
+        and _materialize_slot(entry["materialize"]) == slot
+    ]
+    foreign.sort(key=lambda name: (entries[name]["materialize"].get("order", 0), name))
+    for offset, name in enumerate(foreign):
+        entry = dict(entries[name])
+        entry["materialize"] = {**entry["materialize"], "order": imported_lines + offset}
+        entries[name] = entry
+
+
+def _assign_order(
+    entries: dict[str, dict[str, Any]],
+    *,
+    secret_id: str,
+    materialize: dict[str, Any] | None,
+    existing: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Give a materializing secret its line number in the target file.
+
+    A caller that names no order keeps the one it already had, or takes the next
+    free line at the end of the file. Nothing an existing entry holds moves, so a
+    file that came in through `import` keeps the order it came in with.
+    """
+    if materialize is None:
+        return None
+    if "order" in materialize:
+        return materialize
+    slot = _materialize_slot(materialize)
+    previous = (existing or {}).get("materialize") or {}
+    if "order" in previous and _materialize_slot(previous) == slot:
+        return {**materialize, "order": previous["order"]}
+    used = [
+        entry["materialize"]["order"]
+        for name, entry in entries.items()
+        if name != secret_id
+        and entry.get("materialize")
+        and _materialize_slot(entry["materialize"]) == slot
+        and "order" in entry["materialize"]
+    ]
+    return {**materialize, "order": max(used) + 1 if used else 0}
 
 
 def _check_value(value: bytes) -> None:

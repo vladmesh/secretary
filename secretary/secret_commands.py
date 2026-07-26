@@ -94,7 +94,11 @@ def add_secret_subcommands(subparsers) -> None:
     )
     import_command.add_argument("--instance", required=True)
     import_command.add_argument("--actor", default=DEFAULT_ACTOR)
-    import_command.add_argument("--file", required=True, help="the env file to read")
+    import_command.add_argument(
+        "--file",
+        required=True,
+        help="the env file to read: KEY=VALUE lines, LF, no comments or blank lines",
+    )
     import_command.add_argument("--scope", required=True, help="'installation' or 'project:<id>'")
     import_command.add_argument("--purpose", required=True)
     _add_target_arguments(
