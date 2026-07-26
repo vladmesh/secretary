@@ -36,6 +36,7 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_claude_workspace_trusted,
     role_launch_env,
+    with_pid_heartbeat,
 )
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
@@ -51,6 +52,8 @@ from secretary.dispatcher_watchdog import (
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
+    head_process_status,
+    pid_file_path,
     stall_seconds,
     wait_outcome,
 )
@@ -1713,6 +1716,45 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["action"], "worker-respawned")
         self.assertIn("terminal missing-terminal", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_worker_process_exited_with_shell_left_behind_respawns_without_waiting_for_ceiling(self) -> None:
+        """secretary-751 (the secretary-736/secretary-731 incident): the head crashed, Orca kept
+        the workspace's own shell alive in the pane, and only the pid heartbeat says the head
+        itself is gone. First observation respawns in the same workspace; the next escalates to
+        Blocked. Committed and uncommitted worker work survive both."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        workspace = self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
+        git(workspace, "init", "-q")
+        _configure_git_user(workspace)
+        (workspace / "kept.py").write_text("committed = True\n", encoding="utf-8")
+        git(workspace, "add", "kept.py")
+        git(workspace, "commit", "-qm", "preserved worker commit")
+        commit = git(workspace, "rev-parse", "HEAD")
+        (workspace / "wip.py").write_text("uncommitted = True\n", encoding="utf-8")
+        git(workspace, "add", "wip.py")
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
+
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "worker-respawned")
+        self.assertIn(
+            "terminal process-exited",
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
+        )
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
+
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
+        escalated = self.runtime.tick(self.selector)
+
+        self.assertEqual(escalated["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(
+            self.host.calls.count("restart_worker"), 1, "escalation must not respawn again"
+        )
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
 
     def test_missing_reviewer_terminal_respawns_without_waiting_for_ceiling(self) -> None:
         self.start_pilot()
@@ -4775,6 +4817,83 @@ class ReviewCatalog(FakeCatalog):
         return HeadLaunch(f"run-{role}", prompt_after_start=False)
 
 
+class PidHeartbeatTests(unittest.TestCase):
+    """secretary-751: the pid a head writes for itself before it execs, and how the watchdog
+    reads it back. This is the signal that distinguishes a live silent head from a shell left
+    behind after the head exits, without reading terminal text, title, or a generic running flag.
+    """
+
+    def test_heartbeat_writes_the_shells_own_pid_then_execs_the_head(self) -> None:
+        wrapped = with_pid_heartbeat("codex exec --dangerously-bypass-approvals-and-sandbox", "/tmp/x.pid")
+
+        self.assertEqual(
+            wrapped,
+            'echo "$$" > /tmp/x.pid; exec codex exec --dangerously-bypass-approvals-and-sandbox',
+        )
+
+    def test_heartbeat_quotes_a_pid_file_path_with_spaces(self) -> None:
+        wrapped = with_pid_heartbeat("codex exec", "/tmp/weird dir/x.pid")
+
+        self.assertIn(shlex.quote("/tmp/weird dir/x.pid"), wrapped)
+
+    def test_pid_file_path_is_keyed_on_kind_and_reference_only(self) -> None:
+        """A respawn in the same workspace must land on the same path as the launch before it, so
+        clearing the file before a fresh launch actually removes the predecessor's pid."""
+        self.assertEqual(
+            pid_file_path("worker", "secretary-751"),
+            pid_file_path("worker", "secretary-751"),
+        )
+        self.assertNotEqual(
+            pid_file_path("worker", "secretary-751"),
+            pid_file_path("review", "secretary-751"),
+        )
+
+    def test_pid_file_path_honours_the_body_dir_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": tmp}):
+                self.assertTrue(pid_file_path("worker", "secretary-751").startswith(tmp))
+
+    def test_a_process_that_has_exited_is_not_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "head.pid"
+            proc = subprocess.Popen(["true"])
+            proc.wait()
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
+
+            status = head_process_status(str(pid_file))
+
+            self.assertEqual(status, {"known": True, "alive": False})
+
+    def test_a_running_process_is_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "head.pid"
+            proc = subprocess.Popen(["sleep", "5"])
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.terminate)
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
+
+            status = head_process_status(str(pid_file))
+
+            self.assertEqual(status, {"known": True, "alive": True})
+
+    def test_a_pid_file_that_has_not_been_written_yet_is_not_known(self) -> None:
+        """A fresh launch has not run its `echo $$` yet, and a raw
+        `SECRETARY_DISPATCHER_*_COMMAND` override never will. Neither is evidence of death."""
+        with tempfile.TemporaryDirectory() as tmp:
+            status = head_process_status(str(Path(tmp) / "never-written.pid"))
+
+        self.assertEqual(status, {"known": False})
+
+    def test_garbage_pid_file_contents_are_not_known(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "head.pid"
+            pid_file.write_text("not-a-pid\n", encoding="utf-8")
+
+            status = head_process_status(str(pid_file))
+
+        self.assertEqual(status, {"known": False})
+
+
 class RecordingReviewHost(CommandHostRuntime):
     """CommandHostRuntime with the orca CLI and git stubbed, so the reviewer bring-up runs for
     real: anchor pick, split, label, worker freeze, pinned commit."""
@@ -4958,6 +5077,19 @@ class ReviewLivenessTests(unittest.TestCase):
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
         self.task = {"ref": "secretary-651", "project": "secretary", "routing": {}}
+        _clear_env(self, "SECRETARY_DISPATCHER_BODY_DIR")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+
+    def _dead_pid(self) -> int:
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def _live_pid(self) -> int:
+        proc = subprocess.Popen(["sleep", "5"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.terminate)
+        return proc.pid
 
     def _host(self, terminals: list[dict]) -> RecordingReviewHost:
         return RecordingReviewHost(self.root, terminals=terminals)
@@ -5065,6 +5197,73 @@ class ReviewLivenessTests(unittest.TestCase):
         ])
 
         self.assertTrue(host.review_running(self.task, self._record()))
+
+    def test_connected_worker_pane_with_an_exited_head_process_is_not_live(self) -> None:
+        """secretary-751: Codex crashed and Orca kept the pane's own workspace shell alive. The
+        pane answers connected and even keeps producing output (the shell's own prompt), so only
+        the pid heartbeat tells the watchdog the head itself is gone."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._dead_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["reason"], "process-exited")
+
+    def test_connected_reviewer_pane_with_an_exited_head_process_is_not_live(self) -> None:
+        Path(pid_file_path("review", self.task["ref"])).write_text(
+            str(self._dead_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "connected": True},
+        ])
+
+        status = host.review_status(self.task, self._record(review_handle="term-review"))
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["reason"], "process-exited")
+
+    def test_connected_pane_with_a_live_head_process_stays_live(self) -> None:
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertTrue(status["live"])
+
+    def test_a_head_silent_since_launch_is_still_live_while_its_process_runs(self) -> None:
+        """The pid signal must not read silence as death: a head that has said nothing since it
+        started is a separate, pre-existing case (secretary-726's short initial-output window),
+        not this one."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_000_000},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertTrue(status["live"])
+
+    def test_pid_file_not_written_yet_falls_back_to_ordinary_liveness(self) -> None:
+        """Nothing has written the heartbeat file yet (a launch mid-flight, or a raw
+        SECRETARY_DISPATCHER_*_COMMAND override that never will). That is not evidence of death."""
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertTrue(status["live"])
 
 
 class ProductionPauseTests(unittest.TestCase):

@@ -8,7 +8,11 @@ from typing import Any
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import HostError, legacy_review_pane_label, review_pane_label
-from secretary.dispatcher_watchdog import wait_cycle_token as _wait_cycle_token
+from secretary.dispatcher_watchdog import (
+    head_process_status as _head_process_status,
+    pid_file_path as _pid_file_path,
+    wait_cycle_token as _wait_cycle_token,
+)
 
 
 def command_terminal_status(
@@ -49,6 +53,11 @@ def command_terminal_status(
             continue
         if terminal.get("connected") is False:
             return {"known": True, "live": False, "reason": "disconnected"}
+        pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
+        if pid_status.get("known") and not pid_status.get("alive"):
+            # The pane is connected and Orca kept its wrapping shell open, but the head process
+            # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
+            return {"known": True, "live": False, "reason": "process-exited"}
         last = terminal.get("lastOutputAt")
         try:
             activity = float(last) / 1000.0 if last else None
