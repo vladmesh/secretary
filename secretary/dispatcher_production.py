@@ -14,6 +14,8 @@ from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
+    close_divergence,
+    divergence_is_open,
     new_attempt_id,
     now_rfc3339,
     record_divergence,
@@ -76,6 +78,11 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "records": list((payload.get("records") or {}).keys()),
         "resource_health": runtime.head_health.snapshot(),
         "divergences": list((payload.get("controlled_divergences") or [])),
+        "open_divergences": [
+            divergence
+            for divergence in (payload.get("controlled_divergences") or [])
+            if isinstance(divergence, dict) and divergence_is_open(divergence)
+        ],
         "checkpoint": checkpoint_snapshot(
             runtime.catalog.instance_dir,
             write_state=payload.get("checkpoint"),
@@ -115,7 +122,11 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         payload.setdefault("owner_acquired_at", now_rfc3339())
         payload["last_tick_started_at"] = now_rfc3339()
 
-        outcomes, errors, active_blocked = _advance_active(runtime, records, payload)
+        active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
+        active_refs = {str(task.get("ref") or "") for task in active_tasks}
+        reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
+        outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
+        outcomes = reconcile_outcomes + outcomes
         # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
         claims_allowed = pause.get("mode") != "drain"
         if claims_allowed and not active_blocked:
@@ -496,11 +507,12 @@ def _advance_active(
     runtime: Any,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
+    active_tasks: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], bool]:
     outcomes: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     active_blocked = False
-    for task in _production_tasks(runtime, {"in_progress", "validate"}):
+    for task in active_tasks:
         if is_steward_report(task):
             continue
         try:
@@ -515,6 +527,103 @@ def _advance_active(
             active_blocked = True
         outcomes.append(outcome)
     return outcomes, errors, active_blocked
+
+
+def _reconcile_production(
+    runtime: Any,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    active_refs: set[str],
+) -> list[dict[str, Any]]:
+    """Reconcile records and controlled divergences against the current board.
+
+    `_advance_active` only ever looks at cards the board currently reports as
+    in_progress/validate, so a record whose card left that cycle from outside the
+    dispatcher (a PO move, an archive, a delete) is invisible to it forever. This
+    runs every tick, before the active cards are advanced, and is the only place
+    that removes a record without also touching the card, its workspace or its
+    terminal: reconciliation observes drift the dispatcher did not cause, it does
+    not correct it. A controlled divergence closes the same way: once the card
+    tied to it is no longer in the active cycle, whatever the reason it opened,
+    it does not need an operator's eyes anymore.
+    """
+    outcomes: list[dict[str, Any]] = []
+    state_cache: dict[str, str | None] = {}
+
+    def card_state(ref: str) -> str | None:
+        if ref not in state_cache:
+            state_cache[ref] = _current_card_state(runtime, ref)
+        return state_cache[ref]
+
+    for ref in sorted(ref for ref in records if ref not in active_refs):
+        state = card_state(ref)
+        if state is None:
+            continue
+        record = records.pop(ref)
+        outcomes.append({
+            "status": "ok",
+            "step": "production-reconcile",
+            "ref": ref,
+            "action": "record-removed",
+            "reason": "card left the active dispatcher cycle",
+            "record_state": record.state,
+            "card_state": state,
+        })
+
+    divergences = payload.get("controlled_divergences")
+    open_refs = {
+        str(divergence.get("pilot_ref") or "")
+        for divergence in divergences
+        if isinstance(divergence, dict) and divergence_is_open(divergence)
+    } if isinstance(divergences, list) else set()
+    for ref in sorted(open_refs - active_refs):
+        state = card_state(ref)
+        if state is None:
+            continue
+        closed_ids = _close_divergences_for_ref(payload, ref, state)
+        if closed_ids:
+            outcomes.append({
+                "status": "ok",
+                "step": "production-reconcile",
+                "ref": ref,
+                "action": "divergences-closed",
+                "reason": "card left the active dispatcher cycle",
+                "card_state": state,
+                "divergence_ids": closed_ids,
+            })
+    return outcomes
+
+
+def _close_divergences_for_ref(payload: dict[str, Any], ref: str, card_state: str) -> list[str]:
+    divergences = payload.get("controlled_divergences")
+    if not isinstance(divergences, list):
+        return []
+    closed_ids: list[str] = []
+    for divergence in divergences:
+        if not isinstance(divergence, dict) or divergence.get("pilot_ref") != ref:
+            continue
+        if not divergence_is_open(divergence):
+            continue
+        close_divergence(divergence, f"card left the active dispatcher cycle (state={card_state})")
+        closed_ids.append(str(divergence.get("id") or ""))
+    return closed_ids
+
+
+def _current_card_state(runtime: Any, ref: str) -> str | None:
+    """The card's live state, or None when the board could not be asked right now.
+
+    A `None` here means "skip this ref this tick", never "treat as gone": a
+    transient backend error must not look like the card left the cycle, or a
+    Kanboard hiccup would reconcile away a record that is still legitimately
+    in flight.
+    """
+    try:
+        task = runtime.reader.show(ref)
+    except TaskError as exc:
+        return "not_found" if exc.code == "not_found" else None
+    except Exception:
+        return None
+    return str(task.get("state") or "unknown")
 
 
 def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | None:

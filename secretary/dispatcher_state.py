@@ -313,6 +313,23 @@ def record_divergence(
         "expected": expected,
         "actual": actual,
         "details": details,
+        # Opening rule: every divergence starts open. Closing rule lives with the
+        # production tick (see `_reconcile_production` in dispatcher_production.py):
+        # a divergence closes once its card leaves the active dispatcher cycle
+        # (in_progress/validate), whatever state it lands in. A divergence with no
+        # "status" is a pre-existing record from before this field existed and is
+        # treated as open.
+        "status": "open",
     }
     divergences.append(divergence)
     return divergence
+
+
+def divergence_is_open(divergence: dict[str, Any]) -> bool:
+    return divergence.get("status") != "closed"
+
+
+def close_divergence(divergence: dict[str, Any], reason: str) -> None:
+    divergence["status"] = "closed"
+    divergence["closed_at"] = now_rfc3339()
+    divergence["closed_reason"] = reason

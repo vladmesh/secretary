@@ -669,6 +669,131 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "production")
         self.assertEqual(list(payload["records"]), ["secretary-510-pilot"])
 
+    def test_production_tick_reconciles_a_record_left_behind_by_a_move_to_ideas(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ideas",
+            reason="PO pulled it back out of the cycle",
+            request_id="move-to-ideas",
+        )
+        self.host.calls.clear()
+        self.host.prepared.clear()
+
+        result = self.runtime.production_tick()
+
+        reconcile_actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        self.assertEqual(len(reconcile_actions), 1)
+        action = reconcile_actions[0]
+        self.assertEqual(action["ref"], "secretary-510-pilot")
+        self.assertEqual(action["action"], "record-removed")
+        self.assertEqual(action["card_state"], "ideas")
+        payload = self.runtime.production_state.load()
+        self.assertNotIn("secretary-510-pilot", payload["records"])
+        # Reconciliation only ever removes bookkeeping: the workspace and terminal it had are
+        # untouched (claiming a now-unblocked neighbor card is a separate, legitimate tick action).
+        self.assertEqual(self.host.stopped, [])
+        self.assertEqual(self.host.torn_down, [])
+        self.assertNotIn("secretary-510-pilot", self.host.prepared)
+
+    def test_production_tick_leaves_in_progress_and_validate_records_intact(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.assertEqual(list(self.runtime.production_state.load()["records"]), ["secretary-510-pilot"])
+
+        result = self.runtime.production_tick()
+
+        reconcile_actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        self.assertEqual(reconcile_actions, [])
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_production_tick_closes_a_divergence_once_its_card_leaves_the_active_cycle(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "secretary-pilot",
+            "records": {},
+            "controlled_divergences": [
+                {
+                    "id": "div_stale0000000000",
+                    "at": "2026-07-01T00:00:00Z",
+                    "attempt_id": "attempt-old",
+                    "pilot_ref": "secretary-510-pilot",
+                    "step": "production-recovery",
+                    "reason": "active_claim_mismatch",
+                    "expected": {},
+                    "actual": {},
+                    "details": ["worker"],
+                    # No "status" field: a pre-existing divergence from before this field existed.
+                },
+            ],
+        })
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ideas",
+            reason="PO pulled it back out of the cycle",
+            request_id="move-to-ideas-2",
+        )
+
+        result = self.runtime.production_tick()
+
+        reconcile_actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        closed = [a for a in reconcile_actions if a["action"] == "divergences-closed"]
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["divergence_ids"], ["div_stale0000000000"])
+        payload = self.runtime.production_state.load()
+        divergence = payload["controlled_divergences"][0]
+        self.assertEqual(divergence["status"], "closed")
+        self.assertIn("closed_at", divergence)
+        self.assertIn("closed_reason", divergence)
+
+    def test_production_tick_does_not_close_a_divergence_while_its_card_is_still_active(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "secretary-pilot",
+            "records": {},
+            "controlled_divergences": [
+                {
+                    "id": "div_live00000000000",
+                    "at": "2026-07-01T00:00:00Z",
+                    "attempt_id": "attempt-old",
+                    "pilot_ref": "secretary-510-pilot",
+                    "step": "production-recovery",
+                    "reason": "active_claim_mismatch",
+                    "expected": {},
+                    "actual": {},
+                    "details": ["worker"],
+                    "status": "open",
+                },
+            ],
+        })
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="in_progress",
+            reason="claimed elsewhere",
+            request_id="move-to-in-progress",
+        )
+
+        self.runtime.production_tick()
+
+        payload = self.runtime.production_state.load()
+        divergence = payload["controlled_divergences"][0]
+        self.assertEqual(divergence["status"], "open")
+
     def test_production_tick_writes_the_checkpoint_at_the_end(self) -> None:
         self.commit_cutover()
         self.runtime.checkpoint = FakeCheckpoint(

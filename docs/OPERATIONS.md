@@ -125,6 +125,44 @@ returns structured findings with a non-zero exit status for a broken or unavaila
 `status` to answer what is running now, and `doctor` to decide what needs repair. The default
 human-readable `doctor` output remains available for incident work.
 
+## Record reconciliation and controlled divergences
+
+Каждый production tick, до того как продвигать активные карточки, сверяет свои записи
+(`production-state.json` `records`) с реальным состоянием доски. `_advance_active` смотрит только
+на карточки, которые доска сейчас называет `in_progress`/`validate`: запись про карточку, которую
+PO увёл из цикла напрямую (в `ideas`, `ready`, `blocked`, `done`, или удалил вовсе), этому циклу
+никогда не попадётся на глаза. Реконсиляция закрывает именно этот разрыв: она отдельно проходит по
+всем записям, чьей карточки нет среди активных, спрашивает у доски её текущее состояние и, если
+карточка действительно вне цикла, убирает запись. Тик сообщает об этом действием
+`{"step": "production-reconcile", "action": "record-removed", "ref": ..., "card_state": ...}`.
+Реконсиляция трогает только bookkeeping: workspace и terminal, которые вела запись, не
+останавливаются и не удаляются — они принадлежат PO ровно так же, как принадлежала карточка, и
+разбираться с ними (или воскрешать карточку обратно) остаётся его решением. Если запрос к доске
+временно недоступен, запись не трогается до следующего тика: реконсиляция не рискует принять сбой
+бэкенда за уход карточки из цикла.
+
+Controlled divergence — сигнал о расхождении между тем, что диспетчер ожидал от доски, и тем, что
+она вернула (`active_claim_mismatch`, `claim_live_mismatch` и подобные), записанный в
+`controlled_divergences` через `dispatcher_state.record_divergence`. Жизненный цикл:
+
+- **Открытие.** Divergence создаётся с `"status": "open"` в момент обнаружения расхождения, вместе
+  с `expected`/`actual`/`details` — тем, что нужно для разбора.
+- **Наблюдение.** Пока карточка divergence остаётся в активном цикле (`in_progress`/`validate`),
+  запись остаётся открытой: `status --json` и `doctor --json` показывают её в
+  `dispatcher.divergences.open`, `doctor` поднимает finding `unresolved controlled divergence`
+  (виден и в `--offline`, потому что читается прямо из снапшота состояния, без похода на хост).
+- **Закрытие.** Тот же проход реконсиляции, что убирает осиротевшие записи, закрывает и
+  divergence: как только её карточка больше не входит в активный цикл — неважно, в каком
+  состоянии она оказалась, — divergence получает `"status": "closed"`, `closed_at` и
+  `closed_reason`. Divergence, привязанная к terminal/non-active карточке, поэтому не остаётся
+  открытой бесконечно: secretary-716 (запись и divergence, пережившие уход карточки в Ideas на
+  шесть дней) была ровно этим отсутствием закрывающего правила.
+
+`status --json`/`doctor --json` дают явную, не-null картину: `dispatcher.divergences` —
+`open_count`, `total_count` и список открытых с `pilot_ref`/`reason`/`opened_at`;
+`dispatcher.reconciliation` — `last_tick_finished_at` и `records_tracked`, то есть свидетельство,
+что реконсиляция реально прогонялась, а не просто что файл состояния существует.
+
 ## Checkpoint push
 
 Push идёт на том же тике, но по своему окну: раз в 30 минут, только fast-forward, без
