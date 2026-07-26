@@ -83,6 +83,7 @@ _KNOWN_METADATA = {
     "head", "resolved_head", "review_head", "resolved_review_head", "retry_same",
     "retry_switch", "retry_heads", "complexity", "family_preference", "routing_reason",
     "quota_snapshot_at", "codex_launch_mode",
+    "sprint_ref",
 }
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
@@ -163,7 +164,7 @@ class TaskReader:
         self.board_name = board_name
 
     def list(
-        self, *, states: set[str] | None = None, project: str | None = None
+        self, *, states: set[str] | None = None, project: str | None = None, sprint: str | None = None
     ) -> list[dict[str, Any]]:
         project_id, columns, swimlanes = self._board()
         cards = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
@@ -177,6 +178,8 @@ class TaskReader:
             if states and normalized["state"] not in states:
                 continue
             if project is not None and normalized["project"] != project:
+                continue
+            if sprint is not None and normalized["sprint"] != sprint:
                 continue
             result.append(normalized)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
@@ -251,6 +254,7 @@ class TaskReader:
             },
             "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
             "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
+            "sprint": _null_if_empty(meta.get("sprint_ref")),
             "audit": {"created_at": _rfc3339(card.get("date_creation")), "updated_at": _rfc3339(card.get("date_modification")), "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name}},
         }
         extensions = {key: value for key, value in meta.items() if key not in _KNOWN_METADATA}
@@ -449,6 +453,7 @@ class TaskWriter:
         complexity: str = "standard",
         family_preference: str = "auto",
         codex_launch_mode: str = "",
+        sprint: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _CREATE_ROLES)
@@ -465,6 +470,7 @@ class TaskWriter:
         complexity = complexity.strip() or "standard"
         family_preference = family_preference.strip() or "auto"
         codex_launch_mode = codex_launch_mode.strip()
+        sprint = sprint.strip()
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
         if task_type not in _TASK_TYPES:
@@ -484,6 +490,12 @@ class TaskWriter:
             raise TaskError("validation", "codex launch mode must be exec or tui", 2)
         if slug and not _SLUG_RE.match(slug):
             raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
+        if sprint:
+            from secretary.sprints import SprintReader
+
+            linked_sprint = SprintReader(self.client).show(sprint, include_cards=False)
+            if linked_sprint["status"] == "closed":
+                raise TaskError("closed", "cannot link a new card to a closed sprint", 3)
 
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
@@ -530,6 +542,7 @@ class TaskWriter:
                 "complexity": complexity,
                 "family_preference": family_preference,
                 "codex_launch_mode": codex_launch_mode or None,
+                "sprint": sprint or None,
                 "title_sha256": _digest(title),
                 "description_sha256": _digest(description),
             },
@@ -551,6 +564,7 @@ class TaskWriter:
                 complexity=complexity,
                 family_preference=family_preference,
                 codex_launch_mode=codex_launch_mode,
+                sprint=sprint,
                 event=event,
                 request_id=request_id,
             )
@@ -590,6 +604,7 @@ class TaskWriter:
         complexity: str,
         family_preference: str,
         codex_launch_mode: str,
+        sprint: str,
         event: dict[str, Any],
         request_id: str,
     ) -> str:
@@ -637,6 +652,8 @@ class TaskWriter:
                 values["base_branch"] = base_branch
             if codex_launch_mode:
                 values["codex_launch_mode"] = codex_launch_mode
+            if sprint:
+                values["sprint_ref"] = sprint
             self.client.call("saveTaskMetadata", task_id=task_id, values=values)
         except Exception as exc:
             raise _CommittedWriteError() from exc
@@ -1012,6 +1029,14 @@ class TaskWriter:
         unresolved = 0
         for event in self.audit.pending_events():
             try:
+                if str(event.get("ref") or "").startswith("sprint:"):
+                    from secretary.sprints import SprintWriter
+
+                    SprintWriter(self.client, data_dir=self.data_dir)._pending(
+                        str(event.get("kind") or "updated"), event
+                    )
+                    repaired += 1
+                    continue
                 self._finish_pending_cleanup(event, None)
                 task = self.reader.show(str(event["ref"]))
                 event["task_id"] = task["id"]
@@ -1330,6 +1355,7 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         ("slug", "slug"),
         ("base_branch", "base_branch"),
         ("codex_launch_mode", "codex_launch_mode"),
+        ("sprint", "sprint_ref"),
     ):
         value = _text(payload.get(payload_key))
         if value:

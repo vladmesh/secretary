@@ -54,6 +54,7 @@ def add_task_subcommands(subparsers) -> None:
         choices=("ideas", "ready", "in_progress", "validate", "blocked", "done"),
     )
     task_list.add_argument("--project")
+    task_list.add_argument("--sprint")
     task_list.set_defaults(handler=run_task_list)
     task_show = task_subcommands.add_parser("show")
     task_show.add_argument("--ref", required=True)
@@ -78,6 +79,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard")
     task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
     task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", choices=("exec", "tui"), default="")
+    task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
     task_create.set_defaults(handler=run_task_create)
     for name, handler in (
         ("comment", run_task_comment),
@@ -147,7 +149,7 @@ def not_implemented_task(args: argparse.Namespace) -> int:
 
 
 def run_task_list(args: argparse.Namespace) -> int:
-    return _run_task_read(lambda reader: reader.list(states=set(args.state or ()), project=args.project))
+    return _run_task_read(lambda reader: reader.list(states=set(args.state or ()), project=args.project, sprint=args.sprint))
 
 
 def run_task_show(args: argparse.Namespace) -> int:
@@ -212,6 +214,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             complexity=args.complexity,
             family_preference=args.family_preference,
             codex_launch_mode=args.codex_mode,
+            sprint=args.sprint,
             request_id=args.request_id,
         )
     except TaskError as exc:

@@ -66,6 +66,7 @@ from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
 from secretary.state_repo import StateRepoError
 from secretary.task_commands import add_task_subcommands
+from secretary.sprint_commands import add_sprint_subcommands
 from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
 from secretary.installation import add_install_commands
@@ -146,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_upgrade_command(subparsers)
     add_install_commands(subparsers)
     add_role_skills_subcommands(subparsers)
+    add_sprint_subcommands(subparsers)
 
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")

@@ -39,7 +39,7 @@ Git-backed recovery checkpoint описан в [Recovery](RECOVERY.md). Ручн
 operator / automation
           │
           ▼
-  secretary task protocol ────────> Kanboard
+  secretary task and sprint protocol ────────> Kanboard
           │                            ▲
           ▼                            │
  production dispatcher ──> head adapter ──> Orca session ──> native agent CLI
@@ -49,8 +49,10 @@ operator / automation
 agent heads ── memory_search ──> MCP/index <── facts journal <── curator
 ```
 
-Kanboard является текущим live task store. Все поддержанные записи проходят через
-`secretary task`, который применяет role guards, transitions и append-only audit. Dispatcher
+Kanboard является текущим live store для карточек и спринтов. Карточки живут на board `Pipeline`;
+каждый спринт является отдельной Kanboard-задачей на product board `Secretary sprints`. Все
+поддержанные записи проходят через `secretary task` или `secretary sprint`, которые применяют role
+guards, transitions и append-only audit. Dispatcher
 разрешает routing, создаёт worker/reviewer lifecycle и сверяет board, workspace, report и review
 state перед переходами.
 
