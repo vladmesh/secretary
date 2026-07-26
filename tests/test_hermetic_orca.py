@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import host_apply
 from secretary.host_apply import resolve_systemd_layout
 from tests import _find_orca_patcher
 from tests.orca_fixtures import legacy_orca_runtime
@@ -47,15 +48,40 @@ class HermeticOrcaDiscoveryTests(unittest.TestCase):
         # filesystem probe against the fixture-owned home that
         # legacy_orca_runtime sets up, proving the escape hatch reaches real
         # resolver code and not just a second layer of mocking.
+        #
+        # find_orca_executable checks /usr/local/bin/orca *before* the
+        # runtime user's legacy path (secretary/host_apply.py). That pinned
+        # candidate is a real, unsandboxed host path outside anything
+        # legacy_orca_runtime controls: on a host that happens to have Orca
+        # installed there, the unpatched real resolver would return it
+        # instead of the fixture-owned legacy executable this test asserts
+        # on, making the test's outcome depend on host state again. Model
+        # that candidate as unavailable explicitly so the opt-in's result
+        # depends only on the fixture, not on whether this machine has a
+        # pinned Orca.
         real_find_orca_executable = _find_orca_patcher.temp_original
+        real_is_executable = host_apply._is_executable
+        pinned_candidate = Path("/usr/local/bin/orca")
+
+        def _is_executable_without_pinned_candidate(path):
+            if path == pinned_candidate:
+                return False
+            return real_is_executable(path)
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance_path = root / "instance"
             instance_path.mkdir()
             with legacy_orca_runtime(root) as discoverable:
-                with mock.patch(
-                    "secretary.host_apply.find_orca_executable",
-                    side_effect=real_find_orca_executable,
+                with (
+                    mock.patch(
+                        "secretary.host_apply.find_orca_executable",
+                        side_effect=real_find_orca_executable,
+                    ),
+                    mock.patch(
+                        "secretary.host_apply._is_executable",
+                        side_effect=_is_executable_without_pinned_candidate,
+                    ),
                 ):
                     layout = resolve_systemd_layout(
                         {}, instance_path=instance_path, runtime_user="operator",
