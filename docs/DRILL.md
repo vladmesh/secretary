@@ -59,9 +59,11 @@ CODEX_HOME восстанавливаются автоматически.
    cd ~/secretary && python3 -m pip install '.[memory]'
    ```
 
-4. Kanboard + Orca: на Ubuntu 24.04 bootstrap ставит pinned Kanboard в Docker и
-   pinned Orca AppImage, запускает и проверяет Docker и Orca service, генерирует API
-   token в `runtime.env` и создаёт Pipeline с колонками и swimlanes из project registry:
+4. Kanboard + Orca: на Ubuntu 24.04 bootstrap ставит pinned Kanboard в Docker,
+   запускает и проверяет Docker, ставит pinned Orca AppImage-CLI в
+   `/usr/local/bin/orca` (Orca runtime — внешний, secretary его не запускает и не
+   держит как systemd unit, см. OPERATIONS.md), генерирует API token в
+   `runtime.env` и создаёт Pipeline с колонками и swimlanes из project registry:
 
    ```bash
    sudo secretary bootstrap \

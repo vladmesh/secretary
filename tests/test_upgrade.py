@@ -517,67 +517,13 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "changed")
         self.assertEqual(units.calls, [])
 
-    def legacy_upgrade_materializes_foreign_orca_before_the_ownership_migration(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            instance = root / "instance"
-            instance.mkdir()
-            data = root / "data"
-            legacy = root / "operator" / ".local" / "bin" / "orca"
-            legacy.parent.mkdir(parents=True)
-            legacy.write_text("#!/bin/sh\n", encoding="utf-8")
-            legacy.chmod(0o755)
-            report = SimpleNamespace(
-                instance=instance_config(data, foreign_units=["secretary-orca.service"]),
-                bindings=[],
-                host={"unit_prefix": UNIT_PREFIX, "foreign_units": ["secretary-orca.service"]},
-            )
-            account = SimpleNamespace(pw_dir=str(root / "operator"))
-            source = mock.Mock()
-            source.collect.return_value = SimpleNamespace(inventory=HostInventory(), errors={})
-            units = FakeUnitInstaller()
-            context = self.context(
-                units, instance_path=instance, report=report, runtime_user="operator", host_fixture=root / "fixture",
-            )
-            with (
-                mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.FixtureHostSource", return_value=source),
-            ):
-                result = upgrade.step_host(context)
-
-            self.assertEqual(result.status, "changed")
-            self.assertIn(("install", "secretary-orca.service"), units.calls)
-            self.assertIn(("enable", "secretary-orca.service"), units.calls)
-            self.assertIn(f"ExecStart={legacy}".encode(), units.files["secretary-orca.service"])
-            managed, error = strict_manifest(data / "host-managed.json")
-            self.assertEqual(error, "")
-            self.assertNotIn("systemd:unit:secretary-orca.service", {item.logical_id for item in managed})
-
-    def legacy_host_reports_an_unavailable_orca_runtime_before_writing_ownership(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            data_dir = root / "data"
-            instance = root / "instance"
-            instance.mkdir()
-            report = SimpleNamespace(
-                instance=instance_config(data_dir), bindings=[], host={"unit_prefix": UNIT_PREFIX},
-            )
-            units = FakeUnitInstaller()
-            context = self.context(
-                units, report=report, instance_path=instance, runtime_user="operator"
-            )
-
-            account = SimpleNamespace(pw_dir=str(root / "operator"))
-            with mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account), mock.patch(
-                "secretary.host_apply.find_orca_executable", return_value=None
-            ), mock.patch("secretary.host_apply._is_executable", return_value=False
-            ):
-                result = upgrade.step_host(context)
-
-            self.assertEqual(result.status, "failed")
-            self.assertIn("Orca executable for operator is unavailable", result.detail)
-            self.assertEqual(units.calls, [])
-            self.assertFalse((data_dir / "host-managed.json").exists())
+    # secretary-756: the two scenarios formerly here (materializing a foreign
+    # `secretary-orca.service` before the ownership migration, and `step_host` failing over
+    # an unavailable Orca executable before writing ownership) both depended on the product
+    # shipping a `secretary-orca.*` systemd unit. Orca is host-owned and external
+    # (secretary-739/755): packaging/systemd ships no such unit, `resolve_packaged` no longer
+    # raises over a missing Orca executable, and `step_host` can no longer materialize or
+    # gate on one. Deleted rather than rewritten.
 
     def test_the_run_stops_at_the_first_failed_step(self):
         calls: list[str] = []

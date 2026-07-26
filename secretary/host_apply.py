@@ -250,13 +250,7 @@ def resolve_packaged(
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     root = packaging_root or default_packaging_root()
-    packaged = load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
-    if any(unit.component == "orca" for unit in packaged) and not _is_executable(layout.orca_executable):
-        raise ValueError(
-            f"Orca executable for {layout.runtime_user} is unavailable: {layout.orca_executable}; "
-            "install the pinned runtime or restore ~/.local/bin/orca"
-        )
-    return packaged
+    return load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
 
 
 def find_orca_executable(runtime_user: str, runtime_home: Path | None = None) -> Path | None:

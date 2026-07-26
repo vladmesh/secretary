@@ -265,6 +265,48 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["host"]["external_runtime"]["enabled"], "enabled")
         self.assertEqual(payload["host"]["external_runtime"]["active"], "active")
 
+    def test_status_and_doctor_report_absent_external_runtime(self):
+        # secretary-756: a real systemd reports a never-installed unit as
+        # `is-enabled`/`is-active` "not-found"/"inactive" on stdout, not as a missing
+        # inventory entry (verified against systemd 255). status must surface that
+        # value as-is, and doctor's human report must read it as "absent", not print
+        # the raw systemctl token.
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            report = validate_instance(root / "examples" / "instance")
+            expected = build_doctor_expectations(
+                report.instance, report.bindings,
+                packaged=resolve_packaged(report.instance, instance_path=root / "examples" / "instance"),
+            )
+            (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
+            (fixture / "unit-states.txt").write_text(
+                "\n".join([
+                    *(f"{name} enabled active" for name in sorted(expected.units)),
+                    "orca-server.service not-found inactive",
+                ]),
+                encoding="utf-8",
+            )
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                json_code = main([
+                    "status", "--json", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance"),
+                ])
+            text_output = io.StringIO()
+            with contextlib.redirect_stdout(text_output):
+                text_code = main([
+                    "doctor", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance"),
+                ])
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(json_code, 0, payload)
+        self.assertEqual(payload["host"]["external_runtime"]["name"], "orca-server.service")
+        self.assertEqual(payload["host"]["external_runtime"]["enabled"], "not-found")
+        self.assertEqual(payload["host"]["external_runtime"]["active"], "inactive")
+        # examples/instance's fixture host is otherwise incomplete (missing project checkout,
+        # drifted automations), same as test_doctor_json_reports_the_same_missing_host_resource_as_doctor;
+        # this scenario only asserts the external-runtime line, not the overall exit code.
+        self.assertIn("Orca runtime: absent (external, not managed by Secretary)", text_output.getvalue())
+
     def test_doctor_json_reports_an_unresolved_divergence_even_offline(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:

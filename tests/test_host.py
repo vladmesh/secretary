@@ -237,20 +237,21 @@ class FixtureSourceTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
-    def test_packaged_units_do_not_depend_on_an_orca_executable(self):
+    def test_resolve_packaged_never_yields_an_orca_component(self):
+        """Orca runs external to Secretary (secretary-739/755): the product ships no
+        ``secretary-orca.*`` unit, so ``resolve_packaged`` cannot depend on an Orca
+        executable being installed and must not raise over one being unavailable.
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = root / "instance"
             instance.mkdir()
-            with legacy_orca_runtime(root) as legacy_orca, unittest.mock.patch(
-                "secretary.host_apply.find_orca_executable", return_value=None
-            ):
+            with unittest.mock.patch("secretary.host_apply.find_orca_executable", return_value=None):
                 packaged = resolve_packaged(
                     {"data_dir": str(root / "data"), "host": {"unit_prefix": "secretary-"}},
                     instance_path=instance,
-                    orca_executable=legacy_orca,
                 )
 
         self.assertNotIn("orca", {unit.component for unit in packaged})
