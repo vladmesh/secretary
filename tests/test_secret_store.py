@@ -1117,6 +1117,18 @@ class ObservabilityCase(SecretStoreCase):
         health = secret_store.store_health(self.instance_dir)
         self.assertTrue(health["initialized"])
 
+    def test_a_malformed_scalar_does_not_leak_its_content_into_a_finding(self) -> None:
+        self.initialize()
+        sentinel = "sentinel-secret-do-not-leak"
+        (self.instance_dir / "secrets" / CATALOG_NAME).write_text(
+            f'version: 1\nsecrets: "{sentinel}\n', encoding="utf-8"
+        )
+        findings = secret_store.store_findings(self.instance_dir)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("secret store:", findings[0])
+        for finding in findings:
+            self.assertNotIn(sentinel, finding)
+
 
 class CatalogSchemaCase(unittest.TestCase):
     """The materialization record is only as good as the schema that guards it."""

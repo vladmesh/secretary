@@ -64,7 +64,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from secretary import role_env, state_repo
 from secretary._fsutil import publish_state_atomic
-from secretary.config import validate
+from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.state_repo import SECRETS_PATHSPEC
 
@@ -483,8 +483,14 @@ def load_catalog(instance_dir: Path) -> dict[str, Any]:
         raise SecretStoreStateError(
             "secret store is not initialized; run `secretary secret init` first"
         ) from None
-    except (OSError, yaml.YAMLError) as exc:
-        raise SecretStoreStateError(f"could not read {CATALOG_NAME}: {exc}") from None
+    except yaml.YAMLError as exc:
+        raise SecretStoreStateError(
+            f"{CATALOG_NAME} is invalid: {_safe_yaml_error(exc)}"
+        ) from None
+    except OSError as exc:
+        raise SecretStoreStateError(
+            f"could not read {CATALOG_NAME}: {exc.strerror or 'unreadable'}"
+        ) from None
     errors = validate(data, "secret-catalog", f"secrets/{CATALOG_NAME}")
     if errors:
         raise SecretStoreStateError(f"{CATALOG_NAME} is invalid: {errors[0]}")
