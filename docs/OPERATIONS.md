@@ -1,14 +1,8 @@
 # Эксплуатация
 
-## Текущее состояние
-
-Live ownership принадлежит `secretary`: production dispatcher, memory daemon и systemd timers
-работают из product checkout. `secretary-instance` хранит installation config и переносимый
-checkpoint, `secretary-data` хранит локальный mutable/derived runtime state. Legacy checkouts и
-units удалены.
-
-Живой `doctor`, memory parity и task read/write были проверены после cutover.
-Исторический журнал процедуры доступен в Git history и не является действующим runbook.
+Документ описывает поведение продукта. Состояние конкретной установки — кто владеет юнитами,
+какие компоненты подняты, свежий ли checkpoint — читается из `secretary status` и
+`secretary doctor`, а не из этого файла.
 
 ## Установка и проверка кода
 
@@ -30,13 +24,16 @@ python3 -m unittest
 
 ## Runtime secrets
 
-Секреты установки живут в восстановимом хранилище (`secretary secret init/set/import`,
-`secretary-instance/secrets/`) и материализуются оттуда в env-файлы; `runtime.env` рядом с
-`instance.yaml` переведён на materialization, файл — materialized копия значений из хранилища.
-Файл должен быть `0600`, находится в `.gitignore` instance-репозитория
-и не входит в checkpoint или archive payload. `secretary shell` получает весь файл для trusted
-operator-сессии, dispatcher-launched worker/reviewer получают только allowlisted board credentials
-и non-secret runtime switches через `secretary.role_env`. Хранилище не обещает worker isolation:
+Секреты установки живут в восстановимом хранилище (`secretary secret init/set/import`, каталог
+`secrets/` приватного репозитория) и материализуются оттуда в env-файлы. `runtime.env` рядом с
+`instance.yaml` может быть одной из таких целей: тогда канон значений лежит в хранилище, а файл
+является materialized копией. Переведена ли конкретная установка на materialization, показывает
+`secretary status --json`, секция `secret_store`, поле `materialize`; продукт делает это не сам,
+шаг выполняет оператор командой `secret import`. Сам файл в любом случае `0600`, в `.gitignore`
+приватного репозитория и не входит в checkpoint или archive payload. `secretary shell` получает
+весь файл для trusted operator-сессии, dispatcher-launched worker/reviewer получают только
+allowlisted board credentials и non-secret runtime switches через `secretary.role_env`.
+Хранилище не обещает worker isolation:
 у него нет своего broker или grants, и installation key открывает все секреты сразу, теми же
 правами, что и раньше читали `runtime.env` (см. [Recovery](RECOVERY.md), раздел «Секреты»).
 
@@ -480,8 +477,8 @@ Production dispatcher timer запускает one-shot tick. Memory, curator, s
 установку под неё. Идемпотентна: повторный запуск на актуальном хосте не делает ничего.
 
 ```
-secretary upgrade --instance /home/dev/secretary-instance --dry-run   # решить всё, ничего не писать
-secretary upgrade --instance /home/dev/secretary-instance
+secretary upgrade --instance INSTANCE --dry-run   # решить всё, ничего не писать
+secretary upgrade --instance INSTANCE
 ```
 
 Шаги, по порядку; каждый печатает `changed`/`unchanged`/`skipped`/`failed`, первый `failed`
@@ -527,19 +524,6 @@ host:
 ```
 
 Выключенный компонент, юнит которого стоит и принадлежит нам, будет остановлен и удалён.
-
-### Разовая миграция существующей установки
-
-В desired-состояние юнита теперь входит дайджест packaged-файла, поэтому первый прогон на хосте,
-который ставили руками, потребует один раз навести порядок:
-
-1. `secretary upgrade --instance <dir> --dry-run` — посмотреть список conflict-имён.
-2. Для каждого юнита, который байт в байт совпадает с `packaging/systemd/`:
-   `secretary reconcile adopt --instance <dir> --logical-id systemd:unit:<name> --yes`.
-3. Юниты не нашей установки (`secretary-supervisor.*`) — в `host.foreign_units`.
-4. Уже записанные в manifest юниты покажут `update` — это refresh fingerprint под новую схему;
-   apply перезапишет файл каноном (для совпадающих файлов запись байт-в-байт).
-5. Повторить dry-run: он должен быть чистым, после этого запускать upgrade без флага.
 
 ### Health-набор
 

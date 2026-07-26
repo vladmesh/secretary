@@ -6,24 +6,24 @@ Roadmap описывает последовательность продукто
 
 ## Текущий baseline
 
-На рабочем VPS `secretary` уже владеет production dispatcher, memory service и Git-backed
-checkpoint. Task lifecycle, worker/reviewer loop, memory journal, onboarding, host planning и
-checkpoint recovery primitives доказаны кодом и эксплуатацией. Checkpoint проходит validation,
-коммитится на production-тике и отправляется ff-only с RPO до 30 минут; publish изменений instance
-repo, checkpoint writer и pusher сериализованы одним writer lock.
+Продукт реализует production dispatcher, memory service и Git-backed checkpoint. Task lifecycle,
+worker/reviewer loop, memory journal, onboarding, host planning и checkpoint recovery primitives
+закрыты кодом. Checkpoint проходит validation, коммитится на production-тике и отправляется
+ff-only с RPO до 30 минут; publish изменений instance repo, checkpoint writer и pusher
+сериализованы одним writer lock.
 
-Нормализованные board/runs и канон memory facts находятся в `secretary-instance/state/`. Локальный
-`secretary-data` хранит mutable/derived runtime state и пересоздаваемый memory index, отдельным
-recovery-репозиторием не является.
+Нормализованные board/runs и канон memory facts живут в `state/` приватного instance-репозитория.
+Локальный data plane хранит mutable/derived runtime state и пересоздаваемый memory index,
+отдельным recovery-репозиторием не является.
 
-Восстановимое хранилище секретов (`secretary secret init/set/import`, `secretary-instance/secrets/`)
-держит installation credentials в том же instance-репозитории рядом с board и memory: канон
-значений зашифрован, восстанавливается одной recovery phrase и уезжает тем же push. Секреты стали
-частью recovery-контракта наравне с board, memory и operational configuration.
+Восстановимое хранилище секретов (`secretary secret init/set/import`, `secrets/` приватного
+репозитория) держит installation credentials рядом с board и memory: канон значений зашифрован,
+восстанавливается одной recovery phrase и уезжает тем же push. Секреты входят в recovery-контракт
+наравне с board, memory и operational configuration.
 
 Фоновые роли материализуются из продуктового канона: packaged units и `automation.toml` управляют
 curator, steward и retro, их timers и Orca automations без ручного копирования generated files.
-Live instance содержит переносимый desired config для materializer. Archive backup, offsite и
+Instance содержит переносимый desired config для materializer. Archive backup, offsite и
 backup timer выведены из основного recovery-контракта; archive остался только ручным optional cold
 archive.
 
@@ -67,8 +67,8 @@ Milestone остаётся открытым до появления поддер
 
 ### Acceptance gate
 
-- Поддержанный Ubuntu 24.04 host не содержит заранее подготовленных `/home/dev`, checkout'ов,
-  board или Orca state.
+- Поддержанный Ubuntu 24.04 host не содержит заранее подготовленного домашнего каталога
+  installation user, checkout'ов, board или Orca state.
 - Все host paths и resource names выводятся из instance и обнаруженного host context.
 - Installer ставит и настраивает bundled Kanboard и Orca без заранее подготовленного runtime.
 - Memory, dispatcher, curator, steward, retro и schedules поднимаются materializer'ом без ручного

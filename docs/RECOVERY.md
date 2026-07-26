@@ -6,7 +6,7 @@ checkpoint конфигурации и переносимого состояни
 Отдельный bundle/S3 не является обязательной частью основного пути.
 
 Writer, memory flatten, remote push и цельный recover-from-remote flow реализованы. Archive backup,
-offsite-перенос и backup-таймер выведены из основного пути (см. [Переход и parity](#переход-и-parity));
+offsite-перенос и backup-таймер выведены из основного пути (см. [Отношение к cold archive](#отношение-к-cold-archive));
 git-checkpoint является единственным recovery contract, архив остаётся только ручным optional cold
 archive.
 
@@ -149,8 +149,8 @@ manager оператора и не копируются на хост проду
 трекаются git-ом рядом с board и memory и уезжают тем же push. Единственное, что репо
 никогда не содержит — сырой installation key (`secrets/installation.key`, gitignored, `0600`) и
 recovery phrase, которая генерируется один раз при `secret init`, печатается оператору и нигде не
-хранится продуктом. Восстановление на чистом хосте описано в [DRILL.md](DRILL.md), раздел
-«Восстановление»: с фразой ключ пересобирается и значения возвращаются побайтово; без фразы
+хранится продуктом. Восстановление на чистом хосте описано ниже, в разделе «Fresh install и
+recovery»: с фразой ключ пересобирается и значения возвращаются побайтово; без фразы
 recover печатает отчёт locked/missing и ничего не пишет; потеря фразы означает перевыпуск
 секретов заново, а не потерю остальной установки.
 
@@ -196,12 +196,12 @@ Pipeline без ручного ввода Kanboard credentials:
 python3 -m pip install '.[memory]'
 sudo secretary bootstrap \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
-  --instance-dir /home/dev/secretary-instance \
+  --instance-dir INSTANCE \
   --installation-user dev
 
 sudo secretary install \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
-  --instance-dir /home/dev/secretary-instance \
+  --instance-dir INSTANCE \
   --installation-user dev
 ```
 
@@ -243,30 +243,11 @@ Fresh mode не принимает существующего installation user 
 не перезаписывает dirty checkout, другой remote, произвольный непустой data target или unowned host
 resource. Полный adopt существующего live host в этот flow не входит.
 
-## Переход и parity
+## Отношение к cold archive
 
-Parity gate ухода с архива на git закрыт clean-host recovery из приватного репозитория: установка
-продукта, clone, ручной `runtime.env`, `secretary recover`, зелёный status, совпадающие счётчики
-board/memory/runs. Clean-host тест начинает без checkout, board, index, worktrees и Orca state.
-
-Production cutover выполнен без долгого параллельного периода. Memory facts перенесены в private
-instance repo, memory service читает новый канон, а scheduled archive units сняты. Из основного пути
-выведены:
-
-1. archive backup create/verify как обязательная часть контракта — остаётся ручным опциональным
-   инструментом (`secretary backup create`), не recovery-контрактом;
-2. offsite-перенос (`pull-backups-offsite.sh`) и его doctor-гейт — удалены;
-3. backup-таймер (`secretary-backup.service`/`.timer`) и archive-age doctor-проверка — удалены.
-
-git-checkpoint является единственным recovery contract. Ручной cold archive сохраняется для сырья
-и совместимости, без timer, offsite transport и doctor gate.
-
-## Реализационная нарезка
-
-1. Готово: дизайн-контракт, отказ от sops/age, checkpoint writer, memory flatten, 30-минутный push
-   и вывод archive/offsite из основного пути.
-2. Готово: fresh install и recovery path
-   (`install -> clone -> runtime.env -> rebuild -> status`) для Git-backed Milestone 2.
+git-checkpoint является единственным recovery contract. Ручной cold archive сохраняется для
+сырья и совместимости, без timer, offsite transport и doctor gate. Scheduled archive backup,
+offsite-перенос и archive-age проверка из основного пути выведены и в продукте отсутствуют.
 
 ## Acceptance gate
 
@@ -277,7 +258,6 @@ git-checkpoint является единственным recovery contract. Ру
   divergence, наблюдаемый RPO/lag.
 - Описаны пути fresh install и recovery из приватного remote без обязательного S3.
 - Ручные archives обозначены optional cold storage, не вторым recovery contract.
-- Есть поэтапная нарезка и проверяемый parity gate для оставшегося clean-host recovery flow.
 
 ## Out of scope
 
