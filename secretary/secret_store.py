@@ -690,6 +690,7 @@ def import_env_file(
     variables = parse_env_file(text, source=str(source))
     if not variables:
         raise SecretStoreValidationError(f"{source} defines no variables")
+    _assert_distinct_secret_ids(variables, source=str(source))
 
     instance_dir = state_repo.require_repo(instance_dir)
     created: list[str] = []
@@ -712,6 +713,11 @@ def import_env_file(
                     f"{source}: {name} has an empty value; the store holds no empty secrets"
                 )
             existing = entries.get(secret_id)
+            if existing is not None and existing.get("environment", name) != name:
+                raise SecretStoreValidationError(
+                    f"{source}: {name} would take over secret {secret_id!r}, which already holds "
+                    f"{existing['environment']}; remove one of them before importing"
+                )
             entry = _entry(
                 secret_id,
                 scope=scope,
@@ -974,6 +980,27 @@ def _env_value(entry: dict[str, Any], value: bytes) -> str:
             f"secret {entry['id']!r} contains a newline and cannot go into an env file"
         )
     return text
+
+
+def _assert_distinct_secret_ids(variables: dict[str, str], *, source: str) -> None:
+    """Refuse a file whose variables would share one secret id.
+
+    Ids are lower case, so `FOO` and `foo` are two variables but one id: importing
+    both would leave the second one's value under the first one's name and hand
+    back a file with one line where the source had two. The store cannot keep
+    such a file, so it does not take it in, and it says so before writing
+    anything.
+    """
+    seen: dict[str, str] = {}
+    for name in variables:
+        secret_id = secret_id_for_variable(name)
+        first = seen.get(secret_id)
+        if first is not None:
+            raise SecretStoreValidationError(
+                f"{source} defines {first} and {name}, which differ only in case and would share "
+                f"the secret id {secret_id!r}; rename one of them before importing"
+            )
+        seen[secret_id] = name
 
 
 def _assert_one_secret_per_variable(path: Path, entries: list[dict[str, Any]]) -> None:

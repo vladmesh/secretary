@@ -687,6 +687,44 @@ class ImportCase(EnvStoreCase):
             self.target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV + "EXTRA_FLAG=on\n"
         )
 
+    def test_import_refuses_names_that_differ_only_in_case(self) -> None:
+        # One id per variable, so two names sharing an id are refused whole:
+        # taking the file in would drop a line on the way back out.
+        cased = Path(self.tmpdir.name) / "cased.env"
+        cased.write_text("FOO=upper\nfoo=lower\n", encoding="utf-8")
+        head = state_repo.head(self.instance_dir)
+        with self.assertRaises(SecretStoreValidationError) as caught:
+            self.do_import(source=cased)
+        self.assertIn("differ only in case", str(caught.exception))
+        self.assertNotIn("upper", str(caught.exception))
+        self.assertNotIn("lower", str(caught.exception))
+        # Refused before the first write: no entry, no envelope, no commit.
+        self.assertEqual(list(list_secrets(self.instance_dir)), [])
+        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(list((self.instance_dir / "secrets" / "values").glob("*")), [])
+        self.assertEqual(materialize_secrets(self.instance_dir), ())
+        self.assertFalse(self.target.exists())
+
+    def test_import_does_not_take_over_a_variable_already_stored_under_that_id(self) -> None:
+        set_secret(
+            self.instance_dir,
+            secret_id="foo",
+            value=b"upper",
+            scope="installation",
+            purpose="board api",
+            environment="FOO",
+            materialize={"target": "runtime-env", "order": 0},
+            actor="tester",
+        )
+        lower = Path(self.tmpdir.name) / "lower.env"
+        lower.write_text("foo=lower\n", encoding="utf-8")
+        with self.assertRaises(SecretStoreValidationError) as caught:
+            self.do_import(source=lower)
+        self.assertIn("would take over", str(caught.exception))
+        entry = next(item for item in list_secrets(self.instance_dir) if item["id"] == "foo")
+        self.assertEqual(entry["environment"], "FOO")
+        self.assertEqual(read_secret(self.instance_dir, "foo"), b"upper")
+
     def test_import_does_not_read_a_file_that_is_not_there(self) -> None:
         with self.assertRaises(SecretStoreValidationError) as caught:
             self.do_import(source=Path(self.tmpdir.name) / "absent.env")
