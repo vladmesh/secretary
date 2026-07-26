@@ -33,6 +33,43 @@ def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str 
     return result
 
 
+_GATE_RED_PREFIX = "Механический гейт валидации красный"
+
+
+def _last_gate_red_body(task: dict[str, Any]) -> str | None:
+    """Most recent mechanical-gate-red bounce comment, for delivery to the rework worker.
+
+    Mirrors `_last_review_red_body`: without this the rework prompt never explains why the
+    mechanical gate (CI or local validation) failed, so the worker re-reports the same red
+    commit or edits code at random (secretary-766).
+    """
+    body = None
+    for comment in task.get("comments") or []:
+        if comment.get("marker") == "dispatcher" and _GATE_RED_PREFIX in (comment.get("body") or ""):
+            body = comment.get("body")
+    if not body:
+        return None
+    lines = body.splitlines()
+    if lines and lines[0].strip() == "[dispatcher]":
+        lines = lines[1:]
+    return "\n".join(lines).strip() or None
+
+
+def _gate_red_repeat_count(task: dict[str, Any], detail: str) -> int:
+    """How many times this exact gate-failure reason has already bounced this card.
+
+    A worker stuck reproducing the same failure needs to see that the reason did not change
+    since last time, or an identical silent bounce reads as the rework round having done
+    nothing at all.
+    """
+    needle = f"{_GATE_RED_PREFIX}: {detail}."
+    return sum(
+        1
+        for comment in task.get("comments") or []
+        if comment.get("marker") == "dispatcher" and needle in (comment.get("body") or "")
+    )
+
+
 def _last_review_red_body(task: dict[str, Any]) -> str | None:
     """Findings from the most recent review:red verdict, for delivery to the rework worker.
 
