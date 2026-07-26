@@ -248,15 +248,32 @@ def _reconcile_open_sprint(
         }
     if pause_mode == "drain":
         # A drain claims nothing new. A dead observer is a bring-up, so it waits for the resume
-        # exactly like a Ready card does.
-        return {
-            "status": "skipped",
-            "step": "observer-reconcile",
-            "sprint": ref,
-            "action": "observer-launch-skipped",
-            "reason": "pipeline is draining",
-        }
+        # exactly like a Ready card does. The record is still written: an open sprint has to be
+        # readable from outside with its head profile and the reason nothing is running on it,
+        # and the resume then relaunches from that same record. Neither the readiness gate nor
+        # the host is touched here — only the head profile is resolved, to fill the record.
+        return _defer(
+            runtime,
+            observers,
+            ref,
+            record,
+            head=_observer_head_or_blank(runtime),
+            reason="pipeline is draining",
+            action="observer-launch-skipped",
+        )
     return _launch_observer(runtime, observers, ref, record)
+
+
+def _observer_head_or_blank(runtime: Any) -> str:
+    """The observer profile, or an empty string when the registry cannot name one.
+
+    A registry that cannot answer must not cost the sprint its record: the row is still worth more
+    without a head profile than not at all, and the launch path reports the same failure properly.
+    """
+    try:
+        return runtime.catalog.observer_head()
+    except HostError:
+        return ""
 
 
 def _launch_observer(
@@ -340,6 +357,7 @@ def _defer(
     *,
     head: str,
     reason: str,
+    action: str = "observer-launch-deferred",
     readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Park a launch without losing the sprint or damaging an existing record.
@@ -365,7 +383,7 @@ def _defer(
         "status": "skipped",
         "step": "observer-reconcile",
         "sprint": ref,
-        "action": "observer-launch-deferred",
+        "action": action,
         "head": record.head,
         "reason": reason,
     }

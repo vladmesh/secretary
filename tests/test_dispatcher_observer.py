@@ -424,7 +424,63 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(actions["sprint:2"], "observer-launch-skipped")
         self.assertEqual(self.host.stopped_observers, [])
         self.assertEqual(self.host.observers, ["sprint:1"])
-        self.assertNotIn("sprint:2", self.observers())
+
+    def test_a_sprint_opened_during_drain_is_still_visible_from_outside(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.open_sprint("sprint:2")
+        self.runtime.pause_pipeline(mode="drain", actor="operator", reason="host maintenance")
+
+        self.runtime.production_tick()
+
+        record = self.observers()["sprint:2"]
+        self.assertEqual(record.head, "codex-observer")
+        self.assertEqual(record.state, "deferred")
+        self.assertEqual(record.launches, 0)
+        self.assertEqual(record.deferred_reason, "pipeline is draining")
+        self.assertTrue(record.last_action_at)
+        observed = {row["sprint"]: row for row in self.runtime.production_observe()["observers"]}
+        status = {row["sprint"]: row for row in status_observers(self.runtime.production_state.load())}
+        for row in (observed["sprint:2"], status["sprint:2"]):
+            self.assertEqual(row["head"], "codex-observer")
+            self.assertFalse(row["alive"])
+            self.assertIn("draining", row["deferred_reason"])
+            self.assertTrue(row["last_action_at"])
+
+    def test_the_drained_sprint_is_launched_from_its_record_after_resume(self) -> None:
+        self.open_sprint("sprint:2")
+        self.runtime.pause_pipeline(mode="drain", actor="operator", reason="host maintenance")
+        self.runtime.production_tick()
+        generation = self.observers()["sprint:2"].generation
+
+        self.runtime.resume_pipeline(actor="operator")
+        result = self.runtime.production_tick()
+
+        actions = {action["sprint"]: action["action"] for action in self.actions(result)}
+        self.assertEqual(actions["sprint:2"], "observer-launched")
+        record = self.observers()["sprint:2"]
+        self.assertEqual(record.generation, generation)
+        self.assertEqual(record.state, "running")
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.deferred_reason, "")
+        self.assertEqual(self.host.observers, ["sprint:2"])
+        kinds = [event["kind"] for event in self.audit.events("sprint:2")]
+        self.assertEqual(kinds, [EVENT_DEFERRED, EVENT_LAUNCHED])
+
+    def test_repeated_drain_ticks_write_one_deferral_event(self) -> None:
+        self.open_sprint("sprint:2")
+        self.runtime.pause_pipeline(mode="drain", actor="operator", reason="host maintenance")
+
+        self.runtime.production_tick()
+        before = self.observers()["sprint:2"]
+        self.runtime.production_tick()
+
+        self.assertEqual(self.observers()["sprint:2"].generation, before.generation)
+        self.assertEqual(self.observers()["sprint:2"].launches, 0)
+        self.assertEqual(self.host.observers, [])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:2")], [EVENT_DEFERRED]
+        )
 
     def test_frozen_tick_launches_nothing(self) -> None:
         self.open_sprint()
