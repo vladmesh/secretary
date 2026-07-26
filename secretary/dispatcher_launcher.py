@@ -335,8 +335,16 @@ def with_pid_heartbeat(command: str, pid_file: str) -> str:
     statements before `;` force a real shell to run first, which is what makes `$$` mean anything.
     Orca still keeps the pane's own wrapping shell around once the head exits, but that shell is no
     longer this pid, so the watchdog can tell the two apart.
+
+    Catalog-launched commands (`head_launch`) start with a leading `NAME=value` environment
+    assignment, e.g. `PYTHONPATH=... python3 -m secretary.role_env exec ...`. POSIX `exec` treats
+    the word right after it as the program to run, not an assignment, so `exec PYTHONPATH=... python3`
+    fails to find a program named `PYTHONPATH=...`. Routing the whole command through `env` instead
+    keeps `exec` a single-word invocation while `env` itself parses and applies any leading
+    assignments before it execs the real program in place, so the pid captured above still ends up
+    belonging to the head once `env` hands off to it.
     """
-    return f'echo "$$" > {shlex.quote(pid_file)}; exec {command}'
+    return f'echo "$$" > {shlex.quote(pid_file)}; exec env {command}'
 
 
 def _delivered_prompt(prompt_file: str, launch_prompt: str | None) -> str:

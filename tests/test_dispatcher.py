@@ -4868,8 +4868,31 @@ class PidHeartbeatTests(unittest.TestCase):
 
         self.assertEqual(
             wrapped,
-            'echo "$$" > /tmp/x.pid; exec codex exec --dangerously-bypass-approvals-and-sandbox',
+            'echo "$$" > /tmp/x.pid; exec env codex exec --dangerously-bypass-approvals-and-sandbox',
         )
+
+    def test_heartbeat_survives_a_leading_environment_assignment(self) -> None:
+        """secretary-751 review: catalog commands from `head_launch` start with `NAME=value`, which
+        bare `exec` cannot run directly. Executed through a real `/bin/sh` (not just string
+        comparison), the wrapped command must still exec successfully and the pid file must end up
+        holding the pid of the process that was actually running when it exited."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "x.pid")
+            wrapped = with_pid_heartbeat(
+                'FOO=bar python3 -c "import os; print(os.getpid())"', pid_file
+            )
+
+            result = subprocess.run(
+                ["/bin/sh", "-lc", wrapped],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            reported_pid = result.stdout.strip()
+            heartbeat_pid = Path(pid_file).read_text(encoding="utf-8").strip()
+            self.assertEqual(reported_pid, heartbeat_pid)
 
     def test_heartbeat_quotes_a_pid_file_path_with_spaces(self) -> None:
         wrapped = with_pid_heartbeat("codex exec", "/tmp/weird dir/x.pid")
