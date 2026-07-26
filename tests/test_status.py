@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,22 @@ from secretary.config import validate
 from secretary.host import CollectResult, HostInventory, build_doctor_expectations
 from secretary.host_apply import resolve_packaged
 from secretary.config import validate_instance
+from secretary.secret_store import initialize_store, set_secret
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+
+
+def _init_instance_repo(instance_dir: Path, instance_yaml: str) -> None:
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    (instance_dir / "instance.yaml").write_text(instance_yaml, encoding="utf-8")
+    _git(instance_dir, "init", "--quiet", "--initial-branch", "main")
+    _git(instance_dir, "config", "user.name", "operator")
+    _git(instance_dir, "config", "user.email", "operator@example.invalid")
+    _git(instance_dir, "config", "commit.gpgsign", "false")
+    _git(instance_dir, "add", "instance.yaml")
+    _git(instance_dir, "commit", "--quiet", "-m", "config")
 
 
 class StatusCliTests(unittest.TestCase):
@@ -348,3 +365,153 @@ class StatusCliTests(unittest.TestCase):
             any("unresolved controlled divergence" in f["message"] and "secretary-730" in f["message"] for f in dispatcher_findings),
             dispatcher_findings,
         )
+
+
+class SecretStoreObservabilityTests(unittest.TestCase):
+    """`status`/`doctor` surface the store's health without ever showing a value."""
+
+    def _instance_yaml(self, data_dir: Path) -> str:
+        return (
+            "version: 1\nname: test\n"
+            f"data_dir: {data_dir}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+        )
+
+    def test_status_json_reports_an_initialized_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+            initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
+            set_secret(
+                instance_dir,
+                secret_id="kanboard.api-token",
+                value=b"super-secret-token-value",
+                scope="installation",
+                purpose="board api",
+                environment="KANBOARD_API_TOKEN",
+                materialize={"target": "runtime-env"},
+                actor="tester",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([
+                    "status", "--json", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(code, 0, output.getvalue())
+        payload = json.loads(output.getvalue())
+        self.assertEqual(validate(payload, "status", "status.json"), [])
+        store = payload["secret_store"]
+        self.assertTrue(store["initialized"])
+        self.assertEqual(store["secret_count"], 1)
+        self.assertIsNotNone(store["last_modified_at"])
+        self.assertEqual(store["installation_key"], {"present": True, "usable": True})
+        self.assertEqual(store["materialize"], [{"target": "runtime-env", "path": None, "count": 1}])
+        # The point of the section: never a value, never the recovery phrase.
+        self.assertNotIn("super-secret-token-value", output.getvalue())
+
+    def test_status_json_reports_an_absent_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([
+                    "status", "--json", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(code, 0, output.getvalue())
+        payload = json.loads(output.getvalue())
+        self.assertEqual(validate(payload, "status", "status.json"), [])
+        self.assertEqual(
+            payload["secret_store"],
+            {
+                "initialized": False,
+                "secret_count": 0,
+                "last_modified_at": None,
+                "installation_key": {"present": False, "usable": None},
+                "materialize": [],
+            },
+        )
+
+    def test_doctor_stays_green_when_there_is_no_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([
+                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertNotIn("secret store findings", output.getvalue())
+
+    def test_doctor_stays_green_when_the_store_is_healthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+            initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
+            set_secret(
+                instance_dir,
+                secret_id="kanboard.api-token",
+                value=b"token-value",
+                scope="installation",
+                purpose="board api",
+                actor="tester",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main([
+                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertNotIn("secret store findings", output.getvalue())
+
+    def test_doctor_reports_a_broken_store_as_a_finding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_dir = root / "instance"
+            data_dir = root / "data"
+            _init_instance_repo(instance_dir, self._instance_yaml(data_dir))
+            initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
+            set_secret(
+                instance_dir,
+                secret_id="kanboard.api-token",
+                value=b"token-value",
+                scope="installation",
+                purpose="board api",
+                actor="tester",
+            )
+            (instance_dir / "secrets" / "installation.key").unlink()
+
+            text_output = io.StringIO()
+            with contextlib.redirect_stdout(text_output):
+                text_code = main([
+                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+            json_output = io.StringIO()
+            with contextlib.redirect_stdout(json_output):
+                json_code = main([
+                    "doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir / "instance.yaml"),
+                ])
+
+        self.assertEqual(text_code, 1, text_output.getvalue())
+        self.assertIn("secret store findings:", text_output.getvalue())
+        self.assertIn("installation key is missing or unusable", text_output.getvalue())
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(json_code, 1, payload)
+        self.assertTrue(any(f["code"] == "secret_store" for f in payload["findings"]))

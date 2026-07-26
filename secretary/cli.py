@@ -61,6 +61,7 @@ from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.secret_commands import add_secret_subcommands
+from secretary.secret_store import store_findings as _secret_store_findings
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
 from secretary.state_repo import StateRepoError
@@ -87,6 +88,7 @@ class DoctorInspection:
     restore: list[str]
     dispatcher: list[str]
     checkpoint: list[str]
+    secret_store: list[str]
     expected: object | None = None
     collected: CollectResult | None = None
     diffs: dict[str, KindDiff] | None = None
@@ -488,6 +490,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         report, inspection.collected, inspect_live=not args.offline, findings=inspection.dispatcher
     )
     print_checkpoint_status(report, findings=inspection.checkpoint)
+    print_secret_store_status(report, findings=inspection.secret_store)
 
     print("host changes: none")
     if inspection.unavailable:
@@ -580,11 +583,15 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         findings.extend({"code": "unit_runtime", "message": finding} for finding in _unit_runtime_findings(expected, collected))
     dispatcher = dispatcher_findings(report, collected, inspect_live=not args.offline)
     checkpoint = checkpoint_findings(report)
+    secret_store = secret_store_findings(report)
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
+    findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
-    return DoctorInspection(findings, unavailable, restore, dispatcher, checkpoint, expected, collected, diffs)
+    return DoctorInspection(
+        findings, unavailable, restore, dispatcher, checkpoint, secret_store, expected, collected, diffs
+    )
 
 
 def print_restore_status(report, *, findings: list[str] | None = None) -> list[str]:
@@ -783,6 +790,21 @@ def checkpoint_findings(report) -> list[str]:
     if isinstance(lag, int) and lag > 2 * PUSH_INTERVAL_MINUTES:
         findings.append(f"checkpoint lag is {lag} min, past the {PUSH_INTERVAL_MINUTES} min RPO")
     return findings
+
+
+def print_secret_store_status(report, *, findings: list[str] | None = None) -> list[str]:
+    """Secret store health: catalog/values consistency and installation key health."""
+    findings = secret_store_findings(report) if findings is None else findings
+    if findings:
+        print("")
+        print("secret store findings:")
+        for finding in findings:
+            print(f"  {finding}")
+    return findings
+
+
+def secret_store_findings(report) -> list[str]:
+    return list(_secret_store_findings(report.instance_path.parent))
 
 
 def _load_dispatcher_state(path: Path) -> dict[str, object]:

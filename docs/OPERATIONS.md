@@ -30,11 +30,20 @@ python3 -m unittest
 
 ## Runtime secrets
 
-Секреты установки живут только в host `runtime.env` рядом с `instance.yaml`. Файл должен быть
-`0600`, находится в `.gitignore` instance-репозитория и не входит в checkpoint или archive
-payload. `secretary shell` получает весь файл для trusted operator-сессии, dispatcher-launched
-worker/reviewer получают только allowlisted board credentials и non-secret runtime switches через
-`secretary.role_env`.
+Секреты установки живут в восстановимом хранилище (`secretary secret init/set/import`,
+`secretary-instance/secrets/`) и материализуются оттуда в env-файлы; сегодня `runtime.env` рядом с
+`instance.yaml` остаётся одним из таких файлов, ещё не переведённым на materialization (отдельный
+шаг с участием оператора). Файл должен быть `0600`, находится в `.gitignore` instance-репозитория
+и не входит в checkpoint или archive payload. `secretary shell` получает весь файл для trusted
+operator-сессии, dispatcher-launched worker/reviewer получают только allowlisted board credentials
+и non-secret runtime switches через `secretary.role_env`. Хранилище не обещает worker isolation:
+у него нет своего broker или grants, и installation key открывает все секреты сразу, теми же
+правами, что и раньше читали `runtime.env` (см. [Recovery](RECOVERY.md), раздел «Секреты»).
+
+`secretary status --json` показывает состояние хранилища секцией `secret_store` (инициализировано,
+число секретов, время последнего изменения каталога, пригодность installation key, сводка целей
+материализации), без единого значения. `doctor` даёт finding на рассинхрон каталога и values, на
+отсутствующий или непригодный ключ при непустом каталоге и на права ключа шире `0600`.
 
 Instance config не содержит secret materialization inputs. `reconcile` строит host plan из
 bindings/config и не расшифровывает secret store.

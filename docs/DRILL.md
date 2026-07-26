@@ -19,6 +19,10 @@ manager оператора:
 2. Логины голов: ChatGPT-аккаунт для `codex login`, Claude-аккаунт для `claude`,
    GitHub-аккаунт для `gh auth login`.
 3. Креды хостинг-панели (не на сервере; после secretary-681 их в runtime.env нет).
+4. Recovery phrase хранилища секретов (`secretary secret init`): она нужна только на
+   чистом хосте, чтобы пересобрать installation key, и продукт её нигде не хранит
+   — ни на диске, ни в git. Потеря фразы не топит установку: она означает
+   перевыпуск секретов (`secret set` заново для каждого), а не потерю остального.
 
 Всё остальное либо в приватном remote, либо генерится машиной.
 
@@ -90,7 +94,23 @@ CODEX_HOME восстанавливаются автоматически.
    ```
 
    Возвращает board, runs, memory facts + index, project checkouts, managed
-   CODEX_HOME, юниты, role worktrees и automations.
+   CODEX_HOME, юниты, role worktrees и automations. Хранилище секретов (если оно
+   инициализировано в этом instance-репо) открывается до проверки `runtime.env`:
+
+   - С фразой (`--recovery-phrase-file` / `--recovery-phrase-stdin`, либо
+     интерактивный prompt на TTY, если ключа ещё нет): installation key
+     пересобирается из фразы, значения расшифровываются и env-файлы, на которые
+     указывает каталог, возвращаются побайтово.
+   - Без фразы: recover не отказывает и не выдумывает значения, а печатает отчёт
+     locked/missing и ничего не пишет. Пример шагов в `--json`:
+
+     ```json
+     {"id": "secret:kanboard.api-token", "status": "locked", "detail": "KANBOARD_API_TOKEN -> runtime-env"}
+     {"id": "secret:legacy.note", "status": "missing", "detail": "- -> not materialized"}
+     ```
+
+   - Неверная фраза — явная ошибка (`RecoveryPhraseError`), recover не оставляет
+     после себя ключа и не трогает то, что уже было на диске.
 8. Головы: `codex login`, `claude` (логин), `gh auth login`. Интерактивные внешние
    шаги, остаются ручными по контракту (Milestone 3 сделает их управляемыми, не
    автоматическими).

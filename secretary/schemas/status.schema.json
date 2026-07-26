@@ -9,14 +9,15 @@
   "snapshot": {
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "installation", "host", "dispatcher", "checkpoint", "memory"],
+  "required": ["schema_version", "installation", "host", "dispatcher", "checkpoint", "memory", "secret_store"],
   "properties": {
     "schema_version": {"const": 1},
     "installation": {"type": "object", "required": ["name", "instance", "projects", "heads", "cards"], "properties": {"cards": {"type": "object", "required": ["total", "active_attempts"]}}},
     "host": {"type": "object", "required": ["units", "schedules", "inventory_errors", "resources", "external_runtime"], "properties": {"resources": {"type": "object", "required": ["disk_free_bytes", "memory_available_bytes", "load_average"]}, "external_runtime": {"type": "object", "required": ["name", "enabled", "active"]}}},
     "dispatcher": {"type": "object", "required": ["phase", "active_attempts", "pause", "divergences", "reconciliation"], "properties": {"pause": {"type": "object", "required": ["paused", "mode", "since", "actor", "auto_resume", "cards", "warnings"]}, "active_attempts": {"type": "array", "items": {"type": "object", "required": ["reference", "attempt_id", "head", "workspace", "watchdogs", "paused"], "properties": {"watchdogs": {"type": "object", "required": ["worker", "reviewer"]}}}}, "divergences": {"type": "object", "required": ["open_count", "total_count", "open"]}, "reconciliation": {"type": "object", "required": ["last_tick_finished_at", "last_reconciled_at", "records_tracked"]}}},
     "checkpoint": {"type": "object", "required": ["last_commit", "lag_minutes", "remote_diverged", "blocked_reason"]},
-    "memory": {"type": "object", "required": ["fact_count", "last_reindex_at", "index_present"]}
+    "memory": {"type": "object", "required": ["fact_count", "last_reindex_at", "index_present"]},
+    "secret_store": {"type": "object", "required": ["initialized", "secret_count", "last_modified_at", "installation_key", "materialize"], "properties": {"installation_key": {"type": "object", "required": ["present", "usable"]}, "materialize": {"type": "array", "items": {"type": "object", "required": ["target", "path", "count"]}}}}
   }
   },
   "invalid": {

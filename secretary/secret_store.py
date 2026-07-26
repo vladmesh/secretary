@@ -506,6 +506,118 @@ def _catalog_text(catalog: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Observability
+#
+# `store_health` and `store_findings` are the only two functions in this module
+# that `status` and `doctor` call. Both read the catalog and the key's own
+# metadata (mode, presence, whether it opens the store); neither ever touches
+# `read_secret` or `open_value`, so no value, sealed or otherwise, and no key
+# material can reach either report.
+
+
+def store_health(instance_dir: Path) -> dict[str, Any]:
+    """Non-secret snapshot of the store for `secretary status --json`.
+
+    A store that was never initialized reports as absent rather than raising:
+    an installation with no secrets in it yet is a valid state, not a defect.
+    """
+    instance_dir = Path(instance_dir)
+    if not is_initialized(instance_dir):
+        return {
+            "initialized": False,
+            "secret_count": 0,
+            "last_modified_at": None,
+            "installation_key": {"present": False, "usable": None},
+            "materialize": [],
+        }
+    try:
+        secrets = list_secrets(instance_dir)
+    except SecretStoreError:
+        secrets = ()
+    present, usable = _key_presence(instance_dir)
+    return {
+        "initialized": True,
+        "secret_count": len(secrets),
+        "last_modified_at": _mtime(catalog_path(instance_dir)),
+        "installation_key": {"present": present, "usable": usable},
+        "materialize": _materialize_summary(secrets),
+    }
+
+
+def store_findings(instance_dir: Path) -> tuple[str, ...]:
+    """Everything wrong with the store on disk, for `secretary doctor`.
+
+    A store that was never initialized gives no findings: absence is a valid
+    state. One that was initialized is checked against the four ways it can be
+    unhealthy: a divergence between the catalog and the values directory, an
+    installation key with permissions wider than 0600, and an installation key
+    that is missing or does not open the store while the catalog is not empty.
+    """
+    instance_dir = Path(instance_dir)
+    if not is_initialized(instance_dir):
+        return ()
+    findings = [f"secret store: {item}" for item in store_divergence(instance_dir)]
+    try:
+        secrets = list_secrets(instance_dir)
+    except SecretStoreError as exc:
+        findings.append(f"secret store: {exc}")
+        secrets = ()
+
+    path = key_path(instance_dir)
+    wide_permissions = False
+    try:
+        info = path.lstat()
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISREG(info.st_mode) and (info.st_mode & 0o077):
+        wide_permissions = True
+        findings.append(
+            f"secret store: installation key permissions are too broad; run chmod 0600 {path}"
+        )
+
+    if secrets and not wide_permissions:
+        try:
+            load_installation_key(instance_dir)
+        except SecretStoreError as exc:
+            findings.append(f"secret store: installation key is missing or unusable: {exc}")
+    return tuple(findings)
+
+
+def _key_presence(instance_dir: Path) -> tuple[bool, bool | None]:
+    """Whether a key file is there, and whether it opens this store.
+
+    `usable` is `None` when there is no key file to judge, so a status reader
+    cannot mistake "absent" for "present but broken".
+    """
+    try:
+        path = key_path(instance_dir)
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return True, False
+    except OSError:
+        return False, None
+    try:
+        load_installation_key(instance_dir)
+    except SecretStoreError:
+        return True, False
+    return True, True
+
+
+def _materialize_summary(secrets: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    """One row per materialization target, counted, never with a secret's name."""
+    counts: dict[tuple[str, str], int] = {}
+    for entry in secrets:
+        instruction = entry.get("materialize")
+        if not instruction:
+            continue
+        slot = _materialize_slot(instruction)
+        counts[slot] = counts.get(slot, 0) + 1
+    return [
+        {"target": target, "path": path or None, "count": count}
+        for (target, path), count in sorted(counts.items())
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Operations
 
 
@@ -1336,6 +1448,14 @@ def _commit_message(operation: str, subject: str, actor: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _mtime(path: Path) -> str | None:
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _b64(raw: bytes) -> str:
