@@ -238,20 +238,28 @@ finding на `remote diverged`, на заблокированный гейт и 
 ## Восстановление
 
 Единственный recovery contract — Git-backed checkpoint из [Recovery](RECOVERY.md). Живое
-восстановление идёт из приватного репозитория инстанса, без обязательного S3 transport; host
-`runtime.env` переносится вручную.
+восстановление идёт из приватного репозитория инстанса, без обязательного S3 transport.
 
 ```bash
 secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
-# заполнить INSTANCE/runtime.env и chmod 0600
-secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
+secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev \
+  --recovery-phrase-file PHRASE_FILE
 ```
 
-Первая команда клонирует remote и останавливается до появления host-only credentials. Вторая
-единым идемпотентным flow материализует checkpoint, восстанавливает board, пересобирает memory index,
-role worktrees и host resources, затем проверяет status. Низкоуровневые `bootstrap --empty`,
-`restore-board`, `memory reindex`, `reconcile apply` и `restore-reconcile` остаются диагностическими
-примитивами, а не основным runbook.
+Обе команды открывают хранилище секретов (если оно инициализировано в этом instance-репо) раньше,
+чем читают `runtime.env`: с recovery phrase (`--recovery-phrase-file`, `--recovery-phrase-stdin`
+или интерактивный prompt на TTY, если ключа ещё нет на диске) installation key пересобирается и
+материализует `runtime.env` и другие цели из каталога, включая Kanboard credentials, если они
+заведены в хранилище. Только если хранилища в этом instance-репо нет вовсе, `runtime.env` остаётся
+ручным файлом оператора, как описано в [Recovery](RECOVERY.md). Без фразы recover не отказывает:
+он восстанавливает всё, что не требует credentials, и печатает отчёт locked/missing по секретам,
+которые остались недоступны.
+
+Первая команда клонирует remote и останавливается до появления host-only credentials, если
+хранилище их не материализовало. Вторая единым идемпотентным flow материализует checkpoint,
+восстанавливает board, пересобирает memory index, role worktrees и host resources, затем проверяет
+status. Низкоуровневые `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` и
+`restore-reconcile` остаются диагностическими примитивами, а не основным runbook.
 
 ## Опциональный cold archive
 
