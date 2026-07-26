@@ -1,10 +1,11 @@
-"""`secretary secret` — init, set and list for the encrypted store.
+"""`secretary secret` — init, set, list, import, remove and materialize.
 
 Three rules shape this surface. A value never travels through argv, so `set`
-reads stdin or a file and nothing else. No command here prints a value: `list`
-prints catalog metadata, and reading a value is an internal API until the broker
-card gives it a safe consumer. The recovery phrase is shown once, on stderr, and
-the store is not created until the user has typed some of it back.
+reads stdin or a file and `import` reads an env file. No command here prints a
+value: `list` prints catalog metadata, `import` and `materialize` print ids and
+variable names, and reading a value is an internal API until the broker card
+gives it a safe consumer. The recovery phrase is shown once, on stderr, and the
+store is not created until the user has typed some of it back.
 """
 
 from __future__ import annotations
@@ -17,14 +18,20 @@ from pathlib import Path
 
 from secretary.secret_store import (
     CONFIRM_WORDS,
+    MATERIALIZE_FILE,
+    MATERIALIZE_RUNTIME_ENV,
+    MATERIALIZE_TARGETS,
     SecretStoreError,
     SecretStoreStateError,
     SecretStoreValidationError,
     generate_recovery_phrase,
+    import_env_file,
     initialize_store,
     is_initialized,
     list_secrets,
+    materialize_secrets,
     normalize_phrase,
+    remove_secret,
     set_secret,
 )
 from secretary.state_repo import StateRepoError
@@ -68,6 +75,7 @@ def add_secret_subcommands(subparsers) -> None:
     set_command.add_argument(
         "--environment", help="environment variable this value materializes into"
     )
+    _add_target_arguments(set_command, "where this value materializes", default="none")
     source = set_command.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", help="read the value from this file")
     source.add_argument(
@@ -81,7 +89,60 @@ def add_secret_subcommands(subparsers) -> None:
     list_command.add_argument("--instance", required=True)
     list_command.set_defaults(handler=run_secret_list)
 
+    import_command = secret_subcommands.add_parser(
+        "import", help="take an existing env file into the store, one secret per variable"
+    )
+    import_command.add_argument("--instance", required=True)
+    import_command.add_argument("--actor", default=DEFAULT_ACTOR)
+    import_command.add_argument(
+        "--file",
+        required=True,
+        help="the env file to read: KEY=VALUE lines, LF, no comments or blank lines",
+    )
+    import_command.add_argument("--scope", required=True, help="'installation' or 'project:<id>'")
+    import_command.add_argument("--purpose", required=True)
+    _add_target_arguments(
+        import_command,
+        "where these values materialize back to",
+        default=MATERIALIZE_RUNTIME_ENV,
+    )
+    import_command.set_defaults(handler=run_secret_import)
+
+    remove_command = secret_subcommands.add_parser(
+        "remove", help="drop one secret from the catalog and delete its envelope"
+    )
+    remove_command.add_argument("--instance", required=True)
+    remove_command.add_argument("--actor", default=DEFAULT_ACTOR)
+    remove_command.add_argument("--id", required=True, dest="secret_id")
+    remove_command.set_defaults(handler=run_secret_remove)
+
+    materialize_command = secret_subcommands.add_parser(
+        "materialize", help="write the materializing secrets into their env files"
+    )
+    materialize_command.add_argument("--instance", required=True)
+    materialize_command.add_argument(
+        "--target",
+        choices=MATERIALIZE_TARGETS,
+        help="write only this target; by default every target in the catalog is written",
+    )
+    materialize_command.set_defaults(handler=run_secret_materialize)
+
     secret.set_defaults(handler=lambda args: _usage(secret))
+
+
+def _add_target_arguments(
+    parser: argparse.ArgumentParser, help_text: str, *, default: str
+) -> None:
+    parser.add_argument(
+        "--materialize",
+        choices=(*MATERIALIZE_TARGETS, "none"),
+        default=default,
+        help=help_text,
+    )
+    parser.add_argument(
+        "--materialize-path",
+        help=f"target file for --materialize {MATERIALIZE_FILE}",
+    )
 
 
 def _usage(parser: argparse.ArgumentParser) -> int:
@@ -133,6 +194,7 @@ def run_secret_init(args: argparse.Namespace) -> int:
 def run_secret_set(args: argparse.Namespace) -> int:
     try:
         value = _read_value(args)
+        materialize = _materialize_spec(args)
     except SecretStoreValidationError as exc:
         return _fail("set", "validation", str(exc))
     try:
@@ -143,6 +205,7 @@ def run_secret_set(args: argparse.Namespace) -> int:
             scope=args.scope,
             purpose=args.purpose,
             environment=args.environment,
+            materialize=materialize,
             actor=args.actor,
         )
     except SecretStoreValidationError as exc:
@@ -174,6 +237,104 @@ def run_secret_list(args: argparse.Namespace) -> int:
         return _fail("list", "runtime", str(exc))
     _print_json({"ok": True, "op": "list", "secrets": [dict(entry) for entry in entries]})
     return 0
+
+
+def run_secret_import(args: argparse.Namespace) -> int:
+    try:
+        materialize = _materialize_spec(args)
+        result = import_env_file(
+            _instance_dir(args.instance),
+            source=Path(args.file).expanduser(),
+            scope=args.scope,
+            purpose=args.purpose,
+            materialize=materialize,
+            actor=args.actor,
+        )
+    except SecretStoreValidationError as exc:
+        return _fail("import", "validation", str(exc))
+    except SecretStoreStateError as exc:
+        return _fail("import", "state", str(exc))
+    except (SecretStoreError, StateRepoError) as exc:
+        return _fail("import", "runtime", str(exc))
+    _print_json(
+        {
+            "ok": True,
+            "op": "import",
+            "created": list(result.created),
+            "updated": list(result.updated),
+            "unchanged": list(result.unchanged),
+            "commit": result.commit,
+        }
+    )
+    return 0
+
+
+def run_secret_remove(args: argparse.Namespace) -> int:
+    try:
+        result = remove_secret(
+            _instance_dir(args.instance), secret_id=args.secret_id, actor=args.actor
+        )
+    except SecretStoreValidationError as exc:
+        return _fail("remove", "validation", str(exc))
+    except SecretStoreStateError as exc:
+        return _fail("remove", "state", str(exc))
+    except (SecretStoreError, StateRepoError) as exc:
+        return _fail("remove", "runtime", str(exc))
+    _print_json(
+        {"ok": True, "op": "remove", "id": result.secret_id, "commit": result.commit}
+    )
+    return 0
+
+
+def run_secret_materialize(args: argparse.Namespace) -> int:
+    try:
+        results = materialize_secrets(_instance_dir(args.instance), target=args.target)
+    except SecretStoreValidationError as exc:
+        return _fail("materialize", "validation", str(exc))
+    except SecretStoreStateError as exc:
+        return _fail("materialize", "state", str(exc))
+    except (SecretStoreError, StateRepoError) as exc:
+        return _fail("materialize", "runtime", str(exc))
+    _print_json(
+        {
+            "ok": True,
+            "op": "materialize",
+            "targets": [
+                {
+                    "target": result.target,
+                    "path": str(result.path),
+                    "variables": list(result.variables),
+                    "changed": result.changed,
+                }
+                for result in results
+            ],
+        }
+    )
+    return 0
+
+
+def _materialize_spec(args: argparse.Namespace) -> dict[str, str] | None:
+    """Turn the two target flags into the instruction the catalog stores."""
+    choice = getattr(args, "materialize", "none")
+    path = getattr(args, "materialize_path", None)
+    if choice == "none":
+        if path:
+            raise SecretStoreValidationError(
+                "--materialize-path needs --materialize " + MATERIALIZE_FILE
+            )
+        return None
+    if choice == MATERIALIZE_FILE:
+        if not path:
+            raise SecretStoreValidationError(
+                f"--materialize {MATERIALIZE_FILE} needs --materialize-path"
+            )
+        return {"target": choice, "path": path}
+    if path:
+        raise SecretStoreValidationError(
+            f"--materialize {MATERIALIZE_RUNTIME_ENV} takes no --materialize-path; "
+            "the path comes from the installation's runtime env resolution"
+        )
+    return {"target": choice}
 
 
 def _read_value(args: argparse.Namespace) -> bytes:
@@ -253,7 +414,10 @@ def _print_json(payload: dict[str, object]) -> None:
 
 __all__ = [
     "add_secret_subcommands",
+    "run_secret_import",
     "run_secret_init",
     "run_secret_list",
+    "run_secret_materialize",
+    "run_secret_remove",
     "run_secret_set",
 ]
