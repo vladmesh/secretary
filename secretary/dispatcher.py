@@ -29,6 +29,8 @@ from secretary.dispatcher_launcher import (
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
+    _gate_red_repeat_count,
+    _last_gate_red_body,
     _last_marker,
     _last_review_red_body,
     _legacy_worker_branch,
@@ -41,6 +43,7 @@ from secretary.dispatcher_helpers import (
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
     GateResult,
+    _fingerprint as _gate_fingerprint,
     gate_check as _gate_check,
     validation_ci as _validation_ci,
 )
@@ -1046,6 +1049,18 @@ class CommandHostRuntime:
                 "done again — do NOT re-report the same commit unchanged:",
                 "",
                 review_red,
+                "",
+            ]
+        gate_red = _last_gate_red_body(task)
+        if gate_red:
+            sections += [
+                "## Mechanical gate failure to address (CI/local validation was RED)",
+                "",
+                "The mechanical gate bounced your last submission before it reached review. Fix",
+                "the actual cause named below before reporting done again — do NOT re-report the",
+                "same commit unchanged:",
+                "",
+                gate_red,
                 "",
             ]
         sections += [
@@ -2217,9 +2232,16 @@ class DispatcherRuntime:
         record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
-        body = f"Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
+        # A caller that skips the sha-aware summary (GateResult built without `fingerprint`, e.g.
+        # the review-freeze drift check) still gets a usable, SHA-independent identity here rather
+        # than losing repeat detection outright.
+        fingerprint = result.fingerprint or _gate_fingerprint("fallback", log or detail)
+        repeat = _gate_red_repeat_count(task, fingerprint)
+        prefix = f"Повторный возврат (заход {repeat + 1}, причина не изменилась). " if repeat else ""
+        body = f"{prefix}Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
         if log:
             body += f"\nХвост:\n```\n{log}\n```"
+        body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
         # No-op unless a reviewer pane is up; when one is, drop it before the worker head comes
         # back so no stale reviewer handle survives into the rework round.
         _end_review_pane(self.host, record)

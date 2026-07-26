@@ -2342,6 +2342,99 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # worker prepared once at claim, once on the gate-red relaunch
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
 
+    def test_repeated_gate_red_for_the_same_reason_is_marked_as_a_second_pass(self) -> None:
+        """secretary-766: a second bounce for the identical failure must say so, or it reads to
+        the worker (and the PO) as if `restart_worker` silently did nothing the first time."""
+        self.start_pilot()
+        self.host.gate_results = [
+            GateResult("red", "local validation failed", "assert False"),
+            GateResult("red", "local validation failed", "assert False"),
+        ]
+        self._run_worker_to_validate()
+        first = self.runtime.tick(self.selector)
+        self.assertEqual(first["action"], "gate-red-rework")
+        self.assertNotIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.host.commit = "newc0ffee1234567"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="fixed",
+            request_id=_attempt_request_id(
+                record["attempt_id"], "worker-report-done", "secretary-510-pilot", str(record["review_baseline"]),
+            ),
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+        second = self.runtime.tick(self.selector)
+
+        self.assertEqual(second["action"], "gate-red-rework")
+        self.assertIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_repeated_github_gate_red_for_the_same_reason_survives_a_new_sha(self) -> None:
+        """secretary-766 review: a GitHub gate's rendered detail always carries the head SHA,
+        which changes on every rework commit, so repeat detection keyed on that text never fires
+        twice. It must key on the fingerprint (job/step/error text) instead."""
+        self.start_pilot()
+        self.host.gate_results = [
+            GateResult(
+                "red", "CI red: job «tests» failed on `pipeline/x` @ `aaa111`", "AssertionError: boom",
+                fingerprint="ci-boom",
+            ),
+            GateResult(
+                "red", "CI red: job «tests» failed on `pipeline/x` @ `bbb222`", "AssertionError: boom",
+                fingerprint="ci-boom",
+            ),
+        ]
+        self._run_worker_to_validate()
+        first = self.runtime.tick(self.selector)
+        self.assertEqual(first["action"], "gate-red-rework")
+        self.assertNotIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.host.commit = "newc0ffee1234567"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="fixed",
+            request_id=_attempt_request_id(
+                record["attempt_id"], "worker-report-done", "secretary-510-pilot", str(record["review_baseline"]),
+            ),
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+        second = self.runtime.tick(self.selector)
+
+        self.assertEqual(second["action"], "gate-red-rework")
+        self.assertIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_gate_red_with_a_different_local_error_is_not_marked_as_a_repeat(self) -> None:
+        """secretary-766 review: two distinct local-gate failures must not be conflated into a
+        'same reason' repeat just because both summaries read 'local validation failed'."""
+        self.start_pilot()
+        self.host.gate_results = [
+            GateResult("red", "local validation failed", "assert False"),
+            GateResult("red", "local validation failed", "TypeError: boom"),
+        ]
+        self._run_worker_to_validate()
+        first = self.runtime.tick(self.selector)
+        self.assertEqual(first["action"], "gate-red-rework")
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.host.commit = "newc0ffee1234567"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="fixed",
+            request_id=_attempt_request_id(
+                record["attempt_id"], "worker-report-done", "secretary-510-pilot", str(record["review_baseline"]),
+            ),
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+        second = self.runtime.tick(self.selector)
+
+        self.assertEqual(second["action"], "gate-red-rework")
+        self.assertNotIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
     def test_done_at_a_gate_rejected_sha_is_returned_for_rework(self) -> None:
         self.start_pilot()
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
@@ -4157,6 +4250,36 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("P1: use a time ceiling, not the terminal title", doc)
         self.assertNotIn("stale finding", doc)  # only the latest red
 
+    def test_rework_task_doc_delivers_latest_gate_red_cause(self) -> None:
+        """secretary-766: the worker must see why the mechanical gate bounced the card — the
+        failing job/step and an error-focused log fragment — not just the reviewer findings."""
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            base_task = {
+                "ref": "secretary-510-pilot",
+                "project": "secretary",
+                "description": "body",
+                "workspace": {"base_branch": "main"},
+            }
+            self.assertNotIn("Mechanical gate failure", host._worker_task_doc(base_task, "main", "a", 0))
+            gated = {
+                **base_task,
+                "comments": [
+                    {
+                        "marker": "dispatcher",
+                        "body": (
+                            "[dispatcher]\nМеханический гейт валидации красный: CI red: job «tests», "
+                            "шаг «pytest» failed on `pipeline/secretary-510-pilot` @ `abc123`. Карточка "
+                            "возвращена в In progress на доработку.\nХвост:\n```\nAssertionError: boom\n```"
+                        ),
+                    },
+                ],
+            }
+            doc = host._worker_task_doc(gated, "main", "a", 1)
+        self.assertIn("Mechanical gate failure", doc)
+        self.assertIn("job «tests», шаг «pytest»", doc)
+        self.assertIn("AssertionError: boom", doc)
+
     def test_review_verdict_request_id_is_distinct_per_round(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             host = GitBranchHost(Path(tmp))
@@ -4818,18 +4941,30 @@ class GithubGateHost(CommandHostRuntime):
     """Runs the real gate over a real git workspace but fakes every `gh` shell-out: repo view,
     the PR list/create idempotency probes, and the check-runs/status CI poll."""
 
-    def __init__(self, root: Path, adapter: dict, *, pr_open: bool, check_runs: list, statuses: list | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        adapter: dict,
+        *,
+        pr_open: bool,
+        check_runs: list,
+        statuses: list | None = None,
+        run_log: str = "",
+        run_log_error: bool = False,
+    ) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self._pr_open = pr_open
         self._check_runs = check_runs
         self._statuses = statuses or []
+        self._run_log = run_log
+        self._run_log_error = run_log_error
         self.gh: list[list[str]] = []
 
     def _fake_gh(self, args):
         self.gh.append(list(args))
 
-        def done(out=""):
-            return subprocess.CompletedProcess(args, 0, out, "")
+        def done(out="", code=0):
+            return subprocess.CompletedProcess(args, code, out, "")
 
         if args[1:3] == ["repo", "view"]:
             return done("vladmesh/sample\n")
@@ -4838,6 +4973,10 @@ class GithubGateHost(CommandHostRuntime):
         if args[1:3] == ["pr", "create"]:
             self._pr_open = True
             return done("https://github.com/vladmesh/sample/pull/42\n")
+        if args[1:3] == ["run", "view"]:
+            if self._run_log_error:
+                return done("", code=1)
+            return done(self._run_log)
         if args[1] == "api":
             path = args[2]
             if path.endswith("/check-runs"):
@@ -4987,6 +5126,107 @@ class DispatcherGateTests(unittest.TestCase):
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
         self.assertIn("tests", result.summary)
+
+    def test_github_gate_red_fragment_skips_aggregate_job_echo(self) -> None:
+        """secretary-766: `--log-failed` dumps every failed job, including one that only
+        aggregates the others (`needs: [...]`) and echoes a generic summary after the real
+        error. The fragment must come from the actually-failed job's own `##[error]` line,
+        not a blind tail that lands on the aggregator's echo."""
+        run_log = "\n".join([
+            "tests\tRun pytest\tcollecting tests",
+            "tests\tRun pytest\t##[error]AssertionError: expected 2, got 3",
+            "tests\tRun pytest\t##[error]Process completed with exit code 1.",
+            "gate\tSummarize\tone or more jobs failed",
+            "gate\tSummarize\t##[error]Process completed with exit code 1.",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                }],
+                run_log=run_log,
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("шаг «Run pytest»", result.summary)
+        self.assertIn("AssertionError: expected 2, got 3", result.log)
+        self.assertNotIn("one or more jobs failed", result.log)
+
+    def test_github_gate_red_fragment_keeps_unmarked_error_ahead_of_the_runner_echo(self) -> None:
+        """secretary-766 review: gh only tags its own generic completion line with `##[error]`;
+        the actual Python exception above it usually carries no marker at all. Filtering the
+        fragment down to `##[error]`-only lines then keeps just the completion echo and drops
+        the real cause — reproduced here with the exact two-line log from the review."""
+        run_log = "\n".join([
+            "tests\tRun script\tFileNotFoundError: absent",
+            "tests\tRun script\t##[error]Process completed with exit code 1.",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                }],
+                run_log=run_log,
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("FileNotFoundError: absent", result.log)
+
+    def test_github_gate_red_flags_an_infra_failure(self) -> None:
+        run_log = "\n".join([
+            "tests\tPull image\t##[error]docker: pull access denied for registry.internal/app",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                }],
+                run_log=run_log,
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("инфраструктурный отказ подготовки", result.summary)
+
+    def test_github_gate_red_reports_unavailable_log_when_not_an_actions_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                # A legacy commit status has no Actions run URL at all.
+                check_runs=[{"status": "COMPLETED", "conclusion": "FAILURE", "context": "external-ci"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("лог недоступен", result.log)
+
+    def test_github_gate_red_reports_unavailable_log_when_gh_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                }],
+                run_log_error=True,
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("лог недоступен", result.log)
 
     def test_github_gate_pending_while_pr_ci_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
