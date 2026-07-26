@@ -237,7 +237,9 @@ Controlled divergence — сигнал о расхождении между те
 
 События жизненного цикла (`observer_launched`, `observer_relaunched`, `observer_stopped`,
 `observer_launch_deferred`) лежат в общем durable audit-логе (`board/events.ndjson`) с reference
-спринта; повтор с тем же `request_id` второго события не создаёт.
+спринта; повтор с тем же `request_id` второго события не создаёт. `request_id` строится из reference,
+поколения записи (`generation`) и счётчика запусков, поэтому спринт, вернувшийся на доску после снятия
+записи, пишет свои события заново, а не растворяется в дедупликации первого цикла.
 
 Состояние снаружи, без чтения транскрипта:
 

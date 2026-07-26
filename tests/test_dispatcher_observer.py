@@ -164,6 +164,27 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-stopped"])
         self.assertEqual(self.observers(), {})
 
+    def test_a_reappeared_sprint_reference_is_a_second_audited_lifecycle(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.sprints.clear()
+        self.runtime.production_tick()
+
+        self.open_sprint()
+        result = self.runtime.production_tick()
+        self.board.sprints.clear()
+        self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        events = self.audit.events("sprint:1")
+        self.assertEqual(
+            [event["kind"] for event in events],
+            [EVENT_LAUNCHED, EVENT_STOPPED, EVENT_LAUNCHED, EVENT_STOPPED],
+        )
+        # The second lifecycle is its own request, not a retry of the first one.
+        self.assertEqual(len({event["request_id"] for event in events}), 4)
+
     def test_no_open_sprint_changes_nothing(self) -> None:
         before = len(self.host.calls)
 
@@ -523,12 +544,23 @@ class ObserverConfigurationTests(unittest.TestCase):
 
     def test_request_ids_are_stable_per_launch_generation(self) -> None:
         self.assertEqual(
-            observer_request_id("launch", "sprint:1", 1),
-            observer_request_id("launch", "sprint:1", 1),
+            observer_request_id("launch", "sprint:1", "gen-a", 1),
+            observer_request_id("launch", "sprint:1", "gen-a", 1),
         )
         self.assertNotEqual(
-            observer_request_id("launch", "sprint:1", 1),
-            observer_request_id("launch", "sprint:1", 2),
+            observer_request_id("launch", "sprint:1", "gen-a", 1),
+            observer_request_id("launch", "sprint:1", "gen-a", 2),
+        )
+        # Two lifecycles of the same sprint reference are two different requests.
+        self.assertNotEqual(
+            observer_request_id("launch", "sprint:1", "gen-a", 1),
+            observer_request_id("launch", "sprint:1", "gen-b", 1),
+        )
+
+    def test_each_record_gets_its_own_generation(self) -> None:
+        self.assertNotEqual(
+            ObserverRecord(sprint="sprint:1").generation,
+            ObserverRecord(sprint="sprint:1").generation,
         )
 
 

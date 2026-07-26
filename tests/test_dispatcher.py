@@ -34,8 +34,6 @@ from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     ObserverRecord,
-    load_observers,
-    observer_request_id,
 )
 from secretary.dispatcher_launcher import (
     claude_launch_model,

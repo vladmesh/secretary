@@ -72,6 +72,11 @@ class ObserverRecord:
     """One observer head as the dispatcher last left it."""
 
     sprint: str
+    # Identifies this record, not this sprint. A record is dropped when its sprint closes or
+    # vanishes, and the same reference can come back to the board later; without a per-record token
+    # the second lifecycle would rebuild the request ids of the first one and its real launch and
+    # stop would be deduplicated away as retries.
+    generation: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     head: str = ""
     workspace: str = ""
     handle: str = ""
@@ -91,6 +96,7 @@ class ObserverRecord:
     def to_json(self) -> dict[str, Any]:
         return {
             "sprint": self.sprint,
+            "generation": self.generation,
             "head": self.head,
             "workspace": self.workspace,
             "handle": self.handle,
@@ -111,6 +117,7 @@ class ObserverRecord:
         run = payload.get("run")
         return cls(
             sprint=str(payload.get("sprint") or ""),
+            generation=str(payload.get("generation") or "") or uuid.uuid4().hex[:12],
             head=str(payload.get("head") or ""),
             workspace=str(payload.get("workspace") or ""),
             handle=str(payload.get("handle") or ""),
@@ -311,7 +318,7 @@ def _launch_observer(
         runtime,
         EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED,
         ref,
-        observer_request_id("relaunch" if relaunch else "launch", ref, record.launches),
+        observer_request_id("relaunch" if relaunch else "launch", ref, record.generation, record.launches),
         {"head": head, "workspace": record.workspace, "launches": record.launches},
     )
     return {
@@ -351,7 +358,7 @@ def _defer(
         runtime,
         EVENT_DEFERRED,
         ref,
-        observer_request_id("deferred", ref, record.launches),
+        observer_request_id("deferred", ref, record.generation, record.launches),
         {"head": record.head, "reason": reason, "launches": record.launches},
     )
     outcome = {
@@ -386,7 +393,7 @@ def _stop_observer(
         runtime,
         EVENT_STOPPED,
         ref,
-        observer_request_id("stop", ref, record.launches),
+        observer_request_id("stop", ref, record.generation, record.launches),
         {"head": record.head, "reason": reason, "launches": record.launches},
     )
     return {
@@ -463,7 +470,7 @@ def _mark_stopped_by_pause(
         runtime,
         EVENT_STOPPED,
         ref,
-        observer_request_id("freeze-stop", ref, record.launches),
+        observer_request_id("freeze-stop", ref, record.generation, record.launches),
         {"head": record.head, "reason": reason, "launches": record.launches},
     )
 
@@ -497,7 +504,7 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
             runtime,
             EVENT_STOPPED,
             ref,
-            observer_request_id("stop", ref, record.launches),
+            observer_request_id("stop", ref, record.generation, record.launches),
             {"head": record.head, "reason": reason, "launches": record.launches},
         )
         rows.append({"sprint": ref, "action": "observer-stopped", "reason": reason})
@@ -528,8 +535,11 @@ def resume_observers(payload: dict[str, Any]) -> list[str]:
     return resumed
 
 
-def observer_request_id(action: str, reference: str, launches: int) -> str:
-    return "-".join(("dispatcher-observer", action, request_token(reference), str(launches)))
+def observer_request_id(action: str, reference: str, generation: str, launches: int) -> str:
+    """One id per (record, action, launch counter): the same tick retried is the same request."""
+    return "-".join(
+        ("dispatcher-observer", action, request_token(reference), generation, str(launches))
+    )
 
 
 def record_event(
