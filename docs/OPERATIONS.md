@@ -434,7 +434,7 @@ host:
 secretary doctor --instance <dir>
 secretary role-skills audit --check
 secretary dispatcher production-tick --instance <dir> --probe
-python3 -m unittest discover -s tests
+python3 -m unittest
 ```
 
 `--probe` — это настоящий сухой тик: он берёт тот же singleton-lock, проходит те же mutation
