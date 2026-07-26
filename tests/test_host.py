@@ -38,16 +38,27 @@ from tests.orca_fixtures import legacy_orca_runtime
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 HOST_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "host"
-LEGACY_ORCA = REPO_ROOT / "tests" / "fixtures" / "legacy-orca"
 
 
-def run_cli(argv: list[str], *, orca_executable: Path = LEGACY_ORCA) -> tuple[int, str]:
+_UNSET = object()
+
+
+def run_cli(argv: list[str], *, orca_executable: Path | object = _UNSET) -> tuple[int, str]:
+    """Run the CLI, relying on the suite-wide hermetic Orca default.
+
+    Pass ``orca_executable`` only to model a deliberately alternate or
+    unavailable executable; the default leaves the suite's fixture patch
+    (tests/__init__.py) in place instead of shadowing it with the same value.
+    """
     output = io.StringIO()
-    # Reconcile compiles the packaged Orca unit. Keep command-surface fixtures
-    # independent of whichever runtime happens to be installed on the test host.
-    with contextlib.redirect_stdout(output), unittest.mock.patch(
-        "secretary.host_apply.find_orca_executable", return_value=orca_executable
-    ):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(contextlib.redirect_stdout(output))
+        if orca_executable is not _UNSET:
+            stack.enter_context(
+                unittest.mock.patch(
+                    "secretary.host_apply.find_orca_executable", return_value=orca_executable
+                )
+            )
         code = main(argv)
     return code, output.getvalue()
 
