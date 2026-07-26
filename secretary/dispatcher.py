@@ -25,6 +25,7 @@ from secretary.dispatcher_launcher import (
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
     role_launch_env as _role_launch_env,
+    with_pid_heartbeat as _with_pid_heartbeat,
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
@@ -65,6 +66,7 @@ from secretary.dispatcher_review import (
 )
 from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
+    pid_file_path as _pid_file_path,
     reset_wait as _reset_wait,
     stall_seconds as _stall_seconds,
     wait_cycle_token as _wait_cycle_token,
@@ -842,9 +844,19 @@ class CommandHostRuntime:
             return self._launched(
                 f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace
             )
+        pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
+        if pid_file:
+            # Drop any pid a previous launch in this same workspace left behind, so a respawn
+            # cannot read a dead predecessor's pid as this launch's liveness signal before the new
+            # head has had a chance to overwrite it (secretary-751).
+            Path(pid_file).unlink(missing_ok=True)
         command = os.environ.get(env_name)
         launch = HeadLaunch(command) if command else None
         if command:
+            # A raw command override bypasses the catalog launcher entirely, so it never gets the
+            # pid heartbeat wrapper below. That is deliberate: this path exists for tests and
+            # manual overrides, not the runtimes the watchdog needs to trust, and it keeps the long
+            # inactivity ceiling as its fallback (documented in docs/OPERATIONS.md).
             self.catalog.prepare_head_workspace(head, workspace)
         else:
             launch = self.catalog.head_launch(
@@ -856,6 +868,8 @@ class CommandHostRuntime:
                 launch_prompt=launch_prompt,
             )
             command = launch.command
+            if pid_file:
+                command = _with_pid_heartbeat(command, pid_file)
         if split_from:
             handle = self._split_pane(split_from, title, command)
         else:
@@ -1982,9 +1996,15 @@ class DispatcherRuntime:
                 progress_at = updated
                 setattr(record, f"{kind}_progress_at", progress_at)
                 self._save_records(payload, records)
+        now = time.time()
+        if status.get("pid_confirmed"):
+            # The pid heartbeat proves this exact head process is still running. Silence is not
+            # evidence of anything for a runtime that can prove liveness this way, so none of the
+            # timing ceilings below apply; only an actual exit (handled above) ends this wait. The
+            # long inactivity ceiling stays live only for runtimes that cannot expose this signal.
+            return unavailable() if runtime_reason else None
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
-        now = time.time()
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
         if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
             return self._trigger_wait_watchdog(
@@ -2626,6 +2646,12 @@ def _review_launch_request_id(reference: str, review_baseline: int) -> str:
 
 def _wait_expectation(kind: str) -> str:
     return "review verdict" if kind == "review" else "worker report"
+
+
+def _watchdog_kind(role: str) -> str:
+    """`_launch`'s `role` ("worker"/"reviewer") to the `kind` the wait watchdog and
+    `command_terminal_status` key their pid-heartbeat file on ("worker"/"review")."""
+    return "review" if role == "reviewer" else "worker"
 
 
 def _body_file_path(kind: str, reference: str, review_round: int) -> str:

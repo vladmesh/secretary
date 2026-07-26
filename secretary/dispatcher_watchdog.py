@@ -1,15 +1,21 @@
 """Time ceilings for the dispatcher's two open-ended waits.
 
 `waiting-worker-report` and `waiting-review-verdict` watch the persisted terminal identity on
-every tick. A missing pane is restarted immediately. When Orca supplies `lastOutputAt`, a head
-must also produce its first output shortly after launch; later output renews the ordinary,
-generous silence ceiling. A runtime that cannot supply activity timestamps uses that ceiling as
-its fallback.
+every tick. A missing pane is restarted immediately. A pane whose head process has exited while
+the pane itself is still connected — a shell left behind, `secretary-751` — is caught the same
+tick via `head_process_status`. When Orca supplies `lastOutputAt`, a head must also produce its
+first output shortly after launch; later output renews the ordinary, generous silence ceiling. A
+runtime that cannot supply activity timestamps, or cannot expose the pid heartbeat (a raw
+`SECRETARY_DISPATCHER_*_COMMAND` override), uses that ceiling as its fallback.
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from typing import Any
+
+from secretary.dispatcher_state import request_token
 
 # A missing pane is handled immediately. These ceilings remain deliberately generous for a head
 # that has made progress and then goes quiet, and are the fallback for old Orca runtimes without
@@ -42,6 +48,62 @@ def initial_output_stall_seconds() -> int:
     except ValueError:
         return INITIAL_OUTPUT_STALL_DEFAULT
     return value if value > 0 else INITIAL_OUTPUT_STALL_DEFAULT
+
+
+def pid_file_path(kind: str, reference: str) -> str:
+    """Where a launched head's pid-heartbeat file lives.
+
+    Outside the workspace, like the report and verdict bodies (`_body_file_path`), so it never
+    dirties `git status` for the done-report check. Keyed on kind and reference only: a respawn in
+    the same workspace reuses the same path on purpose, since the dispatcher clears it before every
+    fresh launch and the new head overwrites it with its own pid the moment it starts.
+    """
+    root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
+    return f"{root}/secretary-{kind}-pid-{request_token(reference)}.pid"
+
+
+def _is_zombie(pid: int) -> bool:
+    """A process the kernel has not reaped yet still answers `kill(pid, 0)`, so a check right at
+    exit can read one tick stale as still alive. Reading its own `/proc` status closes that gap."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in status.splitlines():
+        if line.startswith("State:"):
+            return "Z" in line
+    return False
+
+
+def head_process_status(pid_file: str) -> dict[str, Any]:
+    """Whether the OS process named by a pid-heartbeat file is still alive.
+
+    `known: False` covers a file that does not exist yet (a fresh launch has not written its pid
+    yet) and one that never will (a raw `SECRETARY_DISPATCHER_*_COMMAND` override skips the
+    heartbeat wrapper entirely). Neither is evidence the head died, so callers must fall back to
+    the ordinary timing ceiling instead of reading `known: False` as "exited".
+    """
+    try:
+        raw = Path(pid_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"known": False}
+    try:
+        pid = int(raw)
+    except ValueError:
+        return {"known": False}
+    if pid <= 0:
+        return {"known": False}
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {"known": True, "alive": False}
+    except PermissionError:
+        # Exists, owned by someone else. Cannot happen for a head this dispatcher launched itself,
+        # but existing beats dead here rather than guessing.
+        return {"known": True, "alive": True}
+    except OSError:
+        return {"known": False}
+    return {"known": True, "alive": not _is_zombie(pid)}
 
 
 def wait_outcome(
