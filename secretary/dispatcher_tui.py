@@ -64,9 +64,18 @@ def deliver_tui_prompt(
 
 def close_terminal(handle: str, *, run_json: RunJson) -> None:
     try:
-        run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
+        close_terminal_strict(handle, run_json=run_json)
     except Exception:
         pass
+
+
+def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:
+    """Close a terminal and let a refusal reach the caller.
+
+    Cleanup paths swallow the failure because they already have one to report. A caller whose
+    record is the only pointer to the pane cannot: a refused close leaves the head alive.
+    """
+    run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
 
 
 def _confirm_delivered(

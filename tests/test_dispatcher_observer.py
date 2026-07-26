@@ -8,17 +8,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher import CutoverState, DispatcherRuntime
+from secretary.dispatcher import CommandHostRuntime, CutoverState, DispatcherRuntime
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
     EVENT_STOPPED,
     OBSERVER_HEAD_FALLBACK,
+    ObserverRecord,
     load_observers,
     observer_request_id,
     render_observer_prompt,
+    stop_observer_head,
 )
+from secretary.dispatcher_types import HostError
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import ROLE_ALLOWLIST, ROLE_REQUIRED, runtime_env
@@ -527,6 +530,51 @@ class ObserverConfigurationTests(unittest.TestCase):
             observer_request_id("launch", "sprint:1", 1),
             observer_request_id("launch", "sprint:1", 2),
         )
+
+
+class RealHostStopObserverTests(unittest.TestCase):
+    """The real host, not the fake: a refused close has to reach the lifecycle."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.record = ObserverRecord(sprint="sprint:1", head="observer", handle="term-1")
+        self.calls: list[list[str]] = []
+
+    def _run_json(self, args: list[str]) -> dict[str, object]:
+        self.calls.append(args)
+        return {}
+
+    def _run_json_refusing(self, args: list[str]) -> dict[str, object]:
+        self.calls.append(args)
+        raise HostError("orca terminal close failed: pane is busy")
+
+    def test_close_is_requested_for_the_observer_pane(self) -> None:
+        with mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
+        ):
+            self.host.stop_observer(self.record)
+
+        self.assertEqual(
+            self.calls, [["orca", "terminal", "close", "--terminal", "term-1", "--json"]]
+        )
+
+    def test_a_refused_close_raises_instead_of_reporting_success(self) -> None:
+        with mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json_refusing(args)
+        ):
+            with self.assertRaises(HostError):
+                self.host.stop_observer(self.record)
+
+    def test_a_refused_close_keeps_the_record_and_marks_stop_pending(self) -> None:
+        runtime = mock.Mock()
+        runtime.host = self.host
+        with mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json_refusing(args)
+        ):
+            self.assertFalse(stop_observer_head(runtime, self.record))
 
 
 if __name__ == "__main__":

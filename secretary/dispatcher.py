@@ -96,7 +96,11 @@ from secretary.dispatcher_state import (
     record_divergence as _record_divergence,
     request_token as _request_token,
 )
-from secretary.dispatcher_tui import TuiDeliveryError, close_terminal as _close_tui_terminal
+from secretary.dispatcher_tui import (
+    TuiDeliveryError,
+    close_terminal as _close_tui_terminal,
+    close_terminal_strict as _close_tui_terminal_strict,
+)
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
     DispatcherError,
@@ -542,10 +546,19 @@ class CommandHostRuntime:
         return {"workspace": str(workspace), "handle": handle, "pid_file": pid_file, "run": run}
 
     def stop_observer(self, record: Any) -> None:
-        """End one observer head. Its pane only: nothing else runs in that workspace."""
+        """End one observer head. Its pane only: nothing else runs in that workspace.
+
+        Raises HostError when Orca refuses to close the pane: the record is the only pointer to
+        that head, so the lifecycle keeps it and retries instead of losing a live terminal.
+        """
         if self.mode == "noop" or not record.handle:
             return
-        _close_tui_terminal(record.handle, run_json=self._run_json)
+        try:
+            _close_tui_terminal_strict(record.handle, run_json=self._run_json)
+        except HostError:
+            raise
+        except Exception as exc:
+            raise HostError(f"observer terminal close failed: {exc}") from None
 
     def _observer_run(self, head: str, workspace: str) -> dict[str, Any]:
         try:
