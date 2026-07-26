@@ -27,6 +27,7 @@ SCHEMAS = {
     "data-manifest": "data-manifest.schema.json",
     "onboarding-contract": "onboarding-contract.schema.json",
     "status": "status.schema.json",
+    "secret-catalog": "secret-catalog.schema.json",
 }
 
 

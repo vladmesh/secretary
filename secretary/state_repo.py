@@ -2,10 +2,11 @@
 
 Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Three writers commit
 into `state/`: the tick writer (`state/board`, `state/runs`), the memory writer
-(`state/memory`) and the knowledge writer (`state/knowledge`). They own disjoint
-pathspecs and never `git add -A`, so none can pick up another's half-written
-tree, and `state_repo_lock` serializes the index operations git itself does not
-make concurrency-safe.
+(`state/memory`) and the knowledge writer (`state/knowledge`). The secret store
+writes `secrets/` beside them on the same terms. They own disjoint pathspecs and
+never `git add -A`, so none can pick up another's half-written tree, and
+`state_repo_lock` serializes the index operations git itself does not make
+concurrency-safe.
 """
 
 from __future__ import annotations
@@ -26,9 +27,13 @@ FALLBACK_IDENTITY = ("secretary checkpoint", "secretary-checkpoint@localhost")
 BOARD_RUNS_PATHSPEC = ("state/board", "state/runs")
 MEMORY_PATHSPEC = ("state/memory",)
 KNOWLEDGE_PATHSPEC = ("state/knowledge",)
+# The secret store sits beside `state/`, not inside it: the tick writer must never
+# pick it up, and the store commits its own catalog and envelopes.
+SECRETS_PATHSPEC = ("secrets",)
 
 MEMORY_FACTS_RELATIVE = Path("state") / "memory" / "facts"
 KNOWLEDGE_RELATIVE = Path("state") / "knowledge"
+SECRETS_RELATIVE = Path("secrets")
 
 
 class StateRepoError(RuntimeError):
@@ -41,6 +46,10 @@ def memory_facts_dir(instance_dir: Path) -> Path:
 
 def knowledge_dir(instance_dir: Path) -> Path:
     return Path(instance_dir).expanduser().resolve() / KNOWLEDGE_RELATIVE
+
+
+def secrets_dir(instance_dir: Path) -> Path:
+    return Path(instance_dir).expanduser().resolve() / SECRETS_RELATIVE
 
 
 @contextmanager

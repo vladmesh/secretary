@@ -1,0 +1,49 @@
+"""Wordlist for the generated recovery phrase.
+
+Exactly 256 words, so one word carries eight bits and the entropy of a phrase
+is countable without arguing about the list: sixteen words are 128 bits. The
+words are lowercase ASCII, three to eight letters, and were picked to be easy to
+read back over a phone call and to write down without ambiguity.
+
+The list is part of the storage format. Changing it, reordering it or resizing
+it does not break an existing phrase (the phrase is hashed as text, not as
+indexes), but it does change what future `secret init` hands the user, so treat
+it as append-only in spirit and keep the count exact.
+"""
+
+from __future__ import annotations
+
+RECOVERY_WORDS: tuple[str, ...] = (
+    "amber", "anchor", "apple", "arch", "arrow", "atlas", "autumn", "awake",
+    "bacon", "badge", "bagel", "balance", "balloon", "bamboo", "banjo", "barley",
+    "basket", "batch", "beacon", "beam", "bean", "bell", "berry", "bicycle",
+    "birch", "bison", "black", "blanket", "blossom", "blue", "board", "bonus",
+    "border", "bottle", "boulder", "brave", "bread", "breeze", "bridge", "bright",
+    "bronze", "brook", "brush", "bubble", "bucket", "buffalo", "bundle", "butter",
+    "cabin", "cable", "cactus", "camel", "candle", "canvas", "canyon", "captain",
+    "cargo", "carpet", "carrot", "castle", "cedar", "cellar", "cement", "census",
+    "chalk", "charm", "cheese", "cherry", "chess", "chorus", "cider", "cinder",
+    "circle", "citrus", "clay", "clever", "cliff", "clock", "cloud", "clover",
+    "cobalt", "cocoa", "coffee", "comet", "compass", "copper", "coral", "cotton",
+    "county", "cover", "coyote", "crane", "crater", "crayon", "cream", "crimson",
+    "crystal", "cube", "curtain", "cushion", "cymbal", "daisy", "dancer", "dawn",
+    "deck", "delta", "denim", "desert", "diamond", "diary", "dolphin", "domino",
+    "donkey", "draft", "dragon", "dream", "drift", "drum", "dune", "dusk",
+    "eagle", "earth", "east", "echo", "eclipse", "elbow", "elder", "ember",
+    "engine", "escort", "ether", "fabric", "falcon", "farm", "feather", "fern",
+    "ferry", "fiber", "fiddle", "field", "fig", "filter", "finch", "flame",
+    "flask", "fleet", "flint", "flour", "flute", "foam", "forest", "fossil",
+    "fountain", "fox", "frame", "frost", "fuel", "funnel", "galaxy", "garden",
+    "garlic", "gate", "gauge", "gecko", "gem", "ginger", "glacier", "glass",
+    "globe", "glove", "gold", "granite", "grape", "gravel", "green", "grove",
+    "guitar", "gulf", "gypsum", "hammer", "harbor", "harvest", "hazel", "heather",
+    "helmet", "herb", "hollow", "honey", "horizon", "hornet", "horse", "hunter",
+    "igloo", "indigo", "ink", "iris", "iron", "island", "ivory", "jacket",
+    "jade", "jasmine", "jelly", "jersey", "jewel", "journal", "jungle", "juniper",
+    "kayak", "kernel", "kettle", "key", "kite", "kiwi", "knot", "koala",
+    "ladder", "lagoon", "lamp", "lantern", "lark", "laurel", "lava", "leaf",
+    "ledge", "lemon", "lentil", "letter", "lever", "lichen", "light", "lilac",
+    "lily", "linen", "lion", "lizard", "lobby", "locket", "lotus", "lumber",
+    "lunar", "lynx", "magnet", "mango", "manor", "maple", "marble", "marsh",
+    "meadow", "melon", "meteor", "midnight", "mint", "mirror", "mist", "mitten",
+)
