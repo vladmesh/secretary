@@ -21,7 +21,8 @@ state. Instance содержит persona, project bindings, adapters, policies �
 sealed values в git рядом с board и memory; единственное, что репо никогда не содержит — сырой
 installation key и recovery phrase, см. [Recovery](RECOVERY.md), раздел «Секреты». Host
 `runtime.env` остаётся отдельным файлом с правами `0600`, gitignored и вне checkpoint или archive
-payload; миграция его текущего содержимого в хранилище — отдельный шаг с участием оператора.
+payload; миграция его содержимого в хранилище выполнена, канон значений лежит в хранилище, а
+файл — materialized копия.
 Структурированный реестр проектов живёт только в `secretary-instance/projects/`.
 
 `secretary-instance/state/` хранит нормализованный recovery-канон: board, runs, memory facts и

@@ -31,9 +31,9 @@ python3 -m unittest
 ## Runtime secrets
 
 Секреты установки живут в восстановимом хранилище (`secretary secret init/set/import`,
-`secretary-instance/secrets/`) и материализуются оттуда в env-файлы; сегодня `runtime.env` рядом с
-`instance.yaml` остаётся одним из таких файлов, ещё не переведённым на materialization (отдельный
-шаг с участием оператора). Файл должен быть `0600`, находится в `.gitignore` instance-репозитория
+`secretary-instance/secrets/`) и материализуются оттуда в env-файлы; `runtime.env` рядом с
+`instance.yaml` переведён на materialization, файл — materialized копия значений из хранилища.
+Файл должен быть `0600`, находится в `.gitignore` instance-репозитория
 и не входит в checkpoint или archive payload. `secretary shell` получает весь файл для trusted
 operator-сессии, dispatcher-launched worker/reviewer получают только allowlisted board credentials
 и non-secret runtime switches через `secretary.role_env`. Хранилище не обещает worker isolation:
