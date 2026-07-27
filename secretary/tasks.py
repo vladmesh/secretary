@@ -1003,7 +1003,7 @@ class TaskWriter:
                 held.append(sprint_ref)
         if not held:
             return {}
-        sprint_ref = held[0]
+        sprint_ref = card_sprint if card_sprint in held else held[0]
         if role == "po" and sprint_override:
             if not sprint_override_reason:
                 self._deny_sprint_write(
@@ -1012,7 +1012,7 @@ class TaskWriter:
                     request_id=request_id, reference=reference, exit_code=2,
                 )
             return {"sprint_override_reason": sprint_override_reason}
-        if role == "observer" and card_sprint == sprint_ref:
+        if role == "observer" and card_sprint in held:
             return {}
         if role == "dispatcher":
             return {}

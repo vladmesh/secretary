@@ -401,6 +401,40 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             self.tasks.create(role="po", actor="operator", project="secretary", task_type="code", title="blocked")
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
+    def test_pending_sprint_recovery_rebuilds_its_repository_index(self) -> None:
+        with mock.patch.object(self.sprints.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.sprints.create(
+                    role="po", actor="operator", goal="recovered", repositories=["recovered"],
+                    reference="sprint:recovered", request_id="recover-sprint-index",
+                )
+
+        self.assertEqual(self.tasks.reconcile(), (1, 0))
+        with self.assertRaisesRegex(TaskError, "sprint:recovered") as denied:
+            self.tasks.create(
+                role="po", actor="operator", project="recovered", task_type="code", title="blocked",
+            )
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+
+    def test_guard_read_avoids_sprint_comment_history(self) -> None:
+        self.client.calls.clear()
+
+        sprint = SprintReader(self.client).show(self.ref, include_cards=False)  # type: ignore[arg-type]
+
+        self.assertNotIn("comments", sprint)
+        self.assertFalse(any(method == "getAllComments" for method, _params in self.client.calls))
+
+    def test_observer_can_write_when_another_open_sprint_shares_the_repository(self) -> None:
+        other_ref = self.sprints.create(
+            role="po", actor="operator", goal="overlap", repositories=["secretary"],
+        )["sprint"]["ref"]
+        card = self.tasks.create(
+            role="observer", actor="second-observer", project="secretary", task_type="code",
+            title="second sprint", sprint=other_ref,
+        )["task"]
+
+        self.assertEqual(card["sprint"], other_ref)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -78,7 +78,8 @@ Done остаётся выполненной зависимостью; закр�
 разблокирует `blocked_by`.
 
 `edit` заменяет спеку карточки на месте: `--title`, `--description`/`--body-file` (полный новый
-текст, не дифф), `--head`, `--review-head`. Обычно это только для PO и только в Ideas/Ready/Blocked: у
+текст, не дифф), `--head`, `--review-head`. Править могут PO, dispatcher и observer, но обычная
+карточка доступна для этого только в Ideas/Ready/Blocked: у
 активной карточки воркер работает со снапшотом TASK.md, поэтому правка на лету идёт через
 preempt/requeue, а не через тихую подмену. Audit event `edited` хранит старый и новый digest;
 полный текст прошлых версий восстанавливается из git-истории `state/board/cards.ndjson` в

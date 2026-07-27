@@ -31,9 +31,9 @@ python3 -m secretary task list --sprint <sprint-ref>
 python3 -m secretary task show --ref <card-ref>
 ```
 
-Роли в вызовах: сущность спринта принимает `--role observer` там, где это твоя запись
-(`sprint resume`). Остальные записи на доску идёшь делать как PO своим именем:
-`--role po --actor observer`.
+Роли в вызовах: свою работу со sprint и связанными карточками делаешь как observer:
+`--role observer --actor observer`. Для task create, move и edit роль PO оставь человеку для
+явного `--sprint-override` с причиной.
 
 ## Границы
 
@@ -144,7 +144,7 @@ resume-записью и возвращайся к выбору шага.
 проверяемые Acceptance criteria, Out of scope.
 
 ```bash
-python3 -m secretary task create --role po --actor observer \
+python3 -m secretary task create --role observer --actor observer \
   --project <repo> --type code --title "<короткий заголовок>" \
   --state ready --sprint <sprint-ref> \
   --head <worker-profile> --review-head <reviewer-profile> \
@@ -154,7 +154,7 @@ python3 -m secretary task create --role po --actor observer \
 Затем зафиксируй её как текущую:
 
 ```bash
-python3 -m secretary sprint current-task --ref <sprint-ref> --role po --actor observer --task <card-ref>
+python3 -m secretary sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
 ```
 
 Ревьюер — другой семьи, чем воркер:
@@ -259,6 +259,7 @@ hotfix. Зелёная доехавшая карточка и твоё иссл�
    ```bash
    python3 -m secretary sprint close --ref <sprint-ref> --role po --actor observer
    ```
+   Закрытие спринта отдельно авторизовано только для PO; это не task write и не override.
 6. Следующий спринт не начинай: спринты заводит человек.
 
 ## Разрешённые остановки

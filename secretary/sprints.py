@@ -214,11 +214,13 @@ class SprintReader:
         task_id = _positive_int(raw.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        comments_raw = self.client.call("getAllComments", task_id=task_id) or []
-        comments = [
-            {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
-            for comment in comments_raw if isinstance(comment, dict)
-        ]
+        comments = None
+        if include_cards:
+            comments_raw = self.client.call("getAllComments", task_id=task_id) or []
+            comments = [
+                {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
+                for comment in comments_raw if isinstance(comment, dict)
+            ]
         sprint = self._normalize(raw, comments=comments)
         if include_cards:
             sprint["cards"] = TaskReader(self.client).list(sprint=reference)
@@ -504,7 +506,9 @@ class SprintWriter:
         event["task_id"] = sprint["id"]
         event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
         self.audit.stage(str(event["request_id"]), event)
-        return {"action": kind, "sprint": sprint, "event_id": self.audit.append(str(event["request_id"]), event)}
+        event_id = self.audit.append(str(event["request_id"]), event)
+        update_active_sprint_repositories(Path(self.audit.board_dir).parent, sprint)
+        return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     @staticmethod
     def _event(kind: str, role: str, actor: str, reference: str, request_id: str, payload: dict[str, Any], sprint: dict[str, Any] | None = None) -> dict[str, Any]:
