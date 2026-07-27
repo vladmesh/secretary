@@ -250,9 +250,10 @@ class ProductionTickTelemetryTests(unittest.TestCase):
     def test_a_degraded_action_reaches_the_steward_once_and_survives_a_healthy_tick(self) -> None:
         """End to end, on the real state file: dispatcher → durable record → steward gate.
 
-        The intervening healthy tick is the point. Dedup is keyed on the unhealthy counter, so an
-        ordinary production tick between the failure and the steward's look must not consume it,
-        and `advance` — the steward having actually looked — is the only thing that does.
+        The intervening healthy tick is the point. Dedup is keyed on the incident counters, so an
+        ordinary production tick between the failure and the steward's look must not consume the
+        incident — it only adds the recovery that closed it — and `advance` — the steward having
+        actually looked — is the only thing that does.
         """
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         with contextlib.ExitStack() as stack:
@@ -283,10 +284,10 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
             self.runtime.production_tick()
             self.assertEqual(steward_cli.cmd_precheck(), 0)
-            self.assertEqual(
-                [hit["seq"] for hit in steward_signals.scan()["signals"]["pipeline_ticks"]],
-                [hits[0]["seq"]],
-            )
+            after = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in after],
+                             ["pipeline-tick-unhealthy", "pipeline-tick-recovered"])
+            self.assertEqual({hit["incident"] for hit in after}, {hits[0]["incident"]})
 
             self.assertEqual(steward_cli.cmd_scan(True), 0)
             self.assertEqual(steward_cli.cmd_advance(), 0)
@@ -336,6 +337,10 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.unhealthy_total, 1)
         self.assertEqual(telemetry.unhealthy[-1]["seq"], telemetry.last["seq"])
         self.assertEqual(telemetry.last_healthy_at, healthy.last_healthy_at)
+        # ...and it opens the incident, carrying the code that tells a board outage from a bug.
+        self.assertEqual(telemetry.incident_total, 1)
+        self.assertEqual(telemetry.incident["opened"]["errors"][0]["code"], "backend_unavailable")
+        self.assertEqual(telemetry.recovery, {})
 
         with mock.patch.dict(
             os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
@@ -343,6 +348,80 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("backend_unavailable" in problem for problem in problems))
+
+    def test_a_board_outage_is_one_incident_and_one_recovery_end_to_end(self) -> None:
+        """The whole path on the real state file, without touching the live board (secretary-839).
+
+        A board outage fails every tick for as long as it lasts and then stops failing. What has to
+        reach the steward is one incident with its cause, one fact that it is over, and a fresh
+        incident for the next independent failure — not a per-tick stream with no ending.
+        """
+        state = AgentState("steward", state_dir=self.data_dir / "steward")
+        outage = mock.patch(
+            "secretary.dispatcher_production._production_tasks",
+            side_effect=TaskError("backend_unavailable", "board is down", 1),
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(
+                os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}))
+            stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
+            stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
+            stack.enter_context(mock.patch.object(steward_signals.pipeline_ops, "list_cards",
+                                                  return_value=[]))
+            stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
+                                                  self.data_dir / "no-workspaces"))
+            stack.enter_context(mock.patch.dict(
+                os.environ,
+                {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")}))
+            stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
+            stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
+
+            self.runtime.production_tick()
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+
+            # The outage: two ticks die before their own save, on the very first board read.
+            for _ in range(2):
+                with outage, self.assertRaises(TaskError):
+                    self.runtime.production_tick()
+
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            hits = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
+            self.assertEqual(hits[0]["errors"][0]["code"], "backend_unavailable")
+            self.assertEqual(hits[0]["unhealthy_ticks"], 2)
+            incident = hits[0]["incident"]
+            # A repeated precheck before `advance` sees the same one incident, not another.
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            self.assertEqual([hit["incident"] for hit in
+                              steward_signals.scan()["signals"]["pipeline_ticks"]], [incident])
+            self.assertEqual(steward_cli.cmd_scan(True), 0)
+            self.assertEqual(steward_cli.cmd_advance(), 0)
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+
+            # The board comes back. One recovery, tied to the incident and its cause.
+            self.runtime.production_tick()
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            recovered = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in recovered], ["pipeline-tick-recovered"])
+            self.assertEqual(recovered[0]["incident"], incident)
+            self.assertEqual(recovered[0]["unhealthy_ticks"], 2)
+            self.assertIn("backend_unavailable", recovered[0]["cause"])
+            self.assertEqual(steward_cli.cmd_scan(True), 0)
+            self.assertEqual(steward_cli.cmd_advance(), 0)
+
+            # Healthy ticks after it repeat nothing, and health is green on the same records.
+            self.runtime.production_tick()
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+            problems, _ = health._pipeline_status()
+            self.assertEqual(problems, [])
+
+            # A later independent failure is a new incident, and wakes the steward once.
+            with outage, self.assertRaises(TaskError):
+                self.runtime.production_tick()
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            reopened = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in reopened], ["pipeline-tick-unhealthy"])
+            self.assertNotEqual(reopened[0]["incident"], incident)
 
     def test_a_failed_tick_records_telemetry_without_persisting_its_half_done_work(self) -> None:
         """Only the record of the failure lands: the payload it died holding is half applied."""
@@ -447,13 +526,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         # ...and the steward hears about it, on the same records.
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         state.save_watermark(dict(steward_signals._empty_watermark(),
-                                  pipeline_unhealthy_total=0,
+                                  pipeline_incident_total=0, pipeline_recovery_total=0,
                                   pipeline_telemetry_generation=telemetry.generation))
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.dict(
                 os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}))
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
-            hits, _, _ = steward_signals._pipeline_tick_signals(state.load_watermark())
+            hits, _ = steward_signals._pipeline_tick_signals(state.load_watermark())
         self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
         self.assertEqual(hits[0]["degradations"][0]["action"], "observer-stop-failed")
 
@@ -657,11 +736,12 @@ class EnvDataDirConflictTests(unittest.TestCase):
         self.assertIn("boom", " ".join(problems))
         self.assertIn("last tick", detail)
 
-        hits, watermark, _ = steward_signals._pipeline_tick_signals(
-            dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=0)
+        hits, pending = steward_signals._pipeline_tick_signals(
+            dict(steward_signals._empty_watermark(), pipeline_incident_total=0,
+                 pipeline_recovery_total=0)
         )
         self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
-        self.assertEqual(watermark, 1)
+        self.assertEqual(pending["pipeline_incident_total"], 1)
 
     def test_a_record_left_on_the_instance_data_plane_is_not_read_as_healthy(self) -> None:
         """Proof the two directories really are different: the readers do not silently find it."""
@@ -1056,17 +1136,34 @@ class StewardPipelineSignalTests(unittest.TestCase):
         state.start()
         self.addCleanup(state.stop)
 
-    def write(self, *, total: int, unhealthy: list[dict], healthy_last: bool = False,
-              generation: str = "gen-a") -> None:
-        last = _tick(total + 1, healthy=True) if healthy_last else (unhealthy[-1] if unhealthy else {})
-        _telemetry_state(self.path, {
-            "generation": generation,
-            "tick_seq": total + 1,
-            "last": last,
-            "last_healthy_at": _ts(1),
-            "unhealthy": unhealthy,
-            "unhealthy_total": total,
-        })
+    def write(self, ticks: str, *, generation: str = "gen-a", payload: dict | None = None) -> dict:
+        """Fold a run of production ticks through the REAL writer and land it on disk.
+
+        `ticks` is one character per terminal tick, `.` healthy and `x` unhealthy, in order. Going
+        through `record_tick_telemetry` rather than hand-building the record is the point of these
+        tests: incident dedup is a contract between two processes, and a hand-written state file
+        could pin the reader against a shape the dispatcher never writes.
+
+        Returns the payload so a test can keep ticking the same history forward.
+        """
+        body = {} if payload is None else payload
+        for tick in ticks:
+            record_tick_telemetry(body, {
+                "status": "ok" if tick == "." else "degraded",
+                "step": "production-tick",
+                "errors": [] if tick == "." else [
+                    {"ref": "", "code": "backend_unavailable", "message": "TaskError"}],
+            })
+        telemetry = dict(body["tick_telemetry"])
+        telemetry["generation"] = generation
+        body["tick_telemetry"] = telemetry
+        _telemetry_state(self.path, telemetry)
+        return body
+
+    def baseline(self, **fields) -> dict:
+        """A watermark that has already taken a baseline of the current history."""
+        return {**steward_signals._empty_watermark(), "pipeline_incident_total": 0,
+                "pipeline_recovery_total": 0, "pipeline_telemetry_generation": "gen-a", **fields}
 
     @contextlib.contextmanager
     def steward_cli_env(self):
@@ -1092,108 +1189,153 @@ class StewardPipelineSignalTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
-    def test_first_scan_takes_a_baseline_instead_of_replaying_the_ring(self) -> None:
-        self.write(total=3, unhealthy=[_tick(i, healthy=False) for i in (1, 2, 3)])
+    def test_first_scan_takes_a_baseline_instead_of_replaying_the_record(self) -> None:
+        self.write("xxx")
 
-        hits, pending, generation = steward_signals._pipeline_tick_signals(
+        hits, pending = steward_signals._pipeline_tick_signals(
             steward_signals._empty_watermark())
 
         self.assertEqual(hits, [])
-        self.assertEqual(pending, 3)
+        self.assertEqual(pending["pipeline_incident_total"], 1)
+        self.assertEqual(pending["pipeline_recovery_total"], 0)
         # The baseline is only meaningful next to the history it came from, so it is carried too.
-        self.assertEqual(generation, "gen-a")
+        self.assertEqual(pending["pipeline_telemetry_generation"], "gen-a")
 
-    def test_a_new_unhealthy_tick_fires_once_and_is_not_lost_to_healthy_ticks(self) -> None:
-        mark = dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=3,
-                    pipeline_telemetry_generation="gen-a")
-        self.write(total=4, unhealthy=[_tick(i, healthy=False) for i in (2, 3, 4)])
+    def test_one_outage_is_one_incident_however_many_ticks_it_fails(self) -> None:
+        """The Kanboard-outage shape: every tick fails while it lasts, and it is one thing to look
+        at. Repeated scans before `advance` keep reporting the same incident, and further failing
+        ticks of the same outage neither open a second one nor re-arm the first."""
+        mark = self.baseline()
+        payload = self.write("x")
 
-        hits, pending, _ = steward_signals._pipeline_tick_signals(mark)
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
 
         self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
-        self.assertEqual(hits[0]["seq"], 4)
-        self.assertEqual(pending, 4)
+        incident = hits[0]["incident"]
+        self.assertTrue(incident)
+        self.assertEqual(hits[0]["errors"][0]["code"], "backend_unavailable")
+        self.assertEqual(hits[0]["unhealthy_ticks"], 1)
+        self.assertEqual(hits[0]["incidents"], 1)
+        self.assertEqual(pending["pipeline_incident_total"], 1)
 
-        # An ordinary healthy production tick lands between the scan and the next one. It must not
-        # consume the failure the steward has not advanced past yet.
-        self.write(total=4, unhealthy=[_tick(i, healthy=False) for i in (2, 3, 4)], healthy_last=True)
-        again, _, _ = steward_signals._pipeline_tick_signals(mark)
-        self.assertEqual([hit["seq"] for hit in again], [4])
+        # The outage goes on. A repeated precheck/scan, and every further failing tick, describe
+        # the same open incident — not a new one.
+        for ticks in ("", "x", "xx"):
+            payload = self.write(ticks, payload=payload)
+            again, pending = steward_signals._pipeline_tick_signals(mark)
+            self.assertEqual([hit["event"] for hit in again], ["pipeline-tick-unhealthy"])
+            self.assertEqual(again[0]["incident"], incident)
+            self.assertEqual(pending["pipeline_incident_total"], 1)
 
-        # ...and once the watermark has moved, the same failure is silent.
-        advanced = dict(mark, pipeline_unhealthy_total=pending)
-        self.assertEqual(steward_signals._pipeline_tick_signals(advanced)[0], [])
+        # ...and once the steward has actually looked, the same incident is silent.
+        self.assertEqual(steward_signals._pipeline_tick_signals(dict(mark, **pending))[0], [])
 
-    def test_rotation_out_of_the_ring_is_reported_not_swallowed(self) -> None:
-        mark = dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=0,
-                    pipeline_telemetry_generation="gen-a")
-        self.write(total=5, unhealthy=[_tick(i, healthy=False) for i in (4, 5)])
+    def test_the_first_healthy_tick_reports_one_recovery_and_no_more(self) -> None:
+        mark = self.baseline()
+        payload = self.write("xx")
+        opened_hits, pending = steward_signals._pipeline_tick_signals(mark)
+        opened = opened_hits[0]
+        mark = dict(mark, **pending)  # the head looked at the failure and advanced
 
-        hits, pending, _ = steward_signals._pipeline_tick_signals(mark)
+        payload = self.write(".", payload=payload)
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
 
-        self.assertEqual(hits[0]["event"], "pipeline-telemetry-rotated")
-        self.assertEqual(hits[0]["dropped"], 3)
-        self.assertEqual([hit["seq"] for hit in hits[1:]], [4, 5])
-        self.assertEqual(pending, 5)
-        self.assertIn("pipeline-telemetry-rotated", [run["event"] for run in self.steward_runs()])
+        self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-recovered"])
+        recovered = hits[0]
+        # The recovery names the incident it closes, its cause and how the pipeline came back.
+        self.assertEqual(recovered["incident"], opened["incident"])
+        self.assertEqual(recovered["opened_at"], opened["ts"])
+        self.assertEqual(recovered["unhealthy_ticks"], 2)
+        self.assertEqual(recovered["recovered_status"], "ok")
+        self.assertIn("backend_unavailable", recovered["cause"])
+        self.assertEqual(pending["pipeline_recovery_total"], 1)
 
-    def test_a_replaced_state_file_rescans_the_ring_and_says_so(self) -> None:
-        mark = dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=9,
-                    pipeline_telemetry_generation="gen-a")
-        self.write(total=2, unhealthy=[_tick(i, healthy=False) for i in (1, 2)])
+        # Before `advance` the same recovery is still the batch, and further healthy ticks do not
+        # repeat it afterwards.
+        self.assertEqual([hit["incident"] for hit in
+                          steward_signals._pipeline_tick_signals(mark)[0]], [recovered["incident"]])
+        mark = dict(mark, **pending)
+        payload = self.write("..", payload=payload)
+        self.assertEqual(steward_signals._pipeline_tick_signals(mark)[0], [])
 
-        hits, pending, _ = steward_signals._pipeline_tick_signals(mark)
+    def test_a_failure_after_recovery_opens_a_new_incident(self) -> None:
+        mark = self.baseline()
+        payload = self.write("x.")
+        mark = dict(mark, **steward_signals._pipeline_tick_signals(mark)[1])
+        first = payload["tick_telemetry"]["recovery"]["id"]
+
+        payload = self.write("xx", payload=payload)
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
+
+        self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
+        self.assertNotEqual(hits[0]["incident"], first)
+        self.assertEqual(pending["pipeline_incident_total"], 2)
+
+    def test_an_incident_that_opened_and_closed_between_two_scans_reports_both(self) -> None:
+        """A steward that only heard the recovery would be told something ended without ever being
+        told what broke, so the failure is reported first even though it is already over."""
+        mark = self.baseline()
+        self.write("x.")
+
+        hits, _ = steward_signals._pipeline_tick_signals(mark)
+
+        self.assertEqual([hit["event"] for hit in hits],
+                         ["pipeline-tick-unhealthy", "pipeline-tick-recovered"])
+        self.assertEqual(hits[0]["incident"], hits[1]["incident"])
+        self.assertEqual(hits[0]["errors"][0]["code"], "backend_unavailable")
+
+    def test_a_replaced_state_file_reports_the_reset_and_the_incident_again(self) -> None:
+        mark = self.baseline(pipeline_incident_total=9, pipeline_recovery_total=9)
+        self.write("x")
+
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
 
         self.assertEqual(hits[0]["event"], "pipeline-telemetry-reset")
-        self.assertEqual([hit["seq"] for hit in hits[1:]], [1, 2])
-        self.assertEqual(pending, 2)
+        self.assertEqual([hit["event"] for hit in hits[1:]], ["pipeline-tick-unhealthy"])
+        self.assertEqual(pending["pipeline_incident_total"], 1)
 
     def test_a_replaced_state_with_the_same_counter_is_still_a_reset(self) -> None:
         """The counter alone cannot see a state file swap that lands on the same number.
 
-        A restore or a rebuilt installation starts its own history, and its ninth unhealthy tick
-        meets a watermark that already says 9. Without the generation the steward reports nothing
-        and every failure of the new history is deduped away forever (review round 4).
+        A restore or a rebuilt installation starts its own history, and its first incident meets a
+        watermark that already says 1. Without the generation the steward reports nothing and
+        everything the new history records is deduped away forever (secretary-833 review, round 4).
         """
-        mark = dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=9,
-                    pipeline_telemetry_generation="gen-a")
-        self.write(total=9, generation="gen-b",
-                   unhealthy=[_tick(i, healthy=False) for i in range(1, 10)])
+        mark = self.baseline(pipeline_incident_total=1, pipeline_recovery_total=0)
+        self.write("x", generation="gen-b")
 
-        hits, pending, generation = steward_signals._pipeline_tick_signals(mark)
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
 
         self.assertEqual(hits[0]["event"], "pipeline-telemetry-reset")
         self.assertEqual(hits[0]["seen_generation"], "gen-a")
-        self.assertEqual([hit["seq"] for hit in hits[1:]], list(range(1, 10)))
-        self.assertEqual((pending, generation), (9, "gen-b"))
+        self.assertEqual([hit["event"] for hit in hits[1:]], ["pipeline-tick-unhealthy"])
+        self.assertEqual(pending["pipeline_telemetry_generation"], "gen-b")
         self.assertIn("pipeline-telemetry-reset", [run["event"] for run in self.steward_runs()])
 
         # The same history on the next scan is not a reset again: only a change is.
-        advanced = dict(mark, pipeline_unhealthy_total=9, pipeline_telemetry_generation="gen-b")
-        self.assertEqual(steward_signals._pipeline_tick_signals(advanced)[0], [])
+        self.assertEqual(steward_signals._pipeline_tick_signals(dict(mark, **pending))[0], [])
 
     def test_telemetry_without_a_generation_does_not_reset_every_scan(self) -> None:
         """A host whose dispatcher predates the stamp writes no generation. That is "cannot tell",
-        not "the state changed" — reading it as a change would rescan the ring every hour."""
-        mark = dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=2,
-                    pipeline_telemetry_generation="gen-a")
-        self.write(total=2, generation="", unhealthy=[_tick(i, healthy=False) for i in (1, 2)])
+        not "the state changed" — reading it as a change would report a reset every hour."""
+        mark = self.baseline(pipeline_incident_total=1, pipeline_recovery_total=0)
+        self.write("x", generation="")
 
-        hits, pending, generation = steward_signals._pipeline_tick_signals(mark)
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
 
         self.assertEqual(hits, [])
-        self.assertEqual((pending, generation), (2, ""))
+        self.assertEqual(pending["pipeline_telemetry_generation"], "")
 
     def test_missing_telemetry_wakes_the_head_and_is_logged_durably(self) -> None:
-        mark = dict(steward_signals._empty_watermark(), pipeline_unhealthy_total=2,
-                    pipeline_telemetry_generation="gen-a")
+        mark = self.baseline(pipeline_incident_total=2, pipeline_recovery_total=1)
 
-        hits, pending, generation = steward_signals._pipeline_tick_signals(mark)
+        hits, pending = steward_signals._pipeline_tick_signals(mark)
 
         self.assertEqual([hit["event"] for hit in hits], ["production-state-missing"])
         self.assertEqual(hits[0]["level"], "warn")
         # The watermark does not move over a source that could not be read.
-        self.assertEqual((pending, generation), (2, "gen-a"))
+        self.assertEqual(pending, {"pipeline_incident_total": 2, "pipeline_recovery_total": 1,
+                                   "pipeline_telemetry_generation": "gen-a"})
         self.assertEqual([run["event"] for run in self.steward_runs()], ["production-state-missing"])
 
     def test_a_quiet_precheck_keeps_the_baseline_so_a_later_failure_still_fires(self) -> None:
@@ -1202,50 +1344,72 @@ class StewardPipelineSignalTests(unittest.TestCase):
         failure would be read as another first-ever scan and suppressed, forever (round-2 finding).
         """
         with self.steward_cli_env():
-            self.write(total=0, unhealthy=[], healthy_last=True)
+            payload = self.write(".")
             self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
-            self.assertEqual(self.state.load_watermark()["pipeline_unhealthy_total"], 0)
+            self.assertEqual(self.state.load_watermark()["pipeline_incident_total"], 0)
 
             # A production tick fails. The steward is woken by it, and stays woken until it has
             # actually looked: a repeated precheck before `advance` must not consume the signal.
-            self.write(total=1, unhealthy=[_tick(7, healthy=False, reason="board unreachable")])
+            payload = self.write("x", payload=payload)
             self.assertEqual(steward_cli.cmd_precheck(), 0)
             self.assertEqual(steward_cli.cmd_precheck(), 0)
             hits = steward_signals.scan()["signals"]["pipeline_ticks"]
-            self.assertEqual([hit["seq"] for hit in hits], [7])
+            self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
 
-            # ...and once the head has looked, the same failure is silent while a second one is not.
+            # ...and once the head has looked, the same incident is silent — while the recovery
+            # that ends it, and a later independent failure, each wake the steward once more.
             self.assertEqual(steward_cli.cmd_scan(True), 0)
             self.assertEqual(steward_cli.cmd_advance(), 0)
             self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
-            self.write(total=2, unhealthy=[_tick(7, healthy=False), _tick(9, healthy=False)])
+
+            payload = self.write(".", payload=payload)
             self.assertEqual(steward_cli.cmd_precheck(), 0)
+            recovered = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in recovered], ["pipeline-tick-recovered"])
+            self.assertEqual(steward_cli.cmd_scan(True), 0)
+            self.assertEqual(steward_cli.cmd_advance(), 0)
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+
+            payload = self.write("x", payload=payload)
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            reopened = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in reopened], ["pipeline-tick-unhealthy"])
+            self.assertNotEqual(reopened[0]["incident"], recovered[0]["incident"])
+
+            # The health line reads the same records, and the synthetic recovery leaves it green.
+            self.write(".", payload=payload)
+            problems, detail = health._pipeline_status()
+            self.assertEqual(problems, [])
+            self.assertIn("last healthy", detail)
 
     def test_the_baseline_write_never_overwrites_a_watermark_or_invents_one(self) -> None:
-        self.write(total=4, unhealthy=[])
+        self.write("x.")
         self.state.save_watermark(dict(steward_signals._empty_watermark(),
-                                       pipeline_unhealthy_total=2, notified_blocked=["ref-1"]))
+                                       pipeline_incident_total=2, pipeline_recovery_total=2,
+                                       notified_blocked=["ref-1"]))
 
         steward_signals.ensure_pipeline_baseline(
-            {"pending": {"pipeline_unhealthy_total": 4,
+            {"pending": {"pipeline_incident_total": 4, "pipeline_recovery_total": 4,
                          "pipeline_telemetry_generation": "gen-a"}})
 
         mark = self.state.load_watermark()
-        self.assertEqual(mark["pipeline_unhealthy_total"], 2)
+        self.assertEqual(mark["pipeline_incident_total"], 2)
         self.assertEqual(mark["notified_blocked"], ["ref-1"])
 
-        # A baseline that is taken carries the history it was read from, or the next scan could not
-        # tell a replaced state from the one it measured.
+        # A baseline that is taken carries the recovery counter and the history it was read from,
+        # or the next scan would replay a recovery, or fail to tell a replaced state from this one.
         self.state.watermark_file.unlink()
         steward_signals.ensure_pipeline_baseline(
-            {"pending": {"pipeline_unhealthy_total": 4,
+            {"pending": {"pipeline_incident_total": 4, "pipeline_recovery_total": 3,
                          "pipeline_telemetry_generation": "gen-a"}})
-        self.assertEqual(self.state.load_watermark()["pipeline_telemetry_generation"], "gen-a")
+        mark = self.state.load_watermark()
+        self.assertEqual(mark["pipeline_recovery_total"], 3)
+        self.assertEqual(mark["pipeline_telemetry_generation"], "gen-a")
 
         # Telemetry that could not be read measured nothing, so it leaves no baseline behind.
         self.state.watermark_file.unlink()
-        steward_signals.ensure_pipeline_baseline({"pending": {"pipeline_unhealthy_total": None}})
-        self.assertIsNone(self.state.load_watermark().get("pipeline_unhealthy_total"))
+        steward_signals.ensure_pipeline_baseline({"pending": {"pipeline_incident_total": None}})
+        self.assertIsNone(self.state.load_watermark().get("pipeline_incident_total"))
 
     def test_a_hit_is_a_signal_and_renders(self) -> None:
         batch = {"signals": {"pipeline_ticks": [{"event": "pipeline-tick-unhealthy", "ts": _ts(1)}],

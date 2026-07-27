@@ -146,6 +146,14 @@ class TickTelemetry:
     unhealthy: tuple[dict, ...] = ()
     unhealthy_total: int = 0
     tick_seq: int = 0
+    # The open incident (one continuous run of unhealthy ticks) or {} when the pipeline is not in
+    # one, and the last closed one with the healthy tick that ended it. The counters next to them
+    # are monotonic within a generation, so a reader can dedupe on them the way it dedupes on
+    # `unhealthy_total` — see `secretary.dispatcher_production._record_incident`.
+    incident: dict = field(default_factory=dict)
+    incident_total: int = 0
+    recovery: dict = field(default_factory=dict)
+    recovery_total: int = 0
     # Which telemetry history the counters above belong to. Empty means the writer never stamped
     # one (a host still on an older product); a reader that dedupes on the counters must treat
     # that as "cannot tell" rather than as a change.
@@ -171,6 +179,8 @@ def read() -> TickTelemetry:
         return TickTelemetry(path, unavailable="tick-telemetry-missing")
     last = telemetry.get("last")
     unhealthy = telemetry.get("unhealthy")
+    incident = telemetry.get("incident")
+    recovery = telemetry.get("recovery")
     return TickTelemetry(
         path=path,
         last=last if isinstance(last, dict) else {},
@@ -180,6 +190,10 @@ def read() -> TickTelemetry:
         unhealthy_total=_counter(telemetry.get("unhealthy_total")),
         tick_seq=_counter(telemetry.get("tick_seq")),
         generation=str(telemetry.get("generation") or ""),
+        incident=incident if isinstance(incident, dict) else {},
+        incident_total=_counter(telemetry.get("incident_total")),
+        recovery=recovery if isinstance(recovery, dict) else {},
+        recovery_total=_counter(telemetry.get("recovery_total")),
     )
 
 
@@ -219,4 +233,21 @@ def describe(entry: dict) -> str:
     hidden = _counter(entry.get("degraded_count")) - len(degradations)
     if hidden > 0:
         parts.append(f"+{hidden} more degraded action(s)")
+    return "; ".join(parts)
+
+
+def describe_incident(incident: dict) -> str:
+    """One-line diagnostic for an incident: when it started, how long it ran, what caused it.
+
+    The cause is the tick that opened it (`opened`), not the newest failing one: every tick of a
+    Kanboard outage says the same thing, and what an operator needs is where it began.
+    """
+    if not incident:
+        return ""
+    opened = incident.get("opened")
+    parts = [f"since {incident.get('opened_at') or '?'}",
+             f"{_counter(incident.get('unhealthy_ticks'))} unhealthy tick(s)"]
+    cause = describe(opened) if isinstance(opened, dict) else ""
+    if cause:
+        parts.append(cause)
     return "; ".join(parts)
