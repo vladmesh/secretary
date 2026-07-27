@@ -101,7 +101,9 @@ python3 -m triggered_agents steward scan --json
   собственной телеметрии (`tick_telemetry` в `<data_dir>/dispatcher/production-state.json`;
   `data_dir` резолвится из instance, как у самого диспетчера).
   В каждом хите — время тика, статус, шаг и коды ошибок. Тик, упавший с исключением, попадает
-  сюда как `status: failed`. Отдельные события того же вида:
+  сюда как `status: failed`. Тик, у которого не упало ничего, но действие отчиталось
+  `degraded`/`failed` (незакрытый запуск, недоступный рантайм), тоже нездоров — что именно не
+  доделалось, лежит в `degradations` хита. Отдельные события того же вида:
   `production-state-missing`/`tick-telemetry-missing` (телеметрию не прочитать — это не «всё
   тихо», а слепота), `pipeline-telemetry-rotated` (нездоровых тиков было больше, чем сохранило
   кольцо) и `pipeline-telemetry-reset` (state-файл заменили, история счётчика началась заново).

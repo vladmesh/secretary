@@ -25,6 +25,7 @@ from unittest import mock
 from secretary import host
 from secretary.dispatcher import CutoverState, DispatcherRuntime
 from secretary.dispatcher_production import (
+    TICK_TELEMETRY_DEGRADATIONS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
@@ -170,6 +171,118 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         # the freshness evidence, not a verdict on the current tick.
         self.assertEqual(telemetry.last_healthy_at, healthy_at)
 
+    def degraded_reconcile(self, reason: str = "the head of an unresolved launch could not be stopped"):
+        """A reconciliation pass that returns a degraded outcome and raises nothing.
+
+        The real shape of `launch-intent-stop-unconfirmed` (_reconcile_production): the operation
+        failed, the outcome says so, and `errors` stays empty — the tick that reported itself `ok`
+        over exactly this is the round-3 blocker.
+        """
+        return mock.patch(
+            "secretary.dispatcher_production._reconcile_production",
+            return_value=[{
+                "status": "degraded",
+                "step": "production-reconcile",
+                "ref": "secretary-900",
+                "action": "launch-intent-stop-unconfirmed",
+                "reason": reason,
+            }],
+        )
+
+    def test_a_degraded_action_makes_the_tick_degraded_and_is_never_recorded_healthy(self) -> None:
+        self.runtime.production_tick()
+        healthy_at = self.read_through_the_agent_reader().last_healthy_at
+
+        with self.degraded_reconcile():
+            result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "degraded")
+        telemetry = self.read_through_the_agent_reader()
+        self.assertFalse(telemetry.last["healthy"])
+        self.assertEqual(telemetry.last["error_count"], 0)
+        self.assertEqual(telemetry.last["degraded_count"], 1)
+        self.assertEqual(telemetry.last["degradations"][0], {
+            "ref": "secretary-900",
+            "step": "production-reconcile",
+            "status": "degraded",
+            "action": "launch-intent-stop-unconfirmed",
+            "reason": "the head of an unresolved launch could not be stopped",
+        })
+        self.assertEqual(telemetry.unhealthy_total, 1)
+        self.assertEqual(telemetry.last_healthy_at, healthy_at)
+
+        with mock.patch.dict(
+            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
+        ):
+            problems, _ = health._pipeline_status()
+        self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
+        self.assertTrue(any("launch-intent-stop-unconfirmed" in problem for problem in problems))
+
+    def test_a_degraded_action_reaches_the_steward_once_and_survives_a_healthy_tick(self) -> None:
+        """End to end, on the real state file: dispatcher → durable record → steward gate.
+
+        The intervening healthy tick is the point. Dedup is keyed on the unhealthy counter, so an
+        ordinary production tick between the failure and the steward's look must not consume it,
+        and `advance` — the steward having actually looked — is the only thing that does.
+        """
+        state = AgentState("steward", state_dir=self.data_dir / "steward")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(
+                os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}))
+            stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
+            stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
+            stack.enter_context(mock.patch.object(steward_signals.pipeline_ops, "list_cards",
+                                                  return_value=[]))
+            stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
+                                                  self.data_dir / "no-workspaces"))
+            stack.enter_context(mock.patch.object(steward_signals, "PIPELINE_RESOURCE_HEALTH",
+                                                  self.data_dir / "no-resource-health.json"))
+            stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
+            stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
+
+            self.runtime.production_tick()
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+
+            with self.degraded_reconcile():
+                self.runtime.production_tick()
+
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            hits = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
+            self.assertEqual(hits[0]["degradations"][0]["action"], "launch-intent-stop-unconfirmed")
+
+            self.runtime.production_tick()
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            self.assertEqual(
+                [hit["seq"] for hit in steward_signals.scan()["signals"]["pipeline_ticks"]],
+                [hits[0]["seq"]],
+            )
+
+            self.assertEqual(steward_cli.cmd_scan(True), 0)
+            self.assertEqual(steward_cli.cmd_advance(), 0)
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+
+    def test_a_blocked_card_is_the_dispatcher_working_not_a_degraded_tick(self) -> None:
+        """A card parked in Blocked keeps the tick healthy, on purpose.
+
+        The board carries the reason and the steward reports it as a `new_blocked` signal; the
+        tick's exit code is the production unit's result, so a correctly blocked card must not
+        fail the unit or redden the pipeline line. Only an operation the dispatcher could not
+        finish does that.
+        """
+        with mock.patch(
+            "secretary.dispatcher_production._reconcile_production",
+            return_value=[{"status": "blocked", "step": "production-recovery", "ref": "secretary-901",
+                           "reason": "active task claim no longer matches production record"}],
+        ):
+            result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        telemetry = self.read_through_the_agent_reader()
+        self.assertTrue(telemetry.last["healthy"])
+        self.assertEqual(telemetry.last["degraded_count"], 0)
+        self.assertEqual(telemetry.unhealthy_total, 0)
+
     def test_a_tick_that_dies_before_its_own_save_is_recorded_as_a_failure(self) -> None:
         """The Kanboard outage case: the first board read raises and the tick never finishes.
 
@@ -281,6 +394,21 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(entry["error_count"], 9)
         self.assertLess(len(entry["errors"]), 9)
         self.assertIn("+", production_telemetry.describe(entry))
+
+    def test_degraded_actions_recorded_per_tick_are_capped_but_counted_in_full(self) -> None:
+        payload: dict = {}
+        actions = [{"status": "degraded", "step": "production-reconcile", "ref": f"ref-{i}",
+                    "action": "launch-intent-stop-unconfirmed"} for i in range(9)]
+
+        record_tick_telemetry(payload, {"status": "ok", "step": "production-tick", "actions": actions})
+
+        entry = payload["tick_telemetry"]["last"]
+        # A result built as `ok` over degraded actions is still recorded unhealthy: the entry is
+        # the durable evidence, and it must not be able to disagree with what happened.
+        self.assertFalse(entry["healthy"])
+        self.assertEqual(entry["degraded_count"], 9)
+        self.assertEqual(len(entry["degradations"]), TICK_TELEMETRY_DEGRADATIONS_KEPT)
+        self.assertIn("+4 more degraded action(s)", production_telemetry.describe(entry))
 
 
 class ProductionStatePathTests(unittest.TestCase):
@@ -525,6 +653,26 @@ class HealthPipelineLineTests(unittest.TestCase):
         self.assertTrue(problems)
         self.assertIn("last tick unhealthy", problems[0])
         self.assertIn("backend_unavailable", problems[0])
+
+    def test_a_tick_red_only_from_an_action_names_the_degradation(self) -> None:
+        """No caught error at all: the line has to say which operation could not finish."""
+        _telemetry_state(self.path, {
+            "tick_seq": 9,
+            "last": _tick(9, healthy=False, degraded_count=1,
+                          degradations=[{"ref": "secretary-900", "step": "production-reconcile",
+                                         "status": "degraded",
+                                         "action": "launch-intent-stop-unconfirmed",
+                                         "reason": "the head could not be stopped"}]),
+            "last_healthy_at": _ts(2),
+            "unhealthy": [],
+            "unhealthy_total": 1,
+        })
+
+        problems, _ = health._pipeline_status()
+
+        self.assertIn("last tick unhealthy", problems[0])
+        self.assertIn("secretary-900 launch-intent-stop-unconfirmed", problems[0])
+        self.assertIn("the head could not be stopped", problems[0])
 
     def test_stale_healthy_tick_is_red(self) -> None:
         old = _ts(60 * 6)

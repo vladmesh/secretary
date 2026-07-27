@@ -46,10 +46,31 @@ from secretary.sprints import SprintWriter, budget_thresholds
 # Keep the shape and the meaning of those two fields in step with that reader.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50
 TICK_TELEMETRY_ERRORS_KEPT = 5
+TICK_TELEMETRY_DEGRADATIONS_KEPT = 5
 # A frozen tick moves no card on purpose, and the probe already reports a freeze as ok rather than
 # as a dispatcher that cannot work — telemetry says the same, otherwise every freeze would read as
 # an outage for as long as it lasts.
 HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
+# An action outcome saying the dispatcher could not finish the operation it started: a head of an
+# unresolved launch that would not stop (`launch-intent-stop-unconfirmed`), a runtime it could not
+# reach. Nothing raises on those paths, so `errors` stays empty and the tick used to return `ok`
+# and record itself healthy right over the degradation (secretary-833 review, round 3).
+#
+# `blocked` is deliberately not here. A card parked in Blocked is the dispatcher doing its job:
+# the board carries the reason, the steward already reports it as a `new_blocked` signal, and the
+# tick's exit code drives the systemd unit's result — a correctly blocked card must not put the
+# production unit into `failed` and the pipeline health line into RED.
+DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed"})
+
+
+def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:
+    """Action outcomes of a tick that report a failed operation, in the order they happened."""
+    return [
+        outcome
+        for outcome in (outcomes or [])
+        if isinstance(outcome, dict)
+        and str(outcome.get("status") or "") in DEGRADED_ACTION_STATUSES
+    ]
 
 
 def _counter(value: Any) -> int:
@@ -80,15 +101,34 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     seq = _counter(telemetry.get("tick_seq")) + 1
     status = str(result.get("status") or "")
     errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
+    # Health is read off the action outcomes as well as the top-level status, not off the status
+    # alone: a caller that builds `ok` while one of its actions reports a failed operation would
+    # otherwise store a healthy tick over it, and health, the unhealthy ring and the steward's
+    # counter would all keep reading green through the degradation.
+    degradations = degraded_actions(result.get("actions"))
     entry = {
         "seq": seq,
         "at": now_rfc3339(),
         "status": status,
         "step": str(result.get("step") or ""),
-        "healthy": status in HEALTHY_TICK_STATUSES,
+        "healthy": status in HEALTHY_TICK_STATUSES and not degradations,
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
+        "degraded_count": len(degradations),
+        # The diagnostic, not just the count: what the steward and an operator need is which
+        # operation could not finish and on which card, and the outcome is gone once the tick
+        # returns. Bounded for the same reason as `errors`.
+        "degradations": [
+            {
+                "ref": str(outcome.get("ref") or outcome.get("pilot_ref") or ""),
+                "step": str(outcome.get("step") or ""),
+                "status": str(outcome.get("status") or ""),
+                "action": str(outcome.get("action") or ""),
+                "reason": str(outcome.get("reason") or ""),
+            }
+            for outcome in degradations[:TICK_TELEMETRY_DEGRADATIONS_KEPT]
+        ],
         # Bounded on purpose: the diagnostic value is in what failed and why, and an unbounded
         # copy of every error of every tick would grow the state file the whole pipeline reads
         # and writes each minute.
@@ -311,8 +351,12 @@ def _production_tick_body(
     if push is not None:
         payload["checkpoint_push"] = push
     payload["last_tick_finished_at"] = now_rfc3339()
+    # The tick ends degraded on a failed operation it caught as well as on one that raised:
+    # reconciliation and the active pass both return `degraded` outcomes without adding an error
+    # (a launch head that would not stop), and reporting that tick as `ok` told the unit, the
+    # health line and the steward alike that nothing had happened.
     result = {
-        "status": "ok" if not errors else "degraded",
+        "status": "ok" if not errors and not degraded_actions(outcomes) else "degraded",
         "step": "production-tick",
         "owner": runtime.owner,
         "actions": outcomes,

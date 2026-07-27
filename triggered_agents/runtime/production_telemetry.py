@@ -147,7 +147,13 @@ def _counter(value) -> int:
 
 
 def describe(entry: dict) -> str:
-    """One-line diagnostic for a recorded tick: its status, and what actually went wrong."""
+    """One-line diagnostic for a recorded tick: its status, and what actually went wrong.
+
+    Both kinds of failure are named: the errors the tick caught, and the action outcomes that
+    reported a failed operation without raising (`degradations` — see
+    `secretary.dispatcher_production.DEGRADED_ACTION_STATUSES`). A tick red only because of the
+    latter would otherwise print its status and nothing an operator can act on.
+    """
     parts = [str(entry.get("status") or "unknown")]
     reason = str(entry.get("reason") or "")
     if reason:
@@ -160,4 +166,13 @@ def describe(entry: dict) -> str:
     hidden = _counter(entry.get("error_count")) - len(errors)
     if hidden > 0:
         parts.append(f"+{hidden} more error(s)")
+    degradations = [item for item in (entry.get("degradations") or []) if isinstance(item, dict)]
+    for degradation in degradations:
+        ref = str(degradation.get("ref") or "")
+        what = str(degradation.get("action") or degradation.get("step") or "degraded action")
+        detail = str(degradation.get("reason") or "")
+        parts.append(" ".join(part for part in (ref, what, detail) if part))
+    hidden = _counter(entry.get("degraded_count")) - len(degradations)
+    if hidden > 0:
+        parts.append(f"+{hidden} more degraded action(s)")
     return "; ".join(parts)
