@@ -337,6 +337,12 @@ class _ProbeHost:
         "prepare_observer",
         "stop_observer",
         "restart_worker",
+        # Settling an unresolved launch intent ends heads (a worker frozen for its adopted reviewer,
+        # a workspace stopped because its launch left nothing running). A probe that walked those
+        # paths for real would kill live heads while reporting what the tick "would" do.
+        "stop_workspace",
+        "stop_review",
+        "freeze_worker",
         "verify_worker_result",
         "gate_check",
         "complete_green",
@@ -756,6 +762,26 @@ def _production_active_mismatch(
     actual_worker = task.get("claim", {}).get("worker")
     if actual_worker in (None, record.worker):
         return None
+    intent = launch_intent(record)
+    if intent:
+        # This record is dropped a few lines down, and while an unresolved bring-up sits on it, it
+        # is the only thing naming a head that may be running in that workspace. The mismatch runs
+        # before `_tick_task`, so nothing else will settle it: the head goes first, and a stop the
+        # host will not confirm leaves the card and its record exactly as they are for the next
+        # tick to retry. Blocking over a live worker is how the requeue opens a second one.
+        failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
+        if failure is not None:
+            return {
+                "status": "degraded",
+                "step": "production-recovery",
+                "ref": task["ref"],
+                "action": "launch-intent-stop-unconfirmed",
+                "reason": (
+                    "active task claim no longer matches production record, and the head of an "
+                    f"unresolved launch could not be stopped: {failure}"
+                ),
+            }
+        runtime.save_records(payload, records)
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,

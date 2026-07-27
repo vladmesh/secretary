@@ -26,9 +26,11 @@ from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     clear_launch_intent,
+    confirm_launch_intent,
     forget_role_head,
     keep_reserved_round,
     launch_intent,
+    launch_left_a_head,
     mark_launch_aborted,
     stop_launch_intent,
     write_launch_intent,
@@ -440,17 +442,17 @@ def _resume_heads(
             continue
         try:
             launched = runtime.host.restart_worker(task, record)
-            clear_launch_intent(record)
-            record.handle = launched.handle
-            record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
-        except HeadLaunchAborted as exc:
-            # A pane was already open when the relaunch failed, so this card's head may be running.
-            # Its intent stays on disk with what the failure knew of it, and the next tick adopts
-            # or stops that head. Clearing the intent here would hide it from both.
-            mark_launch_aborted(runtime, payload, records, ref, record, exc)
-            skipped.append(f"{ref}:worker")
-            continue
-        except Exception:  # noqa: BLE001 — one failed relaunch must not strand the others
+        except Exception as exc:  # noqa: BLE001 — one failed relaunch must not strand the others
+            if isinstance(exc, HeadLaunchAborted) or launch_left_a_head(record):
+                # A pane was already open, or the heartbeat says a head of this relaunch is running
+                # whatever the failure claimed. Its intent stays on disk with what is known of it,
+                # and the next tick adopts or stops that head. Clearing it would hide it from both.
+                aborted = exc if isinstance(exc, HeadLaunchAborted) else HeadLaunchAborted(
+                    str(exc), workspace=record.workspace
+                )
+                mark_launch_aborted(runtime, payload, records, ref, record, aborted)
+                skipped.append(f"{ref}:worker")
+                continue
             # Left with no handle and a fresh watchdog window: the card stays In progress under the
             # ordinary wait watchdog, which respawns it once and then escalates to Blocked.
             clear_launch_intent(record)
@@ -458,6 +460,30 @@ def _resume_heads(
             record.worker_leaf = ""
             skipped.append(f"{ref}:worker")
             continue
+        # The head is up, so its pane and launch snapshot are fixed on disk before the record is
+        # told about them: everything left to do here can fail over a worker that already runs.
+        confirm_launch_intent(
+            runtime, payload, records, ref, record, handle=launched.handle, run=launched.run
+        )
+        record.handle = launched.handle
+        try:
+            record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
+        except Exception as exc:  # noqa: BLE001 — a failure over a head that already exists
+            mark_launch_aborted(
+                runtime,
+                payload,
+                records,
+                ref,
+                record,
+                HeadLaunchAborted(
+                    f"worker pane identity could not be read: {exc}",
+                    handle=launched.handle,
+                    workspace=record.workspace,
+                ),
+            )
+            skipped.append(f"{ref}:worker")
+            continue
+        clear_launch_intent(record)
         record.state = "claimed"
         # A resume is a real bring-up: the round records the head that came back, which a registry
         # repin during the freeze can configure differently (secretary-716).

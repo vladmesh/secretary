@@ -33,6 +33,7 @@ from secretary.dispatcher_launch import launch_intent_liveness
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HeadLaunchAborted, HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
+from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
@@ -449,9 +450,10 @@ class LaunchIntentTests(unittest.TestCase):
         record = self.record()
         assert record is not None
         self.assertEqual(record.attempt_round, 2)
-        # The previous round's heads go with it: the adopted head is recorded by the round it
-        # actually belongs to, not carried over from the round that was rejected.
-        self.assertEqual((record.worker_run, record.review_run), ({}, {}))
+        # The previous round's heads go with it: the round records the adopted worker as its own,
+        # and the reviewer of the round that was rejected is not carried over.
+        self.assertEqual(record.worker_run.get("role"), "worker")
+        self.assertEqual(record.review_run, {})
 
     def test_an_adopted_gate_red_rework_lands_on_the_round_it_reserved(self) -> None:
         self.run_to_validate()
@@ -538,7 +540,11 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.prepared, [REF], "exactly one head, on the retry")
 
     def test_an_audit_that_refuses_after_the_claim_leaves_the_head_on_the_record(self) -> None:
-        """The routing write is past the record's own save, so the head is already findable."""
+        """The record's own save is past by then, so the head is findable either way.
+
+        What the refused write costs is the round's routing event, and that is why the intent is
+        not spent yet: the next tick adopts the same head and writes it.
+        """
         with self.audit_dies_after("prepare_worker"):
             with self.assertRaises(OSError):
                 self.tick()
@@ -548,12 +554,17 @@ class LaunchIntentTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.state, "claimed")
         self.assertTrue(record.handle, "the launched head must be on the record")
-        self.assertEqual(self.stored_intent(), {})
+        self.assertEqual(self.stored_intent()["action"], "claim")
 
-        # The next tick reads a card that already has its head, and starts nothing.
-        self.tick()
+        # The next tick reads a card that already has its head, and starts nothing beside it.
+        adopted = self.tick()
 
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
         self.assertEqual(self.host.prepared, [REF])
+        attempt = self.routing_history()[-1]
+        assert attempt.worker is not None
+        self.assertEqual(attempt.worker.head, "codex", "the round gets the head that ran it")
+        self.assertEqual(self.stored_intent(), {})
 
     def test_an_audit_that_refuses_after_a_rework_recovers_that_rework_once(self) -> None:
         self.rework_after_red_review()
@@ -699,6 +710,89 @@ class LaunchIntentTests(unittest.TestCase):
         # And the adopted reviewer's verdict still lands on the card it was launched for.
         self.verdict("green", "looks good", "verdict-green")
         self.assertEqual(self.tick()["to"], "done")
+
+    # an adopted head belongs to the round's routing history ------------------
+
+    def routing_history(self) -> list:
+        return routing_attempts(TaskAudit(self.data_dir).events(REF, kind="routing"))
+
+    def test_an_adopted_worker_is_recorded_as_the_round_that_ran_it(self) -> None:
+        """The head an interrupted tick launched is a head that ran, so the round has to name it.
+
+        The tick that started it died before writing its routing event, and nothing after adoption
+        writes one either: without this the round's verdict names only the reviewer, and the
+        history reads as a round nobody worked.
+        """
+        with self.state_dies_after("prepare_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.tick()["action"], "worker-launch-adopted")
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual(attempt.attempt, 1)
+        assert attempt.worker is not None
+        # The launch snapshot the interrupted tick fixed on disk, not a fresh read of a registry
+        # that may have moved since.
+        self.assertEqual((attempt.worker.role, attempt.worker.head), ("worker", "codex"))
+
+        # And the verdict the round ends on carries that worker beside its reviewer.
+        self.report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.verdict("green", "looks good", "verdict-green")
+        self.assertEqual(self.tick()["to"], "done")
+
+        attempt = self.routing_history()[-1]
+        assert attempt.worker is not None and attempt.reviewer is not None
+        self.assertEqual(attempt.outcome, "green")
+        self.assertEqual((attempt.worker.head, attempt.reviewer.head), ("codex", "codex-reviewer"))
+
+    def test_an_adopted_reviewer_is_recorded_as_the_head_that_judged_the_round(self) -> None:
+        self.run_to_validate()
+        with self.state_dies_after("start_review"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.tick()["action"], "review-launch-adopted")
+
+        attempt = self.routing_history()[-1]
+        assert attempt.reviewer is not None
+        self.assertEqual((attempt.reviewer.role, attempt.reviewer.head), ("reviewer", "codex-reviewer"))
+
+        self.verdict("green", "looks good", "verdict-green")
+        self.assertEqual(self.tick()["to"], "done")
+
+        attempt = self.routing_history()[-1]
+        assert attempt.worker is not None and attempt.reviewer is not None
+        self.assertEqual(attempt.outcome, "green")
+        self.assertEqual(attempt.reviewer.head, "codex-reviewer")
+
+    def test_a_journal_that_refuses_an_adopted_head_keeps_the_intent_for_the_next_tick(self) -> None:
+        """The routing write is the last thing adoption owes that head, and it can refuse.
+
+        Spending the intent on a round whose history is missing would leave the head with no record
+        of its launch at all; keeping it costs one more adoption instead.
+        """
+        with self.state_dies_after("prepare_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        with self.refuse_audit("routing-worker"):
+            deferred = self.tick()
+
+        self.assertEqual(deferred["action"], "worker-launch-adopt-deferred")
+        self.assertEqual(deferred["status"], "degraded")
+        self.assertEqual(self.stored_intent()["role"], "worker", "the intent outlives the refusal")
+        self.assertEqual(self.host.prepared, [REF])
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.prepared, [REF], "the retry adopts, it does not relaunch")
+        attempt = self.routing_history()[-1]
+        assert attempt.worker is not None
+        self.assertEqual(attempt.worker.head, "codex")
 
     # an adopted head has a lifecycle, not only a pid -------------------------
 
@@ -864,6 +958,118 @@ class LaunchIntentTests(unittest.TestCase):
         assert record is not None
         self.assertEqual((record.handle, record.worker_pid_file), ("", ""))
         self.assertFalse(self.head_alive("worker"), "the freeze is what recovery had to finish")
+
+    # a failure raised after the head is up, over an intent the tick still holds -----------------
+
+    def pane_identity_fails(self):
+        """Orca answers the bring-up and then refuses the inventory the pane leaf is read from.
+
+        The narrow window the record used to lose a head in: the launch succeeded, and the tick
+        failed on the next thing it did with it. Anything that treats that as a launch that did not
+        happen blocks the card and drops the record over a worker that is running.
+        """
+        return mock.patch.object(
+            self.host, "pane_leaf", mock.Mock(side_effect=HostError("orca terminal list failed"))
+        )
+
+    def test_a_claim_whose_pane_identity_fails_keeps_the_worker_it_launched(self) -> None:
+        with self.pane_identity_fails():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertEqual(self.host.prepared, [REF])
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress", "the card is not blocked")
+        self.assertIsNotNone(self.record(), "the record is the only pointer to that worker")
+        intent = self.stored_intent()
+        self.assertEqual((intent["role"], intent["aborted"]), ("worker", True))
+        self.assertTrue(intent["handle"], "the pane the launch did report is kept")
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.prepared, [REF], "the live head must not be launched twice")
+
+    def test_a_rework_whose_pane_identity_fails_keeps_the_worker_it_launched(self) -> None:
+        self.rework_after_red_review()
+
+        with self.pane_identity_fails():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertIsNotNone(self.record())
+        self.assertEqual(self.stored_intent()["action"], "review-red-rework")
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self.record()
+        assert record is not None
+        self.assertEqual((record.state, record.attempt_round), ("claimed", 2))
+
+    def test_a_respawn_whose_pane_identity_fails_keeps_the_worker_it_launched(self) -> None:
+        self.tick()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+
+        with self.pane_identity_fails():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertIsNotNone(self.record(), "a respawned head may not lose its record")
+        self.assertTrue(self.head_alive("worker"))
+        self.assertEqual(self.stored_intent()["action"], "worker-respawn")
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_a_gate_red_rework_whose_pane_identity_fails_keeps_its_worker(self) -> None:
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.pane_identity_fails():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertIsNotNone(self.record())
+        self.assertEqual(self.stored_intent()["action"], "gate-red-rework")
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_a_review_bring_up_that_fails_over_its_own_heartbeat_keeps_its_intent(self) -> None:
+        """An ordinary failure is only believed while the heartbeat agrees with it.
+
+        A reviewer bring-up that got as far as writing a heartbeat left a process behind, whatever
+        the host called the failure. Blocking the card and dropping the record there strands it.
+        """
+        self.run_to_validate()
+
+        def failing_review(task: dict, record: Any):
+            self.host.calls.append("start_review")
+            self.host.reviews.append(task["ref"])
+            self.host._write_head_pid("review", task["ref"])
+            raise HostError("orca terminal rename failed")
+
+        with mock.patch.object(self.host, "start_review", failing_review):
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "review-launch-aborted")
+        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        self.assertIsNotNone(self.record(), "the record is the only pointer to that reviewer")
+        self.assertEqual(self.stored_intent()["role"], "review")
+        self.assertTrue(self.head_alive("review"))
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "review-launch-adopted")
+        self.assertEqual(self.host.reviews, [REF], "no second reviewer beside the live one")
 
     def test_a_bring_up_that_could_not_hold_its_workspace_leaves_no_intent(self) -> None:
         """The intent names a workspace before the host answers, so the host must land on it.
@@ -1103,6 +1309,50 @@ class HostLaunchContourTests(unittest.TestCase):
 
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
 
+    # a split whose label will not stick -------------------------------------
+
+    def split_answers(self, rename: Exception) -> dict[str, Any]:
+        return {
+            "terminal split": {"split": {"handle": "term:review"}},
+            "terminal rename": rename,
+        }
+
+    def test_a_split_whose_pane_will_not_close_is_ambiguous(self) -> None:
+        """The reviewer's pane exists from the split on, so a failed rename is not "no head".
+
+        The cleanup decides which failure this is, and a close the host will not confirm leaves a
+        reviewer running: it goes back as `HeadLaunchAborted` with that pane, so the caller keeps
+        its launch intent instead of blocking the card and dropping the record over a live head.
+        """
+        answers = self.split_answers(HostError("orca rename failed"))
+        refuse = mock.Mock(side_effect=HostError("tab_not_found"))
+
+        with self.run_json(answers):
+            with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
+                with self.assertRaises(HeadLaunchAborted) as caught:
+                    self.host._split_pane(
+                        "term:worker", "title", "run-review",
+                        workspace=str(self.data_dir), pid_file=self.pid_file(None),
+                    )
+
+        self.assertEqual(caught.exception.handle, "term:review")
+        self.assertEqual(caught.exception.workspace, str(self.data_dir))
+
+    def test_a_split_whose_pane_is_confirmed_gone_stays_an_ordinary_failure(self) -> None:
+        """The other half: the head is provably not there, so the caller may block the card."""
+        answers = self.split_answers(HostError("orca rename failed"))
+        refuse = mock.Mock(side_effect=HostError("tab_not_found"))
+
+        with self.run_json(answers):
+            with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
+                with self.assertRaises(HostError) as caught:
+                    self.host._split_pane(
+                        "term:worker", "title", "run-review",
+                        workspace=str(self.data_dir), pid_file=self.pid_file(str(DEAD_PID)),
+                    )
+
+        self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
+
     # a stop that is not confirmed -------------------------------------------
 
     def test_a_head_that_ignores_every_signal_is_not_reported_as_stopped(self) -> None:
@@ -1334,6 +1584,58 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
         actions = [a["action"] for a in self.actions(retried) if a["step"] == "production-reconcile"]
         self.assertEqual(actions, ["record-removed"])
+        self.assertNotIn(REF, self.records())
+
+    # a claim that moved under a launch nothing has resolved ------------------
+
+    def claim_moved_to(self, worker: str) -> None:
+        """Someone else's claim on the card this record was launched for."""
+        self.board.metadata[12]["claim"] = worker
+
+    def test_a_claim_that_moved_under_a_live_launch_stops_its_head_first(self) -> None:
+        """The mismatch drops the record, and the intent on it is the only pointer to that head.
+
+        It runs ahead of `_tick_task`, so nothing else will settle the launch: blocking the card
+        and removing the record over a live worker leaves it in the checkout, and the requeue that
+        follows opens a second one beside it.
+        """
+        self.leave_a_post_launch_intent()
+        self.claim_moved_to("someone-else")
+        self.host.calls.clear()
+
+        result = self.tick()
+
+        mismatch = [a for a in self.actions(result) if a.get("step") == "production-recovery"]
+        self.assertEqual([a["status"] for a in mismatch], ["blocked"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertFalse(self.head_alive("worker"), "the head of the unresolved launch is gone")
+        self.assertNotIn(REF, self.records())
+        self.assertEqual(self.reader.show(REF)["state"], "blocked")
+
+    def test_a_mismatch_over_a_head_that_will_not_stop_keeps_the_record(self) -> None:
+        self.leave_a_post_launch_intent()
+        self.claim_moved_to("someone-else")
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.tick()
+
+        mismatch = [a for a in self.actions(result) if a.get("step") == "production-recovery"]
+        self.assertEqual([a["action"] for a in mismatch], ["launch-intent-stop-unconfirmed"])
+        self.assertEqual(mismatch[0]["status"], "degraded")
+        self.assertEqual(self.stored_intent().get("role"), "worker", "the pointer survives")
+        self.assertTrue(self.head_alive("worker"))
+        self.assertEqual(
+            self.reader.show(REF)["state"], "in_progress", "the card is not blocked over a live head"
+        )
+
+        # Once the host confirms the stop, the mismatch is resolved the ordinary way.
+        self.host.fail_stop_workspace_reason = ""
+
+        retried = self.tick()
+
+        mismatch = [a for a in self.actions(retried) if a.get("step") == "production-recovery"]
+        self.assertEqual([a["status"] for a in mismatch], ["blocked"])
+        self.assertFalse(self.head_alive("worker"))
         self.assertNotIn(REF, self.records())
 
     # freeze and resume ------------------------------------------------------

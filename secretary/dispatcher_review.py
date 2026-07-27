@@ -10,9 +10,11 @@ from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     clear_launch_intent,
+    confirm_launch_intent,
     forget_role_head,
     launch_aborted,
     launch_intent_unwritable,
+    launch_left_a_head,
     mark_launch_aborted,
     write_launch_intent,
 )
@@ -236,6 +238,26 @@ def start_review(
             reason=scrub_host_output(str(exc)),
         )
     except Exception as exc:
+        if launch_left_a_head(record):
+            # The host reported an ordinary failure, and the reviewer's own heartbeat says a process
+            # of this bring-up is running anyway. The heartbeat wins: the intent stays, and the next
+            # tick adopts that reviewer or stops it rather than the card being blocked over it.
+            mark_launch_aborted(
+                runtime,
+                payload,
+                records,
+                ref,
+                record,
+                HeadLaunchAborted(str(exc), workspace=record.workspace),
+            )
+            record.state = "review_starting"
+            return launch_aborted(
+                step="review",
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=REVIEW_ROLE,
+                reason=scrub_host_output(str(exc)),
+            )
         clear_launch_intent(record)
         runtime.writer.move(
             role="dispatcher",
@@ -249,13 +271,21 @@ def start_review(
         )
         records.pop(ref, None)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
-    clear_launch_intent(record)
+    # The reviewer is up: its pane and its launch configuration go into the intent on disk before
+    # the record is told anything about it, so a tick that dies from here on is adopted with the
+    # routing history of the head that actually ran.
+    confirm_launch_intent(
+        runtime, payload, records, ref, record, handle=launch.handle, run=launch.run
+    )
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit
     # The verdict this pane issues belongs to this head, so the round records it now, from the
-    # launcher's own snapshot (secretary-716).
+    # launcher's own snapshot (secretary-716). The intent is spent only once that has landed: a
+    # journal that refuses here leaves the reviewer adoptable, and the adoption writes the routing
+    # event the round would otherwise never get for it.
     runtime.record_review_routing(task, record, launch.run)
+    clear_launch_intent(record)
     record.review_started_at = record.review_progress_at = time.time()
     # The worker head is gone: its pane was shut down so the reviewer judges a checkout nothing is
     # still editing. A red verdict launches a fresh worker into the same workspace.

@@ -62,10 +62,13 @@ from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.dispatcher_launch import (
     WORKER_ROLE,
     clear_launch_intent as _clear_launch_intent,
+    confirm_launch_intent as _confirm_launch_intent,
     forget_role_head as _forget_role_head,
     head_stop_unconfirmed as _head_stop_unconfirmed,
     launch_aborted as _launch_aborted,
     launch_intent_unwritable as _launch_intent_unwritable,
+    launch_left_a_head as _launch_left_a_head,
+    launch_pid_file as _launch_pid_file,
     mark_launch_aborted as _mark_launch_aborted,
     resolve_launch_intent as _resolve_launch_intent,
     write_launch_intent as _write_launch_intent,
@@ -825,9 +828,21 @@ class CommandHostRuntime:
                 workspace=record.workspace,
                 pid_file=_pid_file_path("review", task["ref"]),
             ) from None
+        try:
+            leaf = self._pane_leaf(record.workspace, launched.handle)
+        except Exception as exc:  # noqa: BLE001 — a failure over a reviewer that is already up
+            # Both heads are settled by now and only the pane's leaf id is missing, so this is not
+            # a bring-up that left no reviewer: it goes back with the pane it opened, and the caller
+            # keeps the launch intent instead of blocking the card over a live head.
+            raise HeadLaunchAborted(
+                f"review pane identity could not be read: {exc}",
+                handle=launched.handle,
+                workspace=record.workspace,
+                pid_file=_pid_file_path("review", task["ref"]),
+            ) from None
         return ReviewLaunch(
             handle=launched.handle,
-            leaf=self._pane_leaf(record.workspace, launched.handle),
+            leaf=leaf,
             commit=self.head_commit(record),
             run=launched.run,
         )
@@ -1303,7 +1318,9 @@ class CommandHostRuntime:
             if pid_file:
                 command = _with_pid_heartbeat(command, pid_file)
         if split_from:
-            handle = self._split_pane(split_from, title, command)
+            handle = self._split_pane(
+                split_from, title, command, workspace=workspace, pid_file=pid_file
+            )
         else:
             handle = self._create_terminal(workspace, title, command)
         if launch and launch.prompt_after_start:
@@ -1380,10 +1397,23 @@ class CommandHostRuntime:
             raise HostError("orca did not return a terminal handle")
         return handle
 
-    def _split_pane(self, split_from: str, title: str, command: str) -> str:
+    def _split_pane(
+        self,
+        split_from: str,
+        title: str,
+        command: str,
+        *,
+        workspace: str = "",
+        pid_file: str = "",
+    ) -> str:
         """Run `command` in a new pane beside an existing one. `terminal split` takes no --title,
         so the label goes on afterwards; a label that will not stick is a failed bring-up rather
-        than an unlabelled pane, because the operator has no other way to tell the panes apart."""
+        than an unlabelled pane, because the operator has no other way to tell the panes apart.
+
+        The head is already running by then, so the cleanup decides what kind of failure this is:
+        a confirmed close leaves nothing of the bring-up and the rename failure travels as the
+        ordinary error it is, while a close that cannot promise the head is gone hands the pane
+        back as `HeadLaunchAborted` and the caller keeps its launch intent."""
         result = self._run_json([
             "orca", "terminal", "split",
             "--terminal", split_from,
@@ -1402,8 +1432,16 @@ class CommandHostRuntime:
                 "--title", title,
                 "--json",
             ])
-        except HostError:
-            _close_tui_terminal(handle, run_json=self._run_json)
+        except HostError as exc:
+            try:
+                self._close_launched_pane(handle, pid_file)
+            except HostError as stop_exc:
+                raise HeadLaunchAborted(
+                    f"{exc}; head terminal stop failed: {stop_exc}",
+                    handle=handle,
+                    workspace=workspace,
+                    pid_file=pid_file,
+                ) from None
             raise
         return handle
 
@@ -2141,11 +2179,12 @@ class DispatcherRuntime:
                 attempt_id=record.attempt_id,
                 require_existing_workspace=require_existing_workspace,
             )
-        except HeadLaunchAborted as exc:
-            return self._worker_launch_aborted(
+        except (HeadLaunchAborted, HostError) as exc:
+            aborted = self._worker_launch_failure(
                 payload, records, ref, record, exc, step="claim", attempt_id=record.attempt_id
             )
-        except HostError as exc:
+            if aborted is not None:
+                return aborted
             _clear_launch_intent(record)
             self.writer.move(
                 role="dispatcher",
@@ -2158,10 +2197,24 @@ class DispatcherRuntime:
             records.pop(ref, None)
             self.save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
-        _clear_launch_intent(record)
         record.workspace = prepared["workspace"]
-        record.handle = prepared["handle"]
-        record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        # The intent carries the pane and the launch snapshot before the record does: from here on
+        # every failure is one over a worker that is already running.
+        _confirm_launch_intent(
+            self,
+            payload,
+            records,
+            ref,
+            record,
+            handle=str(prepared.get("handle") or ""),
+            run=prepared.get("run"),
+        )
+        try:
+            self._settle_worker_pane(ref, record, prepared["handle"])
+        except HeadLaunchAborted as exc:
+            return self._worker_launch_aborted(
+                payload, records, ref, record, exc, step="claim", attempt_id=record.attempt_id
+            )
         record.worker_started_at = record.worker_progress_at = time.time()
         record.state = "claimed"
         resume_workspaces = payload.get("resume_workspaces")
@@ -2171,8 +2224,11 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         # The worker is up: record the head running it, from the launcher's own snapshot. An adopted
         # card whose claim predates this telemetry has no round yet, so record_worker_routing opens
-        # one from the journal rather than leaving the round unrecorded.
+        # one from the journal rather than leaving the round unrecorded. The intent is spent only
+        # once that has landed: a journal that refuses here leaves the head adoptable, and the
+        # adoption writes the routing event this round would otherwise never get.
         self.record_worker_routing(claimed, record, prepared.get("run"))
+        _clear_launch_intent(record)
         self.save_records(payload, records)
         self.writer.comment(
             role="dispatcher",
@@ -2271,6 +2327,110 @@ class DispatcherRuntime:
             role=WORKER_ROLE,
             reason=scrub_host_output(str(exc)),
         )
+
+    def _worker_launch_failure(
+        self,
+        payload: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        ref: str,
+        record: DispatcherRecord,
+        exc: Exception,
+        *,
+        step: str,
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """The aborted-launch outcome when this failure may have left a worker running, else None.
+
+        `HeadLaunchAborted` says so outright. An ordinary failure claims the opposite, and is taken
+        at its word only while the heartbeat agrees: a bring-up that got far enough to write one
+        left a process behind whatever the error said, and blocking the card and dropping its record
+        over that process is exactly the head the next requeue would open a second one beside.
+        """
+        if not isinstance(exc, HeadLaunchAborted):
+            if not _launch_left_a_head(record):
+                return None
+            exc = HeadLaunchAborted(
+                str(exc),
+                workspace=record.workspace,
+                pid_file=_launch_pid_file(WORKER_ROLE, ref),
+            )
+        return self._worker_launch_aborted(
+            payload, records, ref, record, exc, step=step, attempt_id=attempt_id
+        )
+
+    def _settle_worker_pane(self, ref: str, record: DispatcherRecord, handle: str) -> None:
+        """Put the pane identity of a worker head that is already up onto its record.
+
+        Everything from here runs against a live process, so a failure is ambiguous rather than a
+        launch that did not happen: it comes back as `HeadLaunchAborted` carrying that pane, the
+        caller keeps the launch intent, and the next tick settles the head instead of the record
+        being dropped out from under it.
+        """
+        record.handle = handle
+        try:
+            record.worker_leaf = self.host.pane_leaf(record.workspace, handle)
+        except Exception as exc:  # noqa: BLE001 — any failure over a head that already exists
+            raise HeadLaunchAborted(
+                f"worker pane identity could not be read: {scrub_host_output(str(exc))}",
+                handle=handle,
+                workspace=record.workspace,
+                pid_file=_launch_pid_file(WORKER_ROLE, ref),
+            ) from None
+
+    def _bring_up_worker_head(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+        blocked_reason: str,
+        blocked_request_id: str,
+    ) -> tuple[LaunchedHead | None, dict[str, Any] | None]:
+        """Relaunch this card's worker in its own workspace, under the intent already on disk.
+
+        Returns the launched head, or the tick's outcome when nothing usable came up. Every step
+        after `restart_worker` runs over a process that exists, so a failure there is ambiguous and
+        the record must not be dropped for it: only a launch that left no head at all clears the
+        intent and blocks the card. The caller keeps the intent until it has written the head's
+        routing event, which is the last thing the round owes a bring-up.
+        """
+        ref = task["ref"]
+        try:
+            self._require_head_ready(record.head)
+            launched = self.host.restart_worker(task, record)
+        except Exception as exc:  # noqa: BLE001 — classified by what it left running, not by type
+            aborted = self._worker_launch_failure(
+                payload, records, ref, record, exc, step=step, attempt_id=attempt_id
+            )
+            if aborted is not None:
+                return None, aborted
+            _clear_launch_intent(record)
+            return None, self._block_failed_worker_restart(
+                ref=ref,
+                record=record,
+                records=records,
+                payload=payload,
+                attempt_id=attempt_id,
+                step=step,
+                reason=blocked_reason,
+                request_id=blocked_request_id,
+                error=exc,
+            )
+        # The head is up. Its pane and its launch configuration go into the intent before anything
+        # else is attempted with them, so an adoption gets the run that actually launched.
+        _confirm_launch_intent(
+            self, payload, records, ref, record, handle=launched.handle, run=launched.run
+        )
+        try:
+            self._settle_worker_pane(ref, record, launched.handle)
+        except HeadLaunchAborted as exc:
+            return None, self._worker_launch_aborted(
+                payload, records, ref, record, exc, step=step, attempt_id=attempt_id
+            )
+        return launched, None
 
     def _worker_relaunch_intent(
         self,
@@ -2473,33 +2633,26 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
                 reason=failure,
             )
-        try:
-            self._require_head_ready(record.head)
-            launched = self.host.restart_worker(moved, record)
-            _clear_launch_intent(record)
-            record.handle = launched.handle
-            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
-        except HeadLaunchAborted as exc:
-            return self._worker_launch_aborted(
-                payload, records, ref, record, exc, step="advance", attempt_id=attempt_id
-            )
-        except Exception as exc:
-            _clear_launch_intent(record)
-            return self._block_failed_worker_restart(
-                ref=ref,
-                record=record,
-                records=records,
-                payload=payload,
-                attempt_id=attempt_id,
-                step="advance",
-                reason="stale-result rework bring-up failed",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "stale-done-rework-blocked", ref),
-                error=exc,
-            )
+        launched, failed = self._bring_up_worker_head(
+            moved,
+            record,
+            records,
+            payload,
+            attempt_id,
+            step="advance",
+            blocked_reason="stale-result rework bring-up failed",
+            blocked_request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "stale-done-rework-blocked", ref
+            ),
+        )
+        if launched is None:
+            assert failed is not None
+            return failed
         record.state = "claimed"
         # A rejected done report earns no verdict, so this stays the same round: the relaunch is
         # recorded and dedupes unless the registry moved under it.
         self.record_worker_routing(moved, record, launched.run)
+        _clear_launch_intent(record)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self.save_records(payload, records)
@@ -2577,32 +2730,25 @@ class DispatcherRuntime:
                     role=WORKER_ROLE,
                     reason=failure,
                 )
-            try:
-                self._require_head_ready(record.head)
-                launched = self.host.restart_worker(moved, record)
-                _clear_launch_intent(record)
-                record.handle = launched.handle
-                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
-            except HeadLaunchAborted as exc:
-                return self._worker_launch_aborted(
-                    payload, records, ref, record, exc, step="review", attempt_id=attempt_id
-                )
-            except Exception as exc:
-                _clear_launch_intent(record)
-                return self._block_failed_worker_restart(
-                    ref=ref,
-                    record=record,
-                    records=records,
-                    payload=payload,
-                    attempt_id=attempt_id,
-                    step="review",
-                    reason="rework bring-up failed",
-                    request_id=_attempt_request_id(record.attempt_id or attempt_id, "rework-blocked", ref),
-                    error=exc,
-                )
+            launched, failed = self._bring_up_worker_head(
+                moved,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
+                blocked_reason="rework bring-up failed",
+                blocked_request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "rework-blocked", ref
+                ),
+            )
+            if launched is None:
+                assert failed is not None
+                return failed
             record.state = "claimed"
             self.open_worker_round(record, round_number=rework_round)
             self.record_worker_routing(moved, record, launched.run)
+            _clear_launch_intent(record)
             record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
             self.save_records(payload, records)
@@ -2791,38 +2937,29 @@ class DispatcherRuntime:
                     role=WORKER_ROLE,
                     reason=failure,
                 )
-            try:
-                self._require_head_ready(record.head)
-                launched = self.host.restart_worker(task, record)
-                _clear_launch_intent(record)
-                record.handle = launched.handle
-                record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
-            except HeadLaunchAborted as exc:
-                return self._worker_launch_aborted(
-                    payload, records, ref, record, exc, step="advance", attempt_id=attempt_id
-                )
-            except Exception as exc:
-                _clear_launch_intent(record)
-                return self._block_failed_worker_restart(
-                    ref=ref,
-                    record=record,
-                    records=records,
-                    payload=payload,
-                    attempt_id=attempt_id,
-                    step=step,
-                    reason="worker respawn failed",
-                    request_id=_attempt_request_id(
-                        record.attempt_id or attempt_id,
-                        "worker-respawn-blocked",
-                        ref,
-                        _wait_cycle_token(record),
-                    ),
-                    error=exc,
-                )
+            launched, failed = self._bring_up_worker_head(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step=step,
+                blocked_reason="worker respawn failed",
+                blocked_request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id,
+                    "worker-respawn-blocked",
+                    ref,
+                    _wait_cycle_token(record),
+                ),
+            )
+            if launched is None:
+                assert failed is not None
+                return failed
             record.state = "claimed"
             # A respawn is a real bring-up: a repinned profile lands a different configuration, and
             # the round then belongs to the head that is actually running.
             self.record_worker_routing(task, record, launched.run)
+            _clear_launch_intent(record)
             record.worker_started_at = record.worker_progress_at = now
         if kind == "review":
             record.review_started_at = record.review_progress_at = now
@@ -2997,32 +3134,25 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
                 reason=failure,
             )
-        try:
-            self._require_head_ready(record.head)
-            launched = self.host.restart_worker(moved, record)
-            _clear_launch_intent(record)
-            record.handle = launched.handle
-            record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
-        except HeadLaunchAborted as exc:
-            return self._worker_launch_aborted(
-                payload, records, ref, record, exc, step="gate", attempt_id=attempt_id
-            )
-        except Exception as exc:
-            _clear_launch_intent(record)
-            return self._block_failed_worker_restart(
-                ref=ref,
-                record=record,
-                records=records,
-                payload=payload,
-                attempt_id=attempt_id,
-                step="gate",
-                reason="rework bring-up failed",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{phase}-red-blocked", ref),
-                error=exc,
-            )
+        launched, failed = self._bring_up_worker_head(
+            moved,
+            record,
+            records,
+            payload,
+            attempt_id,
+            step="gate",
+            blocked_reason="rework bring-up failed",
+            blocked_request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{phase}-red-blocked", ref
+            ),
+        )
+        if launched is None:
+            assert failed is not None
+            return failed
         record.state = "claimed"
         self.open_worker_round(record, round_number=rework_round)
         self.record_worker_routing(moved, record, launched.run)
+        _clear_launch_intent(record)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self.save_records(payload, records)

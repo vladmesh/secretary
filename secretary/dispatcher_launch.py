@@ -26,6 +26,13 @@ Resolution runs before anything else the tick would do with the card:
                  stopped, the intent is dropped, and the ordinary path relaunches — into the round
                  the intent reserved, since a rework's round is over whether or not its head lived.
 
+The intent is held for the whole bring-up, not only up to the host call. Once the host answers, the
+pane it opened and the configuration it launched go into the intent, and only when the record has
+everything — pane identity, routing event, its own save — is the intent spent. Everything in that
+tail runs over a process that already exists, so a failure there is ambiguous rather than a launch
+that did not happen, and an adoption reads the launch's own snapshot instead of asking a registry
+that may have been edited since.
+
 State that cannot be written is a launch that does not happen: the caller answers a failed intent
 write by not touching the host at all. A failing data plane then costs the card a tick instead of
 giving it two heads. A bring-up that fails once its terminal is already up is not a headless card
@@ -123,6 +130,54 @@ def write_launch_intent(
         record.launch_intent = previous
         return f"{type(exc).__name__}: {exc}"
     return None
+
+
+def confirm_launch_intent(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    ref: str,
+    record: DispatcherRecord,
+    *,
+    handle: str = "",
+    run: dict[str, Any] | None = None,
+) -> None:
+    """Put what the finished host call knows about the head into its intent, on disk.
+
+    The pane and the launch snapshot exist only once the host has answered, and everything the tick
+    still owes that head afterwards — its pane leaf, its routing record, its own save — runs against
+    a process that is already up and can refuse. Writing them into the intent here is what lets a
+    recovery adopt that head with the configuration it actually launched on, instead of inventing
+    one from a registry that may have been edited since.
+
+    A refused write is not a problem: the pre-launch intent is already on disk and names the same
+    head, so recovery still finds it and only its routing snapshot falls back to the registry.
+    """
+    intent = dict(launch_intent(record))
+    if not intent:
+        return
+    if handle:
+        intent["handle"] = handle
+    if run:
+        intent["run"] = dict(run)
+    intent["launched"] = True
+    record.launch_intent = intent
+    records[ref] = record
+    _persist_quietly(runtime, payload, records)
+
+
+def launch_left_a_head(record: DispatcherRecord) -> bool:
+    """Does this launch's heartbeat prove a head exists, whatever the failure claimed?
+
+    A host reporting an ordinary failure is claiming that no head of this bring-up is running. The
+    heartbeat is the one piece of evidence that can contradict it, and where it does, the intent has
+    to survive: a record dropped over a live process is the second head this contour prevents.
+    """
+    intent = launch_intent(record)
+    if not intent:
+        return False
+    status = head_process_status(str(intent.get("pid_file") or ""))
+    return bool(status.get("known") and status.get("alive"))
 
 
 def role_field(role: str, suffix: str) -> str:
@@ -416,7 +471,6 @@ def _adopt_launch_intent(
                 reason=f"{type(exc).__name__}: {exc}",
             )
         forget_role_head(record, WORKER_ROLE)
-        clear_launch_intent(record)
         record.state = "reviewing"
         record.review_leaf = ""
         record.review_started_at = record.review_progress_at = launched_at
@@ -424,6 +478,12 @@ def _adopt_launch_intent(
             # The worker is down and the reviewer writes no commits, so the checkout still sits
             # where the launch pinned it. The merge gate needs that sha to accept the verdict.
             record.review_commit = runtime.host.head_commit(record)
+        deferred = _record_adopted_routing(
+            runtime, task, records, payload, record, intent, role, step
+        )
+        if deferred is not None:
+            return deferred
+        clear_launch_intent(record)
     else:
         record.state = "claimed"
         reserved = int(intent.get("round") or 0)
@@ -437,8 +497,13 @@ def _adopt_launch_intent(
         # the respawn and the red-verdict bounce then stop this head by.
         record.handle = handle
         record.worker_leaf = ""
-        clear_launch_intent(record)
         record.worker_started_at = record.worker_progress_at = launched_at
+        deferred = _record_adopted_routing(
+            runtime, task, records, payload, record, intent, role, step
+        )
+        if deferred is not None:
+            return deferred
+        clear_launch_intent(record)
     records[ref] = record
     _persist_quietly(runtime, payload, records)
     return {
@@ -450,6 +515,48 @@ def _adopt_launch_intent(
         "head": str(intent.get("head") or ""),
         "reason": "a launch intent was left by a tick that did not finish; its head is alive",
     }
+
+
+def _record_adopted_routing(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    record: DispatcherRecord,
+    intent: dict[str, Any],
+    role: str,
+    step: str,
+) -> dict[str, Any] | None:
+    """Give the adopted head its routing record. Returns the tick's outcome when that write fails.
+
+    The head an interrupted tick launched is a head that ran, so the round owes it the same routing
+    event every other bring-up writes: without it the verdict names only the other role, and the
+    history reads as a round nobody worked. The snapshot is the launch's own where the intent got as
+    far as carrying it, and the registry as it stands now otherwise.
+
+    A journal that refuses keeps the intent: the head is adopted again next tick and the routing is
+    retried then, which is one head with late telemetry instead of a head with none.
+    """
+    ref = task["ref"]
+    run = intent.get("run") if isinstance(intent.get("run"), dict) else None
+    try:
+        if role == REVIEW_ROLE:
+            runtime.record_review_routing(task, record, run)
+        else:
+            runtime.record_worker_routing(task, record, run)
+    except Exception as exc:  # noqa: BLE001 — any journal refusal, whatever the plane called it
+        records[ref] = record
+        _persist_quietly(runtime, payload, records)
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": f"{role}-launch-adopt-deferred",
+            "head": str(intent.get("head") or ""),
+            "reason": f"the adopted head could not be recorded in the routing journal: {exc}",
+        }
+    return None
 
 
 def _persist_quietly(
