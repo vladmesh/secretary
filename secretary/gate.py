@@ -44,7 +44,12 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     except ConfigError:
         existing_binding = existing_draft = None
     if isinstance(existing_draft, dict):
+        stored = copy.deepcopy(existing_draft)
         normalize_contract(existing_draft)
+        if existing_draft != stored:
+            migration = _migrate_draft(draft_path, existing_draft)
+            if migration is not None:
+                return migration
     if isinstance(existing_binding, dict) and existing_binding.get("enabled") is True:
         if isinstance(existing_draft, dict) and existing_draft.get("gate", {}).get("status") == "passed":
             adapter_path = instance / "adapters" / f"{existing_binding['adapter']}.yaml"
@@ -274,6 +279,24 @@ def _conflict_result(draft: dict[str, Any], run_id: str, provision_run: str, dig
     result["status"] = "conflict"
     result["findings"] = [{"code": "result.conflict", "message": message}]
     return result
+
+
+def _migrate_draft(draft_path: Path, draft: dict[str, Any]) -> tuple[int, dict[str, Any]] | None:
+    """Persist a contract that lost a legacy section while loading it.
+
+    An enabled project with a current passed result returns that result without
+    republishing state, so a draft normalized only in memory would keep its
+    obsolete ``compatibility_manifest`` block on disk and fail schema validation
+    in `secretary doctor` right after the gate exited 0.
+    """
+    try:
+        publish_state_atomic([(draft_path, yaml.safe_dump(draft, sort_keys=False))])
+    except OSError as exc:
+        return 1, {
+            "status": "publication_failed",
+            "finding": _redact(exc.strerror or "I/O error"),
+        }
+    return None
 
 
 def _redact(value: str) -> str:
