@@ -4041,7 +4041,13 @@ class DispatcherLauncherTests(unittest.TestCase):
             "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
         })
         self.assertEqual(reviewer.head_source, "role_default")
-        self.assertEqual((reviewer.head, reviewer.effort), ("codex-reviewer", "extra"))
+        # Which profile reviews is configuration and moves with the quota that is up; what this
+        # asserts is that the record carries that profile's real configuration rather than its id.
+        expected = catalog._heads["role_defaults"]["reviewer"]  # type: ignore[attr-defined]
+        profile = catalog._heads["profiles"][expected]  # type: ignore[attr-defined]
+        self.assertEqual(reviewer.head, expected)
+        self.assertEqual(reviewer.effort, profile.get("effort", ""))
+        self.assertEqual(reviewer.model, profile["model"])
 
     def test_head_run_snapshots_the_cli_model_for_a_profile_that_pins_none(self) -> None:
         """`claude-default` pins no model, so the CLI picks one from its settings at startup. The
