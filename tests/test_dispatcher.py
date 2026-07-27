@@ -46,7 +46,7 @@ from secretary.dispatcher_launcher import (
 )
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
-from secretary.dispatcher_types import ReviewLaunch, review_pane_label
+from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
 from secretary.routing_journal import (
     HeadRun,
@@ -334,6 +334,9 @@ class FakeHost:
         self.torn_down: list[str] = []
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
+        # A bring-up failure the caller has to read for more than its message, the worker twin of
+        # `fail_observer_error`: a HeadLaunchAborted carrying the pane that stayed up.
+        self.fail_prepare_error: Exception | None = None
         self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
         # Failure hooks for host calls the real runtime can fail on: a rework workspace removed
@@ -373,6 +376,29 @@ class FakeHost:
         self.fail_observer_error: Exception | None = None
         # Orca refusing to close an observer pane: the head must be assumed alive afterwards.
         self.fail_stop_observer_reason = ""
+        # The pid a worker/reviewer bring-up writes to its heartbeat file, the way the real
+        # launcher's `with_pid_heartbeat` wrapper does. Launch-intent recovery reads it, so a fake
+        # that never wrote one would make every intent look like a head that never came up. None
+        # models a runtime that writes no heartbeat at all.
+        self.head_pid: int | None = os.getpid()
+        # Every heartbeat this fake has written, per role: a stop drops them, so a head the test
+        # stopped stops reading as alive.
+        self.head_pid_files: dict[str, set[str]] = {"worker": set(), "review": set()}
+        # Stop refusals (secretary-820). A stop the host will not confirm must never be followed by
+        # a replacement head, and these are how a test makes one refuse.
+        self.fail_stop_workspace_reason = ""
+        self.fail_stop_head_reason = ""
+        self.fail_stop_review_reason = ""
+        self.fail_freeze_worker_reason = ""
+
+    def _write_head_pid(self, kind: str, reference: str) -> None:
+        path = Path(pid_file_path(kind, reference))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if self.head_pid is None:
+            path.unlink(missing_ok=True)
+            return
+        self.head_pid_files[kind].add(str(path))
+        path.write_text(str(self.head_pid), encoding="utf-8")
 
     def prepare_worker(
         self,
@@ -385,11 +411,18 @@ class FakeHost:
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
+        if self.fail_prepare_error is not None:
+            if isinstance(self.fail_prepare_error, HeadLaunchAborted):
+                # A bring-up that failed with its terminal already open: the head is running, so
+                # its heartbeat is there for recovery to find, exactly as after a real launch.
+                self._write_head_pid("worker", task["ref"])
+            raise self.fail_prepare_error
         if self.fail_prepare_reason:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
         workspace.mkdir(parents=True, exist_ok=True)
         self.prepared.append(task["ref"])
+        self._write_head_pid("worker", task["ref"])
         launched = self._launched(f"term:{worker_id}", head, task, "worker")
         return {
             "workspace": str(workspace),
@@ -446,12 +479,24 @@ class FakeHost:
         if self.fail_review_error is not None:
             raise self.fail_review_error
         self.reviews.append(task["ref"])
+        self._write_head_pid("review", task["ref"])
         # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
         launched = self._launched(
             f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace
         )
+        try:
+            self.freeze_worker(record)
+        except HostError as exc:
+            # The reviewer pane is up and the worker would not go: the real host hands the pane
+            # back with the failure rather than reporting a bring-up that left nothing running.
+            raise HeadLaunchAborted(
+                f"worker freeze failed: {exc}",
+                handle=launched.handle,
+                workspace=record.workspace,
+                pid_file=pid_file_path("review", task["ref"]),
+            ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
@@ -464,6 +509,7 @@ class FakeHost:
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
         self.prepared.append(task["ref"])
+        self._write_head_pid("worker", task["ref"])
         return self._launched(f"rework:{task['ref']}", record.head, task, "worker")
 
     def _launched(
@@ -523,11 +569,53 @@ class FakeHost:
     def stop(self, record) -> None:
         self.calls.append("stop")
         self.stopped.append(record.worker)
+        self._kill_head("worker", record)
+        self._kill_head("review", record)
+
+    def stop_workspace(self, record) -> None:
+        """The confirmed twin of `stop`: a refusal reaches the caller (secretary-820)."""
+        self.calls.append("stop_workspace")
+        if self.fail_stop_workspace_reason:
+            raise HostError(self.fail_stop_workspace_reason)
+        self.stop(record)
+
+    def stop_head(self, record, kind: str) -> None:
+        self.calls.append(f"stop_head:{kind}")
+        if self.fail_stop_head_reason:
+            raise HostError(self.fail_stop_head_reason)
+        handle = record.review_handle if kind == "review" else record.handle
+        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
+        if not handle and not pid_file:
+            raise HostError(f"{kind} head has neither a pane handle nor a pid heartbeat")
+        self._kill_head(kind, record)
+
+    def freeze_worker(self, record) -> None:
+        self.calls.append("freeze_worker")
+        if self.fail_freeze_worker_reason:
+            raise HostError(self.fail_freeze_worker_reason)
+        if record.handle or record.worker_pid_file:
+            self.stop_head(record, "worker")
+
+    def _kill_head(self, kind: str, record) -> None:
+        """Drop the heartbeat of a stopped head, the way a closed pty tree does.
+
+        Without this a stop would leave a pid file that still names this live test process, and
+        every later liveness read would answer that the head the test just stopped is running.
+        """
+        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
+        for path in {pid_file, *self.head_pid_files.get(kind, set())}:
+            if path:
+                Path(path).unlink(missing_ok=True)
 
     def stop_review(self, record) -> None:
         self.calls.append("stop_review")
+        if not record.review_handle and not record.review_pid_file:
+            return
+        if self.fail_stop_review_reason:
+            raise HostError(self.fail_stop_review_reason)
         if record.review_handle:
             self.stopped_reviews.append(record.review_handle)
+        self._kill_head("review", record)
 
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
@@ -608,6 +696,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.tmpdir.name)
+        # Head heartbeats are keyed on the card reference alone, so without this every test in the
+        # process would read and overwrite the same /tmp pid files.
+        env = mock.patch.dict(
+            os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")}
+        )
+        env.start()
+        self.addCleanup(env.stop)
         self.board = FakeKanboard()
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         # workspace is pinned off the repo checkout: these tests stand in for a worker
@@ -704,7 +799,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
 
         result = start_reviewer(
-            self.runtime, self.reader.show("secretary-510-pilot"), {}, record, "attempt", action="review-started"
+            self.runtime,
+            self.reader.show("secretary-510-pilot"),
+            {},
+            record,
+            "attempt",
+            action="review-started",
+            payload={},
         )
 
         self.assertEqual(result["action"], "review-resource-not-ready")
@@ -4913,7 +5014,9 @@ class GitBranchHost(CommandHostRuntime):
         self.launched: list[tuple[str, str]] = []
         self.launch_prompts: list[str | None] = []
 
-    def _create_workspace(self, project: str, worker_id: str, base: str) -> str:
+    def _create_workspace(
+        self, project: str, worker_id: str, base: str, *, expected: str = ""
+    ) -> str:
         workspace = self.root / worker_id
         workspace.mkdir(parents=True)
         git(workspace, "init", "--initial-branch", base)
@@ -5947,6 +6050,32 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertTrue(status["live"])
 
+    def test_an_adopted_head_with_no_pane_identity_is_live_on_its_heartbeat(self) -> None:
+        """secretary-820: a head adopted from a launch intent never had its handle persisted, so
+        the inventory cannot name its pane. Its heartbeat can, and reading it as a missing terminal
+        would respawn a working head: the second launch the intent exists to prevent."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([{"handle": "term-other", "leafId": "leaf-other", "connected": True}])
+
+        status = host.worker_status(self.task, self._record(handle="", worker_leaf=""))
+
+        self.assertTrue(status["live"])
+        self.assertEqual(status["reason"], "pid")
+        self.assertTrue(status["pid_confirmed"])
+
+    def test_a_record_with_no_pane_identity_and_a_dead_head_is_still_missing(self) -> None:
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._dead_pid()), encoding="utf-8"
+        )
+        host = self._host([{"handle": "term-other", "leafId": "leaf-other", "connected": True}])
+
+        status = host.worker_status(self.task, self._record(handle="", worker_leaf=""))
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["reason"], "missing-terminal")
+
     def test_a_head_silent_since_launch_is_still_live_while_its_process_runs(self) -> None:
         """The pid signal must not read silence as death: a head that has said nothing since it
         started is a separate, pre-existing case (secretary-726's short initial-output window),
@@ -5988,7 +6117,11 @@ class ProductionPauseTests(unittest.TestCase):
         # The legacy mirror is written next to the live pipeline worktree by default; keep every
         # test's copy inside its own tmpdir.
         env = mock.patch.dict(
-            os.environ, {"SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json")}
+            os.environ,
+            {
+                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -6138,6 +6271,50 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(record.review_handle, f"review:{self.ref}")
         self.assertEqual(record.state, "reviewing")
         self.assertEqual(record.paused_reviewer_at, 0.0)
+
+    def test_a_resume_relaunch_that_dies_mid_flight_is_adopted_by_the_next_tick(self) -> None:
+        """secretary-820: the resume is a bring-up like any other, so it writes its intent first.
+
+        A resume killed between the head coming up and the state write that records it would
+        otherwise leave a live worker with no handle in the record, and the next tick's watchdog
+        would respawn a head that is working.
+        """
+        self.runtime.production_tick()
+        self.pause("freeze")
+        real_save = self.runtime.production_state.save
+        real_restart = self.host.restart_worker
+        launched = {"yet": False}
+
+        def save(payload: dict) -> None:
+            if launched["yet"]:
+                raise OSError("production state is not writable")
+            real_save(payload)
+
+        def restart(task: dict, record):
+            result = real_restart(task, record)
+            launched["yet"] = True
+            return result
+
+        with mock.patch.object(self.runtime.production_state, "save", save):
+            with mock.patch.object(self.host, "restart_worker", restart):
+                with self.assertRaises(OSError):
+                    self.runtime.resume_pipeline(actor="operator")
+
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.record().launch_intent["action"], "worker-resume")
+
+        # The operator retries the resume. It parks the card rather than guessing at the head the
+        # dead run may have left: the tick's recovery is the one place that decides.
+        retried = self.runtime.resume_pipeline(actor="operator")
+
+        self.assertEqual(retried["parked"], [f"{self.ref}:worker"])
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+        adopted = self.runtime.production_tick()["actions"][0]
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.record().state, "claimed")
 
     def test_resume_leaves_a_card_that_reported_during_the_freeze_to_the_tick(self) -> None:
         """A relaunched head would start a fresh turn on work that is already finished."""

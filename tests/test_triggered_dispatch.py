@@ -100,6 +100,10 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
             }) + "\n",
             encoding="utf-8",
         )
+        # The reader skips a log whose mtime is not past `since`, and a filesystem whose timestamp
+        # granularity is coarser than `time.time()` stamps this write a hair before it. Pin the
+        # mtime so the test asks about the record it wrote rather than about clock resolution.
+        os.utime(session, (since + 1, since + 1))
         with mock.patch.dict(os.environ, {"TA_CLAUDE_PROJECTS": str(projects)}):
             self.assertTrue(dispatch._claude_user_turn_after(self.workspace, since))
 

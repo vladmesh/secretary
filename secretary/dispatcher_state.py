@@ -56,6 +56,14 @@ class DispatcherRecord:
     # The worker pane has the same handle-alias problem as the reviewer pane.  Keep its leafId
     # too, so an inventory alias cannot turn a live worker into a missing-terminal respawn.
     worker_leaf: str = ""
+    # Where each role's head writes its pid heartbeat (secretary-820). Recorded when the launch
+    # intent is taken back, so it names the head that is actually running. This is the identity
+    # that survives a lost pane handle: a head adopted from a launch intent has no handle, and
+    # without a pid the stop paths (freeze before review, respawn, red-verdict rework, freeze)
+    # would silently do nothing and a replacement head would start beside a live one. Cleared
+    # together with the handle whenever that role's head is confirmed stopped.
+    worker_pid_file: str = ""
+    review_pid_file: str = ""
     # Wait watchdogs (secretary-654): when the current wait for a worker report / review
     # verdict started, and how many times that wait has already respawned its head. Both
     # reset whenever the card enters a fresh wait of that kind.
@@ -83,6 +91,10 @@ class DispatcherRecord:
     attempt_round: int = 0
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
+    # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
+    # before the host is asked for a head and cleared once the host has answered. Empty at rest.
+    # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
+    launch_intent: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -110,11 +122,14 @@ class DispatcherRecord:
             "state": self.state,
             "worker": self.worker,
             "worker_leaf": self.worker_leaf,
+            "worker_pid_file": self.worker_pid_file,
+            "review_pid_file": self.review_pid_file,
             "worker_progress_at": self.worker_progress_at,
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
             "review_run": self.review_run,
+            "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
         }
@@ -131,6 +146,7 @@ class DispatcherRecord:
             attempt_round=int(payload.get("attempt_round") or 0),
             worker_run=_run_snapshot(payload.get("worker_run")),
             review_run=_run_snapshot(payload.get("review_run")),
+            launch_intent=_run_snapshot(payload.get("launch_intent")),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
             state=str(payload.get("state") or "claimed"),
@@ -143,6 +159,8 @@ class DispatcherRecord:
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),
             worker_leaf=str(payload.get("worker_leaf") or ""),
+            worker_pid_file=str(payload.get("worker_pid_file") or ""),
+            review_pid_file=str(payload.get("review_pid_file") or ""),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),

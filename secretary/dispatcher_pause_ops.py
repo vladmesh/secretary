@@ -22,6 +22,19 @@ from secretary.dispatcher_observer import (
     observer_snapshot,
     resume_observers,
 )
+from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
+    WORKER_ROLE,
+    clear_launch_intent,
+    confirm_launch_intent,
+    forget_role_head,
+    keep_reserved_round,
+    launch_intent,
+    launch_left_a_head,
+    mark_launch_aborted,
+    stop_launch_intent,
+    write_launch_intent,
+)
 from secretary.dispatcher_pause import (
     PAUSE_MODES,
     auto_resume_status,
@@ -33,7 +46,7 @@ from secretary.dispatcher_pause import (
 )
 from secretary.dispatcher_review import end_review_pane, start_review
 from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatcher_types import DispatcherError, HeadLaunchAborted, HostError
 from secretary.tasks import TaskError
 
 WORKER_MARKERS = {"report:done", "report:blocked"}
@@ -194,7 +207,7 @@ def resume_locked(runtime: Any, *, actor: str) -> dict[str, Any]:
             )
         else:
             records = runtime.production_state.records(payload)
-            buckets = _resume_heads(runtime, state, records)
+            buckets = _resume_heads(runtime, state, records, payload)
             # The observers are not relaunched here: clearing their freeze marks hands them back to
             # the tick's reconciliation, which is the one bring-up path and already tells a dead
             # head from a live one.
@@ -295,6 +308,17 @@ def _freeze_heads(
     `stop` only, never `teardown`: the worktree and everything uncommitted in it stays exactly as
     the head left it. The reviewer's pane is closed through its own lifecycle helper first, so
     stopping the worktree's terminals cannot be mistaken later for a reviewer that vanished.
+
+    A head is here whenever anything still names it, the pid heartbeat included: a head adopted
+    from a launch intent has no pane handle, and a freeze that skipped it for want of one would
+    report the pipeline as stopped while that head kept working. A stop the host will not confirm
+    leaves the record pointing at its head and its `paused_*` stamp unset, so the head is not
+    counted as stopped and resume will not relaunch a second one beside it.
+
+    An unresolved launch intent is stopped first and on its own terms. Between the host call and
+    the record's save the intent is the only thing that names that head — the worker has no handle
+    yet, the reviewer neither handle nor pid on the record — so a freeze that read only those
+    fields would declare the pipeline stopped over a head still working in the checkout.
     """
     stopped_worker: list[str] = []
     stopped_reviewer: list[str] = []
@@ -304,21 +328,46 @@ def _freeze_heads(
         if record.workspace and os.path.abspath(record.workspace) in excluded_paths:
             excluded.append(ref)
             continue
-        if record.review_handle:
-            end_review_pane(runtime.host, record)
+        intent = launch_intent(record)
+        if intent:
+            role = str(intent.get("role") or WORKER_ROLE)
+            if stop_launch_intent(runtime, record, intent, role) is not None:
+                # The host would not promise that head is gone, so the intent stays on disk with
+                # its identity and the tick's own recovery keeps owning it. Counting it stopped
+                # here would have resume launch a second head beside a live one.
+                continue
+            # A rework's reserved round outlives the head it never got: the round the red result
+            # closed is over, and the resume relaunches into the one the intent reserved.
+            keep_reserved_round(runtime, record, intent)
+            if role == REVIEW_ROLE:
+                record.paused_reviewer_at = now
+                stopped_reviewer.append(ref)
+            else:
+                record.paused_worker_at = now
+                stopped_worker.append(ref)
+        if record.review_handle or record.review_pid_file:
+            try:
+                end_review_pane(runtime.host, record)
+            except HostError:
+                continue
             record.paused_reviewer_at = now
             stopped_reviewer.append(ref)
-        if record.handle:
-            runtime.host.stop(record)
-            record.handle = ""
-            record.worker_leaf = ""
+        if record.handle or record.worker_pid_file:
+            try:
+                runtime.host.stop_workspace(record)
+            except HostError:
+                continue
+            forget_role_head(record, WORKER_ROLE)
             record.paused_worker_at = now
             stopped_worker.append(ref)
     return stopped_worker, stopped_reviewer, excluded
 
 
 def _resume_heads(
-    runtime: Any, state: dict[str, Any], records: dict[str, DispatcherRecord]
+    runtime: Any,
+    state: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
 ) -> dict[str, list[str]]:
     relaunched: list[str] = []
     parked: list[str] = []
@@ -329,9 +378,11 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:reviewer")
             continue
-        if record.review_handle:
+        if record.review_handle or launch_intent(record):
             # A resume that got this far and then failed to drop the flag is retried by the next
-            # tick's TTL check; relaunching a head that is already back would double it.
+            # tick's TTL check; relaunching a head that is already back would double it. An
+            # unresolved launch intent says the same thing with less certainty: the tick's own
+            # recovery either adopts that head or drops it, and this is not the place to guess.
             parked.append(f"{ref}:reviewer")
             continue
         record.paused_reviewer_at = 0.0
@@ -344,7 +395,15 @@ def _resume_heads(
             # that verdict; a fresh reviewer would review a card that is already judged.
             parked.append(f"{ref}:reviewer")
             continue
-        outcome = start_review(runtime, task, records, record, record.attempt_id, action="review-resumed")
+        outcome = start_review(
+            runtime,
+            task,
+            records,
+            record,
+            record.attempt_id,
+            action="review-resumed",
+            payload=payload,
+        )
         (relaunched if outcome.get("status") == "ok" else skipped).append(f"{ref}:reviewer")
 
     for ref in list(state.get("stopped_worker") or []):
@@ -352,7 +411,7 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:worker")
             continue
-        if record.handle:
+        if record.handle or launch_intent(record):
             parked.append(f"{ref}:worker")
             continue
         record.paused_worker_at = 0.0
@@ -365,17 +424,66 @@ def _resume_heads(
         if _last_marker(task, record.comment_baseline, WORKER_MARKERS):
             parked.append(f"{ref}:worker")
             continue
+        # Same durable launch contour as the tick's own bring-ups: the intent is on disk before
+        # the head exists, so a resume that dies mid-relaunch is adopted rather than doubled.
+        failure = write_launch_intent(
+            runtime,
+            payload,
+            records,
+            ref,
+            record,
+            role=WORKER_ROLE,
+            action="worker-resume",
+            head=record.head,
+            workspace=record.workspace,
+        )
+        if failure is not None:
+            skipped.append(f"{ref}:worker")
+            continue
         try:
             launched = runtime.host.restart_worker(task, record)
-            record.handle = launched.handle
-            record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
-        except Exception:  # noqa: BLE001 — one failed relaunch must not strand the others
+        except Exception as exc:  # noqa: BLE001 — one failed relaunch must not strand the others
+            if isinstance(exc, HeadLaunchAborted) or launch_left_a_head(record):
+                # A pane was already open, or the heartbeat says a head of this relaunch is running
+                # whatever the failure claimed. Its intent stays on disk with what is known of it,
+                # and the next tick adopts or stops that head. Clearing it would hide it from both.
+                aborted = exc if isinstance(exc, HeadLaunchAborted) else HeadLaunchAborted(
+                    str(exc), workspace=record.workspace
+                )
+                mark_launch_aborted(runtime, payload, records, ref, record, aborted)
+                skipped.append(f"{ref}:worker")
+                continue
             # Left with no handle and a fresh watchdog window: the card stays In progress under the
             # ordinary wait watchdog, which respawns it once and then escalates to Blocked.
+            clear_launch_intent(record)
             record.handle = ""
             record.worker_leaf = ""
             skipped.append(f"{ref}:worker")
             continue
+        # The head is up, so its pane and launch snapshot are fixed on disk before the record is
+        # told about them: everything left to do here can fail over a worker that already runs.
+        confirm_launch_intent(
+            runtime, payload, records, ref, record, handle=launched.handle, run=launched.run
+        )
+        record.handle = launched.handle
+        try:
+            record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
+        except Exception as exc:  # noqa: BLE001 — a failure over a head that already exists
+            mark_launch_aborted(
+                runtime,
+                payload,
+                records,
+                ref,
+                record,
+                HeadLaunchAborted(
+                    f"worker pane identity could not be read: {exc}",
+                    handle=launched.handle,
+                    workspace=record.workspace,
+                ),
+            )
+            skipped.append(f"{ref}:worker")
+            continue
+        clear_launch_intent(record)
         record.state = "claimed"
         # A resume is a real bring-up: the round records the head that came back, which a registry
         # repin during the freeze can configure differently (secretary-716).

@@ -802,6 +802,29 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([action["action"] for action in self.actions(live)], ["observer-live"])
         self.assertEqual(self.host.observers, ["sprint:1"])
 
+    def test_no_tick_after_a_refused_confirmation_ever_opens_a_second_head(self) -> None:
+        """The invariant the worker and reviewer contours were ported from (secretary-820).
+
+        The head is up and the write that would have confirmed it refused. Every tick after that,
+        not only the first, has to resolve the intent to the head that is already running.
+        """
+        self.open_sprint()
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].state, "launching")
+
+        actions = [
+            action["action"]
+            for _ in range(3)
+            for action in self.actions(self.runtime.production_tick())
+        ]
+
+        self.assertEqual(actions, ["observer-adopted", "observer-live", "observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
     def test_an_adopted_head_is_stopped_through_its_workspace(self) -> None:
         self.open_sprint()
         with self.failing_state_save(after=1):
