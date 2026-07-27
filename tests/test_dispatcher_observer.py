@@ -257,7 +257,8 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([row for row in repeated["actions"] if row.get("step") == "sprint-budget"], [])
         self.writer.move(
             role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
-            reason="operator stop", request_id="blocked-card",
+            reason="operator stop", sprint_override=True,
+            sprint_override_reason="operator stop", request_id="blocked-card",
         )
         result = self.runtime.production_tick()
         sprint = self.runtime.sprints.show("sprint:1")
