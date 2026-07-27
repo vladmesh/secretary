@@ -216,6 +216,16 @@ adapter = "claude"
 model = "opus"
 fallback = []
 
+[profiles.claude-observer]
+# Sprint observer on the Claude subscription, used while the openai-sub quota is spent. Opus rather
+# than sonnet for the same reason codex-observer is xhigh: the observer slices cards and judges
+# drift from the sprint goal. It stays a profile of its own, not a pointer at claude-opus, so the
+# observer's head remains a deliberate choice rather than whatever the worker default happens to be.
+resource = "claude-sub"
+adapter = "claude"
+model = "opus"
+fallback = []
+
 [profiles.claude-fable]
 # Fable head for the steward agent (triggered-agents-243 design grill, 2026-07-04). Fallback:
 # claude-opus first (Fable itself leaving the subscription), then hermes on a non-Anthropic
@@ -241,9 +251,12 @@ fallback = []
 # Installation snapshots are generated from this table together with resources/profiles. Keeping
 # role routing in the same source prevents the production dispatcher and triggered-agents from
 # selecting different generations.
-new_card = "codex"
-reviewer = "codex-reviewer"
-curator = "codex-curator"
-steward = "codex-steward"
-retro = "codex-retro"
-observer = "codex-observer"
+# 2026-07-28: the openai-sub quota is spent, so every role runs on claude-sub until it comes back.
+# Review is same-family while this holds: the worker and the reviewer draw on one account and one
+# model. Point reviewer and observer back at their codex profiles once the quota resets.
+new_card = "claude-opus"
+reviewer = "claude-opus"
+curator = "claude-sonnet"
+steward = "claude-sonnet"
+retro = "claude-sonnet"
+observer = "claude-observer"

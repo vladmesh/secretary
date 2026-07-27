@@ -60,6 +60,14 @@ shell = "claude"
 root = "/home/dev/orca/workspaces/secretary/steward/.claude/skills"
 roles = ["steward"]
 
+[targets.claude-secretary-observer]
+shell = "claude"
+# The observer's workspace is created per sprint, so its skill cannot be delivered into a fixed
+# workspace the way curator, retro and steward are. It goes to the shell-wide root instead, which
+# is where a claude observer head will look for it whatever sprint it comes up on.
+root = "/home/dev/.claude/skills"
+roles = ["observer"]
+
 [targets.codex-secretary-roles]
 shell = "codex"
 root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
