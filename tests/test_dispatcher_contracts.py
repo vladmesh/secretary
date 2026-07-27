@@ -369,5 +369,61 @@ class RuntimeWiringContractTests(unittest.TestCase):
         self.assertIn("/home/operator/.local/bin", lines[0].split("PATH=", 1)[1])
 
 
+class HeadRegistrySourceContractTests(unittest.TestCase):
+    """The live catalog reads the installation's registry, never the checkout it was imported from.
+
+    The production unit starts the dispatcher out of the working checkout, so comparing the live
+    registry against that checkout made an unmerged `heads.toml` commit stop every tick.
+    """
+
+    def instance(self, root: Path, snapshot: str) -> Path:
+        (root / "instance.yaml").write_text(
+            "version: 1\nname: contract\ndata_dir: " + str(root / "data")
+            + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+            + "host:\n  unit_prefix: secretary-\n",
+            encoding="utf-8",
+        )
+        (root / "heads").mkdir()
+        (root / "heads" / "heads.yaml").write_text(snapshot, encoding="utf-8")
+        return root
+
+    def snapshot(self, *, role_default: str = "installed-head") -> str:
+        return (
+            "resources:\n  installed-resource:\n    account: installed-account\n"
+            "profiles:\n  installed-head:\n    resource: installed-resource\n    adapter: claude\n"
+            f"role_defaults:\n  new_card: {role_default}\n"
+        )
+
+    def test_catalog_runs_off_the_installation_snapshot_not_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir), self.snapshot())
+
+            catalog = InstanceCatalog(instance)
+
+            # Deliberately a registry the product canon does not contain: had the catalog compared
+            # the snapshot against this checkout, construction would have raised `invalid_heads`.
+            self.assertEqual(catalog.head_profile("installed-head")["adapter"], "claude")
+            self.assertEqual(catalog.worker_head({}), "installed-head")
+
+    def test_a_broken_installation_snapshot_still_stops_the_tick_by_name(self) -> None:
+        broken = {
+            "missing table": "profiles:\n  installed-head:\n    adapter: claude\n",
+            "unknown resource": (
+                "resources: {}\nprofiles:\n  installed-head:\n    resource: gone\n    adapter: claude\n"
+                "role_defaults:\n  new_card: installed-head\n"
+            ),
+            "unrouted role": self.snapshot(role_default="not-a-head"),
+        }
+        for name, snapshot in broken.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                instance = self.instance(Path(tmpdir), snapshot)
+
+                with self.assertRaises(dispatcher_module.DispatcherError) as caught:
+                    InstanceCatalog(instance)
+
+                self.assertEqual(caught.exception.code, "invalid_heads")
+                self.assertIn("heads.yaml", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

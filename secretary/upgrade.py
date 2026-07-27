@@ -51,7 +51,9 @@ from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
     materialize_snapshot,
+    record_source,
     snapshot_path,
+    source_path,
 )
 
 MEMORY_COMPONENT = "memory"
@@ -228,7 +230,11 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
 
 
 def step_head_registry(context: UpgradeContext) -> StepResult:
-    """Keep the private installation snapshot derived from the product registry."""
+    """Keep the private installation snapshot derived from the product registry.
+
+    The pin next to it records which checkout and revision the snapshot came from. Since the live
+    tick reads the snapshot alone, that pin is the only place the canon source is written down.
+    """
     target = snapshot_path(context.instance_path)
     try:
         changed = materialize_snapshot(
@@ -236,12 +242,20 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
             context.product_root,
             dry_run=context.dry_run,
         )
+        repinned = record_source(
+            context.instance_path,
+            context.product_root,
+            dry_run=context.dry_run,
+        )
     except HeadRegistryConfigError as exc:
         return StepResult("head-registry", "failed", str(exc))
-    if not changed:
+    if not changed and not repinned:
         return StepResult("head-registry", "unchanged", f"{target} matches product canon")
     verb = "would regenerate" if context.dry_run else "regenerated"
-    return StepResult("head-registry", "changed", f"{verb} {target}")
+    what = target if changed else source_path(context.instance_path)
+    if changed and repinned:
+        what = f"{target} and {source_path(context.instance_path)}"
+    return StepResult("head-registry", "changed", f"{verb} {what}")
 
 
 def desired_role_worktrees(product_root: Path) -> list[Path]:

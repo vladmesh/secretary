@@ -539,6 +539,11 @@ def run_status(args: argparse.Namespace) -> int:
         return 0
     print(f"Secretary status: {snapshot['installation']['name'] or 'unnamed'}")
     print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
+    canon = snapshot["installation"]["head_registry"]
+    if canon["error"]:
+        print(f"head registry: {canon['error']}")
+    else:
+        print(f"head registry: {canon['product_root']} @ {canon['revision']}")
     observers = snapshot["dispatcher"]["observers"]
     live = sum(1 for observer in observers if observer["alive"])
     print(f"sprint observers: {live} live of {len(observers)}")
