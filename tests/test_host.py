@@ -75,7 +75,10 @@ def snapshot(root: Path) -> dict[str, tuple[float, int]]:
 
 class ExpectationTests(unittest.TestCase):
     def test_doctor_uses_exact_checkout_paths_and_canonical_resources(self):
-        instance = {"host": {"projects_root": "/srv/projects", "unit_prefix": "secretary-"}}
+        instance = {
+            "data_dir": "/var/lib/secretary-data",
+            "host": {"projects_root": "/srv/projects", "unit_prefix": "secretary-"},
+        }
         bindings = [
             {"id": "outside", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"},
         ]
@@ -83,6 +86,76 @@ class ExpectationTests(unittest.TestCase):
         self.assertEqual(expected.projects, {"/opt/checkouts/widget"})
         self.assertIn("secretary-dispatcher-production.timer", expected.units)
         self.assertEqual(expected.orca_repos, {"widget"})
+        self.assertEqual(
+            expected.lazy_orca_repos,
+            {"observers": "/var/lib/secretary-data/dispatcher/observer-root/observers"},
+        )
+
+    def test_observer_root_is_lazily_managed_only_with_production_dispatcher(self):
+        enabled = {
+            "data_dir": "/srv/secretary-data",
+            "host": {"unit_prefix": "secretary-"},
+        }
+        expected = build_doctor_expectations(enabled, [], packaged=[])
+        empty = inventory(expected, HostInventory())
+        self.assertEqual(empty["orca repos"].missing_on_host, [])
+        self.assertEqual(empty["orca repos"].unmanaged_on_host, [])
+
+        repo = "/srv/secretary-data/dispatcher/observer-root/observers"
+        present = inventory(
+            expected,
+            HostInventory(orca_repos={"observers"}, orca_repo_paths={"observers": repo}),
+        )
+        self.assertEqual(present["orca repos"].matched, ["observers"])
+        self.assertEqual(present["orca repos"].unmanaged_on_host, [])
+
+        disabled = build_doctor_expectations(
+            {
+                "data_dir": "/srv/secretary-data",
+                "host": {"unit_prefix": "secretary-", "components": {"dispatcher-production": {"enabled": False}}},
+            },
+            [],
+            packaged=[],
+        )
+        self.assertEqual(disabled.lazy_orca_repos, {})
+        self.assertNotIn("secretary-dispatcher-production.timer", disabled.units)
+
+    def test_observer_root_does_not_change_reconcile_plan(self):
+        instance = {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}}
+        desired = build_plan(instance, [], packaged=[])
+        changes = plan_changes(
+            desired,
+            HostInventory(
+                units={resource.name for resource in desired if resource.kind == "unit"},
+                orca_repos={"observers"},
+                orca_repo_paths={"observers": "/srv/secretary-data/dispatcher/observer-root/observers"},
+            ),
+            desired,
+            "secretary-",
+        )
+        self.assertTrue(changes)
+        self.assertTrue(all(change.action == "unchanged" for change in changes))
+        self.assertNotIn("observers", {change.name for change in changes})
+
+    def test_observer_root_name_at_another_path_stays_unmanaged(self):
+        expected = build_doctor_expectations(
+            {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}},
+            [],
+            packaged=[],
+        )
+        diff = inventory(
+            expected,
+            HostInventory(
+                orca_repos={"observers", "someone-else"},
+                orca_repo_paths={
+                    "observers": "/srv/not-secretary/observers",
+                    "someone-else": "/srv/someone-else",
+                },
+            ),
+        )["orca repos"]
+        self.assertEqual(diff.matched, [])
+        self.assertEqual(diff.missing_on_host, [])
+        self.assertEqual(diff.unmanaged_on_host, ["observers", "someone-else"])
 
     def test_doctor_checks_relative_checkout_path(self):
         repo = "missing-relative-doctor-checkout"
@@ -1045,6 +1118,17 @@ class LiveSourceErrorTests(unittest.TestCase):
         ]}})
         host = self._host({"orca": _cmd(stdout=duplicate), "systemctl": _cmd()})
         self.assertEqual(host.orca_repo_paths()[1], "orca returned duplicate registration names")
+
+    def test_orca_inventory_keeps_paths_for_lazy_observer_ownership(self):
+        repo = "/srv/secretary-data/dispatcher/observer-root/observers"
+        host = self._host({
+            "orca": _cmd(stdout=f"id-1 observers {repo}\\n"),
+            "systemctl": _cmd(stdout=""),
+        })
+        expected = Expectations(lazy_orca_repos={"observers": repo})
+        collected = host.collect(expected)
+        self.assertEqual(collected.inventory.orca_repo_paths, {"observers": repo})
+        self.assertEqual(inventory(expected, collected.inventory)["orca repos"].matched, ["observers"])
 
     def test_declared_projects_without_root_is_unavailable(self):
         expected = Expectations(projects={"a"}, projects_root="")

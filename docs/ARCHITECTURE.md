@@ -131,7 +131,10 @@ board `Secretary sprints`:
 выдаётся только по селектору воркспейса, а каталог, о котором Orca не знает, селектором не является.
 Чекаута проекта наблюдатель при этом не получает: воркспейсы режутся из отдельного пустого репозитория
 без remote (`<data_dir>/dispatcher/observer-root/observers`), который диспетчер создаёт при первом
-запуске и регистрирует через `orca repo add`. Коммитить в проект из такого воркспейса нечего и некуда.
+запуске и регистрирует через `orca repo add`. Это managed Orca resource установки: его путь выводится
+из `data_dir`, когда включён компонент `dispatcher-production`. Reconcile не создаёт и не удаляет
+этот lazy-ресурс, а doctor принимает регистрацию только по этому пути; до первого наблюдателя её
+отсутствие нормально. Коммитить в проект из такого воркспейса нечего и некуда.
 Этот же корень получает codex-доверие при запуске головы: воркспейс наблюдателя — ворктри чужого для
 codex репозитория, и без записи на корень наблюдатель встаёт на вопросе о доверии.
 Путь остаётся арифметикой над reference: Orca кладёт ворктри в `<workspaces root>/<каталог
@@ -249,6 +252,9 @@ writer lock и проверяет документ на секреты, поэт
 - `doctor` читает config, data и host inventory, но не меняет host.
 - `reconcile plan` строит desired state. Имя или prefix не дают ownership без managed manifest или
   secretary-owned marker.
+- Ленивая Orca-регистрация корня наблюдателей принадлежит installation config, но не reconcile:
+  диспетчер создаёт её по первому наблюдателю. Совпавшее display name по чужому пути не становится
+  ownership и остаётся finding `unmanaged_on_host`.
 - Секреты, заведённые в хранилище (`secretary-instance/secrets/`), попадают в instance git как
   зашифрованные envelope и уезжают с checkpoint; сырой installation key и recovery phrase — нет
   (см. [Recovery](RECOVERY.md), раздел «Секреты»). Host `runtime.env` вне хранилища, facts, exports
