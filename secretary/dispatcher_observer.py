@@ -140,6 +140,10 @@ class ObserverRecord:
     # A terminal of this head may still be up. True from the launch intent until a stop confirms
     # the head is gone, so the head is never left running with nothing willing to close it.
     head_possible: bool = False
+    # The bring-up may have registered this record's workspace with Orca. Tracked apart from
+    # `head_possible` because a bring-up that dies after `worktree create` leaves a workspace and
+    # no head: the process is gone, the registration is not, and only the stop gives it back.
+    workspace_live: bool = False
     # The recorded terminal is the leftover of a bring-up that failed and could not be closed. Its
     # head never got its prompt, so a live pid there is not a working observer: the terminal has to
     # be closed before this sprint counts as headed again.
@@ -164,6 +168,7 @@ class ObserverRecord:
             "launches": self.launches,
             "pending_launch": self.pending_launch,
             "head_possible": self.head_possible,
+            "workspace_live": self.workspace_live,
             "abandoned_handle": self.abandoned_handle,
             "state": self.state,
             "launched_at": self.launched_at,
@@ -190,6 +195,10 @@ class ObserverRecord:
             # A record written before this field existed carries a handle when a head is up, so
             # the handle is what it falls back to rather than a blanket "nothing is running".
             head_possible=bool(payload.get("head_possible", bool(payload.get("handle")))),
+            # Likewise: a record written before this field existed names a workspace only once a
+            # bring-up has been through it, and the host reads Orca to tell a registered one from
+            # a path it never learned about.
+            workspace_live=bool(payload.get("workspace_live", bool(payload.get("workspace")))),
             abandoned_handle=bool(payload.get("abandoned_handle")),
             state=str(payload.get("state") or "pending"),
             launched_at=_float(payload.get("launched_at")),
@@ -379,6 +388,16 @@ def _head_may_be_running(record: ObserverRecord) -> bool:
     may well have a head behind it, and the workspace is where that head is, handle or no handle.
     """
     return bool(record.handle) or (record.head_possible and bool(record.workspace))
+
+
+def _needs_teardown(record: ObserverRecord) -> bool:
+    """Whether the stop still has something of this record to give back to Orca.
+
+    A head that may be up is one such thing, a workspace the bring-up may have registered is the
+    other, and the two do not arrive or leave together: a bring-up that fails after `worktree
+    create` leaves the registration behind with no process at all.
+    """
+    return _head_may_be_running(record) or (record.workspace_live and bool(record.workspace))
 
 
 def _bring_up_request_id(ref: str, generation: str, attempt: int) -> str:
@@ -625,6 +644,7 @@ def _launch_observer(
     record.launches = attempt
     record.pending_launch = 0
     record.head_possible = True
+    record.workspace_live = True
     record.state = "running"
     record.launched_at = now
     record.last_action = "relaunched" if relaunch else "launched"
@@ -667,6 +687,10 @@ def _write_launch_intent(
     are pure path arithmetic over the sprint reference, and the answer is exactly what a tick that
     dies mid-launch never gets to see. With them in the record, the next tick can read the head's
     liveness and close its terminal without ever having held its handle.
+
+    The intent also says the workspace may become registered with Orca, and that outlives the
+    launch: a bring-up that fails after `worktree create` leaves a registration behind whether or
+    not a head ever ran, and the stop is what gives it back.
     """
     previous = record.to_json()
     now = time.time()
@@ -682,6 +706,7 @@ def _write_launch_intent(
     record.pid_file = pid_file
     record.pending_launch = attempt
     record.head_possible = True
+    record.workspace_live = True
     record.state = "launching"
     record.launched_at = now
     record.last_action = "launching"
@@ -824,11 +849,11 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
 def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
     """Stop one observer head. True when nothing of it is left running.
 
-    A record that points at neither a terminal nor a workspace with a head possibly in it is
-    already stopped. False means the host refused the request and the head must be assumed alive,
-    so the caller keeps the record and retries.
+    A record that points at neither a terminal, nor a workspace with a head possibly in it, nor a
+    workspace its bring-up may have registered is already stopped. False means the host refused the
+    request and the head must be assumed alive, so the caller keeps the record and retries.
     """
-    if not _head_may_be_running(record):
+    if not _needs_teardown(record):
         return True
     try:
         runtime.host.stop_observer(record)
@@ -836,6 +861,7 @@ def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
         return False
     record.handle = ""
     record.head_possible = False
+    record.workspace_live = False
     record.abandoned_handle = False
     return True
 
@@ -908,7 +934,7 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
     pending = {
         ref: record
         for ref, record in sorted(observers.items())
-        if record.state in PENDING_STOP_STATES and _head_may_be_running(record)
+        if record.state in PENDING_STOP_STATES and _needs_teardown(record)
     }
     if not pending:
         return []
