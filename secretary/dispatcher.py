@@ -58,6 +58,13 @@ from secretary.dispatcher_observer import (
     observer_pid_file as _observer_pid_file,
 )
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
+from secretary.dispatcher_launch import (
+    WORKER_ROLE,
+    clear_launch_intent as _clear_launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+    resolve_launch_intent as _resolve_launch_intent,
+    write_launch_intent as _write_launch_intent,
+)
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot, ProductionPause
 from secretary.dispatcher_pause_ops import (
     pause as _pause_pipeline,
@@ -1763,6 +1770,13 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        # A record carrying a launch intent is a bring-up whose tick did not live to record its
+        # outcome. It is settled before anything else: until it is, neither "this card has a head"
+        # nor "this card is headless" is known, and acting on the wrong answer is how a card ends
+        # up with two heads on one workspace.
+        pending_launch = _resolve_launch_intent(self, task, records, payload)
+        if pending_launch is not None:
+            return pending_launch
         if task["state"] == "ready":
             resume_workspaces = payload.get("resume_workspaces")
             resume_workspace = isinstance(resume_workspaces, dict) and ref in resume_workspaces
@@ -1845,8 +1859,11 @@ class DispatcherRuntime:
             )
         )
         if requeued and active is not None:
-            # The preempted head can still be sitting in the workspace the next round claims.
-            if active.handle:
+            # The preempted head can still be sitting in the workspace the next round claims. The
+            # workspace is what it is stopped through, not the handle: a head adopted from a launch
+            # intent is running with no handle on record, and skipping it here would leave it in
+            # the checkout the new round is about to hand a second head.
+            if active.handle or active.workspace:
                 self.host.stop(active)
             if active.review_handle or active.review_leaf:
                 # A preempt out of Validate leaves the worker pane already closed by
@@ -1887,7 +1904,7 @@ class DispatcherRuntime:
         # how many rounds it has had, so a return to Ready adds a round instead of resetting.
         self._open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return self._launch_worker_after_claim(
             claimed,
             record,
@@ -1931,6 +1948,27 @@ class DispatcherRuntime:
                 "reason": "claim live board mismatch",
                 "divergence_id": divergence["id"],
             }
+        # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
+        # resolves the same path itself, and the answer is exactly what a tick that dies mid-launch
+        # never sees. With it and the pid file in the record, the next tick can read the head's
+        # liveness and close its terminal without ever having held its handle.
+        failure = _write_launch_intent(
+            self,
+            payload,
+            records,
+            ref,
+            record,
+            role=WORKER_ROLE,
+            action="claim",
+            head=record.head,
+            workspace=self.host.restore_workspace(claimed, record.worker),
+        )
+        if failure is not None:
+            # A launch nobody can record is exactly how a card ends up with two heads, so the host
+            # is not touched at all. The card keeps its claim and the next tick launches again.
+            return _launch_intent_unwritable(
+                step="claim", ref=ref, attempt_id=record.attempt_id, role=WORKER_ROLE, reason=failure
+            )
         try:
             prepared = self.host.prepare_worker(
                 claimed,
@@ -1940,6 +1978,7 @@ class DispatcherRuntime:
                 require_existing_workspace=require_existing_workspace,
             )
         except HostError as exc:
+            _clear_launch_intent(record)
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -1949,8 +1988,9 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id, "bringup-blocked", ref),
             )
             records.pop(ref, None)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
+        _clear_launch_intent(record)
         record.workspace = prepared["workspace"]
         record.handle = prepared["handle"]
         record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
@@ -1960,12 +2000,12 @@ class DispatcherRuntime:
         if isinstance(resume_workspaces, dict):
             resume_workspaces.pop(ref, None)
         records[ref] = record
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         # The worker is up: record the head running it, from the launcher's own snapshot. An adopted
         # card whose claim predates this telemetry has no round yet, so record_worker_routing opens
         # one from the journal rather than leaving the round unrecorded.
         self.record_worker_routing(claimed, record, prepared.get("run"))
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
@@ -1984,6 +2024,32 @@ class DispatcherRuntime:
             "worker": record.worker,
             "workspace": prepared["workspace"],
         }
+
+    def _worker_relaunch_intent(
+        self,
+        payload: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        ref: str,
+        record: DispatcherRecord,
+        *,
+        action: str,
+    ) -> str | None:
+        """Fix a rework or respawn bring-up on disk before `restart_worker` is called.
+
+        Every relaunch reuses the workspace the record already names, so the intent has the head's
+        identity from the record itself. Returns the failure, or None when the launch may proceed.
+        """
+        return _write_launch_intent(
+            self,
+            payload,
+            records,
+            ref,
+            record,
+            role=WORKER_ROLE,
+            action=action,
+            head=record.head,
+            workspace=record.workspace,
+        )
 
     def _advance_worker(
         self,
@@ -2005,7 +2071,7 @@ class DispatcherRuntime:
                 mismatch = _claim_mismatch(task, record.worker, record.head, record.review_head)
                 if not mismatch:
                     record.state = "claim_verified"
-                    self._save_records(payload, records)
+                    self.save_records(payload, records)
                     return self._launch_worker_after_claim(task, record, records, payload)
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
@@ -2104,7 +2170,7 @@ class DispatcherRuntime:
                 ),
             )
             records.pop(ref, None)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {
                 "status": "blocked",
                 "step": "advance",
@@ -2136,12 +2202,25 @@ class DispatcherRuntime:
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
+        failure = self._worker_relaunch_intent(
+            payload, records, ref, record, action="stale-done-rework"
+        )
+        if failure is not None:
+            return _launch_intent_unwritable(
+                step="advance",
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=WORKER_ROLE,
+                reason=failure,
+            )
         try:
             self._require_head_ready(record.head)
             launched = self.host.restart_worker(moved, record)
+            _clear_launch_intent(record)
             record.handle = launched.handle
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
+            _clear_launch_intent(record)
             return self._block_failed_worker_restart(
                 ref=ref,
                 record=record,
@@ -2159,7 +2238,7 @@ class DispatcherRuntime:
         self.record_worker_routing(moved, record, launched.run)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return {
             "status": "ok",
             "step": "advance",
@@ -2213,12 +2292,25 @@ class DispatcherRuntime:
             _reset_wait(record, "review")
             _reset_wait(record, "worker")
             moved = self.reader.show(ref)
+            failure = self._worker_relaunch_intent(
+                payload, records, ref, record, action="review-red-rework"
+            )
+            if failure is not None:
+                return _launch_intent_unwritable(
+                    step="review",
+                    ref=ref,
+                    attempt_id=record.attempt_id or attempt_id,
+                    role=WORKER_ROLE,
+                    reason=failure,
+                )
             try:
                 self._require_head_ready(record.head)
                 launched = self.host.restart_worker(moved, record)
+                _clear_launch_intent(record)
                 record.handle = launched.handle
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
+                _clear_launch_intent(record)
                 return self._block_failed_worker_restart(
                     ref=ref,
                     record=record,
@@ -2235,7 +2327,7 @@ class DispatcherRuntime:
             self.record_worker_routing(moved, record, launched.run)
             record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {
                 "status": "ok",
                 "step": "review",
@@ -2251,12 +2343,12 @@ class DispatcherRuntime:
             if gated is not None:
                 return gated
         if record.state == "review_starting":
-            return _recover_review_launch(self, task, records, record, attempt_id)
+            return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
         if record.state != "reviewing":
             launch_request = _review_launch_request_id(ref, record.review_baseline)
             if self.audit.committed_event(launch_request) is not None:
                 record.state = "review_starting"
-                return _recover_review_launch(self, task, records, record, attempt_id)
+                return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
             self.writer.comment(
                 role="dispatcher",
                 actor=self.owner,
@@ -2265,7 +2357,9 @@ class DispatcherRuntime:
                 request_id=launch_request,
             )
             record.state = "review_starting"
-            return _start_review(self, task, records, record, attempt_id, action="review-started")
+            return _start_review(
+                self, task, records, record, attempt_id, action="review-started", payload=payload
+            )
         watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="review")
         if watchdog is not None:
             return watchdog
@@ -2321,7 +2415,7 @@ class DispatcherRuntime:
             if updated != progress_at:
                 progress_at = updated
                 setattr(record, f"{kind}_progress_at", progress_at)
-                self._save_records(payload, records)
+                self.save_records(payload, records)
         now = time.time()
         if status.get("pid_confirmed"):
             # The pid heartbeat proves this exact head process is still running. Silence is not
@@ -2346,11 +2440,11 @@ class DispatcherRuntime:
         # window so a long-running head cannot hit the old total-duration fallback ceiling.
         if activity and float(activity) >= waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return None
         if not waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return unavailable() if runtime_reason else None
         outcome = _wait_outcome(
             waiting_since=waiting_since,
@@ -2388,18 +2482,33 @@ class DispatcherRuntime:
             _end_review_pane(self.host, record)
             # One bring-up path for the reviewer: the same helper the normal launch and the
             # recovery path use, so its error handling can't drift from theirs.
-            outcome = _start_review(self, task, records, record, attempt_id, action="review-respawned")
+            outcome = _start_review(
+                self, task, records, record, attempt_id, action="review-respawned", payload=payload
+            )
             if outcome.get("status") != "ok":
-                self._save_records(payload, records)
+                self.save_records(payload, records)
                 return outcome
         else:
             self.host.stop(record)
+            failure = self._worker_relaunch_intent(
+                payload, records, ref, record, action="worker-respawn"
+            )
+            if failure is not None:
+                return _launch_intent_unwritable(
+                    step=step,
+                    ref=ref,
+                    attempt_id=record.attempt_id or attempt_id,
+                    role=WORKER_ROLE,
+                    reason=failure,
+                )
             try:
                 self._require_head_ready(record.head)
                 launched = self.host.restart_worker(task, record)
+                _clear_launch_intent(record)
                 record.handle = launched.handle
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
             except Exception as exc:
+                _clear_launch_intent(record)
                 return self._block_failed_worker_restart(
                     ref=ref,
                     record=record,
@@ -2430,7 +2539,7 @@ class DispatcherRuntime:
         respawns = int(getattr(record, f"{kind}_respawns") or 0) + 1
         setattr(record, f"{kind}_respawns", respawns)
         records[ref] = record
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         # Leave a trace: without it the operator sees only the Blocked hours later and has no
         # way to tell a first stall from a card whose head was already restarted once.
         self.writer.comment(
@@ -2485,7 +2594,7 @@ class DispatcherRuntime:
             ),
         )
         records.pop(ref, None)
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
 
     def _run_gate(
@@ -2513,12 +2622,12 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-blocked", ref),
             )
             records.pop(ref, None)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {"status": "blocked", "step": "gate", "pilot_ref": ref, "reason": "validation gate failed"}
         if result.status == "green":
             record.gate_state = "green"
             record.gate_pending_since = 0.0
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return None
         if result.status == "pending":
             return self._gate_pending(task, record, records, payload, attempt_id, result)
@@ -2576,12 +2685,25 @@ class DispatcherRuntime:
         _reset_wait(record, "review")
         _reset_wait(record, "worker")
         moved = self.reader.show(ref)
+        failure = self._worker_relaunch_intent(
+            payload, records, ref, record, action=f"{phase}-red-rework"
+        )
+        if failure is not None:
+            return _launch_intent_unwritable(
+                step="gate",
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=WORKER_ROLE,
+                reason=failure,
+            )
         try:
             self._require_head_ready(record.head)
             launched = self.host.restart_worker(moved, record)
+            _clear_launch_intent(record)
             record.handle = launched.handle
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
         except Exception as exc:
+            _clear_launch_intent(record)
             return self._block_failed_worker_restart(
                 ref=ref,
                 record=record,
@@ -2598,7 +2720,7 @@ class DispatcherRuntime:
         self.record_worker_routing(moved, record, launched.run)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
 
     def _block_unresumable(
@@ -2626,7 +2748,7 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
         )
         records.pop(ref, None)
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return {
             "status": "blocked",
             "step": step,
@@ -2661,7 +2783,7 @@ class DispatcherRuntime:
         if isinstance(resume_workspaces, dict):
             resume_workspaces[ref] = record.attempt_id or attempt_id
         records.pop(ref, None)
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": reason}
 
     def _gate_pending(
@@ -2680,7 +2802,7 @@ class DispatcherRuntime:
         now = time.time()
         if not record.gate_pending_since:
             record.gate_pending_since = now
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
         if now - record.gate_pending_since <= GATE_PENDING_STALL_SECONDS:
             return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
@@ -2698,7 +2820,7 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-pending-stall", ref),
         )
         records.pop(ref, None)
-        self._save_records(payload, records)
+        self.save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
 
     def _finish_green(
@@ -2733,7 +2855,7 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "merge-gate-blocked", ref),
             )
             records.pop(ref, None)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "merge gate failed"}
         if result.status == "pending":
             return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
@@ -2756,7 +2878,7 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "merge-blocked", ref),
             )
             records.pop(ref, None)
-            self._save_records(payload, records)
+            self.save_records(payload, records)
             return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "merge failed"}
         self.host.teardown(record)
         self.writer.move(
@@ -2909,7 +3031,12 @@ class DispatcherRuntime:
             outcome=outcome,
         )
 
-    def _save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
+    def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
+        """Flush the dispatcher records into whichever state plane this payload belongs to.
+
+        Public because the launch-intent contour (`dispatcher_launch`) persists through it: an
+        intent that is not on disk before the host call is not an intent at all.
+        """
         state = self.production_state if payload.get("mode") == "production" else self.state
         state.put_records(payload, records)
         payload["last_tick_at"] = now_rfc3339()

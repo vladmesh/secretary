@@ -22,6 +22,12 @@ from secretary.dispatcher_observer import (
     observer_snapshot,
     resume_observers,
 )
+from secretary.dispatcher_launch import (
+    WORKER_ROLE,
+    clear_launch_intent,
+    launch_intent,
+    write_launch_intent,
+)
 from secretary.dispatcher_pause import (
     PAUSE_MODES,
     auto_resume_status,
@@ -194,7 +200,7 @@ def resume_locked(runtime: Any, *, actor: str) -> dict[str, Any]:
             )
         else:
             records = runtime.production_state.records(payload)
-            buckets = _resume_heads(runtime, state, records)
+            buckets = _resume_heads(runtime, state, records, payload)
             # The observers are not relaunched here: clearing their freeze marks hands them back to
             # the tick's reconciliation, which is the one bring-up path and already tells a dead
             # head from a live one.
@@ -318,7 +324,10 @@ def _freeze_heads(
 
 
 def _resume_heads(
-    runtime: Any, state: dict[str, Any], records: dict[str, DispatcherRecord]
+    runtime: Any,
+    state: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
 ) -> dict[str, list[str]]:
     relaunched: list[str] = []
     parked: list[str] = []
@@ -329,9 +338,11 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:reviewer")
             continue
-        if record.review_handle:
+        if record.review_handle or launch_intent(record):
             # A resume that got this far and then failed to drop the flag is retried by the next
-            # tick's TTL check; relaunching a head that is already back would double it.
+            # tick's TTL check; relaunching a head that is already back would double it. An
+            # unresolved launch intent says the same thing with less certainty: the tick's own
+            # recovery either adopts that head or drops it, and this is not the place to guess.
             parked.append(f"{ref}:reviewer")
             continue
         record.paused_reviewer_at = 0.0
@@ -344,7 +355,15 @@ def _resume_heads(
             # that verdict; a fresh reviewer would review a card that is already judged.
             parked.append(f"{ref}:reviewer")
             continue
-        outcome = start_review(runtime, task, records, record, record.attempt_id, action="review-resumed")
+        outcome = start_review(
+            runtime,
+            task,
+            records,
+            record,
+            record.attempt_id,
+            action="review-resumed",
+            payload=payload,
+        )
         (relaunched if outcome.get("status") == "ok" else skipped).append(f"{ref}:reviewer")
 
     for ref in list(state.get("stopped_worker") or []):
@@ -352,7 +371,7 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:worker")
             continue
-        if record.handle:
+        if record.handle or launch_intent(record):
             parked.append(f"{ref}:worker")
             continue
         record.paused_worker_at = 0.0
@@ -365,13 +384,31 @@ def _resume_heads(
         if _last_marker(task, record.comment_baseline, WORKER_MARKERS):
             parked.append(f"{ref}:worker")
             continue
+        # Same durable launch contour as the tick's own bring-ups: the intent is on disk before
+        # the head exists, so a resume that dies mid-relaunch is adopted rather than doubled.
+        failure = write_launch_intent(
+            runtime,
+            payload,
+            records,
+            ref,
+            record,
+            role=WORKER_ROLE,
+            action="worker-resume",
+            head=record.head,
+            workspace=record.workspace,
+        )
+        if failure is not None:
+            skipped.append(f"{ref}:worker")
+            continue
         try:
             launched = runtime.host.restart_worker(task, record)
+            clear_launch_intent(record)
             record.handle = launched.handle
             record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
         except Exception:  # noqa: BLE001 — one failed relaunch must not strand the others
             # Left with no handle and a fresh watchdog window: the card stays In progress under the
             # ordinary wait watchdog, which respawns it once and then escalates to Blocked.
+            clear_launch_intent(record)
             record.handle = ""
             record.worker_leaf = ""
             skipped.append(f"{ref}:worker")

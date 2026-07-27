@@ -6,6 +6,12 @@ import time
 from typing import Any
 
 from secretary.dispatcher_helpers import scrub_host_output
+from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
+    clear_launch_intent,
+    launch_intent_unwritable,
+    write_launch_intent,
+)
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import HostError, legacy_review_pane_label, review_pane_label
 from secretary.dispatcher_watchdog import (
@@ -38,12 +44,14 @@ def command_terminal_status(
         raise HostError("orca terminal list returned an unsupported shape")
     if kind == "review":
         labels = {review_pane_label(task["ref"]), legacy_review_pane_label(task["ref"])}
+        pane_known = bool(record.review_handle or record.review_leaf)
         matches = lambda terminal: bool(
             (record.review_handle and terminal.get("handle") == record.review_handle)
             or (record.review_leaf and terminal.get("leafId") == record.review_leaf)
-            or (not record.review_handle and not record.review_leaf and terminal.get("title") in labels)
+            or (not pane_known and terminal.get("title") in labels)
         )
     else:
+        pane_known = bool(record.handle or record.worker_leaf)
         matches = lambda terminal: bool(
             (record.handle and terminal.get("handle") == record.handle)
             or (record.worker_leaf and terminal.get("leafId") == record.worker_leaf)
@@ -74,6 +82,14 @@ def command_terminal_status(
             # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
             "pid_confirmed": bool(pid_status.get("known") and pid_status.get("alive")),
         }
+    if not pane_known:
+        # A head adopted from a launch intent (secretary-820): its bring-up outlived the tick that
+        # started it, so no pane identity was ever persisted for it. The pid heartbeat proves the
+        # process is running, and respawning it for want of a handle would be exactly the second
+        # head the intent contour exists to prevent.
+        pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
+        if pid_status.get("known") and pid_status.get("alive"):
+            return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
     return {"known": True, "live": False, "reason": "missing-terminal"}
 
 
@@ -105,6 +121,8 @@ def recover_review_launch(
     records: dict[str, DispatcherRecord],
     record: DispatcherRecord,
     attempt_id: str,
+    *,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
     try:
@@ -134,7 +152,9 @@ def recover_review_launch(
             "attempt_id": attempt_id,
             "action": "waiting-review-verdict",
         }
-    return start_review(runtime, task, records, record, attempt_id, action="review-restarted")
+    return start_review(
+        runtime, task, records, record, attempt_id, action="review-restarted", payload=payload
+    )
 
 
 def start_review(
@@ -145,6 +165,7 @@ def start_review(
     attempt_id: str,
     *,
     action: str,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
     readiness = runtime.head_readiness(record.review_head)
@@ -159,9 +180,34 @@ def start_review(
             "readiness": readiness.to_json(),
             "reason": readiness.reason,
         }
+    # The reviewer's own durable launch intent (secretary-820). It goes to disk before the pane is
+    # split, because the record does not learn the reviewer's handle until this function returns
+    # and the caller saves: a tick that dies in between would otherwise leave a live reviewer that
+    # the next tick cannot see, and would launch a second one beside.
+    failure = write_launch_intent(
+        runtime,
+        payload,
+        records,
+        ref,
+        record,
+        role=REVIEW_ROLE,
+        action=action,
+        head=record.review_head,
+        workspace=record.workspace,
+    )
+    if failure is not None:
+        record.state = "review_starting"
+        return launch_intent_unwritable(
+            step="review",
+            ref=ref,
+            attempt_id=record.attempt_id or attempt_id,
+            role=REVIEW_ROLE,
+            reason=failure,
+        )
     try:
         launch = runtime.host.start_review(task, record)
     except Exception as exc:
+        clear_launch_intent(record)
         runtime.writer.move(
             role="dispatcher",
             actor=runtime.owner,
@@ -174,6 +220,7 @@ def start_review(
         )
         records.pop(ref, None)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
+    clear_launch_intent(record)
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit

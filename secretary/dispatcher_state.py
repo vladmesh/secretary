@@ -83,6 +83,10 @@ class DispatcherRecord:
     attempt_round: int = 0
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
+    # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
+    # before the host is asked for a head and cleared once the host has answered. Empty at rest.
+    # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
+    launch_intent: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -115,6 +119,7 @@ class DispatcherRecord:
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
             "review_run": self.review_run,
+            "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
         }
@@ -131,6 +136,7 @@ class DispatcherRecord:
             attempt_round=int(payload.get("attempt_round") or 0),
             worker_run=_run_snapshot(payload.get("worker_run")),
             review_run=_run_snapshot(payload.get("review_run")),
+            launch_intent=_run_snapshot(payload.get("launch_intent")),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
             state=str(payload.get("state") or "claimed"),
