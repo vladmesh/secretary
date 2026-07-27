@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -46,14 +48,15 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
     def test_live_agent_repl_is_reused_after_delivery_is_confirmed(self) -> None:
         screens = iter([
             {"terminal": {"tail": ["Claude Code", "❯"]}},
-            {"terminal": {"tail": ["Claude Code", "Thinking"]}},
+            {"terminal": {"tail": ["Claude Code", "✻ Forming... (4s · ↑ 13.2k tokens)"]}},
         ])
         sent: list[list[str]] = []
         patches = self._common_run_patches() + [
             mock.patch.object(dispatch, "_orca_json", side_effect=lambda args: next(screens)),
             mock.patch.object(dispatch, "_orca", side_effect=sent.append),
+            mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
             self.assertEqual(dispatch.run("retro"), 0)
 
         self.assertEqual([call[call.index("--text") + 1] for call in sent], ["/clear", "/retro"])
@@ -78,6 +81,27 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         fresh.assert_called_once()
         self.assertEqual(sent, [])
         self.assertEqual(self._actions(), ["warm-repl-restart"])
+
+    def test_shell_output_above_the_repl_prompt_does_not_restart_a_live_agent(self) -> None:
+        screen = "\n".join(["Claude Code", "dev@host:~/workspace$ from Bash output", "❯"])
+        with mock.patch.object(dispatch, "_terminal_screen", return_value=screen):
+            self.assertTrue(dispatch._agent_repl_visible("term-live"))
+
+    def test_claude_user_turn_after_reads_the_workspace_session_log(self) -> None:
+        projects = Path(self.tmp.name) / "claude-projects"
+        slug = self.workspace.replace("/", "-")
+        session = projects / slug / "session.jsonl"
+        session.parent.mkdir(parents=True)
+        since = time.time()
+        session.write_text(
+            json.dumps({
+                "type": "user",
+                "timestamp": datetime.fromtimestamp(since + 1, timezone.utc).isoformat(),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"TA_CLAUDE_PROJECTS": str(projects)}):
+            self.assertTrue(dispatch._claude_user_turn_after(self.workspace, since))
 
     def test_unconfirmed_reuse_recovers_steward_card_and_fails_dispatch(self) -> None:
         command = dispatch.DispatchCommand("/steward --card secretary-817", "claude", None, "secretary-817")

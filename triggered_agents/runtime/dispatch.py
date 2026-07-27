@@ -143,7 +143,6 @@ _SHELL_PROMPT_RE = re.compile(
     re.MULTILINE,
 )
 _AGENT_REPL_MARKERS = ("Claude Code", "Codex", "Hermes", "❯", "›")
-_AGENT_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -196,30 +195,83 @@ def _agent_repl_visible(handle: str) -> bool:
     """Whether the observed panel is an agent REPL, not the shell it may have returned to.
 
     The prompt glyphs cover the supported interactive runtimes.  We require a positive REPL
-    marker as well as the absence of a shell prompt: unknown or unreadable screens are unsafe to
-    receive a slash command and therefore take the fresh-terminal path.
+    marker as well as the absence of a shell prompt at the bottom of the panel: unknown or
+    unreadable screens are unsafe to receive a slash command and therefore take the
+    fresh-terminal path. Tool output can legitimately contain a shell prompt, so it must not
+    classify the whole scrollback as a shell.
     """
     screen = _terminal_screen(handle)
-    if not screen or _SHELL_PROMPT_RE.search(screen):
+    if not screen or _shell_prompt_at_tail(screen):
         return False
     return any(marker in screen for marker in _AGENT_REPL_MARKERS)
 
 
-def _confirm_reuse_delivery(handle: str) -> None:
-    """Wait until the reused agent visibly starts the command just sent to it."""
+def _shell_prompt_at_tail(screen: str) -> bool:
+    """Whether the last non-empty terminal line is a shell prompt."""
+    for line in reversed(screen.splitlines()):
+        if line.strip():
+            return bool(_SHELL_PROMPT_RE.search(line))
+    return False
+
+
+def _claude_projects_root() -> Path:
+    configured = os.environ.get("TA_CLAUDE_PROJECTS")
+    return Path(configured) if configured else Path.home() / ".claude" / "projects"
+
+
+def _claude_session_paths_for(workspace: str):
+    """Yield Claude session logs for one workspace without scanning other projects."""
+    root = _claude_projects_root()
+    project = str(Path(workspace).resolve(strict=False)).replace("/", "-")
+    try:
+        yield from (root / project).glob("*.jsonl")
+    except OSError:
+        return
+
+
+def _claude_user_turn_after(workspace: str, since: float) -> bool:
+    """Whether Claude durably recorded a new user turn for this workspace after ``since``."""
+    for path in _claude_session_paths_for(workspace):
+        try:
+            if path.stat().st_mtime <= since:
+                continue
+            with path.open(encoding="utf-8", errors="replace") as source:
+                for line in source:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict) or record.get("type") != "user":
+                        continue
+                    timestamp = record.get("timestamp")
+                    if not isinstance(timestamp, str):
+                        continue
+                    try:
+                        recorded_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        continue
+                    if recorded_at > since:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def _confirm_reuse_delivery(handle: str, workspace: str, sent_at: float) -> None:
+    """Wait until Claude durably records the command just sent to the reused REPL."""
     deadline = time.monotonic() + REUSE_DELIVERY_TIMEOUT_S
-    last_reason = "no-agent-activity"
+    last_reason = "no-user-turn"
     while time.monotonic() < deadline:
+        if _claude_user_turn_after(workspace, sent_at):
+            return
         screen = _terminal_screen(handle)
         if not screen:
             last_reason = "panel-unreadable"
-        elif _SHELL_PROMPT_RE.search(screen):
+        elif _shell_prompt_at_tail(screen):
             last_reason = "agent-repl-lost"
             break
         elif not any(marker in screen for marker in _AGENT_REPL_MARKERS):
             last_reason = "agent-repl-not-visible"
-        elif _AGENT_WORKING_RE.search(screen):
-            return
         time.sleep(max(REUSE_DELIVERY_POLL_S, 0.01))
     raise ReuseDeliveryError(
         f"warm-reuse delivery was not confirmed after {REUSE_DELIVERY_TIMEOUT_S:.1f}s "
@@ -535,13 +587,14 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
     return cmd
 
 
-def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str,
+def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, workspace: str,
                          state: AgentState, event: str) -> DispatchCommand:
     cmd = _dispatch_command(agent, variant)
     try:
+        sent_at = time.time()
         _orca(["terminal", "send", "--terminal", terminal_handle,
                "--text", cmd.skill, "--enter"])
-        _confirm_reuse_delivery(terminal_handle)
+        _confirm_reuse_delivery(terminal_handle, workspace, sent_at)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -961,7 +1014,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         _orca(["terminal", "send", "--terminal", survivor["handle"], "--text", "/clear", "--enter"])
         time.sleep(1.0)  # let /clear settle before the skill lands
         try:
-            cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], state, event)
+            cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], ws, state, event)
         except ReuseDeliveryError as exc:
             state.log_run(event, action="reuse-delivery-unconfirmed", result="error", error=str(exc))
             print(f"dispatch[{agent}]: warm-reuse delivery was not confirmed ({exc})", file=sys.stderr)
