@@ -51,6 +51,7 @@ def cmd_scan(as_json: bool) -> int:
         batch = signals.scan()
         STATE.ensure_dir()
         STATE.pending_file.write_text(json.dumps(batch["pending"], ensure_ascii=False), encoding="utf-8")
+    signals.ensure_pipeline_baseline(batch)  # outside the lock above — it takes the lock itself
     if as_json:
         print(json.dumps(batch, ensure_ascii=False, indent=2))
     else:
@@ -92,6 +93,9 @@ def cmd_precheck() -> int:
         STATE.log_run("precheck", result="error", error_class=type(e).__name__, error=scrubbed)
         print(f"steward: precheck failed ({type(e).__name__}): {scrubbed}", file=sys.stderr)
         return 2
+    # A skipped hour writes nothing else, so the pipeline baseline this scan took would be lost
+    # and re-taken on every later failure, suppressing it (see signals.ensure_pipeline_baseline).
+    signals.ensure_pipeline_baseline(batch)
     if signals.has_signal(batch):
         counts = {k: (len(v) if isinstance(v, (list, dict)) else v)
                  for k, v in batch["signals"].items()}

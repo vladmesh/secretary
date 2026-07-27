@@ -136,6 +136,37 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None]:
     return hits, telemetry.unhealthy_total
 
 
+def ensure_pipeline_baseline(batch: dict) -> None:
+    """Persist the pipeline counter baseline a scan just took, before anything else can consume it.
+
+    The baseline itself is described in _pipeline_tick_signals: a scan with no counter in the
+    watermark reports nothing and takes the current one instead. That value only ever reached the
+    watermark through `advance`, which runs after a steward head was actually dispatched — and the
+    normal hour has no signal at all, so precheck exits PRECHECK_SKIP and writes nothing. The next
+    unhealthy tick then meets an unset counter again, is read as a first-ever scan again, and is
+    suppressed again: every production failure stays invisible forever, which is the opposite of
+    what a baseline is for (secretary-833 review, round 2).
+
+    So the baseline is written the moment it is taken, by both entry points that take one. Only
+    that one field is touched, and only while it is still unset — the per-kind dedup state stays
+    on the two-phase scan/advance contract, where a crash between the two re-scans instead of
+    dropping a signal. A concurrent steward run holding the lock needs no help here: its own
+    advance persists the same counter, so a contended write is skipped rather than waited on.
+    """
+    baseline = batch["pending"]["pipeline_unhealthy_total"]
+    if baseline is None:
+        return  # unreadable telemetry: nothing was measured, so there is no baseline to keep
+    try:
+        with STATE.lock():
+            stored = STATE.load_watermark()
+            if stored.get("pipeline_unhealthy_total") is not None:
+                return
+            stored["pipeline_unhealthy_total"] = baseline
+            STATE.save_watermark(stored)
+    except SystemExit:
+        return
+
+
 def _blocked_signals(mark: dict) -> tuple[list[str], list[str]]:
     """(new Blocked refs since the watermark, every ref currently Blocked)."""
     # A steward report card may intentionally end in Blocked when the run found items that need

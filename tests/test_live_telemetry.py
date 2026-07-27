@@ -12,6 +12,8 @@ neither reader can be answered with a stale or missing source as if it were a he
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -20,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from secretary import host
 from secretary.dispatcher import CutoverState, DispatcherRuntime
 from secretary.dispatcher_production import (
     TICK_TELEMETRY_UNHEALTHY_KEPT,
@@ -29,9 +32,10 @@ from secretary.dispatcher import default_data_dir
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
 
+from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
-from triggered_agents.runtime import health, production_telemetry
-from triggered_agents.runtime.state import AgentState
+from triggered_agents.runtime import health, production_telemetry, role_env
+from triggered_agents.runtime.state import PRECHECK_SKIP, AgentState
 
 
 def _ts(minutes_ago: float) -> str:
@@ -291,7 +295,8 @@ class ProductionStatePathTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"HOME": str(self.root / "home")})
         env.start()
         self.addCleanup(env.stop)
-        for name in ("TA_PRODUCTION_STATE", "SECRETARY_DATA_DIR", "SECRETARY_INSTANCE"):
+        for name in ("TA_PRODUCTION_STATE", "SECRETARY_DATA_DIR", "SECRETARY_INSTANCE",
+                     "TA_RUNTIME_ENV_FILE"):
             os.environ.pop(name, None)
 
     def test_instance_data_dir_is_the_dispatchers_own(self) -> None:
@@ -339,6 +344,76 @@ class ProductionStatePathTests(unittest.TestCase):
 
         self.assertEqual(telemetry.unavailable, "production-state-missing")
         self.assertEqual(telemetry.path, self.data_dir / "dispatcher" / "production-state.json")
+
+    def test_the_role_units_env_file_path_carries_the_instance(self) -> None:
+        """A role process handed only TA_RUNTIME_ENV_FILE still lands on the dispatcher's file."""
+        os.environ["TA_RUNTIME_ENV_FILE"] = str(self.instance / "runtime.env")
+
+        self.assertEqual(production_telemetry.data_dir(), self.data_dir)
+
+        # An explicit instance still wins over the env-file's directory.
+        other = _instance(self.root / "other-instance", self.root / "other-data")
+        os.environ["SECRETARY_INSTANCE"] = str(other)
+        self.assertEqual(production_telemetry.data_dir(), self.root / "other-data")
+
+
+class PackagedStewardUnitEnvTests(unittest.TestCase):
+    """The env the packaged steward units actually give the process that reads production state.
+
+    Setting SECRETARY_INSTANCE in a test proves the reader, not the installation: the steward runs
+    with whatever its rendered unit exports, through role_env's allowlist. So this renders the
+    shipped templates and builds the role env exactly that way (secretary-833 review, round 2).
+    """
+
+    UNITS = ("secretary-steward.service", "secretary-steward-deep-sweep.service")
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.data_dir = self.root / "srv" / "secretary-data"
+        self.instance = _instance(self.root / "instance", self.data_dir)
+        # The live runtime.env carries board credentials and no instance path — the case the
+        # reviewer found: role_env has nothing to forward unless the unit itself exports it.
+        (self.instance / "runtime.env").write_text(
+            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
+            "KANBOARD_API_USER=steward\n"
+            "KANBOARD_API_TOKEN=secret\n",
+            encoding="utf-8",
+        )
+        self.layout = host.SystemdLayout(
+            product_root=self.root / "product",
+            instance_path=self.instance,
+            data_dir=self.data_dir,
+            runtime_user="dev",
+            runtime_home=self.root / "home",
+        )
+
+    def unit_env(self, name: str) -> dict[str, str]:
+        rendered = host.render_systemd_unit(
+            (host.default_packaging_root() / name).read_bytes(), self.layout
+        ).decode()
+        env = {}
+        for line in rendered.splitlines():
+            if line.startswith("Environment="):
+                key, value = line[len("Environment="):].split("=", 1)
+                env[key] = value
+        return env
+
+    def test_the_steward_process_resolves_the_installations_production_state(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                env = role_env.runtime_env(
+                    "steward", base_env=self.unit_env(name),
+                    env_file=self.instance / "runtime.env", require=True,
+                )
+
+                self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(
+                        production_telemetry.state_path(),
+                        self.data_dir / "dispatcher" / "production-state.json",
+                    )
 
 
 class HealthAgentStateTests(unittest.TestCase):
@@ -514,6 +589,22 @@ class StewardPipelineSignalTests(unittest.TestCase):
             "unhealthy_total": total,
         })
 
+    @contextlib.contextmanager
+    def steward_cli_env(self):
+        """The steward's own commands with every non-pipeline signal source quiet, so what the
+        gate does with the pipeline record is the only thing under test."""
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(steward_cli, "STATE", self.state))
+            stack.enter_context(mock.patch.object(steward_signals.pipeline_ops, "list_cards",
+                                                  return_value=[]))
+            stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
+                                                  Path(self.tmpdir.name) / "no-workspaces"))
+            stack.enter_context(mock.patch.object(steward_signals, "PIPELINE_RESOURCE_HEALTH",
+                                                  Path(self.tmpdir.name) / "no-resource-health.json"))
+            stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
+            stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
+            yield
+
     def steward_runs(self) -> list[dict]:
         path = self.state.dir / "runs.jsonl"
         if not path.is_file():
@@ -580,6 +671,47 @@ class StewardPipelineSignalTests(unittest.TestCase):
         # The watermark does not move over a source that could not be read.
         self.assertEqual(pending, 2)
         self.assertEqual([run["event"] for run in self.steward_runs()], ["production-state-missing"])
+
+    def test_a_quiet_precheck_keeps_the_baseline_so_a_later_failure_still_fires(self) -> None:
+        """The real lifecycle: precheck skips quiet hours, and `advance` only ever runs after a
+        dispatched head. If the baseline the first quiet scan took never reached disk, the next
+        failure would be read as another first-ever scan and suppressed, forever (round-2 finding).
+        """
+        with self.steward_cli_env():
+            self.write(total=0, unhealthy=[], healthy_last=True)
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+            self.assertEqual(self.state.load_watermark()["pipeline_unhealthy_total"], 0)
+
+            # A production tick fails. The steward is woken by it, and stays woken until it has
+            # actually looked: a repeated precheck before `advance` must not consume the signal.
+            self.write(total=1, unhealthy=[_tick(7, healthy=False, reason="board unreachable")])
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+            hits = steward_signals.scan()["signals"]["pipeline_ticks"]
+            self.assertEqual([hit["seq"] for hit in hits], [7])
+
+            # ...and once the head has looked, the same failure is silent while a second one is not.
+            self.assertEqual(steward_cli.cmd_scan(True), 0)
+            self.assertEqual(steward_cli.cmd_advance(), 0)
+            self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+            self.write(total=2, unhealthy=[_tick(7, healthy=False), _tick(9, healthy=False)])
+            self.assertEqual(steward_cli.cmd_precheck(), 0)
+
+    def test_the_baseline_write_never_overwrites_a_watermark_or_invents_one(self) -> None:
+        self.write(total=4, unhealthy=[])
+        self.state.save_watermark(dict(steward_signals._empty_watermark(),
+                                       pipeline_unhealthy_total=2, notified_blocked=["ref-1"]))
+
+        steward_signals.ensure_pipeline_baseline({"pending": {"pipeline_unhealthy_total": 4}})
+
+        mark = self.state.load_watermark()
+        self.assertEqual(mark["pipeline_unhealthy_total"], 2)
+        self.assertEqual(mark["notified_blocked"], ["ref-1"])
+
+        # Telemetry that could not be read measured nothing, so it leaves no baseline behind.
+        self.state.watermark_file.unlink()
+        steward_signals.ensure_pipeline_baseline({"pending": {"pipeline_unhealthy_total": None}})
+        self.assertIsNone(self.state.load_watermark().get("pipeline_unhealthy_total"))
 
     def test_a_hit_is_a_signal_and_renders(self) -> None:
         batch = {"signals": {"pipeline_ticks": [{"event": "pipeline-tick-unhealthy", "ts": _ts(1)}],

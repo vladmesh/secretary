@@ -20,8 +20,10 @@ any installation, not only on one that kept the default layout: `--data-dir`/`SE
 first, then `data_dir` out of the instance the dispatcher unit is started with
 (`secretary.task_commands.resolve_data_dir` resolves the same pair the same way). The packaged unit
 passes only `--instance`, and a valid `data_dir` is any absolute path, so the instance file is the
-binding that matters. `TA_PRODUCTION_STATE` overrides the whole file for tests and for a host that
-has to point a reader somewhere else by hand.
+binding that matters. A reader's own unit gets that instance from `SECRETARY_INSTANCE`, falling back
+to the directory of its rendered `TA_RUNTIME_ENV_FILE` (see `_instance_from_runtime_env`).
+`TA_PRODUCTION_STATE` overrides the whole file for tests and for a host that has to point a reader
+somewhere else by hand.
 """
 from __future__ import annotations
 
@@ -35,8 +37,24 @@ import yaml
 DEFAULT_INSTANCE = Path("/home/dev/secretary-instance")
 
 
+def _instance_from_runtime_env() -> Path | None:
+    """The instance dir implied by the role unit's own env-file path, or None if it has none.
+
+    Every packaged agent unit is rendered with `TA_RUNTIME_ENV_FILE=<instance>/runtime.env` (the
+    same {{SECRETARY_INSTANCE_PATH}} the dispatcher unit is given), and role_env carries that name
+    through into the agent process. So on an installation whose instance is not the default one,
+    a role that was never handed SECRETARY_INSTANCE still resolves the instance the dispatcher
+    runs against instead of silently reading /home/dev's production-state.json (secretary-833
+    review, round 2). The units also set SECRETARY_INSTANCE outright; this keeps a host whose
+    units predate that rendering honest too.
+    """
+    configured = os.environ.get("TA_RUNTIME_ENV_FILE")
+    return Path(configured).expanduser().parent if configured else None
+
+
 def instance_file() -> Path:
-    path = Path(os.environ.get("SECRETARY_INSTANCE") or DEFAULT_INSTANCE).expanduser()
+    configured = os.environ.get("SECRETARY_INSTANCE")
+    path = Path(configured).expanduser() if configured else (_instance_from_runtime_env() or DEFAULT_INSTANCE)
     return path / "instance.yaml" if path.is_dir() else path
 
 
