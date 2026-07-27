@@ -12,7 +12,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import IDENTITY_FIELDS, normalize_identity, scan_repo
+from secretary.onboarding import IDENTITY_FIELDS, normalize_contract, scan_repo
 
 ENVIRONMENT_SUMMARIES = {
     "dependency-missing": "required dependency is missing",
@@ -171,7 +171,7 @@ def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
         return _status(status, errors=[str(exc)])
     if not isinstance(draft, dict) or not isinstance(binding, dict):
         return _status("draft_invalid", errors=["draft and binding must be mappings"])
-    normalize_identity(draft)
+    normalize_contract(draft)
     errors = validate(draft, "onboarding-contract", draft_path.name)
     errors += validate(binding, "project-binding", binding_path.name)
     if errors:

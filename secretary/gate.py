@@ -15,7 +15,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import IDENTITY_FIELDS, ScannerError, normalize_identity, scan_repo
+from secretary.onboarding import IDENTITY_FIELDS, ScannerError, normalize_contract, scan_repo
 from secretary.provision import _instance_dir, _load_inputs, _project_lock_path, _run_id
 
 _SECRET = re.compile(
@@ -44,7 +44,12 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     except ConfigError:
         existing_binding = existing_draft = None
     if isinstance(existing_draft, dict):
-        normalize_identity(existing_draft)
+        stored = copy.deepcopy(existing_draft)
+        normalize_contract(existing_draft)
+        if existing_draft != stored:
+            migration = _migrate_draft(draft_path, existing_draft)
+            if migration is not None:
+                return migration
     if isinstance(existing_binding, dict) and existing_binding.get("enabled") is True:
         if isinstance(existing_draft, dict) and existing_draft.get("gate", {}).get("status") == "passed":
             adapter_path = instance / "adapters" / f"{existing_binding['adapter']}.yaml"
@@ -201,18 +206,10 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         result["status"] = "failed"
         result["findings"] = [{"code": "gate.failed", "message": "gate output is invalid"}]
         return _publish_result(result_path, result)
-    compatibility = _compatibility_manifest(enabled, adapter)
-    try:
-        compatibility_paths = _compatibility_paths(instance, project_id)
-    except ConfigError:
-        return 1, {"status": "conflict", "finding": "instance compatibility config is invalid"}
-    target_record = _compatibility_target_record(instance, project_id)
     writes = [
         (result_path, json.dumps(result, indent=2, sort_keys=True) + "\n"),
         (instance / "adapter-drafts" / f"{project_id}.yaml", yaml.safe_dump(updated, sort_keys=False)),
         (instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(enabled, sort_keys=False)),
-        *((path, compatibility) for path in compatibility_paths),
-        (target_record, json.dumps({"version": 1, "paths": [str(path) for path in compatibility_paths]}, indent=2, sort_keys=True) + "\n"),
     ]
     try:
         publish_state_atomic(writes)
@@ -284,53 +281,26 @@ def _conflict_result(draft: dict[str, Any], run_id: str, provision_run: str, dig
     return result
 
 
+def _migrate_draft(draft_path: Path, draft: dict[str, Any]) -> tuple[int, dict[str, Any]] | None:
+    """Persist a contract that lost a legacy section while loading it.
+
+    An enabled project with a current passed result returns that result without
+    republishing state, so a draft normalized only in memory would keep its
+    obsolete ``compatibility_manifest`` block on disk and fail schema validation
+    in `secretary doctor` right after the gate exited 0.
+    """
+    try:
+        publish_state_atomic([(draft_path, yaml.safe_dump(draft, sort_keys=False))])
+    except OSError as exc:
+        return 1, {
+            "status": "publication_failed",
+            "finding": _redact(exc.strerror or "I/O error"),
+        }
+    return None
+
+
 def _redact(value: str) -> str:
     return _SECRET.sub("[REDACTED]", value)
-
-
-def _compatibility_manifest(binding: dict[str, Any], adapter: dict[str, Any]) -> str:
-    lines = ["# Generated from enabled binding and canonical adapter.", "[workspace]", f"project = {json.dumps(binding['id'])}", f"base_branch = {json.dumps(binding['default_branch'])}", "", "[setup]", "commands = ["]
-    lines.extend(f"  {json.dumps(command)}," for command in adapter["setup"]["commands"])
-    lines += ["]", "", "[smoke]", f"command = {json.dumps(adapter['smoke']['command'])}", "", "[validate]", f"ci = {json.dumps(adapter['validation']['ci'])}"]
-    if "command" in adapter["validation"]:
-        lines.append(f"command = {json.dumps(adapter['validation']['command'])}")
-    return "\n".join(lines) + "\n"
-
-
-def _compatibility_paths(instance: Path, project_id: str) -> list[Path]:
-    paths = [instance / "compatibility-manifests" / f"{project_id}.toml"]
-    config_path = instance / "instance.yaml"
-    if config_path.exists():
-        config = load_config(config_path)
-        if not isinstance(config, dict):
-            raise ConfigError("instance config must be a mapping")
-        compatibility = config.get("compatibility", {})
-        if not isinstance(compatibility, dict):
-            raise ConfigError("instance compatibility config must be a mapping")
-        manifest_dir = compatibility.get("dispatcher_manifest_dir")
-        if manifest_dir:
-            paths.append(Path(manifest_dir) / f"{project_id}.toml")
-    return paths
-
-
-def _compatibility_target_record(instance: Path, project_id: str) -> Path:
-    return instance / "compatibility-manifests" / f"{project_id}.targets.json"
-
-
-def _recorded_compatibility_paths(instance: Path, project_id: str) -> list[Path]:
-    record_path = _compatibility_target_record(instance, project_id)
-    if not record_path.exists():
-        return []
-    record = load_config(record_path)
-    if not isinstance(record, dict) or record.get("version") != 1:
-        raise ConfigError("compatibility target record is invalid")
-    values = record.get("paths")
-    if not isinstance(values, list) or not values or not all(isinstance(value, str) for value in values):
-        raise ConfigError("compatibility target record is invalid")
-    paths = [Path(value) for value in values]
-    if any(path.name != f"{project_id}.toml" for path in paths):
-        raise ConfigError("compatibility target record is invalid")
-    return paths
 
 
 def _disable_stale_enabled(
@@ -355,20 +325,9 @@ def _disable_stale_enabled(
     stale["status"] = "stale"
     stale["findings"] = [{"code": "stale.input", "message": "enabled gate inputs changed"}]
     try:
-        recorded_paths = _recorded_compatibility_paths(instance, project_id)
-        try:
-            current_paths = _compatibility_paths(instance, project_id)
-        except ConfigError:
-            current_paths = [instance / "compatibility-manifests" / f"{project_id}.toml"]
-        removal_paths = list(dict.fromkeys(recorded_paths + current_paths))
-        removal_paths.append(_compatibility_target_record(instance, project_id))
-    except ConfigError:
-        return 1, {"status": "conflict", "finding": "compatibility target record is invalid"}
-    try:
         publish_state_atomic(
             [(instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(disabled, sort_keys=False)),
              (instance / "adapter-drafts" / f"{project_id}.yaml", yaml.safe_dump(updated, sort_keys=False))],
-            removes=removal_paths,
         )
     except OSError as exc:
         return 1, {"status": "publication_failed", "finding": _redact(exc.strerror or "I/O error")}

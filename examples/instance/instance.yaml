@@ -15,8 +15,6 @@ heads:
     model: example-reviewer-model
 policies:
   default_code_concurrency: 1
-compatibility:
-  dispatcher_manifest_dir: /var/lib/secretary-data/manifests
 host:
   projects_root: /srv/projects
   unit_prefix: secretary-

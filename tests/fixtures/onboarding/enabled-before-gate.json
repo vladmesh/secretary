@@ -72,10 +72,5 @@
       "only_when": "gate.status == passed",
       "forbidden_owners": ["deterministic-scanner", "project-add", "provision-agent"]
     }
-  },
-  "compatibility_manifest": {
-    "consumer": "legacy-dispatcher",
-    "role": "derived-transition-consumer",
-    "canonical_source": "onboarding-contract-v1"
   }
 }
