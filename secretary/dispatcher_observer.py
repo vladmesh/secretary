@@ -929,6 +929,12 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
 
     The reconciliation pass does not run while the pipeline is frozen, so without this a head the
     freeze failed to stop would sit alive and unattended until the resume.
+
+    Each row carries a `status` like any other action outcome, so a stop the host refused again
+    reads as a `degraded` action to the frozen tick that called this and lands in its telemetry.
+    Without it the retry failed silently into a row nobody classified, and the freeze recorded
+    itself as a healthy terminal tick over a head it could not take down (secretary-833 review,
+    round 4).
     """
     observers = load_observers(payload)
     pending = {
@@ -944,11 +950,9 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
             reason = record.stopped_reason
             if record.state == STATE_PAUSE_STOP_PENDING:
                 if _stop_for_pause(runtime, ref, record, reason):
-                    rows.append(
-                        {"sprint": ref, "action": "observer-stopped-by-pause", "reason": reason}
-                    )
+                    rows.append(_retry_row(ref, "observer-stopped-by-pause", reason, ok=True))
                 else:
-                    rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+                    rows.append(_retry_row(ref, "observer-stop-failed", reason))
                 continue
             request_id = observer_request_id("stop", ref, record.generation, record.launches)
             try:
@@ -959,19 +963,35 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
                     request_id,
                     {"head": record.head, "reason": reason, "launches": record.launches},
                 )
-            except OSError:
-                rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+            except OSError as exc:
+                rows.append(_retry_row(
+                    ref, "observer-stop-failed",
+                    f"{reason}, and the stop could not be staged in the audit log: {exc}",
+                ))
                 continue
             if not stop_observer_head(runtime, record):
                 discard_event(runtime, request_id)
-                rows.append({"sprint": ref, "action": "observer-stop-failed", "reason": reason})
+                rows.append(_retry_row(
+                    ref, "observer-stop-failed",
+                    f"{reason}, and the observer terminal could not be stopped",
+                ))
                 continue
             observers.pop(ref)
             commit_event(runtime, event)
-            rows.append({"sprint": ref, "action": "observer-stopped", "reason": reason})
+            rows.append(_retry_row(ref, "observer-stopped", reason, ok=True))
     finally:
         put_observers(payload, observers)
     return rows
+
+
+def _retry_row(ref: str, action: str, reason: str, *, ok: bool = False) -> dict[str, Any]:
+    return {
+        "status": "ok" if ok else "degraded",
+        "step": "observer-stop-retry",
+        "sprint": ref,
+        "action": action,
+        "reason": reason,
+    }
 
 
 def resume_observers(payload: dict[str, Any]) -> list[str]:

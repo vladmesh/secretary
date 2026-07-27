@@ -146,6 +146,10 @@ class TickTelemetry:
     unhealthy: tuple[dict, ...] = ()
     unhealthy_total: int = 0
     tick_seq: int = 0
+    # Which telemetry history the counters above belong to. Empty means the writer never stamped
+    # one (a host still on an older product); a reader that dedupes on the counters must treat
+    # that as "cannot tell" rather than as a change.
+    generation: str = ""
 
     @property
     def available(self) -> bool:
@@ -175,6 +179,7 @@ def read() -> TickTelemetry:
         if isinstance(unhealthy, list) else (),
         unhealthy_total=_counter(telemetry.get("unhealthy_total")),
         tick_seq=_counter(telemetry.get("tick_seq")),
+        generation=str(telemetry.get("generation") or ""),
     )
 
 

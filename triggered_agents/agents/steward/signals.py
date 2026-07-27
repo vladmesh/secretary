@@ -54,6 +54,9 @@ def _empty_watermark() -> dict:
     return {
         # None, not 0: no baseline has been taken yet. See _pipeline_tick_signals.
         "pipeline_unhealthy_total": None,
+        # Which telemetry history the counter above was read from — "" while the dispatcher has
+        # not stamped one. See _pipeline_tick_signals.
+        "pipeline_telemetry_generation": "",
         "notified_blocked": [],
         "notified_stale": {},
         "notified_orphans": [],
@@ -67,8 +70,8 @@ def load_watermark() -> dict:
     return mark
 
 
-def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None]:
-    """(unhealthy production dispatcher ticks since the watermark, new watermark counter).
+def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None, str]:
+    """(unhealthy production dispatcher ticks since the watermark, new counter, its generation).
 
     The source is the production dispatcher's durable tick telemetry — the record written by the
     timer that actually moves cards on this host (runtime/production_telemetry.py, secretary-833).
@@ -84,6 +87,15 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None]:
     prior status for. Otherwise a cold start (or the first run after this record was introduced)
     would replay every retained failure as brand new.
 
+    The counter is only meaningful within one telemetry history, so the watermark stores the
+    `generation` it was read from and rescans the whole ring the moment that changes. A restored
+    or rebuilt state file starts counting again and can land on the number the watermark already
+    holds, and a counter comparison alone reads that as "nothing new" and drops every failure of
+    the new history (secretary-833 review, round 4). A backwards counter is still a reset on its
+    own: a host whose dispatcher predates the generation stamp writes none, and the two states
+    that leaves — neither side stamped, or only one — are "cannot tell", not "changed", or the
+    steward would rescan the ring on every scan.
+
     Telemetry that cannot be read is NOT "nothing to report": that silence is indistinguishable
     from a healthy pipeline and is exactly the blindness this module exists to catch. It is
     reported as a synthetic warn hit AND logged into the steward's own runs.jsonl, so the gap is
@@ -93,20 +105,26 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None]:
     if not telemetry.available:
         STATE.log_run(telemetry.unavailable, level="warn", path=str(telemetry.path))
         return ([{"event": telemetry.unavailable, "level": "warn", "path": str(telemetry.path)}],
-                mark["pipeline_unhealthy_total"])
+                mark["pipeline_unhealthy_total"], mark["pipeline_telemetry_generation"])
+    generation = telemetry.generation
     seen = mark["pipeline_unhealthy_total"]
     if seen is None:
-        return [], telemetry.unhealthy_total
+        return [], telemetry.unhealthy_total, generation
+    seen_generation = str(mark["pipeline_telemetry_generation"] or "")
+    replaced = bool(generation and seen_generation and generation != seen_generation)
     hits: list[dict] = []
-    if telemetry.unhealthy_total < seen:
-        # The counter went BACKWARDS: the state file was replaced (a restore, a rebuilt
-        # installation, a hand edit). Its history restarted, so rescan the whole retained ring and
-        # surface the reset itself — the same reasoning the old log-reset branch used.
+    if replaced or telemetry.unhealthy_total < seen:
+        # The history restarted: the state file was replaced (a restore, a rebuilt installation, a
+        # hand edit), either under a new generation or with a counter that went BACKWARDS. Rescan
+        # the whole retained ring and surface the reset itself — the same reasoning the old
+        # log-reset branch used.
         STATE.log_run("pipeline-telemetry-reset", level="warn", path=str(telemetry.path),
-                      cursor=seen, unhealthy_total=telemetry.unhealthy_total)
+                      cursor=seen, unhealthy_total=telemetry.unhealthy_total,
+                      generation=generation, seen_generation=seen_generation)
         hits.append({"event": "pipeline-telemetry-reset", "level": "warn",
                      "path": str(telemetry.path), "cursor": seen,
-                     "unhealthy_total": telemetry.unhealthy_total})
+                     "unhealthy_total": telemetry.unhealthy_total,
+                     "generation": generation, "seen_generation": seen_generation})
         seen = 0
     new_count = telemetry.unhealthy_total - seen
     retained = list(telemetry.unhealthy)[-new_count:] if new_count > 0 else []
@@ -121,7 +139,7 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None]:
                       unhealthy_total=telemetry.unhealthy_total)
         hits.insert(0, {"event": "pipeline-telemetry-rotated", "level": "warn",
                         "dropped": dropped, "unhealthy_total": telemetry.unhealthy_total})
-    return hits, telemetry.unhealthy_total
+    return hits, telemetry.unhealthy_total, generation
 
 
 def ensure_pipeline_baseline(batch: dict) -> None:
@@ -150,6 +168,10 @@ def ensure_pipeline_baseline(batch: dict) -> None:
             if stored.get("pipeline_unhealthy_total") is not None:
                 return
             stored["pipeline_unhealthy_total"] = baseline
+            # The counter only means anything next to the history it was taken from, so the
+            # generation is written with it and never after it.
+            stored["pipeline_telemetry_generation"] = batch["pending"].get(
+                "pipeline_telemetry_generation", "")
             STATE.save_watermark(stored)
     except SystemExit:
         return
@@ -286,7 +308,7 @@ def scan() -> dict:
     """Everything precheck/the skill need: signals since the watermark, plus the raw state to
     fold into the watermark on advance(). Read-only — never touches the watermark file itself."""
     mark = load_watermark()
-    tick_hits, unhealthy_total = _pipeline_tick_signals(mark)
+    tick_hits, unhealthy_total, telemetry_generation = _pipeline_tick_signals(mark)
     new_blocked, all_blocked = _blocked_signals(mark)
     stale_hits, stale_current = _stale_signals(mark)
     changed_resources, resource_current = _resource_signals(mark)
@@ -301,6 +323,7 @@ def scan() -> dict:
         },
         "pending": {
             "pipeline_unhealthy_total": unhealthy_total,
+            "pipeline_telemetry_generation": telemetry_generation,
             "notified_blocked": all_blocked,
             "notified_stale": stale_current,
             "notified_orphans": all_orphans,

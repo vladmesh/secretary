@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +43,9 @@ from secretary.sprints import SprintWriter, budget_thresholds
 #     so a fresh failing tick can never read as a healthy one.
 #   * the steward's `scan` reports the `unhealthy` ring against its own watermark, keyed on
 #     `unhealthy_total` — a monotonic counter, so an ordinary healthy tick in between never
-#     consumes an unhealthy one the steward has not looked at yet.
-# Keep the shape and the meaning of those two fields in step with that reader.
+#     consumes an unhealthy one the steward has not looked at yet — and on `generation`, which
+#     says which history that counter belongs to.
+# Keep the shape and the meaning of those three fields in step with that reader.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50
 TICK_TELEMETRY_ERRORS_KEPT = 5
 TICK_TELEMETRY_DEGRADATIONS_KEPT = 5
@@ -98,6 +100,14 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     """
     telemetry = payload.get("tick_telemetry")
     telemetry = dict(telemetry) if isinstance(telemetry, dict) else {}
+    # Identity of this telemetry history, minted once and then carried forever. `unhealthy_total`
+    # alone cannot tell a reader that the state file was replaced: a restore or a rebuilt
+    # installation starts a different history whose counter may land on the same number the
+    # steward's watermark already holds, and every failure after it would be deduped away against
+    # a count from a history that no longer exists (secretary-833 review, round 4). The generation
+    # changes exactly when the history does, which is what the reader keys its reset on.
+    if not str(telemetry.get("generation") or ""):
+        telemetry["generation"] = uuid.uuid4().hex
     seq = _counter(telemetry.get("tick_seq")) + 1
     status = str(result.get("status") or "")
     errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
@@ -121,7 +131,11 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         # returns. Bounded for the same reason as `errors`.
         "degradations": [
             {
-                "ref": str(outcome.get("ref") or outcome.get("pilot_ref") or ""),
+                # Observer outcomes name their subject `sprint`, card ones `ref`/`pilot_ref`.
+                # All three land in the same field, or a degraded observer action would be
+                # recorded without the one thing an operator needs to find the head.
+                "ref": str(outcome.get("ref") or outcome.get("pilot_ref")
+                           or outcome.get("sprint") or ""),
                 "step": str(outcome.get("step") or ""),
                 "status": str(outcome.get("status") or ""),
                 "action": str(outcome.get("action") or ""),
@@ -430,6 +444,14 @@ def _frozen_tick_body(
         result["status"] = "degraded"
     if observer_stops:
         result["observer_stops"] = observer_stops
+        # The retried stops are this tick's action outcomes, so a stop the host refused again is
+        # read like any other degraded action: it turns the terminal tick degraded and its reason
+        # reaches the durable record. Before that the row was classified by nobody and a freeze
+        # sitting on a head it could not take down recorded itself healthy, leaving health OK and
+        # the steward without a signal (secretary-833 review, round 4).
+        result["actions"] = observer_stops
+        if degraded_actions(observer_stops):
+            result["status"] = "degraded"
     checkpoint = _write_checkpoint(runtime)
     if checkpoint is not None:
         payload["checkpoint"] = checkpoint
