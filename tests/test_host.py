@@ -1122,7 +1122,7 @@ class LiveSourceErrorTests(unittest.TestCase):
     def test_orca_inventory_keeps_paths_for_lazy_observer_ownership(self):
         repo = "/srv/secretary-data/dispatcher/observer-root/observers"
         host = self._host({
-            "orca": _cmd(stdout=f"id-1 observers {repo}\\n"),
+            "orca": _cmd(stdout=f"id-1 observers {repo}\n"),
             "systemctl": _cmd(stdout=""),
         })
         expected = Expectations(lazy_orca_repos={"observers": repo})
