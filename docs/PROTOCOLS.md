@@ -330,9 +330,14 @@ python3 -m secretary project provision-apply ...
 python3 -m secretary project gate ...
 ```
 
-Identity проекта задаётся один раз top-level binding. Scanner и provision готовят изменения, но не
-включают binding. Enable разрешён только через успешный gate, привязанный к проверенным revision,
-provision run и write-set. Верхнеуровневый resumable workflow остаётся milestone Roadmap.
+Identity проекта задаётся один раз top-level binding: `id`, `repo`, `adapter`, `default_branch`.
+Mutable-поля binding `plane` и `policy` в identity не входят и повторным `project add` переносятся в
+переписанный binding. Scanner и provision готовят изменения, но не включают binding. Enable разрешён
+только через успешный gate, привязанный к проверенным revision, provision run и write-set.
+Верхнеуровневый resumable workflow остаётся milestone Roadmap.
+
+Диагностика отказов, восстановление устаревшего disabled draft и проверка passed-результата описаны в
+[Эксплуатации](OPERATIONS.md#подключение-проекта-gate-и-восстановление-устаревшего-входа).
 
 ## Память
 
