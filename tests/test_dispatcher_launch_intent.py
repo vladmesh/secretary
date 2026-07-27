@@ -472,6 +472,39 @@ class LaunchIntentTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.attempt_round, 2)
 
+    def test_a_dead_rework_intent_relaunches_inside_the_round_it_reserved(self) -> None:
+        """The reservation outlives the head the rework never got.
+
+        The round is the one thing the intent knows and the record does not: the record still
+        carries the round the red verdict closed. A dead rework head that gave its reservation back
+        would put the relaunch, its routing and its next verdict inside the rejected round.
+        """
+        self.rework_after_red_review()
+        self.host.head_pid = DEAD_PID
+        with self.state_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual((self.stored_intent()["round"], self.stored_intent()["opens_round"]), (2, True))
+
+        self.host.head_pid = os.getpid()
+        # Nothing of that launch is running and the pane inventory cannot see one either, so the
+        # ordinary path owns the card again and the wait watchdog respawns its head.
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        self.tick()
+
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2, "the rework runs in the round it reserved")
+        self.assertEqual(self.stored_intent(), {})
+        self.assertEqual(self.host.calls.count("restart_worker"), 2, "one head, once the first died")
+        rounds = [
+            event["payload"]["attempt"]
+            for event in self.runtime.audit.events(REF, kind="routing")
+            if event["payload"].get("phase") == "worker"
+        ]
+        self.assertEqual(rounds[-1], 2, "the respawned head is recorded by the rework's round")
+
     def test_a_respawn_adoption_stays_inside_its_round(self) -> None:
         """A respawn continues the round it interrupted, so its intent reserves nothing."""
         self.tick()
@@ -1192,6 +1225,42 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.prepared, [REF])
         self.assertEqual(self.stored_intent().get("role"), "worker")
 
+    def leave_a_post_launch_review_intent(self) -> None:
+        """Take the card to validate and lose the tick right after the reviewer pane came up."""
+        self.tick()
+        self.report_done()
+        self.tick()
+        with self.state_dies_after("start_review"):
+            with self.assertRaises(OSError):
+                self.tick()
+        self.assertEqual(self.host.reviews, [REF])
+        self.assertEqual(self.stored_intent().get("role"), "review")
+
+    def leave_a_post_launch_rework_intent(self) -> None:
+        """Lose the tick right after a red verdict's rework head came up, round 2 reserved."""
+        self.leave_a_post_launch_review_intent()
+        self.tick()  # the reviewer of the lost tick is adopted
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference=REF, kind="red",
+            body="needs work", request_id="verdict-red",
+        )
+        with self.state_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+        intent = self.stored_intent()
+        self.assertEqual((intent["action"], intent["round"], intent["opens_round"]),
+                         ("review-red-rework", 2, True))
+
+    def report_done(self, request_id: str = "worker-done") -> None:
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=REF,
+            kind="done",
+            body="done",
+            request_id=request_id,
+        )
+
     def move_card(self, target: str, reason: str, request_id: str) -> None:
         self.writer.move(
             role="po",
@@ -1287,6 +1356,94 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertTrue((self.records()[REF] or {})["handle"])
+
+    def test_a_freeze_stops_the_worker_of_a_launch_nothing_has_resolved_yet(self) -> None:
+        """Between the host call and the record's save the intent is the only pointer to that head.
+
+        A freeze that looked only at the handle and the stored pid file would find neither, write an
+        empty `stopped_worker`, and declare the pipeline stopped over a worker still editing the
+        checkout.
+        """
+        self.leave_a_post_launch_intent()
+        self.assertFalse((self.records()[REF] or {})["handle"], "no handle was ever recorded")
+        self.assertTrue(self.head_alive("worker"))
+
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
+
+        self.assertEqual(paused["stopped_worker"], [REF])
+        self.assertFalse(self.head_alive("worker"), "the head of the unresolved launch is stopped")
+        self.assertEqual(self.stored_intent(), {}, "a confirmed stop spends the intent")
+
+        # And the resume puts back one head, from the record the freeze left behind.
+        self.runtime.resume_pipeline(actor="operator")
+
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("prepare_worker"), 1, "the claim is not redone")
+
+    def test_a_freeze_that_cannot_stop_an_unresolved_launch_keeps_its_intent(self) -> None:
+        self.leave_a_post_launch_intent()
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
+
+        self.assertEqual(paused["stopped_worker"], [], "an unconfirmed stop is not a stop")
+        self.assertTrue(self.head_alive("worker"))
+        self.assertEqual(self.stored_intent().get("role"), "worker", "the only pointer survives")
+
+        # The resume launches nothing beside it, and the tick's own recovery still owns that head.
+        self.runtime.resume_pipeline(actor="operator")
+        self.host.fail_stop_workspace_reason = ""
+
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(
+            [a["action"] for a in self.actions(self.tick()) if a.get("pilot_ref") == REF],
+            ["worker-launch-adopted"],
+        )
+        self.assertEqual(self.host.prepared, [REF], "still exactly one head")
+
+    def test_a_freeze_stops_the_reviewer_of_a_launch_nothing_has_resolved_yet(self) -> None:
+        """The reviewer's window is wider: neither handle nor pid file is on the record yet."""
+        self.leave_a_post_launch_review_intent()
+        record = self.records()[REF] or {}
+        self.assertEqual((record["review_handle"], record["review_pid_file"]), ("", ""))
+
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
+
+        self.assertEqual(paused["stopped_reviewer"], [REF])
+        self.assertFalse(self.head_alive("review"), "the reviewer of the lost tick is stopped")
+        self.assertEqual(self.stored_intent(), {})
+
+        self.runtime.resume_pipeline(actor="operator")
+
+        self.assertEqual(self.host.reviews, [REF, REF], "one reviewer at a time, one after resume")
+
+    def test_a_freeze_that_cannot_stop_an_unresolved_reviewer_keeps_its_intent(self) -> None:
+        self.leave_a_post_launch_review_intent()
+        # The reviewer of that launch wrote its heartbeat, so the intent's identity is its own pane
+        # and the stop goes through the reviewer's lifecycle rather than the whole workspace.
+        self.host.fail_stop_review_reason = "orca terminal stop failed"
+
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
+
+        self.assertEqual(paused["stopped_reviewer"], [])
+        self.assertTrue(self.head_alive("review"))
+        self.assertEqual(self.stored_intent().get("role"), "review")
+
+        self.runtime.resume_pipeline(actor="operator")
+
+        self.assertEqual(self.host.reviews, [REF], "no second reviewer over a head still running")
+
+    def test_a_freeze_that_stops_a_rework_launch_keeps_the_round_it_reserved(self) -> None:
+        self.leave_a_post_launch_rework_intent()
+
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
+
+        self.assertEqual(paused["stopped_worker"], [REF])
+        self.assertEqual((self.records()[REF] or {})["attempt_round"], 2)
+
+        self.runtime.resume_pipeline(actor="operator")
+
+        self.assertEqual((self.records()[REF] or {})["attempt_round"], 2)
 
     def test_a_freeze_that_cannot_stop_an_adopted_worker_does_not_relaunch_it(self) -> None:
         self.leave_a_post_launch_intent()

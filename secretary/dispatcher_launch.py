@@ -23,7 +23,8 @@ Resolution runs before anything else the tick would do with the card:
                  heartbeat, and that is not evidence of death, so it waits out the same grace
                  window every fresh head gets.
   dead pid    -> the launch left nothing running. Whatever it may have left in the workspace is
-                 stopped, the intent is dropped, and the ordinary path relaunches.
+                 stopped, the intent is dropped, and the ordinary path relaunches — into the round
+                 the intent reserved, since a rework's round is over whether or not its head lived.
 
 State that cannot be written is a launch that does not happen: the caller answers a failed intent
 write by not touching the host at all. A failing data plane then costs the card a tick instead of
@@ -283,6 +284,8 @@ def resolve_launch_intent(
         }
     if not liveness["alive"]:
         failure = stop_launch_intent(runtime, record, intent, role)
+        if failure is None:
+            keep_reserved_round(runtime, record, intent)
         _persist_quietly(runtime, payload, records)
         if failure is not None:
             return head_stop_unconfirmed(
@@ -294,6 +297,29 @@ def resolve_launch_intent(
             )
         return None
     return _adopt_launch_intent(runtime, task, records, payload, record, intent, role, step)
+
+
+def keep_reserved_round(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> None:
+    """Carry the round a dropped worker intent reserved onto the record it was written over.
+
+    A rework reserves the next round before the host call, while the record still carries the round
+    the red result closed. Dropping such an intent — the launch left nothing running, or a freeze
+    stopped what it left — is not the same as giving the reservation back: the round is over either
+    way, and the relaunch that follows belongs to the new one. Without this the respawn runs the
+    rework inside the round that rejected it, and its routing and its verdict land there too.
+
+    Only for an intent that opens a round. A claim or a respawn continues the round the record
+    already names, and its state is the ordinary path's to decide.
+    """
+    if str(intent.get("role") or "") == REVIEW_ROLE:
+        return
+    reserved = int(intent.get("round") or 0)
+    if not intent.get("opens_round") or not reserved or record.attempt_round == reserved:
+        return
+    runtime.open_worker_round(record, round_number=reserved)
+    # The state the rework bring-up would have written. The head is not up, so the wait watchdog
+    # owns the relaunch from here, and it does it inside the round opened above.
+    record.state = "claimed"
 
 
 def stop_launch_intent(

@@ -23,11 +23,14 @@ from secretary.dispatcher_observer import (
     resume_observers,
 )
 from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
     WORKER_ROLE,
     clear_launch_intent,
     forget_role_head,
+    keep_reserved_round,
     launch_intent,
     mark_launch_aborted,
+    stop_launch_intent,
     write_launch_intent,
 )
 from secretary.dispatcher_pause import (
@@ -309,6 +312,11 @@ def _freeze_heads(
     report the pipeline as stopped while that head kept working. A stop the host will not confirm
     leaves the record pointing at its head and its `paused_*` stamp unset, so the head is not
     counted as stopped and resume will not relaunch a second one beside it.
+
+    An unresolved launch intent is stopped first and on its own terms. Between the host call and
+    the record's save the intent is the only thing that names that head — the worker has no handle
+    yet, the reviewer neither handle nor pid on the record — so a freeze that read only those
+    fields would declare the pipeline stopped over a head still working in the checkout.
     """
     stopped_worker: list[str] = []
     stopped_reviewer: list[str] = []
@@ -318,6 +326,23 @@ def _freeze_heads(
         if record.workspace and os.path.abspath(record.workspace) in excluded_paths:
             excluded.append(ref)
             continue
+        intent = launch_intent(record)
+        if intent:
+            role = str(intent.get("role") or WORKER_ROLE)
+            if stop_launch_intent(runtime, record, intent, role) is not None:
+                # The host would not promise that head is gone, so the intent stays on disk with
+                # its identity and the tick's own recovery keeps owning it. Counting it stopped
+                # here would have resume launch a second head beside a live one.
+                continue
+            # A rework's reserved round outlives the head it never got: the round the red result
+            # closed is over, and the resume relaunches into the one the intent reserved.
+            keep_reserved_round(runtime, record, intent)
+            if role == REVIEW_ROLE:
+                record.paused_reviewer_at = now
+                stopped_reviewer.append(ref)
+            else:
+                record.paused_worker_at = now
+                stopped_worker.append(ref)
         if record.review_handle or record.review_pid_file:
             try:
                 end_review_pane(runtime.host, record)
