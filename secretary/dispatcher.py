@@ -57,6 +57,7 @@ from secretary.dispatcher_observer import (
     observer_launch_prompt as _observer_launch_prompt,
     observer_pid_file as _observer_pid_file,
 )
+from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot, ProductionPause
 from secretary.dispatcher_pause_ops import (
     pause as _pause_pipeline,
@@ -157,7 +158,7 @@ def _instance_file(path: Path) -> Path:
 # Observer workspaces live in this subdirectory of the workspaces root. Orca puts a worktree at
 # <workspaces root>/<repo directory>/<worktree name>, so the observer repo's directory carries the
 # same name and the path the dispatcher fixed in the launch intent is the path Orca hands back.
-OBSERVER_WORKSPACE_DIR = "observers"
+OBSERVER_WORKSPACE_DIR = OBSERVER_REPO_NAME
 # The only branch of the observer repo, named at init so no bring-up has to ask git what a fresh
 # repository calls its first branch.
 OBSERVER_REPO_BRANCH = "observers"
@@ -530,7 +531,7 @@ class CommandHostRuntime:
         entity and writes no code, so a workspace it could commit the project from would be wrong
         as well as unnecessary. Hence a repo of its own, created once and shared by every sprint.
         """
-        repo = self.data_dir / "dispatcher" / "observer-root" / OBSERVER_WORKSPACE_DIR
+        repo = observer_root_repo(self.data_dir)
         if not (repo / ".git").is_dir():
             repo.mkdir(parents=True, exist_ok=True)
             self._run(

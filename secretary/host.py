@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+from secretary.observer_root import observer_root_repo
+
 KINDS = ("projects", "units", "orca repos")
 UNIT_SUFFIXES = (".service", ".timer")
 
@@ -215,7 +217,8 @@ def build_plan(
                 continue
             result.append(_resource(logical_id, "unit", name, {"model": model, "role": role}))
     if prefix:
-        result.extend(_production_dispatcher_units(prefix, digests))
+        if component_enabled(host, "dispatcher-production"):
+            result.extend(_production_dispatcher_units(prefix, digests))
         result.extend(_packaged_component_units(host, packaged))
     for binding in bindings:
         if not isinstance(binding, dict):
@@ -463,6 +466,7 @@ class HostInventory:
     units: set[str] = field(default_factory=set)
     orca_repos: set[str] = field(default_factory=set)
     unit_states: dict[str, tuple[str, str]] = field(default_factory=dict)
+    orca_repo_paths: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -472,6 +476,7 @@ class Expectations:
     projects: set[str] = field(default_factory=set)
     units: set[str] = field(default_factory=set)
     orca_repos: set[str] = field(default_factory=set)
+    lazy_orca_repos: dict[str, str] = field(default_factory=dict)
     unit_prefix: str = ""
     projects_root: str = ""
     foreign_units: set[str] = field(default_factory=set)
@@ -585,10 +590,22 @@ def build_doctor_expectations(
         else:
             runtime[name] = (True, True)
     runtime["orca-server.service"] = (False, True)
+    lazy_orca_repos: dict[str, str] = {}
+    data_dir = instance.get("data_dir") if isinstance(instance, dict) else None
+    if component_enabled(host, "dispatcher-production") and isinstance(data_dir, str) and data_dir:
+        try:
+            repo = observer_root_repo(Path(data_dir).expanduser()).resolve(strict=False)
+        except (OSError, RuntimeError):
+            # Instance validation normally prevents this. An unreadable path is
+            # not evidence that the dispatcher's lazy repo is missing.
+            pass
+        else:
+            lazy_orca_repos[repo.name] = str(repo)
     return Expectations(
         projects=projects,
         units=units,
         orca_repos={resource.name for resource in desired if resource.kind == "orca"},
+        lazy_orca_repos=lazy_orca_repos,
         unit_prefix=prefix,
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
         foreign_units=foreign_units(host),
@@ -614,8 +631,32 @@ def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDi
     return {
         "projects": _diff(expected.projects, actual.projects),
         "units": _diff(expected.units, actual.units - expected.foreign_units),
-        "orca repos": _diff(expected.orca_repos, actual.orca_repos),
+        "orca repos": _orca_repo_diff(expected, actual),
     }
+
+
+def _orca_repo_diff(expected: Expectations, actual: HostInventory) -> KindDiff:
+    """Compare registered repos, admitting the dispatcher's lazy repository by path.
+
+    The dispatcher creates its observer root only when an observer is first
+    needed, so absence is healthy. Once it exists, its configured path proves
+    that this installation owns it; another repo merely reusing the display
+    name remains unmanaged.
+    """
+    matched = expected.orca_repos & actual.orca_repos
+    for name, path in expected.lazy_orca_repos.items():
+        if name not in actual.orca_repos:
+            continue
+        actual_path = actual.orca_repo_paths.get(name)
+        # Fixtures provide names only. Live inventory supplies the path and is
+        # required to prove a same-name registration belongs to this instance.
+        if actual_path is None or actual_path == path:
+            matched.add(name)
+    return KindDiff(
+        matched=sorted(matched),
+        missing_on_host=sorted(expected.orca_repos - actual.orca_repos),
+        unmanaged_on_host=sorted(actual.orca_repos - matched),
+    )
 
 
 class HostSource(ABC):
@@ -761,19 +802,19 @@ class LiveHostSource(HostSource):
         if reason:
             errors["projects"] = reason
         else:
-            inventory = HostInventory(projects, inventory.units, inventory.orca_repos, inventory.unit_states)
+            inventory = HostInventory(projects, inventory.units, inventory.orca_repos, inventory.unit_states, inventory.orca_repo_paths)
 
         units, unit_states, reason = self._units(expected)
         if reason:
             errors["units"] = reason
         else:
-            inventory = HostInventory(inventory.projects, units, inventory.orca_repos, unit_states)
+            inventory = HostInventory(inventory.projects, units, inventory.orca_repos, unit_states, inventory.orca_repo_paths)
 
-        repos, reason = self._orca_repos()
+        repos, repo_paths, reason = self._orca_repos()
         if reason:
             errors["orca repos"] = reason
         else:
-            inventory = HostInventory(inventory.projects, inventory.units, repos, inventory.unit_states)
+            inventory = HostInventory(inventory.projects, inventory.units, repos, inventory.unit_states, repo_paths)
 
         return CollectResult(inventory=inventory, errors=errors)
 
@@ -851,20 +892,28 @@ class LiveHostSource(HostSource):
             return f"systemctl exited {result.returncode}"
         return ""
 
-    def _orca_repos(self) -> tuple[set[str], str]:
+    def _orca_repos(self) -> tuple[set[str], dict[str, str], str]:
         result = self._run(self._orca_command(["orca", "repo", "list"]))
         if not result.ran:
-            return set(), result.reason
+            return set(), {}, result.reason
         if result.returncode != 0:
             # orca reports an empty registry as exit 0, so non-zero is a failure.
-            return set(), f"orca exited {result.returncode}"
+            return set(), {}, f"orca exited {result.returncode}"
         names: set[str] = set()
+        paths: dict[str, str] = {}
         for line in result.stdout.splitlines():
             parts = line.split()
             # Format: <uuid> <name> <path>. The name is the second column.
             if len(parts) >= 2:
-                names.add(parts[1])
-        return names, ""
+                name = parts[1]
+                names.add(name)
+                if len(parts) < 3:
+                    continue
+                try:
+                    paths[name] = str(Path(parts[2]).expanduser().resolve(strict=False))
+                except (OSError, RuntimeError):
+                    return set(), {}, "orca repo path could not be normalized"
+        return names, paths, ""
 
     def orca_repo_paths(self) -> tuple[dict[str, str], str]:
         """Return Orca registration name -> normalized repo path.

@@ -142,6 +142,13 @@ returns structured findings with a non-zero exit status for a broken or unavaila
 `status` to answer what is running now, and `doctor` to decide what needs repair. The default
 human-readable `doctor` output remains available for incident work.
 
+Когда включён `host.components.dispatcher-production`, Orca repo
+`<data_dir>/dispatcher/observer-root/observers` принадлежит установке. Он появляется лениво при
+первом запуске наблюдателя, поэтому fresh installation не получает finding на его отсутствие.
+После создания doctor сопоставляет регистрацию с этим путём и считает совпавшее имя по другому пути
+чужой регистрацией. `reconcile plan` и `reconcile apply` этот repo не создают, не удаляют и не
+записывают в managed manifest.
+
 ## Record reconciliation and controlled divergences
 
 Каждый production tick, до того как продвигать активные карточки, сверяет свои записи
