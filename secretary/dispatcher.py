@@ -22,6 +22,7 @@ from secretary.dispatcher_launcher import (
     HeadLaunchError,
     claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
+    ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
@@ -390,10 +391,13 @@ class InstanceCatalog:
     def prepare_head_workspace(self, head: str, workspace: str) -> None:
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
-        if adapter != "claude":
-            return
         try:
-            _ensure_claude_workspace_ready(workspace)
+            if adapter == "claude":
+                _ensure_claude_workspace_ready(workspace)
+            elif adapter == "codex":
+                # Same job as the claude branch: pre-answer the first-run question this CLI would
+                # otherwise ask the operator, in the file it reads the answer from.
+                _ensure_codex_workspace_trusted(profile, workspace)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
 

@@ -5,12 +5,18 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
-from secretary.dispatcher import CommandHostRuntime, CutoverState, DispatcherRuntime
+from secretary.dispatcher import (
+    CommandHostRuntime,
+    CutoverState,
+    DispatcherRuntime,
+    InstanceCatalog,
+)
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_tui import TuiDeliveryError
 from secretary.dispatcher_observer import (
@@ -1868,6 +1874,86 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         self.assertTrue(caught.exception.workspace)
         self.assertTrue(caught.exception.pid_file)
         self.assertIn("stop failed", str(caught.exception))
+
+
+class ObserverCodexTrustTests(unittest.TestCase):
+    """The bring-up answers codex's trust question for the observer workspace.
+
+    A real `CommandHostRuntime` over a real `InstanceCatalog`: the launcher renders the command and
+    prepares the workspace, only `orca` is replaced. The git worktree is a real one, cut from the
+    real observer repo the runtime creates, because what codex asks about is the repository root
+    that worktree hangs off and no fake reproduces that shape.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.codex_home = self.root / "codex-home"
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "TA_CODEX_HOME": str(self.codex_home),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+        self.host = CommandHostRuntime(catalog, self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.commands: list[str] = []
+        self.registered = False
+        delivery = mock.patch.object(dispatcher_module, "_deliver_tui_prompt", mock.Mock())
+        delivery.start()
+        self.addCleanup(delivery.stop)
+        run_json = mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
+        )
+        run_json.start()
+        self.addCleanup(run_json.stop)
+
+    def _run_json(self, args: list[str]) -> dict[str, object]:
+        step = args[1:3]
+        if step == ["worktree", "show"]:
+            if self.registered:
+                return {}
+            raise HostError("orca worktree show failed: selector_not_found")
+        if step == ["worktree", "create"]:
+            repo = args[args.index("--repo") + 1].split(":", 1)[1]
+            workspace = self.host.observer_workspace("sprint:1")
+            # What `orca worktree create` leaves behind: a git worktree of that repo at that path.
+            self.host._run(  # type: ignore[attr-defined]
+                ["git", "-C", repo, "worktree", "add", "--quiet", "--detach", workspace],
+                "worktree add",
+            )
+            self.registered = True
+            return {"worktree": {"path": workspace}}
+        if step == ["terminal", "create"]:
+            self.commands.append(args[args.index("--command") + 1])
+            return {"handle": "term-obs"}
+        return {}
+
+    def test_the_bring_up_trusts_the_repository_root_of_the_observer_workspace(self) -> None:
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+
+        trusted = tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
+        workspace = Path(self.host.observer_workspace("sprint:1")).resolve()
+        repo_root = (self.root / "data" / "dispatcher" / "observer-root" / "observers").resolve()
+        self.assertEqual(trusted["projects"][str(repo_root)]["trust_level"], "trusted")
+        self.assertEqual(trusted["projects"][str(workspace)]["trust_level"], "trusted")
+        command = self.commands[0]
+        self.assertIn(f"CODEX_HOME={self.codex_home} codex", command)
+        self.assertNotIn("codex exec", command)
+        self.assertIn("--role observer", command)
+
+    def test_a_second_bring_up_leaves_the_recorded_trust_alone(self) -> None:
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+        first = (self.codex_home / "config.toml").read_text(encoding="utf-8")
+
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+
+        self.assertEqual((self.codex_home / "config.toml").read_text(encoding="utf-8"), first)
 
 
 class _ObserverCatalog(FakeCatalog):

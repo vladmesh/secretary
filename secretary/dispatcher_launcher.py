@@ -7,6 +7,7 @@ import os
 import shlex
 import stat
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,6 +15,8 @@ from typing import Any, Mapping
 from secretary.role_env import RoleEnvError, runtime_env
 
 CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
+# The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
+CODEX_CONFIG_FILE = "config.toml"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
 CLAUDE_THEME_DEFAULT = "dark"
 # Where the `claude` CLI itself takes a model from when the head profile pins none.
@@ -65,6 +68,55 @@ def ensure_claude_workspace_ready(
     changed = _ensure_claude_theme(data, default_theme) or changed
     if changed:
         _save_claude_config(config_path, data)
+
+
+def ensure_codex_workspace_trusted(
+    profile: dict[str, Any],
+    workspace: str,
+    config: Path | None = None,
+) -> None:
+    """Answer the codex trust question for one workspace before a head starts in it.
+
+    An interactive codex asks about trust before it takes a prompt, and it asks about the
+    repository root of the directory it starts in rather than that directory: a worktree inherits
+    the answer given to the repo it was cut from. The `-c projects...trust_level` overrides the
+    launch command carries do not reach that check (codex 0.145 still shows the dialog with them
+    in place), so a head whose root codex has never seen sits on the dialog, never goes idle, and
+    never receives its prompt. The answer lives in `config.toml` of the CODEX_HOME the head runs
+    with, which is where codex writes it when a human picks "Yes, continue", so the product writes
+    it there instead of leaving the workspace waiting for that human.
+
+    Both the workspace and its repository root are recorded: the root is what codex checks inside
+    a git repo, the workspace itself is what it checks outside one, and neither is known to be the
+    case from here. Trust already on file is left alone, and a path the file keeps at another
+    trust level is somebody's decision, so it fails the bring-up with a readable reason instead of
+    being overwritten.
+    """
+    config_path = config or Path(_codex_home(profile)) / CODEX_CONFIG_FILE
+    text = _read_codex_config(config_path)
+    projects = _codex_config_projects(text, config_path)
+    additions: list[str] = []
+    for target in _codex_trust_paths(workspace):
+        entry = projects.get(target)
+        if entry is None:
+            additions.append(target)
+            continue
+        if not isinstance(entry, dict):
+            raise HeadLaunchError(
+                f"codex config {config_path} has a non-table project entry for {target}"
+            )
+        level = str(entry.get("trust_level") or "")
+        if level == "trusted":
+            continue
+        raise HeadLaunchError(
+            f"codex config {config_path} keeps {target} at trust_level {level or '(none)'!r}"
+        )
+    if not additions:
+        return
+    body = text if text.endswith("\n") or not text else f"{text}\n"
+    for target in additions:
+        body += f"\n[projects.{json.dumps(target)}]\ntrust_level = \"trusted\"\n"
+    _save_codex_config(config_path, body)
 
 
 def render_claude_command(
@@ -190,6 +242,8 @@ def _render_codex_exec_command(
 
 
 def _render_codex_tui_command(profile: dict[str, Any], *, workspace: str) -> str:
+    # The `projects` overrides below state the intent on the command line; what the TUI actually
+    # checks before it asks about trust is `config.toml`, written by `ensure_codex_workspace_trusted`.
     args = _codex_base_args(profile)
     for path in _codex_trust_paths(workspace):
         args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
@@ -291,17 +345,77 @@ def _save_claude_config(config: Path, data: dict[str, Any]) -> None:
                 pass
 
 
+def _read_codex_config(config: Path) -> str:
+    _reject_symlinked_config(config, "codex")
+    try:
+        return config.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeError) as exc:
+        raise HeadLaunchError(f"cannot read codex config {config}: {exc}") from None
+
+
+def _codex_config_projects(text: str, config: Path) -> dict[str, Any]:
+    try:
+        loaded = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise HeadLaunchError(f"cannot read codex config {config}: {exc}") from None
+    projects = loaded.get("projects", {})
+    if not isinstance(projects, dict):
+        raise HeadLaunchError(f"codex config {config} has a non-table projects value")
+    return projects
+
+
+def _save_codex_config(config: Path, text: str) -> None:
+    """Replace the codex config with `text`, but only once it parses as the TOML codex will read.
+
+    The new trust tables are appended to the file as it stands rather than re-rendered from a
+    parse, because this file is the installation's own: comments, ordering and everything the
+    dispatcher has no opinion about survive a bring-up untouched. Appending can only produce
+    invalid TOML if the file already declared `projects` in a form a table header cannot extend,
+    so the result is parsed back before it replaces anything: a codex config the dispatcher cannot
+    write safely leaves the bring-up deferred with a reason, not a codex that no longer starts.
+    """
+    _codex_config_projects(text, config)
+    temp_path: Path | None = None
+    try:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        _reject_symlinked_config(config, "codex")
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{config.name}.", suffix=".tmp", dir=config.parent, text=True
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _reject_symlinked_config(config, "codex")
+        os.replace(temp_path, config)
+    except OSError as exc:
+        raise HeadLaunchError(f"cannot update codex config {config}: {exc}") from None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
 def _reject_symlinked_claude_config(config: Path) -> None:
+    _reject_symlinked_config(config, "Claude")
+
+
+def _reject_symlinked_config(config: Path, kind: str) -> None:
     try:
         mode = config.lstat().st_mode
     except FileNotFoundError:
         return
     except OSError as exc:
-        raise HeadLaunchError(f"cannot inspect Claude config {config}: {exc}") from None
+        raise HeadLaunchError(f"cannot inspect {kind} config {config}: {exc}") from None
     if stat.S_ISLNK(mode):
-        raise HeadLaunchError(f"refusing symlinked Claude config {config}")
+        raise HeadLaunchError(f"refusing symlinked {kind} config {config}")
     if not stat.S_ISREG(mode):
-        raise HeadLaunchError(f"Claude config {config} is not a regular file")
+        raise HeadLaunchError(f"{kind} config {config} is not a regular file")
 
 
 def role_launch_env(role: str) -> dict[str, str]:
