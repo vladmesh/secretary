@@ -112,7 +112,10 @@ budget request id, so a repeated tick cannot charge it twice. Green cards and ob
 not have a matching event and do not move the counter.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6.
-The schema rejects a hard limit below the signal limit. `show` returns thresholds and
+The schema resolves omitted values to those defaults before rejecting a hard limit below the signal
+limit. Each charge is a `budget_recorded` audit event; the charge that stops a sprint is paired with
+a `budget_hard_stopped` event carrying `budget_hard_limit` and the triggering card-event identity.
+`show` returns thresholds and
 `signal_reached`/`hard_reached` with the totals. The signal appears in a newly launched observer
 prompt but does not stop work. At the hard limit the dispatcher marks the sprint `stopped`, stops
 its observer and skips new linked claims; active cards continue their normal cycle. Only

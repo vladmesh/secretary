@@ -237,6 +237,12 @@ class ObserverLifecycleTests(unittest.TestCase):
         sprint = self.runtime.sprints.show("sprint:1")
         self.assertEqual(sprint["status"], "stopped")
         self.assertEqual(sprint["budget"]["by_type"]["blocked"], 1)
+        hard_stop_events = [
+            event for event in self.audit.events("sprint:1")
+            if event.get("kind") == "budget_hard_stopped"
+        ]
+        self.assertEqual(len(hard_stop_events), 1)
+        self.assertEqual(hard_stop_events[0]["payload"]["reason"], "budget_hard_limit")
         self.assertIn("observer-stopped", [row.get("action") for row in self.actions(result)])
 
     def test_budget_event_classification_excludes_green_card_cycle(self) -> None:

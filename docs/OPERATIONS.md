@@ -213,7 +213,8 @@ Controlled divergence — сигнал о расхождении между те
 `secretary status --json`: `installation.sprints.items` показывает статус, причину hard-остановки,
 разбивку бюджета, resume freshness и состояние наблюдателя каждого спринта. Недоступность board видна в
 `installation.sprints.error`. Детали одного спринта доступны через `secretary sprint status --ref
-sprint:ID`. Продолжить остановленный sprint может только `secretary sprint reopen --role po`.
+sprint:ID`. Переход в stopped остаётся в audit как `budget_hard_stopped` с причиной
+`budget_hard_limit`. Продолжить остановленный sprint может только `secretary sprint reopen --role po`.
 
 Решение тика на спринт видно в `actions` под `{"step": "observer-reconcile"}`:
 

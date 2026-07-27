@@ -154,6 +154,24 @@ class SprintTests(unittest.TestCase):
         events = TaskAudit(self.tmp.name).events(reference=ref)
         self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded"])
 
+    def test_hard_budget_stop_has_its_own_durable_event(self) -> None:
+        writer = SprintWriter(self.client, data_dir=self.tmp.name, thresholds={"signal": 1, "hard": 1})  # type: ignore[arg-type]
+        ref = writer.create(role="po", actor="operator", goal="hard limit")["sprint"]["ref"]
+
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked",
+            request_id="hard-stop", source_event_id="evt-card-blocked",
+        )
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked",
+            request_id="hard-stop", source_event_id="evt-card-blocked",
+        )
+
+        events = TaskAudit(self.tmp.name).events(reference=ref)
+        self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded", "budget_hard_stopped"])
+        self.assertEqual(events[-1]["payload"]["reason"], "budget_hard_limit")
+        self.assertEqual(events[-1]["payload"]["source_event_id"], "evt-card-blocked")
+
     def test_budget_thresholds_reject_hard_limit_below_signal(self) -> None:
         with self.assertRaisesRegex(TaskError, "hard threshold"):
             budget_thresholds({"sprint_budget": {"signal": 3, "hard": 2}})

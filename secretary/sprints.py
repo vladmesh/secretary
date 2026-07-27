@@ -295,6 +295,10 @@ class SprintWriter:
         self._role(role, {"po", "dispatcher", "steward"})
         if event_type not in BUDGET_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
+        request_id = request_id or str(uuid.uuid4())
+        before = self.reader.show(reference)
+        before_budget = _budget(before.get("budget"), self.thresholds)
+        hard_stop = before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
         def mutation(sprint: dict[str, Any]) -> None:
             budget = _budget(sprint.get("budget"), self.thresholds)
             budget["by_type"][event_type] += 1
@@ -303,7 +307,45 @@ class SprintWriter:
             if budget["hard_reached"] and sprint["status"] == "open":
                 values["sprint_status"] = "stopped"
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=values)
-        return self._write("budget_recorded", role, actor, reference, request_id, {"event_type": event_type, "source_event_id": source_event_id or None}, mutation)
+        result = self._write(
+            "budget_recorded", role, actor, reference, request_id,
+            {
+                "event_type": event_type,
+                "source_event_id": source_event_id or None,
+                "hard_limit_stop": hard_stop,
+            },
+            mutation,
+        )
+        recorded = self.audit.committed_event(request_id)
+        if recorded and recorded.get("payload", {}).get("hard_limit_stop"):
+            self._record_hard_stop(
+                role=role, actor=actor, reference=reference, request_id=request_id,
+                budget_event_id=str(recorded.get("event_id") or ""),
+                event_type=event_type, source_event_id=source_event_id,
+            )
+        return result
+
+    def _record_hard_stop(
+        self, *, role: str, actor: str, reference: str, request_id: str,
+        budget_event_id: str, event_type: str, source_event_id: str,
+    ) -> None:
+        """Record the state transition separately from the charge that caused it."""
+        stop_request_id = request_id + ":budget-hard-stop"
+        if self.audit.committed_event(stop_request_id) is not None:
+            return
+        sprint = self.reader.show(reference)
+        event = self._event(
+            "budget_hard_stopped", role, actor, reference, stop_request_id,
+            {
+                "reason": "budget_hard_limit",
+                "budget_event_id": budget_event_id or None,
+                "event_type": event_type,
+                "source_event_id": source_event_id or None,
+            },
+            sprint,
+        )
+        self.audit.stage(stop_request_id, event)
+        self._record("budget_hard_stopped", event)
 
     def resume(self, *, role: str, actor: str, reference: str, entry: dict[str, Any], request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "observer", "steward"})

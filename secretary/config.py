@@ -16,6 +16,9 @@ from typing import Any
 import yaml
 from jsonschema import Draft202012Validator
 
+from secretary.sprints import budget_thresholds
+from secretary.tasks import TaskError
+
 # schema name -> file in secretary/schemas/
 SCHEMAS = {
     "instance": "instance.schema.json",
@@ -221,8 +224,11 @@ def validate_instance(path: Path) -> InstanceReport:
 
     errors += validate(instance, "instance", instance_file.name)
     if isinstance(instance, dict):
-        budget = instance.get("sprint_budget")
-        if isinstance(budget, dict) and isinstance(budget.get("signal"), int) and isinstance(budget.get("hard"), int) and budget["hard"] < budget["signal"]:
+        # Resolve omitted values before comparing the limits.  Runtime does the same,
+        # so a partial setting cannot pass validation then stop every dispatcher tick.
+        try:
+            budget_thresholds(instance)
+        except TaskError:
             errors.append(SchemaError(instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"))
     name = instance.get("name", "") if isinstance(instance, dict) else ""
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
