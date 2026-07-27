@@ -280,8 +280,8 @@ git -C /home/dev/projects/service-template rev-parse --verify refs/heads/main
 gate на свежем disabled draft увидел смену HEAD до сборки worktree (`secretary/gate.py:135-136`) —
 это случай образца `gate-46b8aecb1d8b380eb456`. Stale, опубликованный уже после прогона (draft или
 канонический адаптер сменились по ходу, `gate.py:179-187`), сохраняет те checks, которые успели
-пройти. Про stale на enabled binding см. ниже: там результат наследуется от прошлого passed и может
-показывать все пять `passed`.
+пройти. Оба этих stale попадают на диск. Stale на enabled binding, наоборот, живёт только в выводе
+команды и файл результата не переписывает, см. ниже.
 
 ### Штатное восстановление disabled draft
 
@@ -357,15 +357,26 @@ binding он в двух из трёх исходов меняет состоя�
 - Живой HEAD совпал с записанным и канонический адаптер дал прежний дайджест — gate находит
   опубликованный passed-результат по этой паре и отдаёт его с кодом 0, ничего не трогая.
 - Живой HEAD ушёл вперёд — gate снимает enable, удаляет compatibility manifest вместе с target
-  record и отвечает `stale`.
+  record и печатает `stale` с кодом 1.
 - HEAD тот же, но адаптер переписан, и его дайджест не совпал — gate ищет прошлый passed-результат
   по паре scanner HEAD и provision run_id и, найдя его, делает ровно то же снятие enable
-  (`secretary/gate.py:62-95`). Опубликованный при этом `stale`-результат это копия прошлого passed:
-  `_disable_stale_enabled` меняет в нём только `status` и `findings` (`gate.py:336-356`), так что все
-  пять checks остаются `passed`. Судить о свежести по одним checks нельзя, смотрите `status`.
+  (`secretary/gate.py:62-95`).
 
-То есть один и тот же «проверочный» вызов может отозвать рабочий binding. Когда трогать состояние
-нельзя, ограничивайтесь чтением `result.json`, binding и target record.
+Оба снятия идут через `_disable_stale_enabled` (`gate.py:336-375`), и он не трогает
+`gate-runs/<id>/<run_id>/result.json`. Атомарная публикация переписывает только binding (`enabled:
+false`) и draft, чей блок `gate` получает `status: failed`, findings `stale.input` и пять `not-run`,
+и удаляет manifest с target record. Печатаемый `stale` собирается в памяти: на ушедшем вперёд HEAD
+это голый объект из `status` и `findings`, а на переписанном адаптере копия прошлого passed с
+подменёнными `status` и `findings`, поэтому в выводе все пять checks остаются `passed`.
+
+Отсюда расхождение, которое надо держать в голове при разборе: на диске лежит прежний `passed`
+result, а команда только что ответила `stale`. Долговечные следы снятия это disabled binding,
+`gate.failed` в draft и исчезнувшие manifest с target record. Файл результата рассказывает про свой
+прогон, а не про текущее состояние проекта, и судить о свежести по его checks нельзя.
+
+То есть один и тот же «проверочный» вызов может отозвать рабочий binding, ничего не дописав в
+gate-runs. Когда трогать состояние нельзя, ограничивайтесь чтением `result.json`, binding и target
+record.
 
 ### Чего этот lifecycle не доказывает
 
