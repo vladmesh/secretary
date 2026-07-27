@@ -4,9 +4,7 @@
     "id": "example-project",
     "repo": "/srv/projects/example-project",
     "adapter": "example-project",
-    "default_branch": "main",
-    "plane": "project",
-    "policy": {"code_concurrency": 1}
+    "default_branch": "main"
   },
   "scanner": {
     "version": 1,

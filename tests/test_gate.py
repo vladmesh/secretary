@@ -71,6 +71,45 @@ class GateTests(unittest.TestCase):
         self.assertEqual(dry_result["gate"]["status"], "passed")
         self.assertTrue(load_config(self.binding)["enabled"])
 
+    def test_binding_with_plane_and_policy_passes_with_identity_only_result(self):
+        self.provision()
+        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        binding = load_config(self.binding)
+        binding["plane"] = "project"
+        binding["policy"] = {"code_concurrency": 1}
+        self.binding.write_text(yaml.safe_dump(binding, sort_keys=False), encoding="utf-8")
+        draft = load_config(draft_path)
+        draft["identity"]["plane"] = "project"
+        draft["identity"]["policy"] = {"code_concurrency": 1}
+        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(validate(result, "gate-result", "result"), [])
+        self.assertEqual(sorted(result["identity"]), ["adapter", "default_branch", "id", "repo"])
+        enabled = load_config(self.binding)
+        self.assertTrue(enabled["enabled"])
+        self.assertEqual(enabled["plane"], "project")
+        self.assertEqual(enabled["policy"], {"code_concurrency": 1})
+        self.assertEqual(
+            sorted(load_config(draft_path)["identity"]), ["adapter", "default_branch", "id", "repo"]
+        )
+
+    def test_unexpected_identity_field_still_fails_the_gate(self):
+        self.provision()
+        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        draft = load_config(draft_path)
+        draft["identity"]["unexpected"] = "value"
+        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "draft_invalid")
+        self.assertFalse(load_config(self.binding)["enabled"])
+
     def test_compatibility_is_published_to_legacy_dispatcher_lookup(self):
         legacy = self.root / "control-panel" / "pipeline" / "manifests"
         (self.instance / "instance.yaml").write_text(yaml.safe_dump({

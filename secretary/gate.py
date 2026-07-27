@@ -15,7 +15,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import ScannerError, scan_repo
+from secretary.onboarding import IDENTITY_FIELDS, ScannerError, normalize_identity, scan_repo
 from secretary.provision import _instance_dir, _load_inputs, _project_lock_path, _run_id
 
 _SECRET = re.compile(
@@ -43,6 +43,8 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         existing_draft = load_config(draft_path)
     except ConfigError:
         existing_binding = existing_draft = None
+    if isinstance(existing_draft, dict):
+        normalize_identity(existing_draft)
     if isinstance(existing_binding, dict) and existing_binding.get("enabled") is True:
         if isinstance(existing_draft, dict) and existing_draft.get("gate", {}).get("status") == "passed":
             adapter_path = instance / "adapters" / f"{existing_binding['adapter']}.yaml"
@@ -222,7 +224,8 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
 
 
 def _base_result(draft: dict[str, Any], run_id: str, provision_run: str, digest: str) -> dict[str, Any]:
-    return {"version": 1, "run_id": run_id, "identity": copy.deepcopy(draft["identity"]),
+    return {"version": 1, "run_id": run_id,
+            "identity": {field: copy.deepcopy(draft["identity"][field]) for field in IDENTITY_FIELDS},
             "input_revision": {"scanner_head": draft["scanner"]["repo"]["head"], "provision_run_id": provision_run},
             "adapter_digest": digest, "status": "failed",
             "checks": {name: {"status": "not-run"} for name in ("clean_worktree", "setup", "smoke", "validation", "artifact_policy")},

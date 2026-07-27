@@ -12,7 +12,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import scan_repo
+from secretary.onboarding import IDENTITY_FIELDS, normalize_identity, scan_repo
 
 ENVIRONMENT_SUMMARIES = {
     "dependency-missing": "required dependency is missing",
@@ -171,6 +171,7 @@ def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
         return _status(status, errors=[str(exc)])
     if not isinstance(draft, dict) or not isinstance(binding, dict):
         return _status("draft_invalid", errors=["draft and binding must be mappings"])
+    normalize_identity(draft)
     errors = validate(draft, "onboarding-contract", draft_path.name)
     errors += validate(binding, "project-binding", binding_path.name)
     if errors:
@@ -178,7 +179,7 @@ def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
     identity = draft.get("identity", {})
     if binding.get("enabled") is not False:
         return _status("draft_invalid", errors=["binding must remain disabled"])
-    for field in ("id", "repo", "adapter", "default_branch"):
+    for field in IDENTITY_FIELDS:
         if binding.get(field) != identity.get(field):
             return _status("draft_invalid", errors=[f"binding {field} differs from draft identity"])
     if draft.get("scanner", {}).get("status") != "ok":
@@ -214,10 +215,7 @@ def _run_dir(instance: Path, project_id: str, run_id: str) -> Path:
 
 
 def _task_document(draft: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
-    identity = {
-        key: draft["identity"][key]
-        for key in ("id", "repo", "adapter", "default_branch")
-    }
+    identity = {key: draft["identity"][key] for key in IDENTITY_FIELDS}
     constraints: dict[str, Any] = {
         "binding_enabled": False,
         "adapter_storage": "external",
