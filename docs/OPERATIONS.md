@@ -112,6 +112,12 @@ python3 -m secretary data raw-kanboard-dump --instance INSTANCE \
 transcript inventory. `raw-kanboard-dump` создаёт timestamped raw dump через `docker cp`, не пишет
 в live container и не использует Kanboard API.
 
+Raw dumps копируют базу Kanboard целиком, то есть все boards, включая `Secretary sprints`, которого нет
+в board export. Из них читается только новейший (`_latest_raw_active_task_count` для сверки числа
+активных карточек), retention у них нет, и накопленные каталоги остаются на диске, пока оператор их не
+снесёт: `board/kanboard-raw-*` держат по 8 МБ и более каждый. Держать стоит один-два свежих, остальные
+удалять руками.
+
 ## Checkpoint writer
 
 Каждый production-тик под `tick_lock` в конце регенерирует board и runs exports, проверяет

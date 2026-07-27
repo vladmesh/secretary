@@ -33,6 +33,7 @@ recovery checkpoint. Между коммитами live-состояние оп�
 
 - instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`;
 - board export: `state/board/cards.ndjson`, `state/board/events.ndjson`, `state/board/export.json`;
+  это карточки board `Pipeline`; сущности спринтов лежат на отдельном board и в export не входят;
 - run/audit: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
 - memory facts: `state/memory/facts/**`;
 - knowledge documents: `state/knowledge/**` (свободный markdown, см.
@@ -53,6 +54,23 @@ recovery checkpoint. Между коммитами live-состояние оп�
 
 Board export держим только в `cards.ndjson` (построчный diff). Дубль `cards.json` в checkpoint
 не входит.
+
+## Спринты вне checkpoint
+
+Сущности спринтов живут задачами на board `Secretary sprints` (см. [Архитектура](ARCHITECTURE.md)), а
+board export покрывает только `Pipeline`. Значит потеря Kanboard уносит цель, текст Definition of
+Done, репозитории, счётчик бюджета, resume-записи и историю записей к сущности всех спринтов, включая
+открытые; карточки при этом восстанавливаются, но их поле `sprint_ref` начинает ссылаться на
+несуществующую сущность.
+
+Что от этого остаётся в каноне: документы «почему» в `state/knowledge/` (контекст и отвергнутые
+альтернативы, без полей сущности) и durable audit карточек в `state/board/events.ndjson`, где видны
+начисления бюджета и остановки по hard limit.
+
+Практический вывод для recovery: после восстановления считать открытые спринты потерянными и
+открывать их заново скиллом `open-sprint`, а не пытаться вывести состояние из карточек. Для установки,
+которая ведёт спринты, стоит держать свежий optional cold archive: он включает raw Kanboard dump, то
+есть единственную полную копию борда спринтов.
 
 ## Layout
 
