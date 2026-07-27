@@ -42,7 +42,7 @@ def add_sprint_subcommands(subparsers) -> None:
     created.set_defaults(handler=run_create)
     for name, handler, roles in (
         ("comment", run_comment, ("po", "dispatcher", "worker", "reviewer", "steward", "retro")),
-        ("current-task", run_current_task, ("po", "dispatcher", "steward")),
+        ("current-task", run_current_task, ("po", "dispatcher", "observer", "steward")),
         ("budget", run_budget, ("po", "dispatcher", "steward")),
         ("resume", run_resume, ("po", "dispatcher", "observer", "steward")),
         ("reopen", run_reopen, ("po",)),

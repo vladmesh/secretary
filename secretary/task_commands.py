@@ -60,7 +60,7 @@ def add_task_subcommands(subparsers) -> None:
     task_show.add_argument("--ref", required=True)
     task_show.set_defaults(handler=run_task_show)
     task_create = task_subcommands.add_parser("create")
-    task_create.add_argument("--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro"))
+    task_create.add_argument("--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer"))
     task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_create)
     task_create.add_argument("--request-id")
@@ -81,6 +81,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", choices=("exec", "tui"), default="")
     task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
     task_create.add_argument("--budget-event", choices=("recreated_task", "hotfix"), default="", help="charge a sprint recreation or hotfix event")
+    _add_sprint_override_args(task_create)
     task_create.set_defaults(handler=run_task_create)
     for name, handler in (
         ("comment", run_task_comment),
@@ -94,7 +95,7 @@ def add_task_subcommands(subparsers) -> None:
         command.add_argument(
             "--role",
             required=True,
-            choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro"),
+            choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"),
         )
         command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
         _add_data_dir_args(command)
@@ -107,12 +108,13 @@ def add_task_subcommands(subparsers) -> None:
         if name == "move":
             command.add_argument("--to", required=True, choices=("ideas", "ready", "in_progress", "validate", "blocked", "done"))
             command.add_argument("--reason-file")
+            _add_sprint_override_args(command)
         if name == "archive":
             command.add_argument("--reason-file")
         command.set_defaults(handler=handler)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
-    task_edit.add_argument("--role", required=True, choices=("po",))
+    task_edit.add_argument("--role", required=True, choices=("po", "dispatcher", "observer"))
     task_edit.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_edit)
     task_edit.add_argument("--request-id")
@@ -121,6 +123,7 @@ def add_task_subcommands(subparsers) -> None:
     task_edit.add_argument("--body-file", help="file with the full replacement description")
     task_edit.add_argument("--head")
     task_edit.add_argument("--review-head")
+    _add_sprint_override_args(task_edit)
     task_edit.set_defaults(handler=run_task_edit)
     task_claim = task_subcommands.add_parser("claim")
     task_claim.add_argument("--ref", required=True)
@@ -142,6 +145,11 @@ def add_task_subcommands(subparsers) -> None:
     _add_data_dir_args(verify_audit)
     verify_audit.set_defaults(handler=run_task_verify_audit)
     task.set_defaults(handler=not_implemented_task)
+
+
+def _add_sprint_override_args(parser) -> None:
+    parser.add_argument("--sprint-override", action="store_true", help="PO only: bypass an open sprint's single-writer guard")
+    parser.add_argument("--sprint-override-reason-file", help="required PO override reason file")
 
 
 def not_implemented_task(args: argparse.Namespace) -> int:
@@ -217,6 +225,8 @@ def run_task_create(args: argparse.Namespace) -> int:
             codex_launch_mode=args.codex_mode,
             sprint=args.sprint,
             budget_event=args.budget_event,
+            sprint_override=args.sprint_override,
+            sprint_override_reason=_read_body(args.sprint_override_reason_file),
             request_id=args.request_id,
         )
     except TaskError as exc:
@@ -238,6 +248,8 @@ def run_task_edit(args: argparse.Namespace) -> int:
             description=description,
             head=args.head,
             review_head=args.review_head,
+            sprint_override=args.sprint_override,
+            sprint_override_reason=_read_body(args.sprint_override_reason_file),
             request_id=args.request_id,
         )
     except TaskError as exc:
@@ -256,7 +268,15 @@ def run_task_verdict(args: argparse.Namespace) -> int:
 
 
 def run_task_move(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.move(role=args.role, actor=actor, reference=args.ref, target=args.to, reason=body, request_id=args.request_id))
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.move(
+            role=args.role, actor=actor, reference=args.ref, target=args.to, reason=body,
+            sprint_override=args.sprint_override,
+            sprint_override_reason=_read_body(args.sprint_override_reason_file),
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_task_archive(args: argparse.Namespace) -> int:

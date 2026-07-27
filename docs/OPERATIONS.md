@@ -206,6 +206,14 @@ Controlled divergence — сигнал о расхождении между те
 открытый спринт с board `Secretary sprints`. Наблюдатель не участвует в claim карточек: он не
 занимает project slot, не появляется в `records` и на очередь Ready не влияет.
 
+Пока sprint открыт, его repositories принадлежат этой голове как единственному product writer:
+observer создаёт только связанные с ним карточки и ведёт их изменениями на доске. Dispatcher
+сохраняет штатный цикл уже связанных карточек. Если оператору нужно вмешаться, PO передаёт
+`--sprint-override` и непустой `--sprint-override-reason-file` в `secretary task create`, `move`
+или `edit`; причина остаётся в durable audit. Отказ `sprint_write_forbidden` называет sprint и
+предлагает записать изменение к его сущности. `sprint_guard_unavailable` означает, что live sprint
+board не удалось проверить, поэтому запись намеренно не прошла.
+
 Перед запуском production tick сверяет budget audit связанных карточек. При
 `sprint_budget.signal` в prompt наблюдателя попадает отметка о достигнутом пороге, а скилл роли
 велит на ней пересмотреть вектор и записать пересмотр resume-записью. При
