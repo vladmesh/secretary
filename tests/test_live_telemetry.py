@@ -25,7 +25,8 @@ from secretary.dispatcher_production import (
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+from secretary.dispatcher import default_data_dir
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
 
 from triggered_agents.agents.steward import signals as steward_signals
@@ -35,6 +36,25 @@ from triggered_agents.runtime.state import AgentState
 
 def _ts(minutes_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+
+
+def _instance(root: Path, data_dir: Path) -> Path:
+    """A valid instance dir whose data_dir is `data_dir`, as the dispatcher unit is started with.
+
+    The packaged unit passes `--instance` and no `--data-dir`, so this file is the only thing that
+    binds the dispatcher to a data plane — and therefore the only thing that can bind a reader in
+    another process to the same one.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "instance.yaml").write_text(
+        "version: 1\n"
+        "name: telemetry-test\n"
+        f"data_dir: {data_dir}\n"
+        "offsite:\n"
+        "  instance_remote: https://example.invalid/instance.git\n",
+        encoding="utf-8",
+    )
+    return root
 
 
 def _telemetry_state(path: Path, telemetry: dict | None, **payload) -> None:
@@ -146,6 +166,72 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         # the freshness evidence, not a verdict on the current tick.
         self.assertEqual(telemetry.last_healthy_at, healthy_at)
 
+    def test_a_tick_that_dies_before_its_own_save_is_recorded_as_a_failure(self) -> None:
+        """The Kanboard outage case: the first board read raises and the tick never finishes.
+
+        Nothing inside the tick catches it, so without a record of its own the previous healthy
+        tick would answer for the pipeline for the whole freshness window while no card moves.
+        """
+        self.runtime.production_tick()
+        healthy = self.read_through_the_agent_reader()
+
+        with mock.patch(
+            "secretary.dispatcher_production._production_tasks",
+            side_effect=TaskError("backend_unavailable", "board is down", 1),
+        ):
+            with self.assertRaises(TaskError):
+                self.runtime.production_tick()
+
+        telemetry = self.read_through_the_agent_reader()
+        self.assertFalse(telemetry.last["healthy"])
+        self.assertEqual(telemetry.last["status"], "failed")
+        self.assertEqual(telemetry.last["errors"][0]["code"], "backend_unavailable")
+        self.assertEqual(telemetry.unhealthy_total, 1)
+        self.assertEqual(telemetry.unhealthy[-1]["seq"], telemetry.last["seq"])
+        self.assertEqual(telemetry.last_healthy_at, healthy.last_healthy_at)
+
+        with mock.patch.dict(
+            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
+        ):
+            problems, _ = health._pipeline_status()
+        self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
+        self.assertTrue(any("backend_unavailable" in problem for problem in problems))
+
+    def test_a_failed_tick_records_telemetry_without_persisting_its_half_done_work(self) -> None:
+        """Only the record of the failure lands: the payload it died holding is half applied."""
+        self.runtime.production_tick()
+        before = json.loads(self.runtime.production_state.path.read_text(encoding="utf-8"))
+
+        with mock.patch(
+            "secretary.dispatcher_production._reconcile_production",
+            side_effect=RuntimeError("host is gone"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.runtime.production_tick()
+
+        after = json.loads(self.runtime.production_state.path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {key: value for key, value in after.items() if key != "tick_telemetry"},
+            {key: value for key, value in before.items() if key != "tick_telemetry"},
+        )
+        self.assertEqual(self.read_through_the_agent_reader().last["status"], "failed")
+
+    def test_telemetry_is_found_through_the_instance_the_unit_passes(self) -> None:
+        """No TA_PRODUCTION_STATE, no SECRETARY_DATA_DIR: only `--instance`, as the unit runs it."""
+        instance = _instance(self.data_dir / "instance", self.data_dir)
+        self.runtime.production_tick()
+
+        with mock.patch.dict(
+            os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=False
+        ):
+            os.environ.pop("TA_PRODUCTION_STATE", None)
+            os.environ.pop("SECRETARY_DATA_DIR", None)
+            telemetry = production_telemetry.read()
+
+        self.assertEqual(telemetry.path, self.runtime.production_state.path)
+        self.assertTrue(telemetry.available)
+        self.assertTrue(telemetry.last["healthy"])
+
     def test_frozen_tick_is_recorded_as_a_healthy_terminal_tick(self) -> None:
         self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
 
@@ -191,6 +277,68 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(entry["error_count"], 9)
         self.assertLess(len(entry["errors"]), 9)
         self.assertIn("+", production_telemetry.describe(entry))
+
+
+class ProductionStatePathTests(unittest.TestCase):
+    """Where the reader looks for the dispatcher's records, on a host that is not the default one."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.data_dir = self.root / "srv" / "secretary-data"
+        self.instance = _instance(self.root / "instance", self.data_dir)
+        env = mock.patch.dict(os.environ, {"HOME": str(self.root / "home")})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("TA_PRODUCTION_STATE", "SECRETARY_DATA_DIR", "SECRETARY_INSTANCE"):
+            os.environ.pop(name, None)
+
+    def test_instance_data_dir_is_the_dispatchers_own(self) -> None:
+        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+
+        # default_data_dir is what `secretary dispatcher production-tick --instance ...` resolves
+        # with no --data-dir: the reader must land on the same directory, not on a home default.
+        self.assertEqual(production_telemetry.data_dir(), default_data_dir(self.instance))
+        self.assertEqual(
+            production_telemetry.state_path(),
+            self.data_dir / "dispatcher" / "production-state.json",
+        )
+
+    def test_a_relative_instance_data_dir_resolves_against_the_instance(self) -> None:
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: telemetry-test\ndata_dir: ./data\n"
+            "offsite:\n  instance_remote: https://example.invalid/instance.git\n",
+            encoding="utf-8",
+        )
+        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+
+        self.assertEqual(production_telemetry.data_dir(), self.instance / "data")
+
+    def test_explicit_env_overrides_win_in_the_dispatchers_order(self) -> None:
+        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+        os.environ["SECRETARY_DATA_DIR"] = str(self.root / "elsewhere")
+        self.assertEqual(production_telemetry.data_dir(), self.root / "elsewhere")
+
+        os.environ["TA_PRODUCTION_STATE"] = str(self.root / "state.json")
+        self.assertEqual(production_telemetry.state_path(), self.root / "state.json")
+
+    def test_an_unusable_instance_falls_back_to_the_home_default(self) -> None:
+        """A broken or absent instance file must not crash the command that reports host trouble."""
+        os.environ["SECRETARY_INSTANCE"] = str(self.root / "missing")
+        self.assertEqual(production_telemetry.data_dir(), self.root / "home" / "secretary-data")
+
+        (self.instance / "instance.yaml").write_text("data_dir: [not, a, path\n", encoding="utf-8")
+        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+        self.assertEqual(production_telemetry.data_dir(), self.root / "home" / "secretary-data")
+
+    def test_a_missing_record_names_the_instance_resolved_path(self) -> None:
+        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+
+        telemetry = production_telemetry.read()
+
+        self.assertEqual(telemetry.unavailable, "production-state-missing")
+        self.assertEqual(telemetry.path, self.data_dir / "dispatcher" / "production-state.json")
 
 
 class HealthAgentStateTests(unittest.TestCase):

@@ -15,10 +15,13 @@ with its own environment, and the state file is the durable boundary between the
 reasoning that already sends the steward across worktrees for the dispatcher's own state
 (triggered-agents-253).
 
-Path resolution mirrors `runtime/state.py`'s STATE_ROOT: the installation's data dir, which every
-packaged unit leaves at its default under the runtime user's home. `TA_PRODUCTION_STATE` (whole
-file) and `SECRETARY_DATA_DIR` (the data dir) override it for tests and a host whose layout
-diverges.
+Path resolution follows the dispatcher's own, so the reader lands on the file the writer writes on
+any installation, not only on one that kept the default layout: `--data-dir`/`SECRETARY_DATA_DIR`
+first, then `data_dir` out of the instance the dispatcher unit is started with
+(`secretary.task_commands.resolve_data_dir` resolves the same pair the same way). The packaged unit
+passes only `--instance`, and a valid `data_dir` is any absolute path, so the instance file is the
+binding that matters. `TA_PRODUCTION_STATE` overrides the whole file for tests and for a host that
+has to point a reader somewhere else by hand.
 """
 from __future__ import annotations
 
@@ -27,10 +30,40 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
+DEFAULT_INSTANCE = Path("/home/dev/secretary-instance")
+
+
+def instance_file() -> Path:
+    path = Path(os.environ.get("SECRETARY_INSTANCE") or DEFAULT_INSTANCE).expanduser()
+    return path / "instance.yaml" if path.is_dir() else path
+
+
+def instance_data_dir() -> Path | None:
+    """The installation's `data_dir` as the dispatcher resolves it, or None if it cannot be read.
+
+    None is not an error here: the caller falls back to the home default and, if that file is not
+    there either, reports the path it looked at. An instance that cannot be parsed must not take
+    down the health command that is trying to explain what is wrong with the host.
+    """
+    path = instance_file()
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return None
+    configured = loaded.get("data_dir") if isinstance(loaded, dict) else None
+    if not isinstance(configured, str) or not configured.strip():
+        return None
+    resolved = Path(configured).expanduser()
+    return resolved if resolved.is_absolute() else path.parent / resolved
+
 
 def data_dir() -> Path:
     configured = os.environ.get("SECRETARY_DATA_DIR")
-    return Path(configured) if configured else Path.home() / "secretary-data"
+    if configured:
+        return Path(configured).expanduser()
+    return instance_data_dir() or Path.home() / "secretary-data"
 
 
 def state_path() -> Path:

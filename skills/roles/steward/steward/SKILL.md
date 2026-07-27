@@ -98,8 +98,10 @@ python3 -m triggered_agents steward scan --json
 
 - `new_blocked` — карточки, впервые попавшие в Blocked с прошлого прогона.
 - `pipeline_ticks` — нездоровые тики production dispatcher с прошлого watermark, из его
-  собственной телеметрии (`tick_telemetry` в `<data_dir>/dispatcher/production-state.json`).
-  В каждом хите — время тика, статус, шаг и коды ошибок. Отдельные события того же вида:
+  собственной телеметрии (`tick_telemetry` в `<data_dir>/dispatcher/production-state.json`;
+  `data_dir` резолвится из instance, как у самого диспетчера).
+  В каждом хите — время тика, статус, шаг и коды ошибок. Тик, упавший с исключением, попадает
+  сюда как `status: failed`. Отдельные события того же вида:
   `production-state-missing`/`tick-telemetry-missing` (телеметрию не прочитать — это не «всё
   тихо», а слепота), `pipeline-telemetry-rotated` (нездоровых тиков было больше, чем сохранило
   кольцо) и `pipeline-telemetry-reset` (state-файл заменили, история счётчика началась заново).
