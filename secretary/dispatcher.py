@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -150,6 +151,15 @@ def default_data_dir(instance_path: Path) -> Path:
 
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
+
+
+# Observer workspaces live in this subdirectory of the workspaces root. Orca puts a worktree at
+# <workspaces root>/<repo directory>/<worktree name>, so the observer repo's directory carries the
+# same name and the path the dispatcher fixed in the launch intent is the path Orca hands back.
+OBSERVER_WORKSPACE_DIR = "observers"
+# The only branch of the observer repo, named at init so no bring-up has to ask git what a fresh
+# repository calls its first branch.
+OBSERVER_REPO_BRANCH = "observers"
 
 
 def _same_repo(first: Path, second: Path) -> bool:
@@ -490,15 +500,102 @@ class CommandHostRuntime:
     def observer_workspace(self, reference: str) -> str:
         """Where one sprint observer runs. Its own directory, never a card workspace and never the
         interactive secretary session's checkout: the observer reads reports and slices cards, it
-        does not own a branch."""
+        owns no branch of the project it watches."""
         if self.mode == "noop":
-            return str(self.data_dir / "dispatcher" / "observers" / _request_token(reference))
+            return str(
+                self.data_dir / "dispatcher" / OBSERVER_WORKSPACE_DIR / _request_token(reference)
+            )
         root = Path(
             os.environ.get(
                 "SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")
             )
         )
-        return str(root / "observers" / _request_token(reference))
+        return str(root / OBSERVER_WORKSPACE_DIR / _request_token(reference))
+
+    def _observer_repo(self) -> Path:
+        """The repo observer workspaces are cut from: standalone, empty, without a remote.
+
+        Orca only gives terminals to worktrees it knows, and it only registers git repositories, so
+        a directory made with `mkdir` gets no terminal at all. What the observer needs is that
+        registration, not a checkout of the project it watches: it reads the board and the sprint
+        entity and writes no code, so a workspace it could commit the project from would be wrong
+        as well as unnecessary. Hence a repo of its own, created once and shared by every sprint.
+        """
+        repo = self.data_dir / "dispatcher" / "observer-root" / OBSERVER_WORKSPACE_DIR
+        if not (repo / ".git").is_dir():
+            repo.mkdir(parents=True, exist_ok=True)
+            self._run(
+                [
+                    "git", "-C", str(repo), "init", "--quiet",
+                    "--initial-branch", OBSERVER_REPO_BRANCH,
+                ],
+                "observer repo init",
+            )
+            self._run(
+                [
+                    "git", "-C", str(repo),
+                    "-c", "user.name=secretary-dispatcher",
+                    "-c", "user.email=dispatcher@localhost",
+                    "commit", "--quiet", "--allow-empty", "-m", "observer root",
+                ],
+                "observer repo commit",
+            )
+        # How Orca learns the path. It answers with the same repo when it already knows it, so this
+        # stays a no-op on every bring-up after the first instead of a first-run special case.
+        self._run_json(["orca", "repo", "add", "--path", str(repo), "--json"])
+        return repo
+
+    def _observer_workspace_registered(self, workspace: str) -> bool:
+        """Whether Orca knows this path as a worktree of its own.
+
+        Only `selector_not_found` reads as "not registered". Any other failure is Orca declining to
+        answer, and an unanswered question must not pass for a free path: the caller clears an
+        unregistered directory out of the way, and the stop path removes what it finds.
+        """
+        try:
+            self._run_json(
+                ["orca", "worktree", "show", "--worktree", f"path:{workspace}", "--json"]
+            )
+        except HostError as exc:
+            if "selector_not_found" in str(exc):
+                return False
+            raise
+        return True
+
+    def _create_observer_workspace(self, reference: str) -> Path:
+        """The observer's workspace, registered with Orca and at the path the record already names.
+
+        A workspace Orca already knows is reused: a relaunch after a dead pid keeps the sprint's
+        directory. An unregistered directory at that path is left over from a bring-up that never
+        reached Orca and holds nothing but the prompt file this launch rewrites, so it is cleared
+        rather than worked around: `worktree create` would otherwise sidestep it and put the
+        workspace at a path no record points at.
+        """
+        workspace = Path(self.observer_workspace(reference))
+        if self._observer_workspace_registered(str(workspace)):
+            return workspace
+        if workspace.exists():
+            shutil.rmtree(workspace, ignore_errors=True)
+        repo = self._observer_repo()
+        result = self._run_json([
+            "orca", "worktree", "create",
+            "--repo", f"path:{repo}",
+            "--name", workspace.name,
+            "--base-branch", OBSERVER_REPO_BRANCH,
+            "--setup", "skip",
+            "--no-parent",
+            "--json",
+        ])
+        worktree = result.get("worktree") if isinstance(result.get("worktree"), dict) else result
+        path = worktree.get("path") if isinstance(worktree, dict) else None
+        if not isinstance(path, str) or not path:
+            raise HostError("orca did not return an observer workspace path")
+        if Path(path) != workspace:
+            # The lifecycle wrote `workspace` into the launch intent before this call, and a tick
+            # that dies now can only find the head through it. A workspace somewhere else is a
+            # deferred bring-up with a readable reason, not a head nothing points at.
+            raise HostError(f"orca placed the observer workspace at {path}, not {workspace}")
+        return workspace
 
     def observer_pid_file(self, reference: str) -> str:
         """Where this sprint's observer heartbeat writes its pid.
@@ -515,10 +612,16 @@ class CommandHostRuntime:
         Same rendering and role environment as any other dispatcher-launched head: the command
         comes from the catalog launcher, the process runs through `role_env exec --role observer`,
         and the pid heartbeat wrapper writes the head's own pid where the tick reads it back.
+
+        The workspace is registered with Orca first, the way the worker path registers its own:
+        `terminal create` takes a worktree selector, and a plain directory is not one.
         """
         reference = str(sprint.get("ref") or "")
-        workspace = Path(self.observer_workspace(reference))
-        workspace.mkdir(parents=True, exist_ok=True)
+        if self.mode == "noop":
+            workspace = Path(self.observer_workspace(reference))
+            workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            workspace = self._create_observer_workspace(reference)
         self._write_prompt(workspace / OBSERVER_PROMPT_FILE, prompt)
         pid_file = _observer_pid_file(reference)
         run = self._observer_run(head, str(workspace))
@@ -552,14 +655,14 @@ class CommandHostRuntime:
                 )
             except (TuiDeliveryError, HostError) as exc:
                 try:
-                    _close_tui_terminal_strict(handle, run_json=self._run_json)
-                except Exception as close_exc:
+                    self._stop_observer_terminals(str(workspace))
+                except Exception as stop_exc:
                     # The pane is still up. Its handle goes back with the failure, because this
                     # dict is the only pointer to it: reporting a plain bring-up failure would
                     # leave the sprint reading as headless and the next tick would open a second
                     # head beside a head that is already running.
                     raise ObserverLaunchAborted(
-                        f"{exc}; observer terminal close failed: {close_exc}",
+                        f"{exc}; observer terminal stop failed: {stop_exc}",
                         handle=handle,
                         workspace=str(workspace),
                         pid_file=pid_file,
@@ -569,32 +672,54 @@ class CommandHostRuntime:
         return {"workspace": str(workspace), "handle": handle, "pid_file": pid_file, "run": run}
 
     def stop_observer(self, record: Any) -> None:
-        """End one observer head. Its panes only: nothing else runs in that workspace.
+        """End one observer head and give back what its bring-up took.
 
-        A record with no handle is a head adopted from a launch intent, whose handle died with the
-        tick that opened it. The observer workspace belongs to that one sprint, so its terminals
-        are that head and closing them is the same stop by another name.
+        The stop goes through the workspace, not pane by pane. That workspace belongs to one sprint
+        and nothing else runs there, so its terminals are that head: the pane the record names, the
+        pane a head adopted from a launch intent has lost the handle of, and the shell Orca opens
+        beside a worktree it has just created. The worktree registration goes with them, so a
+        stopped sprint leaves Orca neither a terminal of its observer nor a workspace for it.
 
-        Raises HostError when Orca refuses to close a pane, and equally when it refuses to list
-        the workspace's panes at all: the record is the only pointer to that head, so an inventory
-        that could not be read must not pass for an empty one. The lifecycle then keeps the record
-        and retries, instead of dropping it and putting a second head on the sprint later.
+        A workspace Orca does not know is a head that is already gone, which is what makes the
+        retry of a half-finished stop terminate. Anything else Orca refuses — an answer it will not
+        give, a stop it will not perform, a worktree it will not remove — is a failed stop: it
+        raises, and the lifecycle keeps the record as `stop-pending` and comes back to it. Dropping
+        the record instead would leave a live head with nothing pointing at it, and the next tick
+        would put a second head on the same sprint.
         """
         if self.mode == "noop":
             return
-        handles = [record.handle] if record.handle else [
-            str(terminal.get("handle") or "")
-            for terminal in self._observer_terminals(
-                str(getattr(record, "workspace", "") or "")
-            )
-        ]
-        for handle in [handle for handle in handles if handle]:
-            try:
-                _close_tui_terminal_strict(handle, run_json=self._run_json)
-            except HostError:
-                raise
-            except Exception as exc:
-                raise HostError(f"observer terminal close failed: {exc}") from None
+        workspace = str(getattr(record, "workspace", "") or "")
+        if not workspace:
+            # A record written before the launch intent named a workspace: the handle is the only
+            # pointer left to that head.
+            if record.handle:
+                self._close_observer_pane(record.handle)
+            return
+        if not self._observer_workspace_registered(workspace):
+            return
+        self._stop_observer_terminals(workspace)
+        self._run_json([
+            "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
+        ])
+
+    def _stop_observer_terminals(self, workspace: str) -> None:
+        """Stop every pane of an observer workspace.
+
+        One call for the whole workspace rather than a close per handle: `terminal close` answers
+        `tab_not_found` for a pane the runtime never gave a UI tab, and that is every pane a
+        dispatcher-launched head gets on a headless serve, so a per-handle close reports a stop
+        that worked as a stop that failed. This is the same call the worker teardown makes.
+        """
+        self._run_json(["orca", "terminal", "stop", "--worktree", f"path:{workspace}", "--json"])
+
+    def _close_observer_pane(self, handle: str) -> None:
+        try:
+            _close_tui_terminal_strict(handle, run_json=self._run_json)
+        except HostError:
+            raise
+        except Exception as exc:
+            raise HostError(f"observer terminal close failed: {exc}") from None
 
     def _observer_run(self, head: str, workspace: str) -> dict[str, Any]:
         try:
@@ -1132,26 +1257,6 @@ class CommandHostRuntime:
             if terminal.get("handle") == handle:
                 return str(terminal.get("leafId") or "")
         return ""
-
-    def _observer_terminals(self, workspace: str) -> list[dict[str, Any]]:
-        """Panes of an observer workspace, or HostError when Orca will not say.
-
-        `_worktree_terminals` degrades an unreadable inventory into `[]`, which is right where the
-        answer only picks a pane. Here it decides whether a head is gone, and "Orca is down" must
-        not read as "nothing is running": that is how a live head loses its record.
-        """
-        if self.mode == "noop" or not workspace:
-            return []
-        data = self._run_json([
-            "orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"
-        ])
-        payload = data.get("result") if isinstance(data.get("result"), dict) else data
-        terminals = payload.get("terminals") if isinstance(payload, dict) else None
-        if terminals is None:
-            return []
-        if not isinstance(terminals, list):
-            raise HostError(f"observer terminal list for {workspace} is unreadable")
-        return [terminal for terminal in terminals if isinstance(terminal, dict)]
 
     def _worktree_terminals(self, workspace: str) -> list[dict[str, Any]]:
         """Terminal inventory for a worktree, or [] when it cannot be read. Callers use it to pick
