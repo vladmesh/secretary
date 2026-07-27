@@ -9,7 +9,9 @@ gate runs through its adapter's `validation.ci`:
            typical `on: [push:main, pull_request]` workflow actually fires — a bare feature-branch
            push triggers nothing), then poll GitHub CI for the branch head sha; SUCCESS is green,
            FAILURE is red, PENDING/NONE is pending (a check still running, or none posted yet —
-           «CI не стартовал», deliberately not confused with «CI красный»).
+           «CI не стартовал», deliberately not confused with «CI красный»). `validation
+           .required_checks` narrows the rollup to those check names; without it every check on
+           the sha counts.
   none   — no mechanical gate; the card goes straight to review (unchanged pre-633 behaviour).
 
 Base-freshness recovery runs first for local/github: a branch that fell behind its base is
@@ -117,7 +119,7 @@ def gate_check(host, task: dict, record) -> GateResult:
     if ci == "local":
         return _local_gate(host, task, record, workspace)
     if ci == "github":
-        return _github_gate(host, task, workspace, base)
+        return _github_gate(host, task, workspace, base, _required_checks(host, task))
     return GateResult("green", f"ci {ci!r}: no mechanical gate")
 
 
@@ -126,6 +128,16 @@ def _validation(host, task: dict) -> dict:
     adapter = adapter_fn(task["project"]) if callable(adapter_fn) else None
     validation = adapter.get("validation") if isinstance(adapter, dict) else None
     return validation if isinstance(validation, dict) else {}
+
+
+def _required_checks(host, task: dict) -> list[str]:
+    """Declared names of the checks the github gate judges by (`validation.required_checks`).
+    Empty list means the adapter has not migrated yet: the gate then judges by every check on the
+    sha, as it did before secretary-841."""
+    declared = _validation(host, task).get("required_checks")
+    if not isinstance(declared, list):
+        return []
+    return [name.strip() for name in declared if isinstance(name, str) and name.strip()]
 
 
 def validation_ci(host, task: dict) -> str:
@@ -167,13 +179,13 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     return GateResult("red", summary, tail, fingerprint=_fingerprint("local", tail))
 
 
-def _github_gate(host, task: dict, workspace: str, base: str) -> GateResult:
+def _github_gate(host, task: dict, workspace: str, base: str, required: list[str] | None = None) -> GateResult:
     branch = _legacy_worker_branch(task["ref"])
     host._run(["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch")
     _ensure_pr(host, workspace, task, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
-    rollup, failed = _poll_ci(host, repo, sha)
+    rollup, failed = _poll_ci(host, repo, sha, required or [])
     short = sha[:12] or sha
     if rollup == "SUCCESS":
         return GateResult("green", f"CI green for `{branch}` @ `{short}`")
@@ -245,8 +257,9 @@ def _open_pr_number(host, workspace: str, branch: str) -> int | None:
         return None
 
 
-def _poll_ci(host, repo: str, sha: str) -> tuple[str, dict | None]:
-    """Combined CI rollup for `sha`: GitHub-Actions check-runs plus legacy commit statuses."""
+def _poll_ci(host, repo: str, sha: str, required: list[str] | None = None) -> tuple[str, dict | None]:
+    """Combined CI rollup for `sha`: GitHub-Actions check-runs plus legacy commit statuses,
+    narrowed to `required` when the adapter declares a required set."""
     items: list[dict] = []
     runs = _gh_api(host, f"repos/{repo}/commits/{sha}/check-runs", jq=".check_runs")
     if isinstance(runs, list):
@@ -254,7 +267,7 @@ def _poll_ci(host, repo: str, sha: str) -> tuple[str, dict | None]:
     statuses = _gh_api(host, f"repos/{repo}/commits/{sha}/status", jq=".statuses")
     if isinstance(statuses, list):
         items.extend(item for item in statuses if isinstance(item, dict))
-    return _rollup(items)
+    return _rollup(items, required)
 
 
 def _gh_api(host, path: str, *, jq: str):
@@ -285,11 +298,34 @@ def _check_result(item: dict) -> str:
     return "fail" if str(item.get("conclusion", "")).upper() in _FAIL_CONCLUSIONS else "pass"
 
 
-def _rollup(items: list[dict]) -> tuple[str, dict | None]:
+def _check_name(item: dict) -> str:
+    """Declared-name key of a rollup entry: the Actions check-run `name`, or the legacy commit
+    status `context`."""
+    return str(item.get("name") or item.get("context") or "").strip()
+
+
+def _rollup(items: list[dict], required: list[str] | None = None) -> tuple[str, dict | None]:
     """Overall CI state: PENDING while any job is still running (even next to an already-failed
     one — a flaky-looking early failure must not bounce the card before the suite finishes), then
     FAILURE (with the first failing entry) once every job is terminal, SUCCESS if none failed, or
-    NONE when there are no checks at all."""
+    NONE when there are no checks at all.
+
+    With a declared `required` set the gate judges by those names only (secretary-841): entries
+    with any other name are ignored whatever they report, and a required name with no entry on the
+    sha at all counts as pending — the check may still be queued, and a set nothing ever posts is
+    what the pending watchdog escalates. Without a set every entry counts, the pre-841 behaviour
+    an adapter that has not declared `validation.required_checks` keeps.
+    """
+    if required:
+        by_name = {name: [] for name in required}
+        for item in items:
+            bucket = by_name.get(_check_name(item))
+            if bucket is not None:
+                bucket.append(item)
+        items = [item for name in required for item in by_name[name]]
+        if any(not bucket for bucket in by_name.values()):
+            # a required check has not been posted for this sha yet
+            return "PENDING", None
     if not items:
         return "NONE", None
     first_fail = None
