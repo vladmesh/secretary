@@ -212,6 +212,25 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["sprint"]["repositories"], ["secretary"])
 
+    def test_cli_observer_can_set_current_task(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="observer current task")["sprint"]["ref"]
+        task = TaskWriter(self.client, data_dir=self.tmp.name).create(
+            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            sprint=ref,
+        )["task"]
+        output, errors = io.StringIO(), io.StringIO()
+
+        with mock.patch("secretary.sprint_commands.KanboardClient", return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main([
+                "sprint", "current-task", "--ref", ref, "--role", "observer", "--actor", "observer",
+                "--task", task["ref"], "--data-dir", self.tmp.name,
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue())["sprint"]["current_task"], task["ref"])
+
     def test_resume_requires_all_fields_and_staleness_uses_card_audit(self) -> None:
         ref = self.writer.create(role="po", actor="operator", goal="resume") ["sprint"]["ref"]
         with self.assertRaisesRegex(TaskError, "missing required fields"):
