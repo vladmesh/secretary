@@ -122,6 +122,53 @@ class LaunchIntentTests(unittest.TestCase):
             with mock.patch.object(self.host, host_method, call):
                 yield
 
+    def refuse_audit(self, match: str):
+        """A journal that refuses exactly the writes whose request id carries `match`.
+
+        The refusal lands on `stage`, which is where the journal is written before the backend
+        mutation it describes: nothing of that write happens at all.
+        """
+        real = self.writer.audit.stage
+
+        def stage(request_id: str, event: dict) -> None:
+            if match in request_id:
+                raise OSError("audit journal is not writable")
+            real(request_id, event)
+
+        return mock.patch.object(self.writer.audit, "stage", stage)
+
+    @contextlib.contextmanager
+    def audit_dies_after(self, host_method: str):
+        """The journal stops accepting writes the moment the head is up.
+
+        The other half of `state_dies_after`: the launch itself succeeded, and what is refused is
+        the telemetry the launch path writes after it.
+        """
+        real_stage = self.writer.audit.stage
+        real_append = self.writer.audit.append
+        real_call = getattr(self.host, host_method)
+        launched = {"yet": False}
+
+        def stage(request_id: str, event: dict) -> None:
+            if launched["yet"]:
+                raise OSError("audit journal is not writable")
+            real_stage(request_id, event)
+
+        def append(request_id: str, event: dict) -> str:
+            if launched["yet"]:
+                raise OSError("audit journal is not writable")
+            return real_append(request_id, event)
+
+        def call(*args, **kwargs):
+            result = real_call(*args, **kwargs)
+            launched["yet"] = True
+            return result
+
+        with mock.patch.object(self.writer.audit, "stage", stage):
+            with mock.patch.object(self.writer.audit, "append", append):
+                with mock.patch.object(self.host, host_method, call):
+                    yield
+
     def report_done(self, request_id: str = "worker-done") -> None:
         self.writer.report(
             role="worker",
@@ -329,6 +376,134 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(outcome["action"], "stale-done-rework")
         self.assertEqual(seen[0]["action"], "stale-done-rework")
 
+    # worker: the round a rework launch belongs to ---------------------------
+
+    def rework_after_red_review(self) -> None:
+        """Bring the card to the point where the next tick relaunches a worker for round 2."""
+        self.run_to_validate()
+        self.tick()  # reviewer up
+        self.verdict("red", "needs work", "verdict-red")
+
+    def test_an_uninterrupted_review_red_rework_opens_the_next_round(self) -> None:
+        """The baseline the interrupted rework below has to end up matching."""
+        self.rework_after_red_review()
+
+        self.assertEqual(self.tick()["action"], "rework-started")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2)
+
+    def test_an_adopted_review_red_rework_lands_on_the_round_it_reserved(self) -> None:
+        """Recovery resumes the rework's own round, not the one the red verdict closed.
+
+        The round is reserved before the intent goes to disk precisely so a tick that dies between
+        the relaunch and its record cannot collapse two rounds, with their routing and their
+        verdicts, into one.
+        """
+        self.rework_after_red_review()
+        with self.state_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        intent = self.stored_intent()
+        self.assertEqual((intent["round"], intent["opens_round"]), (2, True))
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2)
+        # The previous round's heads go with it: the adopted head is recorded by the round it
+        # actually belongs to, not carried over from the round that was rejected.
+        self.assertEqual((record.worker_run, record.review_run), ({}, {}))
+
+    def test_an_adopted_gate_red_rework_lands_on_the_round_it_reserved(self) -> None:
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+        with self.state_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        intent = self.stored_intent()
+        self.assertEqual((intent["action"], intent["round"], intent["opens_round"]),
+                         ("gate-red-rework", 2, True))
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2)
+
+    def test_a_respawn_adoption_stays_inside_its_round(self) -> None:
+        """A respawn continues the round it interrupted, so its intent reserves nothing."""
+        self.tick()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        with self.state_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertFalse(self.stored_intent()["opens_round"])
+
+        self.tick()
+
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 1)
+
+    # worker: a journal that refuses instead of a state plane ------------------
+
+    def test_an_audit_that_refuses_the_claim_launches_no_worker_at_all(self) -> None:
+        with self.refuse_audit("-claim-"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.host.prepared, [], "no head may exist that no record can find")
+        self.assertEqual(self.stored_intent(), {})
+        self.assertIsNone(self.record())
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["step"], "claim")
+        self.assertEqual(self.host.prepared, [REF], "exactly one head, on the retry")
+
+    def test_an_audit_that_refuses_after_the_claim_leaves_the_head_on_the_record(self) -> None:
+        """The routing write is past the record's own save, so the head is already findable."""
+        with self.audit_dies_after("prepare_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.host.prepared, [REF])
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.state, "claimed")
+        self.assertTrue(record.handle, "the launched head must be on the record")
+        self.assertEqual(self.stored_intent(), {})
+
+        # The next tick reads a card that already has its head, and starts nothing.
+        self.tick()
+
+        self.assertEqual(self.host.prepared, [REF])
+
+    def test_an_audit_that_refuses_after_a_rework_recovers_that_rework_once(self) -> None:
+        self.rework_after_red_review()
+        with self.audit_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.stored_intent()["action"], "review-red-rework")
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self.record()
+        assert record is not None
+        self.assertEqual((record.state, record.attempt_round), ("claimed", 2))
+
     # reviewer ---------------------------------------------------------------
 
     def test_the_review_launch_intent_is_on_disk_before_the_host_is_called(self) -> None:
@@ -416,6 +591,46 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertEqual(pending["action"], "review-launch-pending")
         self.assertEqual(self.host.reviews, [REF])
+
+    # reviewer: a journal that refuses instead of a state plane ---------------
+
+    def test_an_audit_that_refuses_the_launch_request_starts_no_reviewer(self) -> None:
+        """The launch request comment is the reviewer's own pre-launch journal write."""
+        self.run_to_validate()
+
+        with self.refuse_audit("start-intent"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.host.reviews, [])
+        self.assertEqual(self.stored_intent(), {})
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["step"], "review")
+        self.assertEqual(self.host.reviews, [REF], "exactly one reviewer, on the retry")
+
+    def test_an_audit_that_refuses_after_the_review_launch_adopts_that_reviewer(self) -> None:
+        """The reviewer's routing write is before the record's save, so the intent is what survives."""
+        self.run_to_validate()
+        with self.audit_dies_after("start_review"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.host.reviews, [REF])
+        self.assertEqual(self.stored_intent()["role"], "review")
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "review-launch-adopted")
+        self.assertEqual(self.host.reviews, [REF], "the live reviewer must not be doubled")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.state, "reviewing")
+
+        # And the adopted reviewer's verdict still lands on the card it was launched for.
+        self.verdict("green", "looks good", "verdict-green")
+        self.assertEqual(self.tick()["to"], "done")
 
     # liveness ---------------------------------------------------------------
 

@@ -11,7 +11,9 @@ to, the workspace the head runs in and the pid file it writes its heartbeat to. 
 file are path arithmetic over the card reference and the worker id, so both are known before the
 host answers, which is exactly what a tick that dies mid-launch never gets to see. With them the
 next tick can settle the only question that matters, "is the head of that launch alive", without
-the terminal handle the lost tick never persisted.
+the terminal handle the lost tick never persisted. The round is the round the new head belongs to,
+which for a rework is the next one: it is reserved here, before the host call, so an adoption
+resumes the rework rather than the round the red result closed.
 
 Resolution runs before anything else the tick would do with the card:
 
@@ -76,13 +78,20 @@ def write_launch_intent(
     action: str,
     head: str,
     workspace: str,
+    round_number: int | None = None,
 ) -> str | None:
     """Fix one bring-up on disk before the host is called. Returns the failure, or None.
 
     The record is left exactly as it was when the write fails, so a caller that answers with "no
     host call this tick" leaves nothing behind for the next one to misread.
+
+    `round_number` is the round the head being launched will belong to. A rework opens a new one,
+    and it has to be reserved here rather than after the host call: the round the intent carries is
+    the round an adoption resumes, and a rework recovered on the round its red verdict ended would
+    merge two rounds and their routing into one.
     """
     previous = dict(getattr(record, "launch_intent", None) or {})
+    reserved = record.attempt_round if round_number is None else round_number
     record.launch_intent = {
         "role": role,
         "action": action,
@@ -90,7 +99,8 @@ def write_launch_intent(
         "workspace": workspace,
         "pid_file": launch_pid_file(role, ref),
         "attempt_id": record.attempt_id,
-        "round": record.attempt_round,
+        "round": reserved,
+        "opens_round": bool(reserved) and reserved != record.attempt_round,
         "respawns": int(getattr(record, f"{role}_respawns", 0) or 0),
         "at": time.time(),
     }
@@ -228,6 +238,12 @@ def _adopt_launch_intent(
             record.review_commit = runtime.host.head_commit(record)
     else:
         record.state = "claimed"
+        reserved = int(intent.get("round") or 0)
+        if intent.get("opens_round") and reserved:
+            # The launch was a rework: it reserved the next round before calling the host, and the
+            # adopted head belongs to that round. Opening it here is what keeps the rework's
+            # routing and its verdict apart from the round the red result closed.
+            runtime.open_worker_round(record, round_number=reserved)
         record.handle = ""
         record.worker_leaf = ""
         record.worker_started_at = record.worker_progress_at = launched_at

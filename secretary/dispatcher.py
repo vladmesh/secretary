@@ -1902,7 +1902,7 @@ class DispatcherRuntime:
         )
         # A re-claimed card continues its own round numbering: the journal, not the board, knows
         # how many rounds it has had, so a return to Ready adds a round instead of resetting.
-        self._open_worker_round(record, round_number=self._journal_round(ref) + 1)
+        self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self.save_records(payload, records)
         return self._launch_worker_after_claim(
@@ -2033,11 +2033,14 @@ class DispatcherRuntime:
         record: DispatcherRecord,
         *,
         action: str,
+        round_number: int | None = None,
     ) -> str | None:
         """Fix a rework or respawn bring-up on disk before `restart_worker` is called.
 
         Every relaunch reuses the workspace the record already names, so the intent has the head's
-        identity from the record itself. Returns the failure, or None when the launch may proceed.
+        identity from the record itself. A rework passes the round it has reserved for the head it
+        is about to start, so an adoption resumes that round and not the one being left behind.
+        Returns the failure, or None when the launch may proceed.
         """
         return _write_launch_intent(
             self,
@@ -2049,6 +2052,7 @@ class DispatcherRuntime:
             action=action,
             head=record.head,
             workspace=record.workspace,
+            round_number=round_number,
         )
 
     def _advance_worker(
@@ -2292,8 +2296,12 @@ class DispatcherRuntime:
             _reset_wait(record, "review")
             _reset_wait(record, "worker")
             moved = self.reader.show(ref)
+            # The rework round is reserved before the intent goes to disk. The head this launch
+            # starts belongs to the next round, and a recovery that read the intent's round as the
+            # closed one would fold the rework into the round its red verdict ended.
+            rework_round = record.attempt_round + 1
             failure = self._worker_relaunch_intent(
-                payload, records, ref, record, action="review-red-rework"
+                payload, records, ref, record, action="review-red-rework", round_number=rework_round
             )
             if failure is not None:
                 return _launch_intent_unwritable(
@@ -2323,7 +2331,7 @@ class DispatcherRuntime:
                     error=exc,
                 )
             record.state = "claimed"
-            self._open_worker_round(record)
+            self.open_worker_round(record, round_number=rework_round)
             self.record_worker_routing(moved, record, launched.run)
             record.worker_started_at = record.worker_progress_at = time.time()
             records[ref] = record
@@ -2685,8 +2693,11 @@ class DispatcherRuntime:
         _reset_wait(record, "review")
         _reset_wait(record, "worker")
         moved = self.reader.show(ref)
+        # Same reservation as the review-red bounce: the round the rework head belongs to is fixed
+        # on disk with the intent, so an adoption resumes it instead of the round the gate closed.
+        rework_round = record.attempt_round + 1
         failure = self._worker_relaunch_intent(
-            payload, records, ref, record, action=f"{phase}-red-rework"
+            payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
         )
         if failure is not None:
             return _launch_intent_unwritable(
@@ -2716,7 +2727,7 @@ class DispatcherRuntime:
                 error=exc,
             )
         record.state = "claimed"
-        self._open_worker_round(record)
+        self.open_worker_round(record, round_number=rework_round)
         self.record_worker_routing(moved, record, launched.run)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
@@ -2934,7 +2945,7 @@ class DispatcherRuntime:
         history = _routing_attempts(self.audit.events(ref, kind="routing"))
         return history[-1].attempt if history else 0
 
-    def _open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
+    def open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
         """Start the card's next worker round: stamp its number and drop the previous round's heads.
 
         A round is one worker bring-up plus the review it earns. Claim opens round 1, each rework
