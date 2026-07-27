@@ -41,11 +41,12 @@ from secretary.sprints import SprintWriter, budget_thresholds
 # `triggered_agents.runtime.production_telemetry`:
 #   * `python3 -m triggered_agents health` builds the pipeline line from `last`/`last_healthy_at`,
 #     so a fresh failing tick can never read as a healthy one.
-#   * the steward's `scan` reports the `unhealthy` ring against its own watermark, keyed on
-#     `unhealthy_total` — a monotonic counter, so an ordinary healthy tick in between never
-#     consumes an unhealthy one the steward has not looked at yet — and on `generation`, which
-#     says which history that counter belongs to.
-# Keep the shape and the meaning of those three fields in step with that reader.
+#   * the steward's `scan` reports one signal per INCIDENT — a continuous run of unhealthy ticks —
+#     against its own watermark, keyed on the monotonic `incident_total`/`recovery_total` counters,
+#     so an ordinary healthy tick in between never consumes an incident the steward has not looked
+#     at yet, and a second failing tick of the same outage does not open a second one. `generation`
+#     says which history those counters belong to.
+# Keep the shape and the meaning of those fields in step with that reader.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50
 TICK_TELEMETRY_ERRORS_KEPT = 5
 TICK_TELEMETRY_DEGRADATIONS_KEPT = 5
@@ -165,8 +166,57 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         telemetry["unhealthy_total"] = _counter(telemetry.get("unhealthy_total")) + 1
     telemetry["unhealthy"] = unhealthy[-TICK_TELEMETRY_UNHEALTHY_KEPT:]
     telemetry.setdefault("unhealthy_total", _counter(telemetry.get("unhealthy_total")))
+    _record_incident(telemetry, entry)
     payload["tick_telemetry"] = telemetry
     return telemetry
+
+
+def _record_incident(telemetry: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Fold one tick into the open incident, closing it when the tick is healthy again.
+
+    An incident is one continuous run of unhealthy ticks. A Kanboard outage fails every tick for
+    as long as it lasts, and each of those ticks is the same failure — one thing to look at, with
+    one cause and one moment it ended. So the tick that finds no incident open opens one and bumps
+    `incident_total`; every unhealthy tick after it only extends that record, and the first healthy
+    tick closes it into `recovery` and bumps `recovery_total`. Both counters are monotonic within a
+    generation for the same reason `unhealthy_total` is: a reader dedupes on them, and a counter
+    that can go down would let a later event consume an earlier one the reader has not seen yet.
+
+    The tick that opened the incident is kept whole under `opened`, so the cause (its errors,
+    its degradations — `backend_unavailable` and friends) survives into the recovery record. It is
+    the same already-bounded entry that `last` holds, so this costs one entry, not a history.
+    """
+    incident = telemetry.get("incident")
+    incident = dict(incident) if isinstance(incident, dict) else None
+    if entry["healthy"]:
+        if incident:
+            telemetry["recovery"] = {
+                **incident,
+                "recovered_seq": entry["seq"],
+                "recovered_at": entry["at"],
+                "recovered_status": entry["status"],
+            }
+            telemetry["recovery_total"] = _counter(telemetry.get("recovery_total")) + 1
+            incident = None
+    elif incident:
+        incident["unhealthy_ticks"] = _counter(incident.get("unhealthy_ticks")) + 1
+        incident["last_seq"] = entry["seq"]
+        incident["last_at"] = entry["at"]
+    else:
+        incident = {
+            "id": uuid.uuid4().hex,
+            "opened_seq": entry["seq"],
+            "opened_at": entry["at"],
+            "last_seq": entry["seq"],
+            "last_at": entry["at"],
+            "unhealthy_ticks": 1,
+            "opened": entry,
+        }
+        telemetry["incident_total"] = _counter(telemetry.get("incident_total")) + 1
+    telemetry["incident"] = incident
+    telemetry.setdefault("recovery", None)
+    telemetry.setdefault("incident_total", _counter(telemetry.get("incident_total")))
+    telemetry.setdefault("recovery_total", _counter(telemetry.get("recovery_total")))
 
 
 def _record_failed_tick(runtime: Any, exc: BaseException) -> None:

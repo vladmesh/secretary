@@ -53,8 +53,9 @@ _AGENTS_PROJECT = shared_state.AGENTS_PROJECT
 def _empty_watermark() -> dict:
     return {
         # None, not 0: no baseline has been taken yet. See _pipeline_tick_signals.
-        "pipeline_unhealthy_total": None,
-        # Which telemetry history the counter above was read from — "" while the dispatcher has
+        "pipeline_incident_total": None,
+        "pipeline_recovery_total": None,
+        # Which telemetry history the counters above were read from — "" while the dispatcher has
         # not stamped one. See _pipeline_tick_signals.
         "pipeline_telemetry_generation": "",
         "notified_blocked": [],
@@ -70,31 +71,44 @@ def load_watermark() -> dict:
     return mark
 
 
-def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None, str]:
-    """(unhealthy production dispatcher ticks since the watermark, new counter, its generation).
+def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], dict]:
+    """(pipeline incidents/recoveries since the watermark, the counters to fold into it).
 
     The source is the production dispatcher's durable tick telemetry — the record written by the
     timer that actually moves cards on this host (runtime/production_telemetry.py, secretary-833).
     That is where a failing production tick leaves its trace; a log written by anything else is a
     file whose silence cannot be told apart from a healthy pipeline (triggered-agents-253).
 
-    Dedup is keyed on `unhealthy_total`, a counter the dispatcher only ever bumps on an unhealthy
-    tick. A healthy tick in between therefore cannot consume an unhealthy one the steward has not
-    looked at yet, which a "have I seen the newest record" cursor would do every minute.
+    The unit reported here is the INCIDENT, not the tick (secretary-839). A Kanboard outage fails
+    every tick for as long as it lasts, and per-tick hits made one outage look like a stream of
+    separate anomalies whose end nobody ever announced. The dispatcher folds a continuous run of
+    unhealthy ticks into one incident and closes it on the first healthy tick
+    (`dispatcher_production._record_incident`), so this reads two counters:
 
-    A first scan with no counter in the watermark takes the current one as a BASELINE and reports
-    nothing from the ring — same rule `_resource_signals` already applies to a resource it has no
-    prior status for. Otherwise a cold start (or the first run after this record was introduced)
-    would replay every retained failure as brand new.
+      * `incident_total` — one `pipeline-tick-unhealthy` per incident, carrying the tick that
+        opened it, so the cause (`backend_unavailable` and friends) is in the hit. Further failing
+        ticks of the same incident, and repeated prechecks/scans before `advance`, add nothing.
+      * `recovery_total` — one `pipeline-tick-recovered` per closed incident, naming the incident
+        it closes, its cause and the healthy tick that ended it. Further healthy ticks add nothing.
 
-    The counter is only meaningful within one telemetry history, so the watermark stores the
-    `generation` it was read from and rescans the whole ring the moment that changes. A restored
-    or rebuilt state file starts counting again and can land on the number the watermark already
-    holds, and a counter comparison alone reads that as "nothing new" and drops every failure of
-    the new history (secretary-833 review, round 4). A backwards counter is still a reset on its
-    own: a host whose dispatcher predates the generation stamp writes none, and the two states
+    Both counters are monotonic within a generation, so an ordinary tick in between cannot consume
+    an event the steward has not looked at yet, which a "have I seen the newest record" cursor
+    would do every minute.
+
+    A first scan with no counters in the watermark takes the current ones as a BASELINE and reports
+    nothing — same rule `_resource_signals` already applies to a resource it has no prior status
+    for. Otherwise a cold start (or the first run after this record was introduced) would replay
+    whatever the state file happens to hold as brand new. A watermark written before this contract
+    carries no incident counter, so it re-baselines once, on the same rule.
+
+    The counters are only meaningful within one telemetry history, so the watermark stores the
+    `generation` they were read from and reports the open incident again the moment that changes. A
+    restored or rebuilt state file starts counting again and can land on the numbers the watermark
+    already holds, and a counter comparison alone reads that as "nothing new" and drops everything
+    the new history reports (secretary-833 review, round 4). A backwards counter is still a reset on
+    its own: a host whose dispatcher predates the generation stamp writes none, and the two states
     that leaves — neither side stamped, or only one — are "cannot tell", not "changed", or the
-    steward would rescan the ring on every scan.
+    steward would report a reset on every scan.
 
     Telemetry that cannot be read is NOT "nothing to report": that silence is indistinguishable
     from a healthy pipeline and is exactly the blindness this module exists to catch. It is
@@ -104,49 +118,95 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None, str]:
     telemetry = production_telemetry.read()
     if not telemetry.available:
         STATE.log_run(telemetry.unavailable, level="warn", path=str(telemetry.path))
+        # The watermark does not move over a source that could not be read.
         return ([{"event": telemetry.unavailable, "level": "warn", "path": str(telemetry.path)}],
-                mark["pipeline_unhealthy_total"], mark["pipeline_telemetry_generation"])
+                {"pipeline_incident_total": mark["pipeline_incident_total"],
+                 "pipeline_recovery_total": mark["pipeline_recovery_total"],
+                 "pipeline_telemetry_generation": mark["pipeline_telemetry_generation"]})
     generation = telemetry.generation
-    seen = mark["pipeline_unhealthy_total"]
-    if seen is None:
-        return [], telemetry.unhealthy_total, generation
+    pending = {"pipeline_incident_total": telemetry.incident_total,
+               "pipeline_recovery_total": telemetry.recovery_total,
+               "pipeline_telemetry_generation": generation}
+    seen_incidents = mark["pipeline_incident_total"]
+    if seen_incidents is None:
+        return [], pending
+    seen_recoveries = mark["pipeline_recovery_total"] or 0
     seen_generation = str(mark["pipeline_telemetry_generation"] or "")
     replaced = bool(generation and seen_generation and generation != seen_generation)
     hits: list[dict] = []
-    if replaced or telemetry.unhealthy_total < seen:
+    if (replaced or telemetry.incident_total < seen_incidents
+            or telemetry.recovery_total < seen_recoveries):
         # The history restarted: the state file was replaced (a restore, a rebuilt installation, a
-        # hand edit), either under a new generation or with a counter that went BACKWARDS. Rescan
-        # the whole retained ring and surface the reset itself — the same reasoning the old
-        # log-reset branch used.
+        # hand edit), either under a new generation or with a counter that went BACKWARDS. Report
+        # the reset itself and treat whatever the new history holds as unseen.
         STATE.log_run("pipeline-telemetry-reset", level="warn", path=str(telemetry.path),
-                      cursor=seen, unhealthy_total=telemetry.unhealthy_total,
+                      cursor=seen_incidents, incident_total=telemetry.incident_total,
+                      recovery_total=telemetry.recovery_total,
                       generation=generation, seen_generation=seen_generation)
         hits.append({"event": "pipeline-telemetry-reset", "level": "warn",
-                     "path": str(telemetry.path), "cursor": seen,
-                     "unhealthy_total": telemetry.unhealthy_total,
+                     "path": str(telemetry.path), "cursor": seen_incidents,
+                     "incident_total": telemetry.incident_total,
+                     "recovery_total": telemetry.recovery_total,
                      "generation": generation, "seen_generation": seen_generation})
-        seen = 0
-    new_count = telemetry.unhealthy_total - seen
-    retained = list(telemetry.unhealthy)[-new_count:] if new_count > 0 else []
-    hits += [{"event": "pipeline-tick-unhealthy", "level": "warn", "ts": entry.get("at", ""),
-              **entry} for entry in retained]
-    dropped = new_count - len(retained)
-    if dropped > 0:
-        # More unhealthy ticks happened than the ring keeps. The steward must hear that the count
-        # is bigger than the batch it just got, or a storm of failures would read as the handful
-        # that happened to survive rotation.
-        STATE.log_run("pipeline-telemetry-rotated", level="warn", dropped=dropped,
-                      unhealthy_total=telemetry.unhealthy_total)
-        hits.insert(0, {"event": "pipeline-telemetry-rotated", "level": "warn",
-                        "dropped": dropped, "unhealthy_total": telemetry.unhealthy_total})
-    return hits, telemetry.unhealthy_total, generation
+        seen_incidents = 0
+        seen_recoveries = 0
+    new_incidents = telemetry.incident_total - seen_incidents
+    new_recoveries = telemetry.recovery_total - seen_recoveries
+    if new_incidents > 0:
+        # The open incident, or — if it has already been closed since the last scan — the closed
+        # one the recovery record carries. Either way the failure is reported before its recovery,
+        # so the steward never hears that something recovered without hearing what broke.
+        incident = telemetry.incident or telemetry.recovery
+        if incident:
+            hits.append(_incident_hit(incident, new_incidents))
+    if new_recoveries > 0 and telemetry.recovery:
+        hits.append(_recovery_hit(telemetry.recovery, new_recoveries))
+    return hits, pending
+
+
+def _incident_hit(incident: dict, incidents: int) -> dict:
+    opened = incident.get("opened")
+    return {
+        # The tick that opened the incident, spread whole: status, step, reason, errors and
+        # degradations are what an operator reads to tell a board outage from a product bug.
+        **(opened if isinstance(opened, dict) else {}),
+        "event": "pipeline-tick-unhealthy",
+        "level": "warn",
+        "ts": incident.get("opened_at", ""),
+        "incident": incident.get("id", ""),
+        "opened_seq": incident.get("opened_seq"),
+        "unhealthy_ticks": incident.get("unhealthy_ticks"),
+        "cause": production_telemetry.describe_incident(incident),
+        # More than one incident opened between two scans: the newest one is described here, and
+        # the count says the steward is not looking at all of them.
+        "incidents": incidents,
+    }
+
+
+def _recovery_hit(recovery: dict, recoveries: int) -> dict:
+    return {
+        "event": "pipeline-tick-recovered",
+        "level": "info",
+        "ts": recovery.get("recovered_at", ""),
+        "incident": recovery.get("id", ""),
+        "opened_at": recovery.get("opened_at", ""),
+        "opened_seq": recovery.get("opened_seq"),
+        "unhealthy_ticks": recovery.get("unhealthy_ticks"),
+        "recovered_seq": recovery.get("recovered_seq"),
+        "recovered_at": recovery.get("recovered_at", ""),
+        "recovered_status": recovery.get("recovered_status", ""),
+        # What the incident was, on the recovery hit itself: the steward reads one record and
+        # knows both what broke and that it is over.
+        "cause": production_telemetry.describe_incident(recovery),
+        "recoveries": recoveries,
+    }
 
 
 def ensure_pipeline_baseline(batch: dict) -> None:
     """Persist the pipeline counter baseline a scan just took, before anything else can consume it.
 
-    The baseline itself is described in _pipeline_tick_signals: a scan with no counter in the
-    watermark reports nothing and takes the current one instead. That value only ever reached the
+    The baseline itself is described in _pipeline_tick_signals: a scan with no counters in the
+    watermark reports nothing and takes the current ones instead. That value only ever reached the
     watermark through `advance`, which runs after a steward head was actually dispatched — and the
     normal hour has no signal at all, so precheck exits PRECHECK_SKIP and writes nothing. The next
     unhealthy tick then meets an unset counter again, is read as a first-ever scan again, and is
@@ -154,22 +214,26 @@ def ensure_pipeline_baseline(batch: dict) -> None:
     what a baseline is for (secretary-833 review, round 2).
 
     So the baseline is written the moment it is taken, by both entry points that take one. Only
-    that one field is touched, and only while it is still unset — the per-kind dedup state stays
-    on the two-phase scan/advance contract, where a crash between the two re-scans instead of
+    the pipeline fields are touched, and only while they are still unset — the per-kind dedup state
+    stays on the two-phase scan/advance contract, where a crash between the two re-scans instead of
     dropping a signal. A concurrent steward run holding the lock needs no help here: its own
-    advance persists the same counter, so a contended write is skipped rather than waited on.
+    advance persists the same counters, so a contended write is skipped rather than waited on.
     """
-    baseline = batch["pending"]["pipeline_unhealthy_total"]
+    baseline = batch["pending"]["pipeline_incident_total"]
     if baseline is None:
         return  # unreadable telemetry: nothing was measured, so there is no baseline to keep
     try:
         with STATE.lock():
             stored = STATE.load_watermark()
-            if stored.get("pipeline_unhealthy_total") is not None:
+            if stored.get("pipeline_incident_total") is not None:
                 return
-            stored["pipeline_unhealthy_total"] = baseline
-            # The counter only means anything next to the history it was taken from, so the
-            # generation is written with it and never after it.
+            stored["pipeline_incident_total"] = baseline
+            # Incidents and recoveries are one dedup state, taken from one read: a baseline that
+            # kept only half of it would replay the recovery of an incident it never reported.
+            stored["pipeline_recovery_total"] = batch["pending"].get(
+                "pipeline_recovery_total", 0)
+            # The counters only mean anything next to the history they were taken from, so the
+            # generation is written with them and never after them.
             stored["pipeline_telemetry_generation"] = batch["pending"].get(
                 "pipeline_telemetry_generation", "")
             STATE.save_watermark(stored)
@@ -308,7 +372,7 @@ def scan() -> dict:
     """Everything precheck/the skill need: signals since the watermark, plus the raw state to
     fold into the watermark on advance(). Read-only — never touches the watermark file itself."""
     mark = load_watermark()
-    tick_hits, unhealthy_total, telemetry_generation = _pipeline_tick_signals(mark)
+    tick_hits, tick_pending = _pipeline_tick_signals(mark)
     new_blocked, all_blocked = _blocked_signals(mark)
     stale_hits, stale_current = _stale_signals(mark)
     changed_resources, resource_current = _resource_signals(mark)
@@ -322,8 +386,7 @@ def scan() -> dict:
             "new_orphan_workspaces": new_orphans,
         },
         "pending": {
-            "pipeline_unhealthy_total": unhealthy_total,
-            "pipeline_telemetry_generation": telemetry_generation,
+            **tick_pending,
             "notified_blocked": all_blocked,
             "notified_stale": stale_current,
             "notified_orphans": all_orphans,
@@ -348,7 +411,7 @@ def render_markdown(batch: dict) -> str:
         lines += [f"- {ref}" for ref in s["new_blocked"]]
         lines.append("")
     if s["pipeline_ticks"]:
-        lines.append(f"## Тики production dispatcher ({len(s['pipeline_ticks'])})")
+        lines.append(f"## Инциденты тиков production dispatcher ({len(s['pipeline_ticks'])})")
         lines += [f"- {rec.get('ts', '?')} [{rec.get('event', '?')}] "
                   f"{json.dumps(rec, ensure_ascii=False)}" for rec in s["pipeline_ticks"]]
         lines.append("")

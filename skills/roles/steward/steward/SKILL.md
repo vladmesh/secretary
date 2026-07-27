@@ -97,16 +97,21 @@ python3 -m triggered_agents steward scan --json
 сигналов, каждый — почему тебя вообще подняли:
 
 - `new_blocked` — карточки, впервые попавшие в Blocked с прошлого прогона.
-- `pipeline_ticks` — нездоровые тики production dispatcher с прошлого watermark, из его
-  собственной телеметрии (`tick_telemetry` в `<data_dir>/dispatcher/production-state.json`;
-  `data_dir` резолвится из instance, как у самого диспетчера).
-  В каждом хите — время тика, статус, шаг и коды ошибок. Тик, упавший с исключением, попадает
-  сюда как `status: failed`. Тик, у которого не упало ничего, но действие отчиталось
-  `degraded`/`failed` (незакрытый запуск, недоступный рантайм), тоже нездоров — что именно не
-  доделалось, лежит в `degradations` хита. Отдельные события того же вида:
-  `production-state-missing`/`tick-telemetry-missing` (телеметрию не прочитать — это не «всё
-  тихо», а слепота), `pipeline-telemetry-rotated` (нездоровых тиков было больше, чем сохранило
-  кольцо) и `pipeline-telemetry-reset` (state-файл заменили, история счётчика началась заново).
+- `pipeline_ticks` — incident'ы production dispatcher с прошлого watermark, из его собственной
+  телеметрии (`tick_telemetry` в `<data_dir>/dispatcher/production-state.json`; `data_dir`
+  резолвится из instance, как у самого диспетчера). Непрерывная череда нездоровых тиков — один
+  incident, а не поток аномалий: недоступная доска роняет каждый тик, пока длится.
+  - `pipeline-tick-unhealthy` — incident открылся. В хите поле `incident` (его id), время и
+    диагностика тика-причины (статус, шаг, коды ошибок) и `unhealthy_ticks` — сколько тиков он уже
+    уронил. Тик, упавший с исключением, попадает сюда как `status: failed`. Тик, у которого не
+    упало ничего, но действие отчиталось `degraded`/`failed` (незакрытый запуск, недоступный
+    рантайм), тоже нездоров — что именно не доделалось, лежит в `degradations` хита.
+  - `pipeline-tick-recovered` — первый здоровый тик закрыл incident. В хите тот же `incident`, его
+    причина (`cause`), сколько тиков он длился и когда/чем закончился. Больше ни этот incident, ни
+    его восстановление не повторятся; следующее независимое падение откроет новый.
+  - Отдельные события того же вида: `production-state-missing`/`tick-telemetry-missing`
+    (телеметрию не прочитать — это не «всё тихо», а слепота) и `pipeline-telemetry-reset`
+    (state-файл заменили, история счётчиков началась заново).
 - `stale` — карточки, застрявшие в одной колонке (Ready/In progress/Validate/Blocked) дольше
   `TA_STEWARD_STALE_HOURS` (по умолчанию 24ч).
 - `resource_flip` — health-статус ресурса (`claude-sub`, `openrouter`, см. heads.toml) изменился
