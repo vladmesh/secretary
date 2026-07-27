@@ -1389,6 +1389,12 @@ class CommandHostRuntime:
             "",
             task.get("description") or "(empty task description)",
             "",
+            # One verdict carries every blocker the reviewer has. Holding some back for a later
+            # round ratchets the card through extra worker attempts, and each of those costs the
+            # sprint a budget event.
+            "A red verdict must list every blocker you have found in this round. Do not hold "
+            "blockers back for a later round and do not widen the scope on the next one.",
+            "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
             f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',

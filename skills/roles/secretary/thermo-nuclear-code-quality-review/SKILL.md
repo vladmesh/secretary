@@ -166,6 +166,11 @@ Prioritize findings in this order:
 Do not flood the review with low-value nits if there are larger structural issues.
 Prefer a smaller number of high-conviction comments over a long list of cosmetic notes.
 
+Give the full set of blockers in one round. Everything that would hold the change back belongs in
+the current verdict, whether or not the author is likely to fix it all at once. Do not keep a
+blocker in reserve for the next round, and do not widen the scope once the author has answered the
+round you already gave them.
+
 ## Approval Bar
 
 Do not approve merely because behavior seems correct.
