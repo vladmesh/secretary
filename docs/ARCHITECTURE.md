@@ -56,6 +56,13 @@ guards, transitions и append-only audit. Dispatcher
 разрешает routing, создаёт worker/reviewer lifecycle и сверяет board, workspace, report и review
 state перед переходами.
 
+Бюджет спринта не является самоотчётом наблюдателя. Production dispatcher читает durable audit
+связанных с `sprint_ref` карточек и записывает один budget event на идентификатор исходного события.
+Пороги приходят из `instance.yaml`; hard limit меняет сущность на `stopped`. Observer reconcile
+читает только открытые спринты, поэтому такая остановка снимает живую голову и не даёт поднять новую,
+не затрагивая уже клеймленные карточки. Resume хранится в metadata спринта как структурированная
+запись, а её свежесть выводится сравнением с audit карточек, не с terminal history.
+
 Orca является текущим session manager и live terminal UI. Одна карточка занимает один worktree:
 воркер получает свой терминал, ревьюер запускается отдельной split-панелью в том же worktree, и оба
 handle хранятся в dispatcher state порознь. Split, а не второй `terminal create`, потому что на

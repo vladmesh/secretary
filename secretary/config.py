@@ -220,6 +220,10 @@ def validate_instance(path: Path) -> InstanceReport:
         )
 
     errors += validate(instance, "instance", instance_file.name)
+    if isinstance(instance, dict):
+        budget = instance.get("sprint_budget")
+        if isinstance(budget, dict) and isinstance(budget.get("signal"), int) and isinstance(budget.get("hard"), int) and budget["hard"] < budget["signal"]:
+            errors.append(SchemaError(instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"))
     name = instance.get("name", "") if isinstance(instance, dict) else ""
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     if not isinstance(host, dict):

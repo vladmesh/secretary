@@ -80,6 +80,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
     task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", choices=("exec", "tui"), default="")
     task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
+    task_create.add_argument("--budget-event", choices=("recreated_task", "hotfix"), default="", help="charge a sprint recreation or hotfix event")
     task_create.set_defaults(handler=run_task_create)
     for name, handler in (
         ("comment", run_task_comment),
@@ -215,6 +216,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             family_preference=args.family_preference,
             codex_launch_mode=args.codex_mode,
             sprint=args.sprint,
+            budget_event=args.budget_event,
             request_id=args.request_id,
         )
     except TaskError as exc:

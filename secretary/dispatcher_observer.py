@@ -1086,6 +1086,7 @@ def render_observer_prompt(sprint: dict[str, Any]) -> str:
         "## Budget",
         "",
         f"total {int(budget.get('total') or 0)} restart events recorded so far",
+        "Signal threshold reached: reconsider the sprint direction." if budget.get("signal_reached") else "Signal threshold not reached.",
         "",
         "## Where to start",
         "",

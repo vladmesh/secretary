@@ -27,6 +27,7 @@ from secretary.dispatcher_state import (
     request_token,
 )
 from secretary.tasks import TaskError
+from secretary.sprints import SprintWriter, budget_thresholds
 
 
 class ProductionState:
@@ -132,14 +133,6 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         active_refs = {str(task.get("ref") or "") for task in active_tasks}
         reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
         observer_errors: list[dict[str, str]] = []
-        # Observer heads are reconciled against the sprint board, not the card board, and hold no
-        # card record: a live observer never occupies the per-project claim gate below.
-        try:
-            reconcile_outcomes += reconcile_observers(
-                runtime, payload, pause_mode=str(pause.get("mode") or "")
-            )
-        except Exception as exc:
-            observer_errors.append(_unexpected_error("", exc))
         # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
         # reconciliation did: those are stamped by every tick regardless of code version, so a
         # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
@@ -147,6 +140,18 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         payload["last_reconciled_at"] = now_rfc3339()
         outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
         outcomes = reconcile_outcomes + outcomes
+        try:
+            outcomes += _reconcile_sprint_budget(runtime)
+        except Exception as exc:
+            errors.append(_unexpected_error("", exc))
+        # Reconcile after budget accounting. A hard limit reached by the card work above then
+        # stops an already-live observer in this tick and prevents a replacement launch.
+        try:
+            outcomes += reconcile_observers(
+                runtime, payload, pause_mode=str(pause.get("mode") or "")
+            )
+        except Exception as exc:
+            observer_errors.append(_unexpected_error("", exc))
         errors = observer_errors + errors
         # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
         claims_allowed = pause.get("mode") != "drain"
@@ -772,6 +777,12 @@ def _production_claim_ready(
         if is_steward_report(task):
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
             continue
+        sprint_ref = str(task.get("sprint") or "")
+        if sprint_ref:
+            sprint = runtime.sprints.show(sprint_ref, include_cards=False)
+            if sprint.get("status") != "open":
+                skipped.append({"ref": task["ref"], "reason": "linked sprint is stopped or closed"})
+                continue
         if task.get("type") == "code" and task.get("project") in active_code_projects:
             skipped.append({
                 "ref": task["ref"],
@@ -823,3 +834,77 @@ def _unexpected_error(reference: str, exc: Exception) -> dict[str, str]:
         "code": "unexpected_error",
         "message": exc.__class__.__name__,
     }
+
+
+def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
+    """Charge each durable card event once, using its audit identity as the budget request id."""
+    instance = getattr(runtime.catalog, "instance", {})
+    thresholds = budget_thresholds(instance if isinstance(instance, dict) else None)
+    writer = SprintWriter(
+        runtime.reader.client,
+        data_dir=Path(runtime.audit.board_dir).parent,
+        thresholds=thresholds,
+    )
+    outcomes: list[dict[str, Any]] = []
+    sprint_cache: dict[str, str] = {}
+    for event in runtime.audit.events():
+        reference = str(event.get("ref") or "")
+        if not reference or reference.startswith("sprint:"):
+            continue
+        event_type = _budget_event_type(event)
+        if event_type is None:
+            continue
+        sprint = _event_sprint(runtime, event, sprint_cache)
+        if not sprint:
+            continue
+        identity = str(event.get("event_id") or event.get("request_id") or "")
+        if not identity:
+            continue
+        result = writer.record_budget(
+            role="dispatcher", actor=runtime.owner, reference=sprint, event_type=event_type,
+            request_id="sprint-budget-" + identity, source_event_id=identity,
+        )
+        outcomes.append({
+            "status": "ok", "step": "sprint-budget", "sprint": sprint,
+            "ref": reference, "event_type": event_type,
+            "hard_stopped": result["sprint"]["status"] == "stopped",
+        })
+    return outcomes
+
+
+def _event_sprint(runtime: Any, event: dict[str, Any], cache: dict[str, str]) -> str:
+    reference = str(event.get("ref") or "")
+    if reference in cache:
+        return cache[reference]
+    payload = event.get("payload")
+    if event.get("kind") == "created" and isinstance(payload, dict):
+        sprint = str(payload.get("sprint") or "")
+    else:
+        try:
+            sprint = str(runtime.reader.show(reference).get("sprint") or "")
+        except TaskError:
+            sprint = ""
+    cache[reference] = sprint
+    return sprint
+
+
+def _budget_event_type(event: dict[str, Any]) -> str | None:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    marker = str(payload.get("marker") or "")
+    if event.get("kind") == "verdict" and marker == "review:red":
+        return "red_review"
+    if event.get("kind") == "moved":
+        target = str(payload.get("to") or "")
+        source = str(payload.get("from") or "")
+        request_id = str(event.get("request_id") or "")
+        if target == "blocked":
+            return "blocked"
+        if target == "ready" and source in {"in_progress", "validate"}:
+            return "preempt"
+        if target == "in_progress" and "gate-red" in request_id:
+            return "red_ci"
+    if event.get("kind") == "created":
+        budget_event = str(payload.get("budget_event") or "")
+        if budget_event in {"recreated_task", "hotfix"}:
+            return budget_event
+    return None

@@ -28,7 +28,9 @@ from secretary.dispatcher_observer import (
     render_observer_prompt,
     stop_observer_head,
 )
+from secretary.sprints import SprintReader
 from secretary.dispatcher_types import HostError
+from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
@@ -210,6 +212,44 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertNotIn("observers", self.runtime.production_state.load())
         self.assertNotIn("prepare_observer", self.host.calls[before:])
         self.assertNotIn("stop_observer", self.host.calls[before:])
+
+    def test_budget_is_charged_from_card_events_once_and_hard_limit_stops_observer(self) -> None:
+        self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
+        self.runtime.sprints = SprintReader(self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2})  # type: ignore[arg-type]
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
+            body="fix it", request_id="red-review",
+        )
+        first = self.runtime.production_tick()
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
+        self.assertTrue(self.runtime.sprints.show("sprint:1")["budget"]["signal_reached"])
+        self.assertEqual(len([row for row in first["actions"] if row.get("step") == "sprint-budget"]), 1)
+        self.runtime.production_tick()
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
+            reason="operator stop", request_id="blocked-card",
+        )
+        result = self.runtime.production_tick()
+        sprint = self.runtime.sprints.show("sprint:1")
+        self.assertEqual(sprint["status"], "stopped")
+        self.assertEqual(sprint["budget"]["by_type"]["blocked"], 1)
+        self.assertIn("observer-stopped", [row.get("action") for row in self.actions(result)])
+
+    def test_budget_event_classification_excludes_green_card_cycle(self) -> None:
+        cases = {
+            "red_review": {"kind": "verdict", "payload": {"marker": "review:red"}},
+            "blocked": {"kind": "moved", "payload": {"to": "blocked"}},
+            "red_ci": {"kind": "moved", "payload": {"to": "in_progress"}, "request_id": "gate-red"},
+            "preempt": {"kind": "moved", "payload": {"from": "validate", "to": "ready"}},
+            "recreated_task": {"kind": "created", "payload": {"budget_event": "recreated_task"}},
+            "hotfix": {"kind": "created", "payload": {"budget_event": "hotfix"}},
+        }
+        self.assertEqual({name: _budget_event_type(event) for name, event in cases.items()}, {name: name for name in cases})
+        self.assertIsNone(_budget_event_type({"kind": "verdict", "payload": {"marker": "review:green"}}))
+        self.assertIsNone(_budget_event_type({"kind": "moved", "payload": {"to": "done"}}))
 
     def test_unreadable_sprint_board_never_stops_a_live_head(self) -> None:
         self.open_sprint()

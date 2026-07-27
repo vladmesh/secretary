@@ -29,6 +29,7 @@ SPRINT_METADATA = {
     "sprint_status",
     "sprint_budget",
     "sprint_current_task",
+    "sprint_resume",
 }
 BUDGET_EVENT_TYPES = (
     "red_review",
@@ -38,6 +39,27 @@ BUDGET_EVENT_TYPES = (
     "recreated_task",
     "hotfix",
 )
+DEFAULT_BUDGET_SIGNAL = 3
+DEFAULT_BUDGET_HARD = 6
+RESUME_FIELDS = (
+    "selected_step",
+    "selected_why",
+    "rejected_alternatives",
+    "current_task",
+    "dod_state",
+    "next_safe_step",
+)
+
+
+def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
+    """Read installation budget limits, retaining safe defaults for old installations."""
+    raw = (config or {}).get("sprint_budget") if isinstance(config, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    signal = _positive_int(raw.get("signal")) or DEFAULT_BUDGET_SIGNAL
+    hard = _positive_int(raw.get("hard")) or DEFAULT_BUDGET_HARD
+    if hard < signal:
+        raise TaskError("validation", "sprint budget hard threshold must not be below signal threshold", 2)
+    return {"signal": signal, "hard": hard}
 
 
 def ensure_sprint_board(client: KanboardClient) -> int:
@@ -52,8 +74,10 @@ def ensure_sprint_board(client: KanboardClient) -> int:
 
 
 class SprintReader:
-    def __init__(self, client: KanboardClient) -> None:
+    def __init__(self, client: KanboardClient, *, data_dir: str | Path | None = None, thresholds: dict[str, int] | None = None) -> None:
         self.client = client
+        self.data_dir = Path(data_dir) if data_dir is not None else None
+        self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
 
     def list(self, *, statuses: set[str] | None = None) -> list[dict[str, Any]]:
         board_id = ensure_sprint_board(self.client)
@@ -86,6 +110,7 @@ class SprintReader:
         sprint = self._normalize(raw, comments=comments)
         if include_cards:
             sprint["cards"] = TaskReader(self.client).list(sprint=reference)
+            sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"))
         return sprint
 
     def _normalize(self, raw: dict[str, Any], *, comments: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -101,14 +126,14 @@ class SprintReader:
             if str(key) in SPRINT_METADATA
         }
         repositories = _json_list(meta.get("sprint_repositories"))
-        budget = _budget(meta.get("sprint_budget"))
+        budget = _budget(meta.get("sprint_budget"), self.thresholds)
         result: dict[str, Any] = {
             "id": f"sprint_kanboard_{task_id}",
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
             "repositories": repositories,
-            "status": meta.get("sprint_status") if meta.get("sprint_status") in {"open", "closed"} else "open",
+            "status": meta.get("sprint_status") if meta.get("sprint_status") in {"open", "closed", "stopped"} else "open",
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
             "audit": {
@@ -119,15 +144,51 @@ class SprintReader:
         }
         if comments is not None:
             result["comments"] = comments
+        resume = _resume(meta.get("sprint_resume"))
+        result["resume"] = resume
+        result["resume_freshness"] = self._resume_freshness(result, resume)
         return result
+
+    def status(self, reference: str, *, observer: dict[str, Any] | None = None) -> dict[str, Any]:
+        sprint = self.show(reference)
+        cards = sprint.get("cards") or []
+        states: dict[str, list[str]] = {}
+        for card in cards:
+            if isinstance(card, dict):
+                states.setdefault(str(card.get("state") or "unknown"), []).append(str(card.get("ref") or ""))
+        return {
+            "ref": sprint["ref"], "goal": sprint["goal"], "status": sprint["status"],
+            "current_task": sprint["current_task"], "cards": {key: sorted(value) for key, value in sorted(states.items())},
+            "budget": sprint["budget"], "resume_freshness": sprint["resume_freshness"],
+            "observer": observer or {"state": "unknown"},
+        }
+
+    def _resume_freshness(self, sprint: dict[str, Any], resume: dict[str, Any] | None) -> dict[str, Any]:
+        if not resume:
+            return {"fresh": False, "error": "resume_missing", "last_event_at": None}
+        last_event = ""
+        if self.data_dir is not None:
+            refs = {str(card.get("ref") or "") for card in sprint.get("cards") or [] if isinstance(card, dict)}
+            for event in TaskAudit(self.data_dir).events():
+                if event.get("ref") in refs and event.get("kind") != "routing":
+                    last_event = max(last_event, str(event.get("occurred_at") or ""))
+        recorded_at = str(resume.get("recorded_at") or "")
+        stale = bool(last_event and recorded_at < last_event)
+        return {
+            "fresh": not stale,
+            "error": "resume_stale" if stale else None,
+            "recorded_at": recorded_at or None,
+            "last_event_at": last_event or None,
+        }
 
 
 class SprintWriter:
     """Sprint mutations with the task protocol's durable audit semantics."""
 
-    def __init__(self, client: KanboardClient, *, data_dir: str | Path) -> None:
+    def __init__(self, client: KanboardClient, *, data_dir: str | Path, thresholds: dict[str, int] | None = None) -> None:
         self.client = client
-        self.reader = SprintReader(client)
+        self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
+        self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
         self.audit = TaskAudit(data_dir)
 
     def create(
@@ -187,8 +248,9 @@ class SprintWriter:
                 "sprint_definition_of_done": definition_of_done,
                 "sprint_repositories": json.dumps(repos, separators=(",", ":")),
                 "sprint_status": "open",
-                "sprint_budget": json.dumps(_budget(), separators=(",", ":")),
+                "sprint_budget": json.dumps(_budget(thresholds=self.thresholds), separators=(",", ":")),
                 "sprint_current_task": "",
+                "sprint_resume": "",
             })
         except Exception:
             # A created Kanboard task is recoverable from the staged event, so retain it.
@@ -205,7 +267,7 @@ class SprintWriter:
         return self._write("commented", role, actor, reference, request_id, {"body_sha256": _digest(body)}, lambda sprint: self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content=f"[{role}]\n{body}"))
 
     def set_current_task(self, *, role: str, actor: str, reference: str, task_reference: str, request_id: str | None = None) -> dict[str, Any]:
-        self._role(role, {"po", "dispatcher", "steward"})
+        self._role(role, {"po", "dispatcher", "observer", "steward"})
         task_reference = task_reference.strip()
         if not task_reference:
             raise TaskError("validation", "current task requires a task reference", 2)
@@ -216,20 +278,36 @@ class SprintWriter:
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_current_task": task_reference})
         return self._write("current_task_set", role, actor, reference, request_id, {"task": task_reference}, mutation)
 
-    def record_budget(self, *, role: str, actor: str, reference: str, event_type: str, request_id: str | None = None) -> dict[str, Any]:
+    def record_budget(self, *, role: str, actor: str, reference: str, event_type: str, request_id: str | None = None, source_event_id: str = "") -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "steward"})
         if event_type not in BUDGET_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
         def mutation(sprint: dict[str, Any]) -> None:
-            budget = _budget(sprint.get("budget"))
+            budget = _budget(sprint.get("budget"), self.thresholds)
             budget["by_type"][event_type] += 1
-            budget["total"] += 1
-            self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_budget": json.dumps(budget, separators=(",", ":"))})
-        return self._write("budget_recorded", role, actor, reference, request_id, {"event_type": event_type}, mutation)
+            budget = _budget({"by_type": budget["by_type"]}, self.thresholds)
+            values = {"sprint_budget": json.dumps(budget, separators=(",", ":"))}
+            if budget["hard_reached"] and sprint["status"] == "open":
+                values["sprint_status"] = "stopped"
+            self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=values)
+        return self._write("budget_recorded", role, actor, reference, request_id, {"event_type": event_type, "source_event_id": source_event_id or None}, mutation)
+
+    def resume(self, *, role: str, actor: str, reference: str, entry: dict[str, Any], request_id: str | None = None) -> dict[str, Any]:
+        self._role(role, {"po", "dispatcher", "steward"})
+        normalized = _resume(entry, required=True)
+        assert normalized is not None
+        def mutation(sprint: dict[str, Any]) -> None:
+            self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))})
+            self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content="[sprint:resume]\n" + normalized["selected_step"])
+        return self._write("resume_recorded", role, actor, reference, request_id, {"fields": list(RESUME_FIELDS)}, mutation)
 
     def close(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"po"})
         return self._write("closed", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "closed"}))
+
+    def reopen(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
+        self._role(role, {"po"})
+        return self._write("reopened", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"}))
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
@@ -240,7 +318,7 @@ class SprintWriter:
         if pending is not None:
             return self._pending(kind, pending)
         sprint = self.reader.show(reference)
-        if sprint["status"] == "closed" and kind in {"commented", "current_task_set"}:
+        if sprint["status"] in {"closed", "stopped"} and kind in {"commented", "current_task_set", "resume_recorded"}:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)
         self.audit.stage(request_id, event)
@@ -307,7 +385,7 @@ def _json_list(value: str | None) -> list[str]:
     return _repositories(raw) if isinstance(raw, list) else []
 
 
-def _budget(value: Any = None) -> dict[str, Any]:
+def _budget(value: Any = None, thresholds: dict[str, int] | None = None) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     if isinstance(value, str):
         try:
@@ -316,4 +394,25 @@ def _budget(value: Any = None) -> dict[str, Any]:
             source = {}
     by_type = source.get("by_type") if isinstance(source, dict) else {}
     counts = {event_type: max(0, int(by_type.get(event_type, 0))) if isinstance(by_type, dict) else 0 for event_type in BUDGET_EVENT_TYPES}
-    return {"total": sum(counts.values()), "by_type": counts}
+    limits = thresholds or budget_thresholds()
+    total = sum(counts.values())
+    return {"total": total, "by_type": counts, "thresholds": limits, "signal_reached": total >= limits["signal"], "hard_reached": total >= limits["hard"]}
+
+
+def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
+    source = value
+    if isinstance(value, str):
+        try:
+            source = json.loads(value)
+        except ValueError:
+            source = None
+    if not isinstance(source, dict):
+        if required:
+            raise TaskError("validation", "resume entry must be a JSON object", 2)
+        return None
+    missing = [field for field in RESUME_FIELDS if not isinstance(source.get(field), str) or not source[field].strip()]
+    if missing:
+        if required:
+            raise TaskError("validation", "resume entry is missing required fields: " + ", ".join(missing), 2)
+        return None
+    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": _text(source.get("recorded_at")) or _now()}

@@ -454,6 +454,7 @@ class TaskWriter:
         family_preference: str = "auto",
         codex_launch_mode: str = "",
         sprint: str = "",
+        budget_event: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _CREATE_ROLES)
@@ -471,6 +472,7 @@ class TaskWriter:
         family_preference = family_preference.strip() or "auto"
         codex_launch_mode = codex_launch_mode.strip()
         sprint = sprint.strip()
+        budget_event = budget_event.strip()
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
         if task_type not in _TASK_TYPES:
@@ -494,8 +496,12 @@ class TaskWriter:
             from secretary.sprints import SprintReader
 
             linked_sprint = SprintReader(self.client).show(sprint, include_cards=False)
-            if linked_sprint["status"] == "closed":
-                raise TaskError("closed", "cannot link a new card to a closed sprint", 3)
+            if linked_sprint["status"] != "open":
+                raise TaskError("closed", "cannot link a new card to a closed or stopped sprint", 3)
+        if budget_event not in {"", "recreated_task", "hotfix"}:
+            raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
+        if budget_event and not sprint:
+            raise TaskError("validation", "budget event requires a linked sprint", 2)
 
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
@@ -543,6 +549,7 @@ class TaskWriter:
                 "family_preference": family_preference,
                 "codex_launch_mode": codex_launch_mode or None,
                 "sprint": sprint or None,
+                "budget_event": budget_event or None,
                 "title_sha256": _digest(title),
                 "description_sha256": _digest(description),
             },
@@ -823,7 +830,8 @@ class TaskWriter:
                     self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
             except Exception as exc:
                 raise _CommittedWriteError() from exc
-        return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
+        source = self.reader.show(reference)["state"]
+        return self._write("moved", role, actor, reference, request_id, {"from": source, "to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
 
     def edit(
         self,
