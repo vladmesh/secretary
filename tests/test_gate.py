@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -55,16 +54,17 @@ class GateTests(unittest.TestCase):
         code, output = apply_provision_result(str(self.instance), "sample-project", str(path))
         self.assertEqual(code, 0, output)
 
-    def test_success_enables_and_publishes_versioned_result_and_compatibility(self):
+    def assert_no_derived_artifacts(self) -> None:
+        self.assertFalse((self.instance / "compatibility-manifests").exists())
+
+    def test_success_enables_and_publishes_versioned_result_without_derived_artifacts(self):
         self.provision()
         code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 0, result)
         self.assertEqual(validate(result, "gate-result", "result"), [])
         self.assertTrue(load_config(self.binding)["enabled"])
         self.assertEqual(load_config(self.instance / "adapter-drafts/sample-project.yaml")["gate"]["status"], "passed")
-        manifest = self.instance / "compatibility-manifests/sample-project.toml"
-        self.assertTrue(manifest.exists())
-        self.assertIn('project = "sample-project"', manifest.read_text())
+        self.assert_no_derived_artifacts()
         self.assertEqual(run_gate(str(self.instance), "sample-project"), (0, result))
         dry_code, dry_result = project_add(str(self.repo), str(self.instance), dry_run=True)
         self.assertEqual(dry_code, 0, dry_result)
@@ -110,40 +110,26 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result["status"], "draft_invalid")
         self.assertFalse(load_config(self.binding)["enabled"])
 
-    def test_compatibility_is_published_to_legacy_dispatcher_lookup(self):
-        legacy = self.root / "control-panel" / "pipeline" / "manifests"
-        (self.instance / "instance.yaml").write_text(yaml.safe_dump({
-            "version": 1, "name": "test", "data_dir": str(self.root / "data"),
-            "offsite": {"instance_remote": "git@example.invalid:test/instance.git"},
-            "compatibility": {"dispatcher_manifest_dir": str(legacy)},
-        }), encoding="utf-8")
+    def test_enable_does_not_read_instance_config(self):
         self.provision()
+        (self.instance / "instance.yaml").write_text("broken: [", encoding="utf-8")
 
         code, result = run_gate(str(self.instance), "sample-project")
 
         self.assertEqual(code, 0, result)
-        rendered = legacy / "sample-project.toml"
-        self.assertEqual(tomllib.loads(rendered.read_text())["workspace"]["base_branch"], "main")
-        (self.instance / "instance.yaml").write_text(yaml.safe_dump({
-            "version": 1, "name": "test", "data_dir": str(self.root / "data"),
-            "offsite": {"instance_remote": "git@example.invalid:test/instance.git"},
-        }), encoding="utf-8")
+        self.assertEqual(result["status"], "passed")
+        self.assertTrue(load_config(self.binding)["enabled"])
+        self.assert_no_derived_artifacts()
 
-        (self.repo / "sample.py").write_text("VALUE = 12\n", encoding="utf-8")
-        git(self.repo, "add", "sample.py")
-        git(self.repo, "commit", "-m", "Invalidate gate")
-        self.assertEqual(run_gate(str(self.instance), "sample-project")[1]["status"], "stale")
-        self.assertFalse(rendered.exists())
-
-    def test_stale_disable_tolerates_compatibility_path_added_after_enable(self):
+    def test_stale_disable_ignores_leftover_manifest_artifacts(self):
         self.provision()
         self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
-        legacy = self.root / "new-control-panel" / "pipeline" / "manifests"
-        (self.instance / "instance.yaml").write_text(yaml.safe_dump({
-            "version": 1, "name": "test", "data_dir": str(self.root / "data"),
-            "offsite": {"instance_remote": "git@example.invalid:test/instance.git"},
-            "compatibility": {"dispatcher_manifest_dir": str(legacy)},
-        }), encoding="utf-8")
+        leftovers = self.instance / "compatibility-manifests"
+        leftovers.mkdir()
+        manifest = leftovers / "sample-project.toml"
+        manifest.write_text("[workspace]\n", encoding="utf-8")
+        record = leftovers / "sample-project.targets.json"
+        record.write_text("{broken", encoding="utf-8")
         (self.repo / "sample.py").write_text("VALUE = 13\n", encoding="utf-8")
         git(self.repo, "add", "sample.py")
         git(self.repo, "commit", "-m", "Invalidate old gate")
@@ -153,16 +139,27 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale")
         self.assertFalse(load_config(self.binding)["enabled"])
+        # Leftovers from an older secretary are inert: the gate neither reads them nor
+        # touches them, so an operator removes them on their own schedule.
+        self.assertTrue(manifest.exists())
+        self.assertTrue(record.exists())
 
-    def test_invalid_instance_config_on_enable_is_structured_conflict(self):
+    def test_legacy_compatibility_block_in_draft_is_dropped(self):
         self.provision()
-        (self.instance / "instance.yaml").write_text("compatibility: [broken", encoding="utf-8")
+        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        draft = load_config(draft_path)
+        draft["compatibility_manifest"] = {
+            "consumer": "legacy-dispatcher",
+            "role": "derived-transition-consumer",
+            "canonical_source": "onboarding-contract-v1",
+        }
+        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
 
         code, result = run_gate(str(self.instance), "sample-project")
 
-        self.assertEqual(code, 1)
-        self.assertEqual(result["status"], "conflict")
-        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertEqual(code, 0, result)
+        self.assertNotIn("compatibility_manifest", load_config(draft_path))
+        self.assertTrue(load_config(self.binding)["enabled"])
 
     def test_corrupt_current_result_is_structured_conflict(self):
         self.provision()
@@ -185,7 +182,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result["checks"][stage]["status"], "failed")
         self.assertNotIn("ghp_secret_value", str(result))
         self.assertFalse(load_config(self.binding)["enabled"])
-        self.assertFalse((self.instance / "compatibility-manifests/sample-project.toml").exists())
+        self.assert_no_derived_artifacts()
 
     def test_setup_failure_leaves_disabled(self):
         self.assert_stage_failure("setup")
@@ -229,7 +226,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["findings"][0]["code"], "publication.failed")
         self.assertFalse(load_config(self.binding)["enabled"])
-        self.assertFalse((self.instance / "compatibility-manifests/sample-project.toml").exists())
+        self.assert_no_derived_artifacts()
 
     def test_repo_revision_invalidates_enabled_result(self):
         self.provision()
@@ -243,7 +240,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale")
         self.assertFalse(load_config(self.binding)["enabled"])
-        self.assertFalse((self.instance / "compatibility-manifests/sample-project.toml").exists())
+        self.assert_no_derived_artifacts()
 
     def test_repeat_selects_current_result_after_multiple_revisions(self):
         self.provision()
@@ -288,13 +285,12 @@ class GateTests(unittest.TestCase):
     def test_scan_failure_invalidates_enabled_project_without_traceback(self):
         self.provision()
         self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
-        manifest = self.instance / "compatibility-manifests/sample-project.toml"
         with mock.patch("secretary.gate.scan_repo", side_effect=ScannerError("injected")):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale")
         self.assertFalse(load_config(self.binding)["enabled"])
-        self.assertFalse(manifest.exists())
+        self.assert_no_derived_artifacts()
 
     def test_scan_failure_on_disabled_project_is_structured_stale(self):
         self.provision()
@@ -319,7 +315,6 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "conflict")
         self.assertTrue(load_config(self.binding)["enabled"])
-        self.assertTrue((self.instance / "compatibility-manifests/sample-project.toml").exists())
 
 
 if __name__ == "__main__":

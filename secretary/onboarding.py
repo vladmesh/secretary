@@ -92,7 +92,7 @@ def _project_add_locked(
     if error:
         return 1, _fail_draft(artifact, "draft.invalid", error)
     if existing_draft:
-        normalize_identity(existing_draft)
+        normalize_contract(existing_draft)
         errors = validate(existing_draft, "onboarding-contract", draft_path.name)
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
@@ -176,12 +176,15 @@ def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any
     }
 
 
-def normalize_identity(document: dict[str, Any]) -> None:
-    """Drop the legacy mutable binding fields an older writer copied into ``identity``.
+def normalize_contract(document: dict[str, Any]) -> None:
+    """Drop the legacy sections an older writer left in a contract on disk.
 
-    Only the known legacy keys are migrated; any other unexpected key stays in place
-    so schema validation still rejects a corrupt contract.
+    Two of them: the mutable binding fields copied into ``identity``, and the
+    ``compatibility_manifest`` block that declared a dispatcher consumer the
+    pipeline never had. Only these known keys are migrated; any other unexpected
+    key stays in place so schema validation still rejects a corrupt contract.
     """
+    document.pop("compatibility_manifest", None)
     identity = document.get("identity")
     if not isinstance(identity, dict):
         return
@@ -409,7 +412,6 @@ def _base_artifact(repo: Path, project_id: str, branch: str, scanner: dict[str, 
             "adapter": {"draft_owner": "project-add", "provision_owner": "provision-agent", "storage": "secretary-instance/adapter-drafts/<project>.yaml"},
             "enable_transition": {"only_when": "gate.status == passed", "forbidden_owners": ["deterministic-scanner", "project-add", "provision-agent"]},
         },
-        "compatibility_manifest": {"consumer": "legacy-dispatcher", "role": "derived-transition-consumer", "canonical_source": "onboarding-contract-v1"},
     }
 
 

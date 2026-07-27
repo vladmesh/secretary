@@ -327,7 +327,7 @@ yaml: сначала `project gate` на живом binding, он сам сни�
 INSTANCE=/home/dev/secretary-instance
 cat "$INSTANCE/gate-runs/service-template/gate-7c5aaea4bf399373c132/result.json"
 cat "$INSTANCE/projects/service-template.yaml"
-cat "$INSTANCE/compatibility-manifests/service-template.targets.json"
+cat "$INSTANCE/adapter-drafts/service-template.yaml"
 ```
 
 Живой эталон, `gate-7c5aaea4bf399373c132`:
@@ -342,10 +342,8 @@ cat "$INSTANCE/compatibility-manifests/service-template.targets.json"
 | `checks` | `clean_worktree`, `setup`, `smoke`, `validation`, `artifact_policy`, все пять `passed` |
 
 Binding `projects/service-template.yaml` держит те же четыре поля identity, `enabled: true` и
-пережившие обновление mutable-поля `plane: project` и `policy.code_concurrency: 1`. Target record
-`compatibility-manifests/service-template.targets.json` это `{"version": 1, "paths": [...]}` с
-единственным путём `compatibility-manifests/service-template.toml`: gate записывает, куда он положил
-manifest, чтобы уметь убрать ровно эти файлы при потере enable.
+пережившие обновление mutable-поля `plane: project` и `policy.code_concurrency: 1`. Draft
+`adapter-drafts/service-template.yaml` держит блок `gate` со `status: passed` и пятью checks.
 
 Предыдущий прогон того же проекта, `gate-46b8aecb1d8b380eb456`, остаётся на диске со `status: stale`,
 findings `stale.input` и пятью `not-run`. Это образец только для своего случая: свежий прогон на
@@ -356,28 +354,25 @@ binding он в двух из трёх исходов меняет состоя�
 
 - Живой HEAD совпал с записанным и канонический адаптер дал прежний дайджест — gate находит
   опубликованный passed-результат по этой паре и отдаёт его с кодом 0, ничего не трогая.
-- Живой HEAD ушёл вперёд — gate снимает enable, удаляет compatibility manifest вместе с target
-  record и печатает `stale` с кодом 1.
+- Живой HEAD ушёл вперёд — gate снимает enable и печатает `stale` с кодом 1.
 - HEAD тот же, но адаптер переписан, и его дайджест не совпал — gate ищет прошлый passed-результат
   по паре scanner HEAD и provision run_id и, найдя его, делает ровно то же снятие enable
   (`secretary/gate.py:62-95`).
 
-Оба снятия идут через `_disable_stale_enabled` (`gate.py:336-375`), и он не трогает
+Оба снятия идут через `_disable_stale_enabled`, и он не трогает
 `gate-runs/<id>/<run_id>/result.json`. Атомарная публикация переписывает только binding (`enabled:
-false`) и draft, чей блок `gate` получает `status: failed`, findings `stale.input` и пять `not-run`,
-и удаляет manifest с target record. Печатаемый `stale` собирается в памяти: на ушедшем вперёд HEAD
-это голый объект из `status` и `findings`, а на переписанном адаптере копия прошлого passed с
-подменёнными `status` и `findings`, поэтому в выводе все пять checks остаются `passed`.
+false`) и draft, чей блок `gate` получает `status: failed`, findings `stale.input` и пять `not-run`.
+Печатаемый `stale` собирается в памяти: на ушедшем вперёд HEAD это голый объект из `status` и
+`findings`, а на переписанном адаптере копия прошлого passed с подменёнными `status` и `findings`,
+поэтому в выводе все пять checks остаются `passed`.
 
 Отсюда расхождение, которое надо держать в голове при разборе: на диске лежит прежний `passed`
-result, а команда только что ответила `stale`. Долговечные следы снятия это disabled binding, блок
-`gate` в draft со `status: "failed"` и finding `stale.input`, и исчезнувшие manifest с target
-record. Файл результата рассказывает про свой прогон, а не про текущее состояние проекта, и судить
-о свежести по его checks нельзя.
+result, а команда только что ответила `stale`. Долговечные следы снятия это disabled binding и блок
+`gate` в draft со `status: "failed"` и finding `stale.input`. Файл результата рассказывает про свой
+прогон, а не про текущее состояние проекта, и судить о свежести по его checks нельзя.
 
 То есть один и тот же «проверочный» вызов может отозвать рабочий binding, ничего не дописав в
-gate-runs. Когда трогать состояние нельзя, ограничивайтесь чтением `result.json`, binding и target
-record.
+gate-runs. Когда трогать состояние нельзя, ограничивайтесь чтением `result.json`, binding и draft.
 
 ### Чего этот lifecycle не доказывает
 
@@ -386,12 +381,30 @@ gate не гоняет локальную команду валидации: б�
 `git diff --check HEAD` на временном worktree. Passed `validation` говорит про чистый diff, а не про
 branch protection и не про required status checks на стороне GitHub.
 
-Потребляет ли legacy dispatcher compatibility manifest, прогон тоже не решает. Gate его пишет, но
-читателя у `compatibility-manifests/<id>.toml` в коде секретаря нет. Легаси-путь ищет
-`workspace.toml` сначала в самом репозитории проекта, а центральный `<project>.toml` только при
-заданном `TA_MANIFEST_DIR`; в инстансе `compatibility.dispatcher_manifest_dir` не задан, у
-`service-template` своего `workspace.toml` нет, так что сгенерированный manifest сегодня никем не
-читается. Связать эти два адреса это отдельное решение, а не следствие пройденного gate.
+Про dispatcher прогон тоже ничего не доказывает: gate не публикует для него никаких файлов. Легаси
+lookup воркера ищет `workspace.toml` в самом репозитории проекта, а центральный `<project>.toml`
+только при заданном `TA_MANIFEST_DIR`. Эта переменная в live-инстансе и packaged runtime не задана,
+и связать её с onboarding это отдельное решение, а не следствие пройденного gate.
+
+### Остатки compatibility-manifests в инстансе
+
+В инстансе, который проходил gate на прежних версиях, может лежать каталог `compatibility-manifests`
+с файлами `<project>.toml` и `<project>.targets.json`. Это derived-вывод, который никто не читал:
+воркер берёт центральный manifest только из `TA_MANIFEST_DIR`, а она нигде не задана. Активной
+конфигурацией dispatcher эти файлы не были, и `<project>.targets.json` не является доказательством
+пройденного gate: доказательство это `gate-runs/<id>/<run_id>/result.json` со `status: passed` плюс
+enabled binding.
+
+Убирать их безопасно и ничем не связано с состоянием проекта. Ни одна команда секретаря их не читает
+и не пишет, так что снятие enable, повторный gate и восстановление после удаления работают одинаково:
+
+```bash
+INSTANCE=/home/dev/secretary-instance
+git -C "$INSTANCE" rm -r compatibility-manifests
+git -C "$INSTANCE" commit -m "Drop derived compatibility manifests"
+```
+
+Если каталог не отслеживается, достаточно обычного `rm -r`. Заново gate его не создаст.
 
 ## Рождение спринта
 

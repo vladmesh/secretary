@@ -5,7 +5,7 @@
   "description": "Versioned Phase 6 artifact for scanner output, draft binding/adapter, provision result and onboarding gate result. Binding identity (id, repo, adapter, default_branch) lives once in the top-level identity object; each stage only records the mutable enabled bit, so identity cannot diverge between draft, provision and gate.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "identity", "scanner", "draft", "provision", "gate", "ownership", "compatibility_manifest"],
+  "required": ["version", "identity", "scanner", "draft", "provision", "gate", "ownership"],
   "properties": {
     "version": {"const": 1},
     "identity": {"$ref": "#/$defs/identity"},
@@ -13,8 +13,7 @@
     "draft": {"$ref": "#/$defs/draft"},
     "provision": {"$ref": "#/$defs/provision"},
     "gate": {"$ref": "#/$defs/gate"},
-    "ownership": {"$ref": "#/$defs/ownership"},
-    "compatibility_manifest": {"$ref": "#/$defs/compatibilityManifest"}
+    "ownership": {"$ref": "#/$defs/ownership"}
   },
   "allOf": [
     {
@@ -341,16 +340,6 @@
             }
           }
         }
-      }
-    },
-    "compatibilityManifest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["consumer", "role", "canonical_source"],
-      "properties": {
-        "consumer": {"const": "legacy-dispatcher"},
-        "role": {"const": "derived-transition-consumer"},
-        "canonical_source": {"const": "onboarding-contract-v1"}
       }
     },
     "stageBinding": {
