@@ -213,7 +213,8 @@ class TwoWriterTests(unittest.TestCase):
     def seed_board_and_runs(self) -> None:
         board = self.data_dir / "board"
         (board / "cards.ndjson").write_text('{"id": 1}\n', encoding="utf-8")
-        (board / "export.json").write_text('{"card_count": 1}\n', encoding="utf-8")
+        (board / "sprints.ndjson").write_text("", encoding="utf-8")
+        (board / "export.json").write_text('{"card_count": 1, "sprint_count": 0}\n', encoding="utf-8")
         runs = self.data_dir / "runs"
         (runs / "runs.ndjson").write_text("", encoding="utf-8")
         (runs / "export.json").write_text(

@@ -15,6 +15,7 @@ from secretary.restore import (
     plan_as_json,
     rebuild_memory_index,
     restore_backup,
+    restore_state,
 )
 from secretary.host_apply import resolve_packaged
 from secretary.host import (
@@ -94,7 +95,8 @@ def run_restore_board(args: argparse.Namespace) -> int:
     except RestoreError as exc:
         _print_json({"ok": False, "action": "restore-board", "error": str(exc)})
         return 2
-    _print_json({"ok": True, "action": "restore-board", "cards": count})
+    sprints = restore_state(data_dir).get("sprint_count", 0)
+    _print_json({"ok": True, "action": "restore-board", "cards": count, "sprints": sprints})
     return 0
 
 

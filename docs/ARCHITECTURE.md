@@ -50,7 +50,10 @@ agent heads ── memory_search ──> MCP/index <── facts journal <──
 ```
 
 Kanboard является текущим live store для карточек и спринтов. Карточки живут на board `Pipeline`;
-каждый спринт является отдельной Kanboard-задачей на product board `Secretary sprints`. Все
+каждый спринт является отдельной Kanboard-задачей на product board `Secretary sprints`. Оба набора
+уходят в checkpoint и возвращаются из него отдельными наборами (см.
+[Recovery](RECOVERY.md#состав-checkpoint)), поэтому live store остаётся оперативным, а не
+единственным местом, где живёт контракт спринта. Все
 поддержанные записи проходят через `secretary task` или `secretary sprint`, которые применяют role
 guards, transitions и append-only audit. Dispatcher
 разрешает routing, создаёт worker/reviewer lifecycle и сверяет board, workspace, report и review

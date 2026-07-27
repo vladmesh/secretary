@@ -57,7 +57,7 @@ from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import UpgradeContext, default_product_root, run_steps
 
 
-CHECKPOINT_BOARD = ("cards.ndjson", "events.ndjson", "export.json")
+CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json")
 CHECKPOINT_RUNS = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 
 
@@ -382,6 +382,10 @@ def _valid_existing_layout(data_dir: Path) -> bool:
     return actual == manifest_for(data_dir)
 
 
+def _read_optional(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
 def materialize_checkpoint(
     instance_dir: Path, data_dir: Path, *, dry_run: bool = False,
 ) -> tuple[int, int]:
@@ -418,7 +422,16 @@ def materialize_checkpoint(
             for line in (runs_source / "runs.ndjson").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        # A checkpoint written before sprints joined the board export carries no
+        # sprints.ndjson; its export.json declares no sprint count either, and the
+        # next tick writes both.
+        sprint_lines = [
+            line
+            for line in _read_optional(board_source / "sprints.ndjson").splitlines()
+            if line.strip()
+        ]
         cards = [json.loads(line) for line in card_lines]
+        sprints = [json.loads(line) for line in sprint_lines]
         for line in run_lines:
             json.loads(line)
         board_export = json.loads((board_source / "export.json").read_text(encoding="utf-8"))
@@ -431,6 +444,11 @@ def materialize_checkpoint(
         raise InstallError("private checkpoint contains invalid export metadata")
     if any(not isinstance(card, dict) for card in cards) or board_export.get("card_count") != len(cards):
         raise InstallError("private checkpoint board count does not match cards.ndjson")
+    declared_sprints = board_export.get("sprint_count")
+    if any(not isinstance(sprint, dict) for sprint in sprints) or (
+        declared_sprints is not None and declared_sprints != len(sprints)
+    ):
+        raise InstallError("private checkpoint sprint count does not match sprints.ndjson")
     run_count = len(run_lines)
     declared_runs = run_export.get("run_record_count")
     if not isinstance(declared_runs, int) or declared_runs != run_count:
@@ -456,6 +474,7 @@ def materialize_checkpoint(
         with tempfile.TemporaryDirectory(prefix=".checkpoint-board-", dir=board_target) as staging_raw:
             staging = Path(staging_raw)
             write_json(staging / "cards.json", {"version": 1, "cards": cards})
+            write_json(staging / "sprints.json", {"version": 1, "sprints": sprints})
             for name in CHECKPOINT_BOARD:
                 source = board_source / name
                 if source.is_file():
@@ -463,7 +482,11 @@ def materialize_checkpoint(
             publish_component_entries(
                 staging,
                 board_target,
-                ["cards.json", *[n for n in CHECKPOINT_BOARD if (staging / n).is_file()]],
+                [
+                    "cards.json",
+                    "sprints.json",
+                    *[n for n in CHECKPOINT_BOARD if (staging / n).is_file()],
+                ],
                 "checkpoint board materialization",
             )
         with tempfile.TemporaryDirectory(prefix=".checkpoint-runs-", dir=runs_target) as staging_raw:

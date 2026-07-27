@@ -236,6 +236,10 @@ python3 -m secretary sprint status --ref sprint:<ID>
 (`secretary sprint status`, `secretary task list --sprint`). `STATUS.md` для этого контура не
 пишется: состояние спринта лежит там же, где карточки.
 
+Сущность спринта входит в checkpoint отдельным набором (`state/board/sprints.ndjson`) и
+восстанавливается вместе с карточками: после recovery спринт возвращается со всеми полями и
+записями, заводить его заново не нужно. Контракт — [Recovery](RECOVERY.md#состав-checkpoint).
+
 Разделение хранилищ: цель, текст Definition of Done, репозитории, статус, бюджет, текущая карточка
 и resume — поля сущности; документ в `secretary-instance/state/knowledge/` держит только «почему»
 (контекст момента, выбор цели, отвергнутые альтернативы) и указатель `sprint:<ID>`. Поля сущности
@@ -479,8 +483,12 @@ secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installatio
 
 Первая команда клонирует remote и останавливается до появления host-only credentials, если
 хранилище их не материализовало. Вторая единым идемпотентным flow материализует checkpoint,
-восстанавливает board, пересобирает memory index, role worktrees и host resources, затем проверяет
-status. Низкоуровневые `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` и
+восстанавливает board — и карточки Pipeline, и сущности спринтов с их полями, бюджетом, resume и
+записями, — пересобирает memory index, role worktrees и host resources, затем проверяет
+status. `restore-board` печатает обе величины (`cards`, `sprints`), а расхождение любой из двух
+parity-сверок оставляет recovery незавершённым и видно в `doctor`.
+
+Низкоуровневые `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` и
 `restore-reconcile` остаются диагностическими примитивами, а не основным runbook.
 
 ## Опциональный cold archive

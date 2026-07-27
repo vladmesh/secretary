@@ -148,6 +148,47 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(sprint["budget"]["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
         self.assertIsNone(sprint["current_task"])
 
+    def test_export_reads_records_without_the_board_or_the_linked_cards(self) -> None:
+        reader = SprintReader(self.client)  # type: ignore[arg-type]
+        self.assertEqual(reader.export(), [])
+        self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
+
+        ref = self.writer.create(role="po", actor="operator", goal="export")["sprint"]["ref"]
+        self.writer.comment(role="po", actor="operator", reference=ref, body="note")
+        self.client.calls.clear()
+        exported = reader.export()
+
+        self.assertEqual([sprint["ref"] for sprint in exported], [ref])
+        self.assertEqual([comment["body"] for comment in exported[0]["comments"]], ["[po]\nnote"])
+        self.assertNotIn("resume_freshness", exported[0])
+        self.assertNotIn("cards", exported[0])
+        self.assertFalse(
+            any(call[0] == "getProjectByName" and call[1]["name"] == "Pipeline" for call in self.client.calls)
+        )
+
+    def test_restore_rewrites_a_closed_entity_and_refuses_foreign_fields(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="restore")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+
+        with self.assertRaisesRegex(TaskError, "unknown sprint fields"):
+            self.writer.restore(reference=ref, values={"claim": "worker"})
+
+        result = self.writer.restore(
+            reference=ref,
+            values={"sprint_goal": "rewritten", "sprint_current_task": "secretary-12"},
+            request_id="restore-once",
+        )
+        replay = self.writer.restore(
+            reference=ref,
+            values={"sprint_goal": "rewritten", "sprint_current_task": "secretary-12"},
+            request_id="restore-once",
+        )
+
+        self.assertEqual(result["sprint"]["goal"], "rewritten")
+        self.assertEqual(result["sprint"]["status"], "closed")
+        self.assertEqual(result["sprint"]["current_task"], "secretary-12")
+        self.assertEqual(result["event_id"], replay["event_id"])
+
     def test_budget_is_validated_and_retry_is_one_event(self) -> None:
         ref = self.writer.create(role="po", actor="operator", goal="budget")["sprint"]["ref"]
         with self.assertRaisesRegex(TaskError, "unknown budget"):
