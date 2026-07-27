@@ -164,6 +164,41 @@ class RestoreTests(unittest.TestCase):
             )
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
 
+    def test_completed_legacy_restore_state_stays_green_without_sprint_progress(self):
+        # A recovery finished before sprint entities joined the checkpoint. Its
+        # `restore-state.json` has no sprint keys, and there is nothing left for it to
+        # restore, so the new sprint step must not turn doctor red on it.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            init_layout(data_dir)
+            instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
+            (data_dir / "restore-state.json").write_text(
+                json.dumps({
+                    "version": 1, "board": "complete", "board_parity": "complete",
+                    "board_count": 2, "memory_index": "complete", "memory_index_count": 5,
+                    "reconcile": "complete",
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(restore_findings(data_dir), [])
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
+
+    def test_recovery_that_records_sprint_progress_still_reports_it_unfinished(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "restore-state.json").write_text(
+                json.dumps({
+                    "version": 1, "board": "complete", "board_parity": "complete",
+                    "sprints": "pending", "memory_index": "complete", "reconcile": "complete",
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(restore_findings(data_dir), ["sprint restore is incomplete"])
+
     def test_default_reindex_keeps_the_model_cache_out_of_tmp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -252,10 +287,10 @@ class RestoreTests(unittest.TestCase):
             results: list[tuple[str, object]] = []
             original = restore_module._create_restored_card
 
-            def paused_create(writer, card):
+            def paused_create(writer, card, prefix):
                 entered.set()
                 self.assertTrue(release.wait(timeout=5))
-                original(writer, card)
+                original(writer, card, prefix)
 
             def run_restore() -> None:
                 try:

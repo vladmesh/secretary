@@ -145,12 +145,13 @@ class SprintRestoreTests(unittest.TestCase):
 
     def test_repeated_restore_creates_one_entity_and_no_duplicate_records(self) -> None:
         client, _ = self._restore()
-        # A recovery retry rematerializes the canonical events.ndjson, which does not
-        # carry the derived restore audit records of the failed attempt.
-        (self.target_data / "board" / "events.ndjson").write_text("", encoding="utf-8")
+        namespace = restore_state(self.target_data)["restore_namespace"]
 
+        # The retry meets the durable audit its own first pass wrote, and stays on the
+        # same namespace: the entities that audit names are the ones this backend holds.
         self._restore(client)
 
+        self.assertEqual(restore_state(self.target_data)["restore_namespace"], namespace)
         sprint_board = ensure_sprint_board(client)  # type: ignore[arg-type]
         entities = [task for task in client.tasks if task["project_id"] == sprint_board]  # type: ignore[attr-defined]
         self.assertEqual([task["reference"] for task in entities], [self.ref])
@@ -158,6 +159,44 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(
             [comment["body"] for comment in live["comments"]],
             [comment["text"] for comment in self._exported_sprint()["comments"]],
+        )
+
+    def test_second_disaster_restores_from_the_checkpoint_of_the_first_recovery(self) -> None:
+        """A recovered instance is itself recoverable.
+
+        The restore audit is durable, so the next checkpoint ships it as canon. Meeting
+        those request ids again on a backend that holds nothing used to short-circuit
+        every write as already committed and fail reading the entity nobody created.
+        """
+        first, _ = self._restore()
+        # The checkpoint of the recovered instance: its own export, its own audit.
+        export_board(self.target_data, command=self._pipeline_command(), sprint_client=first)
+        second_data = self.root / "second-data"
+        shutil.copytree(self.target_data, second_data)
+
+        second = _EmptyBoardsKanboard()
+        self.assertEqual(import_normalized_board(second_data, client=second), 1)  # type: ignore[arg-type]
+
+        self.assertNotEqual(
+            restore_state(second_data)["restore_namespace"],
+            restore_state(self.target_data)["restore_namespace"],
+        )
+        live = SprintReader(second, data_dir=second_data).show(self.ref)  # type: ignore[arg-type]
+        exported = self._exported_sprint()
+        self.assertEqual(live["goal"], exported["goal"])
+        self.assertEqual(live["status"], "closed")
+        self.assertEqual(live["repositories"], exported["repositories"])
+        self.assertEqual(live["budget"]["by_type"], exported["budget"]["by_type"])
+        self.assertEqual(live["current_task"], exported["current_task"])
+        self.assertEqual(live["resume"], exported["resume"])
+        self.assertEqual(
+            [comment["body"] for comment in live["comments"]],
+            [comment["text"] for comment in exported["comments"]],
+        )
+        self.assertEqual(normalize_sprint_entity(live), exported)
+        self.assertEqual(restore_state(second_data)["sprint_parity"], "complete")
+        self.assertEqual(
+            [task["reference"] for task in second.tasks if task["reference"] == self.ref], [self.ref]  # type: ignore[attr-defined]
         )
 
     def test_parity_failure_leaves_recovery_incomplete_with_a_named_error(self) -> None:
@@ -178,6 +217,17 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(state["sprint_parity"], "failed")
         self.assertEqual(state["sprints"], "failed")
         self.assertIn("sprint restore parity failed", restore_findings(self.target_data))
+
+    def test_recovery_interrupted_before_the_sprint_step_reports_it_unfinished(self) -> None:
+        # Doctor treats a restore state with no sprint key as one that predates sprint
+        # entities. A recovery that started under this build records the step from the
+        # first live write, so an interruption cannot be read as nothing left to do.
+        with mock.patch("secretary.restore._import_sprints", side_effect=RestoreError("stopped")):
+            with self.assertRaisesRegex(RestoreError, "stopped"):
+                import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+
+        self.assertEqual(restore_state(self.target_data)["sprints"], "pending")
+        self.assertIn("sprint restore is incomplete", restore_findings(self.target_data))
 
     def test_foreign_sprint_on_the_target_board_stops_the_restore(self) -> None:
         (self.target_data / "board" / "cards.json").write_text(

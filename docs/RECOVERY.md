@@ -249,7 +249,15 @@ Parity сверяется отдельно для карточек и для с�
 которой нет в экспорте, restore не перезаписывает, а останавливается.
 
 Повторный `secretary recover` безопасен: checkout fast-forward-only, board restore сверяет parity,
-memory index строится заново, materializer на втором проходе не имеет изменений. Терминалы,
+memory index строится заново, materializer на втором проходе не имеет изменений. Восстановленный
+инстанс сам остаётся восстановимым: его audit-записи о restore попадают в следующий checkpoint, и
+recovery в очередной пустой backend пишет свои события под новым namespace, а не зачитывает чужие
+как уже применённые. Namespace живёт в `restore-state.json`, поэтому retry одного recovery остаётся
+идемпотентным.
+
+Checkpoint, снятый до того, как сущности спринтов вошли в export, восстанавливается по-прежнему:
+`sprints.ndjson` в нём нет, это читается как установка без спринтов, и `doctor` у уже завершённого
+восстановления такого инстанса остаётся зелёным. Терминалы,
 worktrees, vector index, generated units и host caches из remote не копируются. S3 и отдельный
 backup host не требуются.
 

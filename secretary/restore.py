@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +28,7 @@ from secretary.config import ConfigError, load_config, validate_instance
 from secretary import state_repo
 from secretary.data import init_layout
 from secretary._fsutil import file_lock, write_text_atomic
-from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
+from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
 
 
 @dataclass(frozen=True)
@@ -78,15 +79,22 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
             unexpected = set(existing) - {card["reference"] for card in cards}
             if unexpected:
                 raise RestoreError("board is not empty or does not match normalized restore data")
+            # One read of the sprint board before any write: it decides what already exists,
+            # which records a retry must not append twice, and whether the audit this data dir
+            # carries was written against this backend or an earlier one.
+            existing_sprints = _existing_sprints(data_dir, client, sprints)
+            prefix = _restore_request_prefix(
+                data_dir, writer.audit, set(existing) | set(existing_sprints)
+            )
             for card in sorted(cards, key=_restore_card_order):
                 current = existing.get(card["reference"])
                 if current is None:
-                    _create_restored_card(writer, card)
+                    _create_restored_card(writer, card, prefix)
                 target = _state_for_column(card["column"])
                 writer.restore_card(
                     reference=card["reference"], metadata=_restore_board_metadata(card), target=target or "",
                     position=_restore_position(card), swimlane=str(card.get("swimlane") or ""),
-                    request_id=f"restore-card:{card['reference']}",
+                    request_id=f"{prefix}card:{card['reference']}",
                 )
                 live_comments = Counter(
                     str(comment.get("body") or "")
@@ -100,13 +108,13 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
                         continue
                     writer.restore_comment(
                         reference=card["reference"], body=comment, occurrence=occurrence,
-                        request_id=f"restore-comment:{card['reference']}:{index}",
+                        request_id=f"{prefix}comment:{card['reference']}:{index}",
                     )
             actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed")
-            _import_sprints(data_dir, client, sprints)
+            _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
         except TaskError as exc:
             raise RestoreError(exc.message) from None
         _update_restore_state(
@@ -121,7 +129,28 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
         return len(cards)
 
 
-def _import_sprints(data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]]) -> None:
+def _existing_sprints(
+    data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """The sprint entities the target already holds, read once before any write.
+
+    An export without sprint entities never touches the sprint board, so it never
+    asks the backend about one either.
+    """
+    if not sprints:
+        return {}
+    from secretary.sprints import SprintReader
+
+    return {
+        sprint["ref"]: sprint
+        for sprint in SprintReader(client, data_dir=data_dir).export()
+    }
+
+
+def _import_sprints(
+    data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]],
+    existing: dict[str, dict[str, Any]], prefix: str,
+) -> None:
     """Recreate the sprint entities and prove they match the export.
 
     Cards come first: a restored sprint names its current card, and the entity is
@@ -137,9 +166,6 @@ def _import_sprints(data_dir: Path, client: KanboardClient, sprints: list[dict[s
     ensure_sprint_board(client)
     reader = SprintReader(client, data_dir=data_dir)
     writer = SprintWriter(client, data_dir=data_dir)
-    # One read of the board before any write: it decides what already exists and which
-    # records a retry must not append twice. Nothing else writes to it meanwhile.
-    existing = {sprint["ref"]: sprint for sprint in reader.export()}
     unexpected = set(existing) - {sprint["reference"] for sprint in sprints}
     if unexpected:
         raise RestoreError("sprint board is not empty or does not match normalized restore data")
@@ -150,11 +176,11 @@ def _import_sprints(data_dir: Path, client: KanboardClient, sprints: list[dict[s
                 role="steward", actor="restore", goal=sprint["goal"],
                 definition_of_done=sprint["definition_of_done"],
                 repositories=list(sprint["repositories"]), reference=reference,
-                request_id=f"restore-sprint-create:{reference}",
+                request_id=f"{prefix}sprint-create:{reference}",
             )
         writer.restore(
             reference=reference, values=_restore_sprint_metadata(sprint),
-            request_id=f"restore-sprint:{reference}",
+            request_id=f"{prefix}sprint:{reference}",
         )
         live_comments = Counter(
             str(comment.get("body") or "")
@@ -168,7 +194,7 @@ def _import_sprints(data_dir: Path, client: KanboardClient, sprints: list[dict[s
                 continue
             writer.restore_comment(
                 reference=reference, body=comment, occurrence=occurrence,
-                request_id=f"restore-sprint-comment:{reference}:{index}",
+                request_id=f"{prefix}sprint-comment:{reference}:{index}",
             )
     live = {entity["reference"]: entity for entity in map(normalize_sprint_entity, reader.export())}
     if any(_sprint_core(live.get(sprint["reference"], {})) != _sprint_core(sprint) for sprint in sprints):
@@ -306,7 +332,11 @@ def restore_findings(data_dir: Path) -> list[str]:
         findings.append("board restore is incomplete")
     if state.get("sprint_parity") == "failed":
         findings.append("sprint restore parity failed")
-    elif state.get("sprints") != "complete":
+    elif "sprints" in state and state.get("sprints") != "complete":
+        # A recovery staged before sprint entities joined the checkpoint records no
+        # sprint state at all. Its board restore already finished against an export
+        # that had none, so demanding the field now would only turn doctor red on an
+        # instance that has nothing left to restore.
         findings.append("sprint restore is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
@@ -411,7 +441,40 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
     return sorted(sprints, key=lambda sprint: str(sprint["reference"]))
 
 
-def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
+def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str]) -> str:
+    """Return the request-id namespace this recovery writes its audit under.
+
+    Restore events are durable: the checkpoint of a recovered instance carries them, so a
+    second recovery from that checkpoint meets its own request ids again. Reusing them
+    would short-circuit every write as already committed against a backend that holds
+    nothing, and recovery would fail reading an entity it never created. A namespace whose
+    committed events name entities the target does not have was written against an earlier
+    backend, so this recovery takes a fresh one; `restore-state.json` keeps it so the
+    retries of one recovery stay on the same namespace.
+    """
+    state = restore_state(data_dir)
+    token = state.get("restore_namespace")
+    if not isinstance(token, str) or not token or not _namespace_is_local(audit, token, live_refs):
+        token = uuid.uuid4().hex
+        # `sprints` is also what marks a restore state as one that tracks the sprint step
+        # at all; a recovery staged before sprint entities joined the checkpoint has no
+        # such key, and doctor reads its absence as nothing left to restore.
+        _update_restore_state(
+            data_dir, restore_namespace=token, sprints=state.get("sprints", "pending")
+        )
+    return f"restore:{token}:"
+
+
+def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bool:
+    prefix = f"restore:{token}:"
+    return all(
+        str(event.get("ref") or "") in live_refs
+        for event in audit.events()
+        if str(event.get("request_id") or "").startswith(prefix)
+    )
+
+
+def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str) -> None:
     fields = _restore_fields(card)
     writer.create(
         role="steward", actor="restore", project=fields["project"], task_type=fields["task_type"],
@@ -419,7 +482,7 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:
         blocked_by=fields["blocked_by"], head=fields["head"], review_head=fields["review_head"],
         slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
         family_preference=fields["family_preference"], codex_launch_mode=fields["codex_launch_mode"],
-        request_id=f"restore-create:{card['reference']}",
+        request_id=f"{prefix}create:{card['reference']}",
     )
 
 
@@ -690,8 +753,12 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
             _update_restore_state(
                 data_staging,
                 board="pending",
+                sprints="pending",
                 memory_index="pending",
                 reconcile="pending",
+                # The archive carries the audit and the restore progress of whatever
+                # recovery produced it; this data dir restores into its own backend.
+                restore_namespace=uuid.uuid4().hex,
             )
             _reject_existing_target(target)
             os.replace(data_staging, target)
