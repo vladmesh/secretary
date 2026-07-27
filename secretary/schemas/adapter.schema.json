@@ -51,6 +51,13 @@
           "minItems": 1,
           "items": {"type": "string", "minLength": 1},
           "description": "What the gate could not cover, e.g. ['tests']. Required when ci is 'none'."
+        },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "description": "GitHub check names the gate judges by, e.g. ['test']. Matches an Actions check-run name or a legacy commit status context. Only meaningful when ci is 'github'; without it the gate judges by every check on the sha."
         }
       },
       "allOf": [

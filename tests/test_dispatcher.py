@@ -5568,6 +5568,119 @@ class DispatcherGateTests(unittest.TestCase):
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "pending")
 
+    def _required_adapter(self, *names: str) -> dict:
+        return {"validation": {"ci": "github", "required_checks": list(names)}}
+
+    def test_github_gate_green_when_required_check_passes_next_to_a_failed_optional(self) -> None:
+        """secretary-841: the declared set is the whole truth. An `optional-suite` failing on the
+        same sha is not the project's gate and must not bounce the card."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._required_adapter("test"),
+                pr_open=True,
+                check_runs=[
+                    {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
+                    {"status": "COMPLETED", "conclusion": "FAILURE", "name": "optional-suite"},
+                ],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+
+    def test_github_gate_red_names_the_failed_required_check(self) -> None:
+        run_log = "\n".join([
+            "test\tRun unittest\t##[error]AssertionError: expected 2, got 3",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._required_adapter("test"),
+                pr_open=True,
+                check_runs=[
+                    {
+                        "status": "COMPLETED", "conclusion": "FAILURE", "name": "test",
+                        "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                    },
+                    {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "optional-suite"},
+                ],
+                run_log=run_log,
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("test", result.summary)
+        self.assertIn("AssertionError: expected 2, got 3", result.log)
+
+    def test_github_gate_pending_while_a_required_check_still_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._required_adapter("test"),
+                pr_open=True,
+                check_runs=[
+                    {"status": "IN_PROGRESS", "name": "test"},
+                    {"status": "COMPLETED", "conclusion": "FAILURE", "name": "optional-suite"},
+                ],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "pending")
+
+    def test_github_gate_pending_while_a_required_check_is_missing(self) -> None:
+        """A required name nothing posted for this sha is «CI не стартовал», not green: the
+        pending watchdog escalates it if it never arrives."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._required_adapter("test", "lint"),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "pending")
+
+    def test_github_gate_matches_a_required_legacy_status_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._required_adapter("external-ci"),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "FAILURE", "name": "optional-suite"}],
+                statuses=[{"state": "success", "context": "external-ci"}],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+
+    def test_github_gate_without_a_required_list_still_judges_every_check(self) -> None:
+        """Migration safety: an adapter that has not declared `required_checks` keeps the pre-841
+        behaviour, where any failing check on the sha is red."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                check_runs=[
+                    {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
+                    {"status": "COMPLETED", "conclusion": "FAILURE", "name": "optional-suite"},
+                ],
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("optional-suite", result.summary)
+
+    def test_github_rollup_honours_the_required_set(self) -> None:
+        from secretary.dispatcher_gate import _rollup
+
+        items = [
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
+            {"status": "COMPLETED", "conclusion": "FAILURE", "name": "optional-suite"},
+            {"status": "IN_PROGRESS", "name": "slow-optional"},
+        ]
+        self.assertEqual(_rollup(items, ["test"])[0], "SUCCESS")
+        self.assertEqual(_rollup(items, ["test", "optional-suite"])[0], "FAILURE")
+        self.assertEqual(_rollup(items, ["absent"])[0], "PENDING")
+        self.assertEqual(_rollup([], ["test"])[0], "PENDING")
+        # legacy status entries match on `context`
+        self.assertEqual(_rollup([{"state": "failure", "context": "external-ci"}], ["external-ci"])[0], "FAILURE")
+
     def test_github_rollup_classification(self) -> None:
         from secretary.dispatcher_gate import _rollup
 

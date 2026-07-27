@@ -82,6 +82,23 @@ class SchemaValidTests(unittest.TestCase):
         data["validation"] = {"ci": "none", "missing": ["tests"]}
         self.assertEqual(validate(data, "adapter", "a.yaml"), [])
 
+    def test_adapter_github_ci_with_required_checks_passes(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "github", "required_checks": ["test"]}
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
+    def test_adapter_github_ci_without_required_checks_stays_valid(self):
+        """secretary-841: adapters that have not migrated keep validating; the gate falls back to
+        judging by every check on the sha."""
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["validation"] = {"ci": "github"}
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
+    def test_onboarding_draft_accepts_required_checks(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["provision"]["adapter"]["validation"] = {"ci": "github", "required_checks": ["test"]}
+        self.assertEqual(validate(data, "onboarding-contract", "required-checks.json"), [])
+
 
 class SchemaInvalidTests(unittest.TestCase):
     def test_instance_rejects_relative_data_dir(self):
@@ -194,6 +211,19 @@ class SchemaInvalidTests(unittest.TestCase):
         errors = validate(data, "adapter", "a.yaml")
         self.assertTrue(errors)
         self.assertTrue(any("missing" in e.message for e in errors), errors)
+
+    def test_adapter_rejects_empty_or_duplicate_required_checks(self):
+        for value in ([], [""], ["test", "test"]):
+            with self.subTest(required_checks=value):
+                data = copy.deepcopy(VALID_ADAPTER)
+                data["validation"] = {"ci": "github", "required_checks": value}
+                self.assertTrue(validate(data, "adapter", "a.yaml"))
+
+    def test_onboarding_draft_rejects_duplicate_required_checks(self):
+        data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
+        data["provision"]["adapter"]["validation"] = {"ci": "github", "required_checks": ["test", "test"]}
+        errors = validate(data, "onboarding-contract", "dup-required-checks.json")
+        self.assertTrue(any("required_checks" in e.path for e in errors), errors)
 
     def test_adapter_none_ci_rejects_empty_missing(self):
         data = copy.deepcopy(VALID_ADAPTER)

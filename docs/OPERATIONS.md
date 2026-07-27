@@ -376,10 +376,24 @@ gate-runs. Когда трогать состояние нельзя, огран
 
 ### Чего этот lifecycle не доказывает
 
-Настройка GitHub required checks не проверена. `validation.ci: github` в адаптере значит только, что
-gate не гоняет локальную команду валидации: без явного `validation.command` он выполняет дефолтный
-`git diff --check HEAD` на временном worktree. Passed `validation` говорит про чистый diff, а не про
-branch protection и не про required status checks на стороне GitHub.
+Onboarding-gate не проверяет GitHub-конфигурацию проекта. `validation.ci: github` в адаптере значит
+только, что gate не гоняет локальную команду валидации: без явного `validation.command` он выполняет
+дефолтный `git diff --check HEAD` на временном worktree. Passed `validation` говорит про чистый diff,
+а не про branch protection на стороне GitHub.
+
+Набор обязательных checks задаёт сам адаптер полем `validation.required_checks` — источник истины
+для механического gate, а не GitHub branch protection. Механический gate читает его так:
+
+- список задан — красит карточку только по этим именам. Имя сопоставляется с `name` Actions
+  check-run или `context` легаси commit status. Требуемый check, который не появился на sha или ещё
+  не завершился, оставляет карточку в pending (дальше её добирает pending-watchdog); упавший
+  требуемый check даёт red с его именем; все требуемые successful дают green.
+- список не задан — прежнее поведение: в rollup идут все checks на sha, и любой упавший даёт red.
+
+Всё, что вне списка, для gate необязательно: упавший или висящий посторонний check-run на том же sha
+результат не меняет. Проверить это можно dispatch-only workflow `optional-suite`, который по ручному
+`workflow_dispatch` кладёт заведомо падающий check с этим именем; на PR и push он не запускается и
+job `test` в workflow `ci` не трогает.
 
 Про dispatcher прогон тоже ничего не доказывает: gate не публикует для него никаких файлов. Легаси
 lookup воркера ищет `workspace.toml` в самом репозитории проекта, а центральный `<project>.toml`
