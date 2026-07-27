@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -130,6 +131,18 @@ CREATE_VISIBILITY_GRACE_S = 60
 FINALIZE_LOCK_ATTEMPTS = 4
 FINALIZE_LOCK_RETRY_S = 2.0
 REPORT_VISIBILITY_GAP_SECONDS = 60
+# A reused terminal is only useful while an agent REPL still owns the pane. `tui-idle` alone is
+# not enough: Orca reports it for a shell that replaced a completed agent too. Keep this bounded
+# like the other terminal probes so a broken pane turns into a failed unit rather than a wedged
+# scheduler invocation.
+REUSE_DELIVERY_TIMEOUT_S = float(os.environ.get("TA_REUSE_DELIVERY_TIMEOUT_S", "12"))
+REUSE_DELIVERY_POLL_S = float(os.environ.get("TA_REUSE_DELIVERY_POLL_S", "0.25"))
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SHELL_PROMPT_RE = re.compile(
+    r"(?:^[^\n]*@[^\n:]+:[^\n]*[#$](?:\s|$)|^(?:bash|zsh|fish|sh)[^\n]*[#$](?:\s|$))",
+    re.MULTILINE,
+)
+_AGENT_REPL_MARKERS = ("Claude Code", "Codex", "Hermes", "❯", "›")
 
 
 @dataclass(frozen=True)
@@ -138,6 +151,10 @@ class DispatchCommand:
     launch: str
     profile: str | None
     card_ref: str | None = None
+
+
+class ReuseDeliveryError(RuntimeError):
+    """A warm terminal did not visibly accept its next skill command."""
 
 
 def _orca_json(args: list[str]) -> dict:
@@ -150,6 +167,116 @@ def _orca_json(args: list[str]) -> dict:
 
 def _orca(args: list[str]) -> None:
     subprocess.run([ORCA, *args], capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
+
+
+def _terminal_screen(handle: str) -> str:
+    """Rendered terminal text, or an empty string when Orca cannot provide it.
+
+    This deliberately reads the panel instead of inferring liveness from the terminal record.
+    A completed agent leaves a perfectly live PTY behind, now owned by bash.
+    """
+    try:
+        data = _orca_json(["terminal", "read", "--terminal", handle, "--limit", "200"])
+    except Exception:
+        return ""
+    terminal = data.get("terminal") if isinstance(data.get("terminal"), dict) else data
+    if not isinstance(terminal, dict):
+        return ""
+    tail = terminal.get("tail")
+    if isinstance(tail, list):
+        text = "\n".join(str(line) for line in tail)
+    else:
+        text = next((value for key in ("text", "content", "screen")
+                     if isinstance((value := terminal.get(key)), str)), "")
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _agent_repl_visible(handle: str) -> bool:
+    """Whether the observed panel is an agent REPL, not the shell it may have returned to.
+
+    The prompt glyphs cover the supported interactive runtimes.  We require a positive REPL
+    marker as well as the absence of a shell prompt at the bottom of the panel: unknown or
+    unreadable screens are unsafe to receive a slash command and therefore take the
+    fresh-terminal path. Tool output can legitimately contain a shell prompt, so it must not
+    classify the whole scrollback as a shell.
+    """
+    screen = _terminal_screen(handle)
+    if not screen or _shell_prompt_at_tail(screen):
+        return False
+    return any(marker in screen for marker in _AGENT_REPL_MARKERS)
+
+
+def _shell_prompt_at_tail(screen: str) -> bool:
+    """Whether the last non-empty terminal line is a shell prompt."""
+    for line in reversed(screen.splitlines()):
+        if line.strip():
+            return bool(_SHELL_PROMPT_RE.search(line))
+    return False
+
+
+def _claude_projects_root() -> Path:
+    configured = os.environ.get("TA_CLAUDE_PROJECTS")
+    return Path(configured) if configured else Path.home() / ".claude" / "projects"
+
+
+def _claude_session_paths_for(workspace: str):
+    """Yield Claude session logs for one workspace without scanning other projects."""
+    root = _claude_projects_root()
+    project = str(Path(workspace).resolve(strict=False)).replace("/", "-")
+    try:
+        yield from (root / project).glob("*.jsonl")
+    except OSError:
+        return
+
+
+def _claude_user_turn_after(workspace: str, since: float) -> bool:
+    """Whether Claude durably recorded a new user turn for this workspace after ``since``."""
+    for path in _claude_session_paths_for(workspace):
+        try:
+            if path.stat().st_mtime <= since:
+                continue
+            with path.open(encoding="utf-8", errors="replace") as source:
+                for line in source:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict) or record.get("type") != "user":
+                        continue
+                    timestamp = record.get("timestamp")
+                    if not isinstance(timestamp, str):
+                        continue
+                    try:
+                        recorded_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        continue
+                    if recorded_at > since:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def _confirm_reuse_delivery(handle: str, workspace: str, sent_at: float) -> None:
+    """Wait until Claude durably records the command just sent to the reused REPL."""
+    deadline = time.monotonic() + REUSE_DELIVERY_TIMEOUT_S
+    last_reason = "no-user-turn"
+    while time.monotonic() < deadline:
+        if _claude_user_turn_after(workspace, sent_at):
+            return
+        screen = _terminal_screen(handle)
+        if not screen:
+            last_reason = "panel-unreadable"
+        elif _shell_prompt_at_tail(screen):
+            last_reason = "agent-repl-lost"
+            break
+        elif not any(marker in screen for marker in _AGENT_REPL_MARKERS):
+            last_reason = "agent-repl-not-visible"
+        time.sleep(max(REUSE_DELIVERY_POLL_S, 0.01))
+    raise ReuseDeliveryError(
+        f"warm-reuse delivery was not confirmed after {REUSE_DELIVERY_TIMEOUT_S:.1f}s "
+        f"(reason={last_reason})"
+    )
 
 
 def _workspace(agent: str) -> str:
@@ -460,12 +587,14 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
     return cmd
 
 
-def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str,
+def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, workspace: str,
                          state: AgentState, event: str) -> DispatchCommand:
     cmd = _dispatch_command(agent, variant)
     try:
+        sent_at = time.time()
         _orca(["terminal", "send", "--terminal", terminal_handle,
                "--text", cmd.skill, "--enter"])
+        _confirm_reuse_delivery(terminal_handle, workspace, sent_at)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -855,6 +984,28 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
             print(f"dispatch[{agent}]: idle terminal's head is red — stopped, fresh fallback terminal -> {cmd.skill}")
             return 0
 
+        # idle: a terminal can remain live after its agent exits, leaving bash in the same pane.
+        # `tui-idle` reports that shell as idle too, so inspect the rendered panel before any
+        # slash command is sent. A dead REPL takes the normal stop/reap/fresh-create route.
+        # Its telemetry action is `warm-repl-restart`, not `reused`.
+        if not _agent_repl_visible(survivor["handle"]):
+            if not _stop_and_confirm(ws, state):
+                state.log_run(event, action="warm-repl-stop-failed")
+                print(f"dispatch[{agent}]: idle terminal has no live agent REPL, but its stop "
+                      "could not be confirmed — leaving it for the next tick")
+                return 0
+            _, ok = _reap_ghosts(ws)
+            if not ok:
+                state.log_run(event, action="warm-repl-restart-tab-failed")
+                print(f"dispatch[{agent}]: idle terminal had no live agent REPL; stopped it but "
+                      "a ghost tab would not close, not restarting this tick")
+                return 0
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event)
+            state.log_run(event, action="warm-repl-restart")
+            print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> "
+                  f"{cmd.skill}")
+            return 0
+
         # idle: warm reuse, killing nothing -> no ghost. Close only legacy duplicates (one-time).
         state.save_terminal_handle(survivor.get("handle") or survivor.get("id"))
         extras = [t for t in terms if t["handle"] != survivor["handle"]]
@@ -862,7 +1013,12 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
             _orca(["terminal", "close", "--terminal", t["handle"]])
         _orca(["terminal", "send", "--terminal", survivor["handle"], "--text", "/clear", "--enter"])
         time.sleep(1.0)  # let /clear settle before the skill lands
-        cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], state, event)
+        try:
+            cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], ws, state, event)
+        except ReuseDeliveryError as exc:
+            state.log_run(event, action="reuse-delivery-unconfirmed", result="error", error=str(exc))
+            print(f"dispatch[{agent}]: warm-reuse delivery was not confirmed ({exc})", file=sys.stderr)
+            raise
         state.log_run(event, action="reused")
         tail = f"; closed {len(extras)} dup(s)" if extras else ""
         print(f"dispatch[{agent}]: reused idle terminal (/clear -> {cmd.skill}){tail}")
