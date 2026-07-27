@@ -98,6 +98,16 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createProject"]), 1)
 
+    def test_read_only_sprint_list_does_not_create_a_board_or_claim_resume_freshness(self) -> None:
+        reader = SprintReader(self.client)  # type: ignore[arg-type]
+        self.assertEqual(reader.list(create=False), [])
+        self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
+
+        created = self.writer.create(role="po", actor="operator", goal="list")
+        listed = reader.list()
+        self.assertEqual(listed[0]["ref"], created["sprint"]["ref"])
+        self.assertNotIn("resume_freshness", listed[0])
+
     def test_create_has_only_contract_fields_and_rejects_duplicate_reference(self) -> None:
         created = self.writer.create(
             role="po", actor="operator", goal="Ship sprint entity", definition_of_done="tests pass",

@@ -64,12 +64,19 @@ def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
 
 def ensure_sprint_board(client: KanboardClient) -> int:
     """Return the dedicated sprint board, creating it once when absent."""
-    board = client.call("getProjectByName", name=SPRINT_BOARD_NAME)
-    board_id = _positive_int(board.get("id")) if isinstance(board, dict) else None
-    if board_id is None:
-        board_id = _positive_int(client.call("createProject", name=SPRINT_BOARD_NAME))
+    board_id = _sprint_board(client, create=True)
     if board_id is None:
         raise TaskError("backend_error", "Kanboard did not create the sprint board", 1)
+    return board_id
+
+
+def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
+    board = client.call("getProjectByName", name=SPRINT_BOARD_NAME)
+    board_id = _positive_int(board.get("id")) if isinstance(board, dict) else None
+    if board_id is None and create:
+        board_id = _positive_int(client.call("createProject", name=SPRINT_BOARD_NAME))
+    if board_id is None:
+        return None
     return board_id
 
 
@@ -79,8 +86,10 @@ class SprintReader:
         self.data_dir = Path(data_dir) if data_dir is not None else None
         self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
 
-    def list(self, *, statuses: set[str] | None = None) -> list[dict[str, Any]]:
-        board_id = ensure_sprint_board(self.client)
+    def list(self, *, statuses: set[str] | None = None, create: bool = True) -> list[dict[str, Any]]:
+        board_id = _sprint_board(self.client, create=create)
+        if board_id is None:
+            return []
         raw_sprints = self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
         if not isinstance(raw_sprints, list):
             raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
@@ -89,6 +98,9 @@ class SprintReader:
             if not isinstance(raw, dict):
                 continue
             sprint = self._normalize(raw, comments=None)
+            # Without live cards this value would claim freshness based on incomplete data.  `show`
+            # and `status` populate it after reading the linked cards instead.
+            sprint.pop("resume_freshness", None)
             if statuses and sprint["status"] not in statuses:
                 continue
             result.append(sprint)

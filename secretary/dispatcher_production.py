@@ -773,13 +773,29 @@ def _production_claim_ready(
         if task.get("type") == "code" and task.get("project") and not is_steward_report(task)
     }
     skipped: list[dict[str, str]] = []
+    sprint_cache: dict[str, dict[str, Any]] = {}
+    sprint_errors: dict[str, str] = {}
     for task in _production_tasks(runtime, {"ready"}):
         if is_steward_report(task):
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
             continue
         sprint_ref = str(task.get("sprint") or "")
         if sprint_ref:
-            sprint = runtime.sprints.show(sprint_ref, include_cards=False)
+            sprint = sprint_cache.get(sprint_ref)
+            if sprint is None and sprint_ref not in sprint_errors:
+                try:
+                    sprint = runtime.sprints.show(sprint_ref, include_cards=False)
+                except TaskError as exc:
+                    sprint_errors[sprint_ref] = exc.message
+                else:
+                    sprint_cache[sprint_ref] = sprint
+            if sprint_ref in sprint_errors:
+                skipped.append({
+                    "ref": task["ref"],
+                    "reason": "linked sprint cannot be read: " + sprint_errors[sprint_ref],
+                })
+                continue
+            assert sprint is not None
             if sprint.get("status") != "open":
                 skipped.append({"ref": task["ref"], "reason": "linked sprint is stopped or closed"})
                 continue
@@ -848,7 +864,7 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
     events = runtime.audit.events()
     committed = {str(event.get("request_id") or "") for event in events}
     outcomes: list[dict[str, Any]] = []
-    sprint_cache: dict[str, str] = {}
+    sprint_cache: dict[str, str | None] = {}
     for event in events:
         reference = str(event.get("ref") or "")
         if not reference or reference.startswith("sprint:"):
@@ -863,7 +879,12 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         if request_id in committed:
             continue
         sprint = _event_sprint(runtime, event, sprint_cache)
+        if sprint is None:
+            # A transient board failure must remain eligible for the next tick.  Only a successful
+            # lookup that proves the card is unlinked gets a durable terminal marker below.
+            continue
         if not sprint:
+            _record_unlinked_budget_event(runtime, event, request_id, identity, event_type)
             continue
         result = writer.record_budget(
             role="dispatcher", actor=runtime.owner, reference=sprint, event_type=event_type,
@@ -877,7 +898,7 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
     return outcomes
 
 
-def _event_sprint(runtime: Any, event: dict[str, Any], cache: dict[str, str]) -> str:
+def _event_sprint(runtime: Any, event: dict[str, Any], cache: dict[str, str | None]) -> str | None:
     reference = str(event.get("ref") or "")
     if reference in cache:
         return cache[reference]
@@ -888,9 +909,37 @@ def _event_sprint(runtime: Any, event: dict[str, Any], cache: dict[str, str]) ->
         try:
             sprint = str(runtime.reader.show(reference).get("sprint") or "")
         except TaskError:
-            sprint = ""
+            sprint = None
     cache[reference] = sprint
     return sprint
+
+
+def _record_unlinked_budget_event(
+    runtime: Any,
+    event: dict[str, Any],
+    request_id: str,
+    source_event_id: str,
+    event_type: str,
+) -> None:
+    """Durably remember that a budget-shaped card event has no sprint to charge.
+
+    The audit request id is deliberately the same one a charge would use.  A card's sprint link
+    is assigned at creation and cannot appear later, so this is a terminal result and prevents an
+    old unrelated red verdict from causing board reads forever.
+    """
+    runtime.audit.append(request_id, {
+        "event_id": "evt_budget_unlinked_" + source_event_id,
+        "schema_version": 1,
+        "occurred_at": now_rfc3339(),
+        "actor": {"role": "dispatcher", "id": runtime.owner},
+        "kind": "budget_unlinked",
+        "outcome": "success",
+        "task_id": str(event.get("task_id") or ""),
+        "ref": str(event.get("ref") or ""),
+        "backend": dict(event.get("backend") or {}),
+        "request_id": request_id,
+        "payload": {"source_event_id": source_event_id, "event_type": event_type},
+    })
 
 
 def _budget_event_type(event: dict[str, Any]) -> str | None:

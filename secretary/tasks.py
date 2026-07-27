@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class TaskError(Exception):
@@ -830,8 +830,14 @@ class TaskWriter:
                     self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
             except Exception as exc:
                 raise _CommittedWriteError() from exc
-        source = self.reader.show(reference)["state"]
-        return self._write("moved", role, actor, reference, request_id, {"from": source, "to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
+        return self._write(
+            "moved", role, actor, reference, request_id,
+            lambda task: {
+                "from": task["state"], "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+            },
+            mutation,
+        )
 
     def edit(
         self,
@@ -985,7 +991,7 @@ class TaskWriter:
         actor: str,
         reference: str,
         request_id: str | None,
-        payload: dict[str, Any],
+        payload: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
         mutation: Any,
         *,
         retry_payload: dict[str, Any] | None = None,
@@ -1011,7 +1017,8 @@ class TaskWriter:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
         task = self.reader.show(reference)
-        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": payload}
+        event_payload = payload(task) if callable(payload) else payload
+        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": event_payload}
         self.audit.stage(request_id, event)
         try:
             mutation(task)

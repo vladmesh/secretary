@@ -105,7 +105,7 @@ def _sprints(data_dir: Path, instance: dict[str, Any], production: dict[str, Any
         return {
             "items": [
                 reader.status(sprint["ref"], observer=observers.get(sprint["ref"]))
-                for sprint in reader.list()
+                for sprint in reader.list(create=False)
             ],
             "error": None,
         }
