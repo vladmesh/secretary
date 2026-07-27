@@ -58,6 +58,7 @@ from secretary.dispatcher_watchdog import (
     pid_file_path,
 )
 from secretary.dispatcher_types import HostError
+from secretary.role_skills import skill_delivery
 from secretary.tasks import TaskError
 
 OBSERVER_ROLE = "observer"
@@ -66,9 +67,10 @@ OBSERVER_WATCHDOG_KIND = "observer"
 # resolved to the worker's default: an observer must never silently inherit another role's head.
 OBSERVER_HEAD_FALLBACK = "codex-observer"
 OBSERVER_PROMPT_FILE = "SPRINT.md"
-# The role skill the head opens once it is up. What the observer does inside its session is the
-# skill's business, not the dispatcher's.
-OBSERVER_SKILL = "run-sprint"
+# The role skill the head opens once it is up, owned by the `observer` role in
+# `skills/manifest.toml`. What the observer does inside its session is the skill's business, not
+# the dispatcher's: the prompt points at the file and never restates it.
+OBSERVER_SKILL = "observe-sprint"
 
 # Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
 # so a respawn after a dead pid is readable in the log without joining it against the record.
@@ -486,6 +488,32 @@ def _observer_head_or_blank(runtime: Any) -> str:
         return ""
 
 
+def observer_skill_delivery(runtime: Any, head: str) -> dict[str, Any]:
+    """Whether the observer skill is in the shell this head runs in.
+
+    The shell is the head's own adapter, read from the same registry the launch command is rendered
+    from: repointing `role_defaults.observer` at a profile of another shell moves the check with it.
+    A registry that cannot name the adapter reads as undelivered — a head brought up without its
+    instructions is worse than a sprint that waits for the next tick.
+    """
+    try:
+        shell = str(runtime.catalog.observer_run(head).adapter or "")
+    except (HostError, TaskError) as exc:
+        return {
+            "delivered": False,
+            "paths": [],
+            "reason": f"the shell of head {head!r} could not be resolved: "
+                      f"{getattr(exc, 'message', str(exc))}",
+        }
+    if not shell:
+        return {
+            "delivered": False,
+            "paths": [],
+            "reason": f"head {head!r} names no adapter, so its shell is unknown",
+        }
+    return skill_delivery(OBSERVER_ROLE, OBSERVER_SKILL, shell)
+
+
 def _launch_observer(
     runtime: Any,
     payload: dict[str, Any],
@@ -505,6 +533,15 @@ def _launch_observer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}",
             readiness=readiness.to_json(),
+        )
+    # A head whose shell has no observer skill would come up with a prompt pointing at a file it
+    # cannot open, and would improvise a sprint from the entity alone. The launch waits instead,
+    # and the record says exactly which file is missing.
+    delivery = observer_skill_delivery(runtime, head)
+    if not delivery["delivered"]:
+        return _defer(
+            runtime, payload, observers, ref, record, head=head,
+            reason=f"observer role skill is not available to this head: {delivery['reason']}",
         )
     if _head_may_be_running(record):
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
@@ -547,7 +584,11 @@ def _launch_observer(
             reason=f"observer launch intent could not be persisted: {intent}",
         )
     try:
-        launched = runtime.host.prepare_observer(sprint, head, prompt=render_observer_prompt(sprint))
+        launched = runtime.host.prepare_observer(
+            sprint,
+            head,
+            prompt=render_observer_prompt(sprint, skill_path=_first_path(delivery)),
+        )
     except ObserverLaunchAborted as exc:
         # The bring-up failed with its terminal still up. The staged event is dropped, because no
         # observer was launched, but the handle is kept so the next tick closes that terminal
@@ -1054,8 +1095,17 @@ def _with_audit(outcome: dict[str, Any], audited: bool) -> dict[str, Any]:
     return outcome
 
 
-def render_observer_prompt(sprint: dict[str, Any]) -> str:
-    """The observer's launch document, rendered from the live sprint entity."""
+def _first_path(delivery: dict[str, Any]) -> str:
+    paths = delivery.get("paths") or []
+    return str(paths[0]) if paths else ""
+
+
+def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> str:
+    """The observer's launch document: the sprint entity, and the skill that says what to do.
+
+    The document carries data and one pointer. How a sprint is led belongs to the role skill alone,
+    because two texts about the same job drift apart and the head then follows the stale one.
+    """
     ref = str(sprint.get("ref") or "")
     repositories = [str(repo) for repo in (sprint.get("repositories") or [])]
     current = str(sprint.get("current_task") or "")
@@ -1063,9 +1113,17 @@ def render_observer_prompt(sprint: dict[str, Any]) -> str:
     sections = [
         f"# Sprint {ref}",
         "",
-        "You are the observer head of this sprint. You are not the interactive secretary session,",
-        "and you are never a worker or a reviewer: you do not claim cards and you do not implement",
-        "them. Cards are claimed and executed by the dispatcher independently of you.",
+        f"You are the observer head of this sprint. Your instructions are the `{OBSERVER_SKILL}`",
+        "role skill and nothing else in this file:",
+        "",
+        f"- {skill_path or OBSERVER_SKILL}",
+        "",
+        "Read it first. Everything below is the sprint entity as the board holds it right now; the",
+        "live copy is `python3 -m secretary sprint show --ref " + ref + "`.",
+        "",
+        "## Reference",
+        "",
+        ref or "(unknown sprint reference)",
         "",
         "## Goal",
         "",
@@ -1079,6 +1137,10 @@ def render_observer_prompt(sprint: dict[str, Any]) -> str:
         "",
         "\n".join(f"- {repo}" for repo in repositories) or "- (none recorded)",
         "",
+        "## Status",
+        "",
+        str(sprint.get("status") or "(unknown)"),
+        "",
         "## Current card",
         "",
         current or "(none)",
@@ -1086,15 +1148,8 @@ def render_observer_prompt(sprint: dict[str, Any]) -> str:
         "## Budget",
         "",
         f"total {int(budget.get('total') or 0)} restart events recorded so far",
-        "Signal threshold reached: reconsider the sprint direction." if budget.get("signal_reached") else "Signal threshold not reached.",
-        "",
-        "## Where to start",
-        "",
-        f"Follow the `{OBSERVER_SKILL}` role skill. Read the live sprint entity with:",
-        "",
-        f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary sprint show --ref {ref}',
-        "",
-        f"and the cards linked to it with `python3 -m secretary task list --sprint {ref}`.",
+        "Signal threshold reached." if budget.get("signal_reached") else "Signal threshold not reached.",
+        "Hard threshold reached." if budget.get("hard_reached") else "Hard threshold not reached.",
         "",
     ]
     return "\n".join(sections)

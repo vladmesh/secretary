@@ -207,7 +207,8 @@ Controlled divergence — сигнал о расхождении между те
 занимает project slot, не появляется в `records` и на очередь Ready не влияет.
 
 Перед запуском production tick сверяет budget audit связанных карточек. При
-`sprint_budget.signal` в prompt наблюдателя попадает предупреждение пересмотреть вектор. При
+`sprint_budget.signal` в prompt наблюдателя попадает отметка о достигнутом пороге, а скилл роли
+велит на ней пересмотреть вектор и записать пересмотр resume-записью. При
 `sprint_budget.hard` sprint становится `stopped`: head штатно останавливается, новые связанные Ready
 карточки пропускаются, а активные карточки остаются в обычном цикле. Оператор проверяет это через
 `secretary status --json`: `installation.sprints.items` показывает статус, причину hard-остановки,
@@ -227,7 +228,8 @@ sprint:ID`. Переход в stopped остаётся в audit как `budget_h
   остановку. Сюда же попадает случай, когда останавливать надо по воркспейсу (хэндла нет), а Orca
   не отдала список терминалов: нечитаемая инвентаризация не считается пустой, иначе живая голова
   осталась бы без записи. Если спринт за это время снова открыли, тик просто видит голову живой;
-- `observer-launch-deferred` — запуск отложен (ресурс головы не готов, bring-up не удался или
+- `observer-launch-deferred` — запуск отложен (ресурс головы не готов, ролевой скилл не доставлен в
+  шелл этой головы, bring-up не удался или
   старый терминал не закрылся перед переподъёмом); спринт остаётся в записи с причиной, следующий
   тик пробует снова. Если bring-up упал уже после создания терминала и закрыть его не удалось,
   запись сохраняет хэндл с флагом `abandoned_handle`: тик не считает такую голову живой, сначала
@@ -252,7 +254,35 @@ sprint:ID`. Переход в stopped остаётся в audit как `budget_h
 тот же гейт готовности ресурса, что и перед claim карточки, с теми же вердиктами (см. «Готовность
 голов»). Голова запускается через `role_env exec --role observer` в собственном воркспейсе
 `<workspaces root>/observers/<ref>` с собственным терминалом; промпт `SPRINT.md` рендерится из живой
-сущности спринта в момент запуска.
+сущности спринта в момент запуска и ссылается на ролевой скилл по пути.
+
+### Ролевой скилл наблюдателя
+
+Что наблюдатель делает внутри сессии, задаёт скилл роли `observer` — `observe-sprint`. Канон лежит
+в продукте (`skills/roles/observer/observe-sprint/SKILL.md`), в шеллы попадает обычным
+`secretary role-skills sync` (шаг `role-skills` в `secretary upgrade`) и проверяется тем же
+`secretary role-skills audit --check`.
+
+Перед запуском тик проверяет, что скилл лежит в шелле поднимаемой головы. Если нет, голова не
+поднимается: тик отдаёт `observer-launch-deferred` с причиной вида
+
+```
+observer role skill is not available to this head: observer/observe-sprint is not in the codex
+skill directory (<root>/observe-sprint/SKILL.md); run `secretary role-skills sync`
+```
+
+Причина лежит в `deferred_reason` записи наблюдателя, поэтому видна в `secretary status --json`
+(`.dispatcher.observers`), `secretary sprint status --ref sprint:ID` (`.observer`) и
+`secretary dispatcher production-observe`. Лечится доставкой скилла:
+
+```bash
+secretary role-skills audit --check
+secretary role-skills sync
+```
+
+Следующий тик поднимает голову из той же записи. Та же причина печатается, когда для шелла головы
+в `skills/manifest.toml` вовсе нет цели с ролью `observer` (например, `role_defaults.observer`
+переставили на профиль другого шелла) и когда сам манифест нечитаем.
 
 Живость — тот же pid-heartbeat, что у воркера и ревьюера
 (`$SECRETARY_DISPATCHER_BODY_DIR/secretary-observer-pid-<ref>.pid`, по умолчанию под `/tmp`).
