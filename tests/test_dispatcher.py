@@ -46,7 +46,7 @@ from secretary.dispatcher_launcher import (
 )
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
-from secretary.dispatcher_types import ReviewLaunch, review_pane_label
+from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
 from secretary.routing_journal import (
     HeadRun,
@@ -334,6 +334,9 @@ class FakeHost:
         self.torn_down: list[str] = []
         self.completed: list[str] = []
         self.fail_prepare_reason = ""
+        # A bring-up failure the caller has to read for more than its message, the worker twin of
+        # `fail_observer_error`: a HeadLaunchAborted carrying the pane that stayed up.
+        self.fail_prepare_error: Exception | None = None
         self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
         # Failure hooks for host calls the real runtime can fail on: a rework workspace removed
@@ -378,6 +381,15 @@ class FakeHost:
         # that never wrote one would make every intent look like a head that never came up. None
         # models a runtime that writes no heartbeat at all.
         self.head_pid: int | None = os.getpid()
+        # Every heartbeat this fake has written, per role: a stop drops them, so a head the test
+        # stopped stops reading as alive.
+        self.head_pid_files: dict[str, set[str]] = {"worker": set(), "review": set()}
+        # Stop refusals (secretary-820). A stop the host will not confirm must never be followed by
+        # a replacement head, and these are how a test makes one refuse.
+        self.fail_stop_workspace_reason = ""
+        self.fail_stop_head_reason = ""
+        self.fail_stop_review_reason = ""
+        self.fail_freeze_worker_reason = ""
 
     def _write_head_pid(self, kind: str, reference: str) -> None:
         path = Path(pid_file_path(kind, reference))
@@ -385,6 +397,7 @@ class FakeHost:
         if self.head_pid is None:
             path.unlink(missing_ok=True)
             return
+        self.head_pid_files[kind].add(str(path))
         path.write_text(str(self.head_pid), encoding="utf-8")
 
     def prepare_worker(
@@ -398,6 +411,12 @@ class FakeHost:
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
+        if self.fail_prepare_error is not None:
+            if isinstance(self.fail_prepare_error, HeadLaunchAborted):
+                # A bring-up that failed with its terminal already open: the head is running, so
+                # its heartbeat is there for recovery to find, exactly as after a real launch.
+                self._write_head_pid("worker", task["ref"])
+            raise self.fail_prepare_error
         if self.fail_prepare_reason:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
@@ -467,6 +486,17 @@ class FakeHost:
         launched = self._launched(
             f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace
         )
+        try:
+            self.freeze_worker(record)
+        except HostError as exc:
+            # The reviewer pane is up and the worker would not go: the real host hands the pane
+            # back with the failure rather than reporting a bring-up that left nothing running.
+            raise HeadLaunchAborted(
+                f"worker freeze failed: {exc}",
+                handle=launched.handle,
+                workspace=record.workspace,
+                pid_file=pid_file_path("review", task["ref"]),
+            ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
@@ -539,11 +569,53 @@ class FakeHost:
     def stop(self, record) -> None:
         self.calls.append("stop")
         self.stopped.append(record.worker)
+        self._kill_head("worker", record)
+        self._kill_head("review", record)
+
+    def stop_workspace(self, record) -> None:
+        """The confirmed twin of `stop`: a refusal reaches the caller (secretary-820)."""
+        self.calls.append("stop_workspace")
+        if self.fail_stop_workspace_reason:
+            raise HostError(self.fail_stop_workspace_reason)
+        self.stop(record)
+
+    def stop_head(self, record, kind: str) -> None:
+        self.calls.append(f"stop_head:{kind}")
+        if self.fail_stop_head_reason:
+            raise HostError(self.fail_stop_head_reason)
+        handle = record.review_handle if kind == "review" else record.handle
+        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
+        if not handle and not pid_file:
+            raise HostError(f"{kind} head has neither a pane handle nor a pid heartbeat")
+        self._kill_head(kind, record)
+
+    def freeze_worker(self, record) -> None:
+        self.calls.append("freeze_worker")
+        if self.fail_freeze_worker_reason:
+            raise HostError(self.fail_freeze_worker_reason)
+        if record.handle or record.worker_pid_file:
+            self.stop_head(record, "worker")
+
+    def _kill_head(self, kind: str, record) -> None:
+        """Drop the heartbeat of a stopped head, the way a closed pty tree does.
+
+        Without this a stop would leave a pid file that still names this live test process, and
+        every later liveness read would answer that the head the test just stopped is running.
+        """
+        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
+        for path in {pid_file, *self.head_pid_files.get(kind, set())}:
+            if path:
+                Path(path).unlink(missing_ok=True)
 
     def stop_review(self, record) -> None:
         self.calls.append("stop_review")
+        if not record.review_handle and not record.review_pid_file:
+            return
+        if self.fail_stop_review_reason:
+            raise HostError(self.fail_stop_review_reason)
         if record.review_handle:
             self.stopped_reviews.append(record.review_handle)
+        self._kill_head("review", record)
 
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
@@ -4942,7 +5014,9 @@ class GitBranchHost(CommandHostRuntime):
         self.launched: list[tuple[str, str]] = []
         self.launch_prompts: list[str | None] = []
 
-    def _create_workspace(self, project: str, worker_id: str, base: str) -> str:
+    def _create_workspace(
+        self, project: str, worker_id: str, base: str, *, expected: str = ""
+    ) -> str:
         workspace = self.root / worker_id
         workspace.mkdir(parents=True)
         git(workspace, "init", "--initial-branch", base)

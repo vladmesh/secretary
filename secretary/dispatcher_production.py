@@ -15,6 +15,7 @@ from secretary.dispatcher_observer import (
     reconcile_observers,
     retry_pending_observer_stops,
 )
+from secretary.dispatcher_launch import launch_intent, stop_launch_intent
 from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -600,7 +601,27 @@ def _reconcile_production(
         state = card_state(ref)
         if state is None or state in ("in_progress", "validate"):
             continue
-        record = records.pop(ref)
+        record = records[ref]
+        intent = launch_intent(record)
+        if intent:
+            # An unresolved bring-up is the only pointer to a head that may be running right now,
+            # and this record is the only pointer to that intent. `_tick_task` never sees this card
+            # — the board has taken it out of the active cycle — so the intent is settled here or
+            # not at all: a record dropped over a live head leaves it in the workspace, and the
+            # requeue that follows opens a second one beside it.
+            failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
+            if failure is not None:
+                outcomes.append({
+                    "status": "degraded",
+                    "step": "production-reconcile",
+                    "ref": ref,
+                    "action": "launch-intent-stop-unconfirmed",
+                    "reason": f"the head of an unresolved launch could not be stopped: {failure}",
+                    "record_state": record.state,
+                    "card_state": state,
+                })
+                continue
+        records.pop(ref)
         outcomes.append({
             "status": "ok",
             "step": "production-reconcile",
@@ -609,6 +630,7 @@ def _reconcile_production(
             "reason": "card left the active dispatcher cycle",
             "record_state": record.state,
             "card_state": state,
+            **({"stopped_launch": str(intent.get("action") or "")} if intent else {}),
         })
 
     divergences = payload.get("controlled_divergences")

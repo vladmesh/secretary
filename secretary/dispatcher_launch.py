@@ -17,22 +17,32 @@ resumes the rework rather than the round the red result closed.
 
 Resolution runs before anything else the tick would do with the card:
 
-  live pid    -> adopt it. The record becomes what the launch would have written minus the pane
-                 handle, and no second head is launched.
+  live pid    -> adopt it. The record becomes what the launch would have written, and no second
+                 head is launched.
   no pid yet  -> leave the intent alone. A head that has just started has not written its
                  heartbeat, and that is not evidence of death, so it waits out the same grace
                  window every fresh head gets.
-  dead pid    -> the launch left nothing running. The intent is dropped, whatever it may have left
-                 in the workspace is closed, and the ordinary path relaunches.
+  dead pid    -> the launch left nothing running. Whatever it may have left in the workspace is
+                 stopped, the intent is dropped, and the ordinary path relaunches.
 
 State that cannot be written is a launch that does not happen: the caller answers a failed intent
 write by not touching the host at all. A failing data plane then costs the card a tick instead of
-giving it two heads.
+giving it two heads. A bring-up that fails once its terminal is already up is not a headless card
+either: the host reports it as `HeadLaunchAborted` with the pane it opened, the intent stays on
+disk carrying that handle, and the same resolution settles it a tick later.
 
-A head adopted this way has no pane handle, which is why `command_terminal_status` falls back to
-the pid heartbeat when a record carries no pane identity for its role. Without that the wait
-watchdog would read the adopted head as a missing terminal and respawn it: the double launch this
-module exists to prevent, one tick later.
+A head adopted this way usually has no pane handle, which is why `command_terminal_status` falls
+back to the pid heartbeat when a record carries no pane identity for its role. Without that the
+wait watchdog would read the adopted head as a missing terminal and respawn it: the double launch
+this module exists to prevent, one tick later. For the same reason the heartbeat stays on the
+record as that role's identity (`worker_pid_file` / `review_pid_file`): every stop the lifecycle
+makes afterwards — the freeze before review, a respawn, a red verdict, a pipeline freeze — goes
+through it when there is no pane to close, and one that quietly stopped nothing would put a second
+process on the checkout just as surely.
+
+Nothing here assumes a stop worked. A head the host will not confirm gone keeps its record and its
+intent, and the tick that wanted to replace it returns `*-stop-unconfirmed` instead: an
+unconfirmed stop followed by a launch is the same two heads by another route.
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ import time
 from typing import Any
 
 from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatcher_types import HeadLaunchAborted, HostError
 from secretary.dispatcher_watchdog import (
     head_process_status,
     initial_output_stall_seconds,
@@ -113,9 +124,95 @@ def write_launch_intent(
     return None
 
 
+def role_field(role: str, suffix: str) -> str:
+    return f"{'review' if role == REVIEW_ROLE else 'worker'}_{suffix}"
+
+
 def clear_launch_intent(record: DispatcherRecord) -> None:
-    """Take back an intent whose host call has answered. The caller's own save persists it."""
+    """Take back an intent whose host call has answered. The caller's own save persists it.
+
+    The heartbeat the intent named stays on the record as that role's head identity. It is what
+    every later stop falls back on when the pane handle is missing — an adopted head never had one
+    — and without it a freeze, a respawn or a red-verdict bounce would quietly stop nothing and
+    open a second process beside the one still running.
+    """
+    intent = launch_intent(record)
+    role = str(intent.get("role") or "")
+    pid_file = str(intent.get("pid_file") or "")
+    if role and pid_file:
+        setattr(record, role_field(role, "pid_file"), pid_file)
     record.launch_intent = {}
+
+
+def forget_role_head(record: DispatcherRecord, role: str) -> None:
+    """Drop every pointer to one role's head, once it is confirmed gone."""
+    if role == REVIEW_ROLE:
+        record.review_handle = ""
+        record.review_leaf = ""
+        record.review_pid_file = ""
+        return
+    record.handle = ""
+    record.worker_leaf = ""
+    record.worker_pid_file = ""
+
+
+def mark_launch_aborted(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    ref: str,
+    record: DispatcherRecord,
+    exc: HeadLaunchAborted,
+) -> None:
+    """Keep the intent of a bring-up that failed with a pane already open.
+
+    The host could not promise that nothing of that head is running, so the intent survives with
+    whatever identity the failure carried. The next tick reads the heartbeat and either adopts the
+    head — pane included, so its lifecycle is whole — or stops what is left of it. A persist that
+    refuses here is not a problem: the pre-launch intent is already on disk and names the same pid
+    file, which is the identity recovery actually settles the question with.
+    """
+    intent = dict(launch_intent(record))
+    if not intent:
+        return
+    if exc.handle:
+        intent["handle"] = exc.handle
+    intent["aborted"] = True
+    record.launch_intent = intent
+    records[ref] = record
+    _persist_quietly(runtime, payload, records)
+
+
+def launch_aborted(
+    *, step: str, ref: str, attempt_id: str, role: str, reason: str
+) -> dict[str, Any]:
+    """The outcome of a bring-up that may have left a head running and could not confirm it."""
+    return {
+        "status": "degraded",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": attempt_id,
+        "action": f"{role}-launch-aborted",
+        "reason": f"launch may have left a head running: {reason}",
+    }
+
+
+def head_stop_unconfirmed(
+    *, step: str, ref: str, attempt_id: str, role: str, reason: str
+) -> dict[str, Any]:
+    """The outcome of a tick that refused to launch because a stop was not confirmed.
+
+    A head the host would not promise is gone is a head that may still be editing the checkout, so
+    nothing takes its place this tick. The card keeps its record and the next tick retries the stop.
+    """
+    return {
+        "status": "degraded",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": attempt_id,
+        "action": f"{role}-stop-unconfirmed",
+        "reason": f"the previous head could not be confirmed stopped: {reason}",
+    }
 
 
 def launch_intent_unwritable(
@@ -185,27 +282,78 @@ def resolve_launch_intent(
             "reason": "a launch intent is still within its grace window and has written no pid yet",
         }
     if not liveness["alive"]:
-        _drop_dead_intent(runtime, record, role)
+        failure = stop_launch_intent(runtime, record, intent, role)
         _persist_quietly(runtime, payload, records)
+        if failure is not None:
+            return head_stop_unconfirmed(
+                step=step,
+                ref=ref,
+                attempt_id=record.attempt_id,
+                role=role,
+                reason=failure,
+            )
         return None
     return _adopt_launch_intent(runtime, task, records, payload, record, intent, role, step)
 
 
-def _drop_dead_intent(runtime: Any, record: DispatcherRecord, role: str) -> None:
-    """Close the books on a launch whose head is not there, terminal leftovers included."""
-    clear_launch_intent(record)
-    if role == REVIEW_ROLE:
-        # Imported here rather than at module scope: `dispatcher_review` writes the reviewer's
-        # intent through this module, and a top-level import either way would be a cycle.
-        from secretary.dispatcher_review import end_review_pane
+def stop_launch_intent(
+    runtime: Any, record: DispatcherRecord, intent: dict[str, Any], role: str
+) -> str | None:
+    """End whatever a launch left behind and take its intent back. Returns the failure, or None.
 
-        end_review_pane(runtime.host, record)
+    Called both for a launch whose head is not there — the pane can outlive the process, and the
+    relaunch reuses this workspace — and wherever a card leaves the cycle with an intent still on
+    it. Either way the intent survives an unconfirmed stop: a head the host will not promise is
+    gone must keep a pointer, or a later requeue starts a second process in the same checkout.
+
+    The identity is whatever the launch got as far as recording: the pane the failure handed back,
+    the heartbeat the head wrote for itself, and failing both the workspace itself. That last case
+    is a head nothing can name individually — a raw `SECRETARY_DISPATCHER_*_COMMAND` override runs
+    without the heartbeat wrapper — and stopping the workspace is all that can still reach it.
+    """
+    _remember_launch_identity(record, intent, role)
+    handle = getattr(record, "review_handle" if role == REVIEW_ROLE else "handle", "")
+    pid_file = getattr(record, role_field(role, "pid_file"), "")
+    # The path is known before the head exists, so it says nothing on its own; a heartbeat that can
+    # be read is what proves this launch left something a role-scoped stop can address.
+    named = bool(handle) or bool(head_process_status(pid_file).get("known"))
+    try:
+        if role == REVIEW_ROLE and named:
+            # Imported here rather than at module scope: `dispatcher_review` writes the reviewer's
+            # intent through this module, and a top-level import either way would be a cycle.
+            from secretary.dispatcher_review import end_review_pane
+
+            end_review_pane(runtime.host, record)
+        else:
+            # Everything this card runs in that workspace. For the worker that is the ordinary
+            # answer; for a reviewer nothing can name, it is the last one, and it costs only the
+            # worker head that a reviewer bring-up shuts down anyway.
+            runtime.host.stop_workspace(record)
+            forget_role_head(record, WORKER_ROLE)
+            forget_role_head(record, REVIEW_ROLE)
+    except HostError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    record.launch_intent = {}
+    return None
+
+
+def _remember_launch_identity(
+    record: DispatcherRecord, intent: dict[str, Any], role: str
+) -> None:
+    """Put the launch's own identity on the record, so the stop paths can reach its head."""
+    pid_file = str(intent.get("pid_file") or "")
+    handle = str(intent.get("handle") or "")
+    # A first claim writes its intent before the record knows where the head runs, so the
+    # workspace comes back off the intent here: without it the stop has no worktree to address.
+    record.workspace = record.workspace or str(intent.get("workspace") or "")
+    if pid_file:
+        setattr(record, role_field(role, "pid_file"), pid_file)
+    if not handle:
         return
-    # The worker's pane can outlive its process, and the relaunch reuses this workspace, so the
-    # leftover goes before the replacement opens.
-    runtime.host.stop(record)
-    record.handle = ""
-    record.worker_leaf = ""
+    if role == REVIEW_ROLE:
+        record.review_handle = record.review_handle or handle
+    else:
+        record.handle = record.handle or handle
 
 
 def _adopt_launch_intent(
@@ -222,14 +370,28 @@ def _adopt_launch_intent(
     ref = task["ref"]
     launched_at = float(intent.get("at") or 0.0) or time.time()
     record.workspace = record.workspace or str(intent.get("workspace") or "")
-    clear_launch_intent(record)
+    handle = str(intent.get("handle") or "")
     if role == REVIEW_ROLE:
+        # A reviewer bring-up shuts the worker head down before it hands the pane back, and an
+        # adopted one has to do the same: a worker still editing the checkout would leave the
+        # verdict describing a tree that no longer exists. It goes through the same confirmed stop,
+        # so a worker that will not die keeps the intent instead of being assumed gone.
+        record.review_handle = handle
+        record.review_pid_file = str(intent.get("pid_file") or "")
+        try:
+            runtime.host.freeze_worker(record)
+        except HostError as exc:
+            _persist_quietly(runtime, payload, records)
+            return head_stop_unconfirmed(
+                step=step,
+                ref=ref,
+                attempt_id=record.attempt_id,
+                role=WORKER_ROLE,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+        forget_role_head(record, WORKER_ROLE)
+        clear_launch_intent(record)
         record.state = "reviewing"
-        # A reviewer bring-up shuts the worker head down before it hands the pane back, so an
-        # adopted reviewer says the same: one head on this checkout, not two.
-        record.handle = ""
-        record.worker_leaf = ""
-        record.review_handle = ""
         record.review_leaf = ""
         record.review_started_at = record.review_progress_at = launched_at
         if not record.review_commit:
@@ -244,8 +406,12 @@ def _adopt_launch_intent(
             # adopted head belongs to that round. Opening it here is what keeps the rework's
             # routing and its verdict apart from the round the red result closed.
             runtime.open_worker_round(record, round_number=reserved)
-        record.handle = ""
+        # Whatever pane identity the launch got as far as reporting. Usually none: the tick died
+        # before the host answered. The heartbeat `clear_launch_intent` keeps is what the freeze,
+        # the respawn and the red-verdict bounce then stop this head by.
+        record.handle = handle
         record.worker_leaf = ""
+        clear_launch_intent(record)
         record.worker_started_at = record.worker_progress_at = launched_at
     records[ref] = record
     _persist_quietly(runtime, payload, records)

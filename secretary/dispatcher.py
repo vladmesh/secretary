@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -61,7 +62,11 @@ from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.dispatcher_launch import (
     WORKER_ROLE,
     clear_launch_intent as _clear_launch_intent,
+    forget_role_head as _forget_role_head,
+    head_stop_unconfirmed as _head_stop_unconfirmed,
+    launch_aborted as _launch_aborted,
     launch_intent_unwritable as _launch_intent_unwritable,
+    mark_launch_aborted as _mark_launch_aborted,
     resolve_launch_intent as _resolve_launch_intent,
     write_launch_intent as _write_launch_intent,
 )
@@ -86,6 +91,7 @@ from secretary.dispatcher_review import (
     start_review as _start_review,
 )
 from secretary.dispatcher_watchdog import (
+    head_process_status as _head_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
     reset_wait as _reset_wait,
@@ -115,6 +121,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
     DispatcherError,
+    HeadLaunchAborted,
     HostError,
     PilotSelector,
     ReviewLaunch,
@@ -169,6 +176,12 @@ OBSERVER_WORKSPACE_DIR = OBSERVER_REPO_NAME
 # The only branch of the observer repo, named at init so no bring-up has to ask git what a fresh
 # repository calls its first branch.
 OBSERVER_REPO_BRANCH = "observers"
+
+# How long a confirmed stop waits for a head to leave after each signal, and how often it looks.
+# A head that has been asked to close its pane exits within a moment; the wait exists so a stop is
+# not called unconfirmed over a process that is in the middle of leaving.
+HEAD_STOP_GRACE_SECONDS = 5.0
+HEAD_STOP_POLL_SECONDS = 0.1
 
 
 def _same_repo(first: Path, second: Path) -> bool:
@@ -465,7 +478,7 @@ class CommandHostRuntime:
         else:
             if require_existing_workspace:
                 raise HostError("resume workspace is missing")
-            workspace = self._create_workspace(project, worker_id, base)
+            workspace = self._create_workspace(project, worker_id, base, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
         self._clear_body_file("report", task["ref"], 0)
@@ -799,7 +812,19 @@ class CommandHostRuntime:
             split_from=self._split_anchor(record),
             task=task,
         )
-        self._freeze_worker(record)
+        try:
+            self._freeze_worker(record)
+        except HostError as exc:
+            # The reviewer pane is up and the worker would not stop. Neither head can be reported
+            # as absent, so the bring-up hands the reviewer's pane back with the failure and the
+            # caller keeps its launch intent: dropping the record here would leave a live reviewer
+            # with nothing pointing at it, and the freeze is retried on the recovery path.
+            raise HeadLaunchAborted(
+                f"worker freeze failed: {exc}",
+                handle=launched.handle,
+                workspace=record.workspace,
+                pid_file=_pid_file_path("review", task["ref"]),
+            ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=self._pane_leaf(record.workspace, launched.handle),
@@ -819,10 +844,14 @@ class CommandHostRuntime:
     def stop_review(self, record: DispatcherRecord) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
         which on a red verdict means killing the checkout's terminals the worker is about to get
-        back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone."""
-        if self.mode == "noop" or not record.review_handle:
+        back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone.
+
+        A reviewer adopted from a launch intent is stopped by its pid heartbeat, for the same
+        reason the worker freeze is: without it the red-verdict bounce, the reviewer respawn and
+        the pipeline freeze would all leave a live reviewer behind and start a head beside it."""
+        if self.mode == "noop" or not (record.review_handle or record.review_pid_file):
             return
-        _close_tui_terminal(record.review_handle, run_json=self._run_json)
+        self.stop_head(record, "review")
 
     def head_commit(self, record: DispatcherRecord) -> str:
         """Commit the workspace checkout currently sits on, or "" when it cannot be read. Pinned
@@ -1032,9 +1061,92 @@ class CommandHostRuntime:
         if self.mode == "noop" or not record.workspace:
             return
         try:
-            self._run_json(["orca", "terminal", "stop", "--worktree", f"path:{record.workspace}", "--json"])
+            self.stop_workspace(record)
         except HostError:
             pass
+
+    def stop_workspace(self, record: DispatcherRecord) -> None:
+        """Stop every head of this workspace and let a refusal reach the caller.
+
+        The confirmed twin of `stop`. A path that opens a replacement head afterwards cannot use
+        the suppressing one: `orca terminal stop` refusing is not evidence the head is gone, and
+        the replacement would then be the second process on the same checkout.
+        """
+        if self.mode == "noop" or not record.workspace:
+            return
+        self._run_json(
+            ["orca", "terminal", "stop", "--worktree", f"path:{record.workspace}", "--json"]
+        )
+        for pid_file in (record.worker_pid_file, record.review_pid_file):
+            self._confirm_head_process_gone(pid_file)
+
+    def stop_head(self, record: DispatcherRecord, kind: str) -> None:
+        """Stop one role's head and confirm it is gone, or raise.
+
+        Identity is the pane handle when the record has one and the pid heartbeat when it does not:
+        a head adopted from a launch intent lost its handle with the tick that opened it, and
+        without the heartbeat every stop for it would be a silent no-op — the worker left editing
+        the checkout under review, the reviewer left running beside its replacement.
+
+        The pane close stays best-effort because Orca answers `tab_not_found` for a pane it never
+        gave a UI tab, which is every pane a dispatcher-launched head gets on a headless serve. The
+        heartbeat is what actually decides: a head still answering it after the close is a stop
+        that did not happen, and it raises rather than letting a replacement start.
+        """
+        handle = record.review_handle if kind == "review" else record.handle
+        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
+        if self.mode == "noop":
+            return
+        if handle:
+            _close_tui_terminal(handle, run_json=self._run_json)
+        elif not pid_file:
+            # Neither identity: nothing here can name that head, so nothing here can promise it is
+            # gone. The caller answers by not launching a replacement.
+            raise HostError(f"{kind} head has neither a pane handle nor a pid heartbeat")
+        self._confirm_head_process_gone(pid_file)
+
+    def _confirm_head_process_gone(self, pid_file: str) -> None:
+        """Make sure the process behind a heartbeat is not running, escalating if it is.
+
+        A pid file that was never written (a raw `SECRETARY_DISPATCHER_*_COMMAND` override skips
+        the heartbeat wrapper) says nothing either way, and the close that came before is then all
+        the evidence there is.
+        """
+        if not pid_file:
+            return
+        for signal_number in (signal.SIGTERM, signal.SIGKILL):
+            status = _head_process_status(pid_file)
+            if not status.get("known") or not status.get("alive"):
+                return
+            self._signal_head(pid_file, signal_number)
+            self._await_head_exit(pid_file)
+        status = _head_process_status(pid_file)
+        if status.get("known") and status.get("alive"):
+            raise HostError(f"head process from {pid_file} is still running after stop")
+
+    def _signal_head(self, pid_file: str, signal_number: int) -> None:
+        try:
+            pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return
+        try:
+            os.kill(pid, signal_number)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            raise HostError(f"head process {pid} could not be signalled: {exc}") from None
+
+    def _await_head_exit(self, pid_file: str) -> None:
+        deadline = time.monotonic() + HEAD_STOP_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            status = _head_process_status(pid_file)
+            if not status.get("known") or not status.get("alive"):
+                return
+            time.sleep(HEAD_STOP_POLL_SECONDS)
+
+    def freeze_worker(self, record: DispatcherRecord) -> None:
+        """Shut this card's worker head down and confirm it. Raises when it cannot be confirmed."""
+        self._freeze_worker(record)
 
     def teardown(self, record: DispatcherRecord) -> None:
         """Done-path cleanup after a green merge: stop the worktree's terminals (killing
@@ -1049,7 +1161,18 @@ class CommandHostRuntime:
         except HostError:
             pass
 
-    def _create_workspace(self, project: str, worker_id: str, base: str) -> str:
+    def _create_workspace(
+        self, project: str, worker_id: str, base: str, *, expected: str = ""
+    ) -> str:
+        """Cut the card's worktree, at the path the launch intent already names.
+
+        `expected` is `restore_workspace`'s answer, which the launch intent wrote to disk before
+        this call. A worktree Orca placed anywhere else is a deferred bring-up with a readable
+        reason, not a head the record points past: a tick that dies right after this call can only
+        find the head through the intent, and an intent naming the wrong directory would send every
+        later review, stop, respawn and teardown to a checkout with nothing in it. Same invariant
+        the observer workspace holds.
+        """
         if self.mode == "noop":
             workspace = self.data_dir / "dispatcher" / "workspaces" / worker_id
             workspace.mkdir(parents=True, exist_ok=True)
@@ -1073,6 +1196,8 @@ class CommandHostRuntime:
         path = worktree.get("path") if isinstance(worktree, dict) else None
         if not isinstance(path, str) or not path:
             raise HostError("orca did not return a workspace path")
+        if expected and not _same_repo(Path(path), Path(expected)):
+            raise HostError(f"orca placed the worker workspace at {path}, not {expected}")
         return path
 
     def _validate_resumable_workspace(self, task: dict[str, Any], workspace: str) -> None:
@@ -1186,13 +1311,40 @@ class CommandHostRuntime:
                 _deliver_tui_prompt(
                     handle, workspace, prompt_file, run_json=self._run_json, prompt_text=launch_prompt
                 )
-            except TuiDeliveryError as exc:
-                _close_tui_terminal(handle, run_json=self._run_json)
+            except (TuiDeliveryError, HostError) as exc:
+                # The terminal is already up, so a failure here is not proof that no head exists.
+                # The close decides which: confirmed, nothing of this bring-up is left and the
+                # caller may treat it as a launch that did not happen; refused, the pane goes back
+                # with the failure so the caller keeps its launch intent and the next tick settles
+                # the head instead of opening a second one beside it.
+                try:
+                    self._close_launched_pane(handle, pid_file)
+                except HostError as stop_exc:
+                    raise HeadLaunchAborted(
+                        f"{exc}; head terminal stop failed: {stop_exc}",
+                        handle=handle,
+                        workspace=workspace,
+                        pid_file=pid_file,
+                    ) from None
                 raise HostError(str(exc)) from None
-            except HostError:
-                _close_tui_terminal(handle, run_json=self._run_json)
-                raise
         return self._launched(handle, head, task, role, workspace)
+
+    def _close_launched_pane(self, handle: str, pid_file: str) -> None:
+        """Close a pane this bring-up opened and confirm nothing of its head survived.
+
+        The close is asked strictly, but its refusal is not the answer on its own: Orca reports
+        `tab_not_found` for a pane it never gave a UI tab, which is every pane a dispatcher-launched
+        head gets on a headless serve. The heartbeat decides. Only when there is no heartbeat to
+        read is a refused close taken at face value, because then nothing else can say whether the
+        head is still there.
+        """
+        try:
+            _close_tui_terminal_strict(handle, run_json=self._run_json)
+        except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it
+            status = _head_process_status(pid_file) if pid_file else {"known": False}
+            if not status.get("known"):
+                raise HostError(f"head terminal close failed: {exc}") from None
+        self._confirm_head_process_gone(pid_file)
 
     def _launched(
         self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = ""
@@ -1294,10 +1446,14 @@ class CommandHostRuntime:
     def _freeze_worker(self, record: DispatcherRecord) -> None:
         """Shut the worker head down now that the reviewer is up. Nothing else stops the worker
         from editing the checkout mid-review, which would leave the verdict describing a tree that
-        no longer exists. The workspace itself is untouched: a red verdict hands it straight back."""
-        if self.mode == "noop" or not record.handle:
+        no longer exists. The workspace itself is untouched: a red verdict hands it straight back.
+
+        A worker adopted from a launch intent has no pane handle, so the stop goes by its pid
+        heartbeat instead: a freeze that quietly did nothing for want of a handle would leave that
+        worker editing the tree the reviewer is judging."""
+        if self.mode == "noop" or not (record.handle or record.worker_pid_file):
             return
-        _close_tui_terminal(record.handle, run_json=self._run_json)
+        self.stop_head(record, "worker")
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
@@ -1863,13 +2019,21 @@ class DispatcherRuntime:
             # workspace is what it is stopped through, not the handle: a head adopted from a launch
             # intent is running with no handle on record, and skipping it here would leave it in
             # the checkout the new round is about to hand a second head.
-            if active.handle or active.workspace:
-                self.host.stop(active)
-            if active.review_handle or active.review_leaf:
+            if active.review_handle or active.review_leaf or active.review_pid_file:
                 # A preempt out of Validate leaves the worker pane already closed by
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
-                _end_review_pane(self.host, active)
+                unconfirmed = self._end_review_pane_confirmed(
+                    active, records, payload, ref, step="claim", attempt_id=attempt_id
+                )
+                if unconfirmed is not None:
+                    return unconfirmed
+            if active.handle or active.workspace or active.worker_pid_file:
+                unconfirmed = self._stop_worker_confirmed(
+                    active, ref, step="claim", attempt_id=attempt_id
+                )
+                if unconfirmed is not None:
+                    return unconfirmed
         if retry_after_block or requeued:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
@@ -1977,6 +2141,10 @@ class DispatcherRuntime:
                 attempt_id=record.attempt_id,
                 require_existing_workspace=require_existing_workspace,
             )
+        except HeadLaunchAborted as exc:
+            return self._worker_launch_aborted(
+                payload, records, ref, record, exc, step="claim", attempt_id=record.attempt_id
+            )
         except HostError as exc:
             _clear_launch_intent(record)
             self.writer.move(
@@ -2024,6 +2192,85 @@ class DispatcherRuntime:
             "worker": record.worker,
             "workspace": prepared["workspace"],
         }
+
+    def _end_review_pane_confirmed(
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        ref: str,
+        *,
+        step: str,
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """End the reviewer before a replacement head opens. Returns the tick's outcome on refusal.
+
+        A refusal leaves the record pointing at that reviewer exactly as it was, so the next tick
+        retries the same stop. Nothing after this call runs on this tick: whatever it was going to
+        open — the rework worker, the replacement reviewer — would be the second process in a
+        checkout the previous head may still be holding.
+        """
+        try:
+            _end_review_pane(self.host, record)
+        except HostError as exc:
+            return _head_stop_unconfirmed(
+                step=step,
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role="review",
+                reason=scrub_host_output(str(exc)),
+            )
+        return None
+
+    def _stop_worker_confirmed(
+        self,
+        record: DispatcherRecord,
+        ref: str,
+        *,
+        step: str,
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Stop this card's worker head before a replacement opens, or answer with the refusal."""
+        try:
+            self.host.stop_workspace(record)
+        except HostError as exc:
+            return _head_stop_unconfirmed(
+                step=step,
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=WORKER_ROLE,
+                reason=scrub_host_output(str(exc)),
+            )
+        _forget_role_head(record, WORKER_ROLE)
+        return None
+
+    def _worker_launch_aborted(
+        self,
+        payload: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        ref: str,
+        record: DispatcherRecord,
+        exc: HeadLaunchAborted,
+        *,
+        step: str,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """A worker bring-up that failed with its terminal already open.
+
+        Nothing is blocked and nothing is dropped: the host could not say the head is gone, so the
+        launch intent stays on disk carrying whatever identity the failure knew. The next tick
+        reads the heartbeat and either adopts that head or stops it. Moving the card to Blocked and
+        removing its record here — which is what an ordinary bring-up failure does, because there
+        it is true that no head exists — would leave a live worker on a checkout nothing points at.
+        """
+        _mark_launch_aborted(self, payload, records, ref, record, exc)
+        return _launch_aborted(
+            step=step,
+            ref=ref,
+            attempt_id=record.attempt_id or attempt_id,
+            role=WORKER_ROLE,
+            reason=scrub_host_output(str(exc)),
+        )
 
     def _worker_relaunch_intent(
         self,
@@ -2223,6 +2470,10 @@ class DispatcherRuntime:
             _clear_launch_intent(record)
             record.handle = launched.handle
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        except HeadLaunchAborted as exc:
+            return self._worker_launch_aborted(
+                payload, records, ref, record, exc, step="advance", attempt_id=attempt_id
+            )
         except Exception as exc:
             _clear_launch_intent(record)
             return self._block_failed_worker_restart(
@@ -2272,8 +2523,14 @@ class DispatcherRuntime:
         if marker == "review:red":
             # Only the reviewer's lifecycle ends here. A full `stop` would take the worktree's
             # terminals down wholesale, and the same checkout is about to be handed back to a
-            # fresh worker head for rework — it is never re-created from base.
-            _end_review_pane(self.host, record)
+            # fresh worker head for rework — it is never re-created from base. A stop the host
+            # will not confirm ends the tick before the card is moved: the rework worker must not
+            # open beside a reviewer that may still be running in the same checkout.
+            unconfirmed = self._end_review_pane_confirmed(
+                record, records, payload, ref, step="review", attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
             record.rejected_sha = record.review_commit or self.host.head_commit(record)
             record.rejected_done_reports = 0
             self.writer.move(
@@ -2317,6 +2574,10 @@ class DispatcherRuntime:
                 _clear_launch_intent(record)
                 record.handle = launched.handle
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+            except HeadLaunchAborted as exc:
+                return self._worker_launch_aborted(
+                    payload, records, ref, record, exc, step="review", attempt_id=attempt_id
+                )
             except Exception as exc:
                 _clear_launch_intent(record)
                 return self._block_failed_worker_restart(
@@ -2486,8 +2747,14 @@ class DispatcherRuntime:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
         if kind == "review":
-            # Only the reviewer is stalled; its pane goes and the workspace stays.
-            _end_review_pane(self.host, record)
+            # Only the reviewer is stalled; its pane goes and the workspace stays. A stall is not
+            # a death: the head this respawn replaces may well still be running, so a stop the host
+            # will not confirm ends the tick here rather than putting a second reviewer beside it.
+            unconfirmed = self._end_review_pane_confirmed(
+                record, records, payload, ref, step=step, attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
             # One bring-up path for the reviewer: the same helper the normal launch and the
             # recovery path use, so its error handling can't drift from theirs.
             outcome = _start_review(
@@ -2497,7 +2764,13 @@ class DispatcherRuntime:
                 self.save_records(payload, records)
                 return outcome
         else:
-            self.host.stop(record)
+            # Same reasoning as the reviewer above: a silent worker is not a dead one, and this
+            # path is about to open a replacement in the same workspace.
+            unconfirmed = self._stop_worker_confirmed(
+                record, ref, step=step, attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
             failure = self._worker_relaunch_intent(
                 payload, records, ref, record, action="worker-respawn"
             )
@@ -2515,6 +2788,10 @@ class DispatcherRuntime:
                 _clear_launch_intent(record)
                 record.handle = launched.handle
                 record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+            except HeadLaunchAborted as exc:
+                return self._worker_launch_aborted(
+                    payload, records, ref, record, exc, step="advance", attempt_id=attempt_id
+                )
             except Exception as exc:
                 _clear_launch_intent(record)
                 return self._block_failed_worker_restart(
@@ -2670,13 +2947,17 @@ class DispatcherRuntime:
         if log:
             body += f"\nХвост:\n```\n{log}\n```"
         body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
-        # No-op unless a reviewer pane is up; when one is, drop it before the worker head comes
-        # back so no stale reviewer handle survives into the rework round.
-        _end_review_pane(self.host, record)
+        # No-op unless a reviewer head is up; when one is, it goes before the worker head comes
+        # back, and an unconfirmed stop ends the tick before the card is moved rather than sending
+        # a rework worker into a checkout something may still be holding.
+        unconfirmed = self._end_review_pane_confirmed(
+            record, records, payload, ref, step="gate", attempt_id=attempt_id
+        ) or self._stop_worker_confirmed(record, ref, step="gate", attempt_id=attempt_id)
+        if unconfirmed is not None:
+            return unconfirmed
         # The round ends here without a reviewer verdict: the outcome names the gate so a later
         # reading does not attribute the bounce to whoever reviewed the round.
         self._record_verdict_routing(ref, record, f"{phase}_red")
-        self.host.stop(record)
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
@@ -2713,6 +2994,10 @@ class DispatcherRuntime:
             _clear_launch_intent(record)
             record.handle = launched.handle
             record.worker_leaf = self.host.pane_leaf(record.workspace, record.handle)
+        except HeadLaunchAborted as exc:
+            return self._worker_launch_aborted(
+                payload, records, ref, record, exc, step="gate", attempt_id=attempt_id
+            )
         except Exception as exc:
             _clear_launch_intent(record)
             return self._block_failed_worker_restart(

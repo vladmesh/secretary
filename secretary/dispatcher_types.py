@@ -18,6 +18,32 @@ class HostError(Exception):
     pass
 
 
+class HeadLaunchAborted(HostError):
+    """A worker or reviewer bring-up that failed after its terminal was already created.
+
+    The same ambiguity `ObserverLaunchAborted` covers for the observer, and it is answered the same
+    way. The bring-up did not finish, but something of it may still be running, so the failure
+    carries the pane it opened and the heartbeat that head writes. The caller keeps the launch
+    intent instead of blocking the card on it: the next tick reads the heartbeat and either adopts
+    the head or stops what is left of it. Clearing the intent and dropping the record here would
+    leave a live head with nothing pointing at it, which is the second head this contour exists to
+    prevent.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        handle: str = "",
+        workspace: str = "",
+        pid_file: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.handle = handle
+        self.workspace = workspace
+        self.pid_file = pid_file
+
+
 @dataclass(frozen=True)
 class ReviewLaunch:
     """What a reviewer bring-up hands back to the runtime: the pane the reviewer runs in and the

@@ -25,7 +25,9 @@ from secretary.dispatcher_observer import (
 from secretary.dispatcher_launch import (
     WORKER_ROLE,
     clear_launch_intent,
+    forget_role_head,
     launch_intent,
+    mark_launch_aborted,
     write_launch_intent,
 )
 from secretary.dispatcher_pause import (
@@ -39,7 +41,7 @@ from secretary.dispatcher_pause import (
 )
 from secretary.dispatcher_review import end_review_pane, start_review
 from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatcher_types import DispatcherError, HeadLaunchAborted, HostError
 from secretary.tasks import TaskError
 
 WORKER_MARKERS = {"report:done", "report:blocked"}
@@ -301,6 +303,12 @@ def _freeze_heads(
     `stop` only, never `teardown`: the worktree and everything uncommitted in it stays exactly as
     the head left it. The reviewer's pane is closed through its own lifecycle helper first, so
     stopping the worktree's terminals cannot be mistaken later for a reviewer that vanished.
+
+    A head is here whenever anything still names it, the pid heartbeat included: a head adopted
+    from a launch intent has no pane handle, and a freeze that skipped it for want of one would
+    report the pipeline as stopped while that head kept working. A stop the host will not confirm
+    leaves the record pointing at its head and its `paused_*` stamp unset, so the head is not
+    counted as stopped and resume will not relaunch a second one beside it.
     """
     stopped_worker: list[str] = []
     stopped_reviewer: list[str] = []
@@ -310,14 +318,19 @@ def _freeze_heads(
         if record.workspace and os.path.abspath(record.workspace) in excluded_paths:
             excluded.append(ref)
             continue
-        if record.review_handle:
-            end_review_pane(runtime.host, record)
+        if record.review_handle or record.review_pid_file:
+            try:
+                end_review_pane(runtime.host, record)
+            except HostError:
+                continue
             record.paused_reviewer_at = now
             stopped_reviewer.append(ref)
-        if record.handle:
-            runtime.host.stop(record)
-            record.handle = ""
-            record.worker_leaf = ""
+        if record.handle or record.worker_pid_file:
+            try:
+                runtime.host.stop_workspace(record)
+            except HostError:
+                continue
+            forget_role_head(record, WORKER_ROLE)
             record.paused_worker_at = now
             stopped_worker.append(ref)
     return stopped_worker, stopped_reviewer, excluded
@@ -405,6 +418,13 @@ def _resume_heads(
             clear_launch_intent(record)
             record.handle = launched.handle
             record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
+        except HeadLaunchAborted as exc:
+            # A pane was already open when the relaunch failed, so this card's head may be running.
+            # Its intent stays on disk with what the failure knew of it, and the next tick adopts
+            # or stops that head. Clearing the intent here would hide it from both.
+            mark_launch_aborted(runtime, payload, records, ref, record, exc)
+            skipped.append(f"{ref}:worker")
+            continue
         except Exception:  # noqa: BLE001 — one failed relaunch must not strand the others
             # Left with no handle and a fresh watchdog window: the card stays In progress under the
             # ordinary wait watchdog, which respawns it once and then escalates to Blocked.
