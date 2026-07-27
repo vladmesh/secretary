@@ -31,6 +31,90 @@ from secretary.tasks import TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
 
 
+# Durable telemetry of terminal production ticks, written into production-state.json under
+# `tick_telemetry` (secretary-833). It is the only current record of how a tick ENDED: the
+# `last_tick_*` timestamps say when one ran, not whether it did any good, so a dispatcher failing
+# every minute looks exactly like a healthy one to anything reading them.
+#
+# Two readers outside this module consume it, both through
+# `triggered_agents.runtime.production_telemetry`:
+#   * `python3 -m triggered_agents health` builds the pipeline line from `last`/`last_healthy_at`,
+#     so a fresh failing tick can never read as a healthy one.
+#   * the steward's `scan` reports the `unhealthy` ring against its own watermark, keyed on
+#     `unhealthy_total` — a monotonic counter, so an ordinary healthy tick in between never
+#     consumes an unhealthy one the steward has not looked at yet.
+# Keep the shape and the meaning of those two fields in step with that reader.
+TICK_TELEMETRY_UNHEALTHY_KEPT = 50
+TICK_TELEMETRY_ERRORS_KEPT = 5
+# A frozen tick moves no card on purpose, and the probe already reports a freeze as ok rather than
+# as a dispatcher that cannot work — telemetry says the same, otherwise every freeze would read as
+# an outage for as long as it lasts.
+HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
+
+
+def _counter(value: Any) -> int:
+    """A monotonic counter read back from state, defaulting to 0 for anything unusable.
+
+    The file is written by this process, but a hand-edited or half-restored state must degrade to
+    "start counting again", never crash the tick that is trying to record its own outcome.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Fold one terminal tick outcome into `payload["tick_telemetry"]` and return it.
+
+    Called with the result the tick is about to return, right before the state is saved, so the
+    durable record and the returned outcome cannot disagree. A tick that never reaches a save
+    (the singleton lock is held by another tick, the mutation guard refuses because the state is
+    not ours to write) deliberately records nothing: taking the state file in either case would
+    write outside the lock or across an ownership fence, and both leave their own evidence
+    already — a held lock means another tick is recording, and a guard-blocked dispatcher stops
+    producing healthy ticks, which is exactly what the freshness check reads.
+    """
+    telemetry = payload.get("tick_telemetry")
+    telemetry = dict(telemetry) if isinstance(telemetry, dict) else {}
+    seq = _counter(telemetry.get("tick_seq")) + 1
+    status = str(result.get("status") or "")
+    errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
+    entry = {
+        "seq": seq,
+        "at": now_rfc3339(),
+        "status": status,
+        "step": str(result.get("step") or ""),
+        "healthy": status in HEALTHY_TICK_STATUSES,
+        "reason": str(result.get("reason") or ""),
+        "actions": len(result.get("actions") or []),
+        "error_count": len(errors),
+        # Bounded on purpose: the diagnostic value is in what failed and why, and an unbounded
+        # copy of every error of every tick would grow the state file the whole pipeline reads
+        # and writes each minute.
+        "errors": [
+            {
+                "ref": str(error.get("ref") or ""),
+                "code": str(error.get("code") or ""),
+                "message": str(error.get("message") or ""),
+            }
+            for error in errors[:TICK_TELEMETRY_ERRORS_KEPT]
+        ],
+    }
+    telemetry["tick_seq"] = seq
+    telemetry["last"] = entry
+    unhealthy = [item for item in (telemetry.get("unhealthy") or []) if isinstance(item, dict)]
+    if entry["healthy"]:
+        telemetry["last_healthy_at"] = entry["at"]
+    else:
+        unhealthy.append(entry)
+        telemetry["unhealthy_total"] = _counter(telemetry.get("unhealthy_total")) + 1
+    telemetry["unhealthy"] = unhealthy[-TICK_TELEMETRY_UNHEALTHY_KEPT:]
+    telemetry.setdefault("unhealthy_total", _counter(telemetry.get("unhealthy_total")))
+    payload["tick_telemetry"] = telemetry
+    return telemetry
+
+
 class ProductionState:
     def __init__(self, data_dir: Path) -> None:
         self.root = data_dir / "dispatcher"
@@ -173,7 +257,6 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         if push is not None:
             payload["checkpoint_push"] = push
         payload["last_tick_finished_at"] = now_rfc3339()
-        runtime.production_state.save(payload)
         result = {
             "status": "ok" if not errors else "degraded",
             "step": "production-tick",
@@ -189,6 +272,10 @@ def production_tick(runtime: Any) -> dict[str, Any]:
             result["checkpoint"] = checkpoint
         if push is not None:
             result["checkpoint_push"] = push
+        # Recorded before the save, off the result this call is about to return: the durable
+        # record of how the tick ended and the answer its caller gets are the same object.
+        record_tick_telemetry(payload, result)
+        runtime.production_state.save(payload)
         return result
 
 
@@ -225,7 +312,12 @@ def _frozen_tick(
         observer_stops = retry_pending_observer_stops(runtime, payload)
     except Exception as exc:
         observer_stops = []
+        # A freeze itself is healthy; a retry that raised inside it is not, and telemetry keys
+        # health off the status. Say so in both places rather than reporting the frozen tick as a
+        # clean one that happens to carry an error field nobody reads.
         result["observer_stop_error"] = _unexpected_error("", exc)
+        result["errors"] = [result["observer_stop_error"]]
+        result["status"] = "degraded"
     if observer_stops:
         result["observer_stops"] = observer_stops
     checkpoint = _write_checkpoint(runtime)
@@ -236,9 +328,12 @@ def _frozen_tick(
     if push is not None:
         payload["checkpoint_push"] = push
         result["checkpoint_push"] = push
-    if checkpoint is not None or push is not None or observer_stops:
-        payload["last_frozen_tick_at"] = now_rfc3339()
-        runtime.production_state.save(payload)
+    payload["last_frozen_tick_at"] = now_rfc3339()
+    # A freeze is a deliberate stop, so this tick is recorded as a healthy terminal one — and it
+    # is saved even when nothing else about this tick changed the state, or a long freeze would
+    # age the last healthy tick out and report the pipeline as dead instead of frozen.
+    record_tick_telemetry(payload, result)
+    runtime.production_state.save(payload)
     return result
 
 
