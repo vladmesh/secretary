@@ -2404,8 +2404,9 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Bounce one repeated rejected result, then leave the diagnosis to a human."""
         ref = task["ref"]
-        record.rejected_done_reports += 1
-        if record.rejected_done_reports >= 2:
+        rejected = record.rejected_done_reports + 1
+        if rejected >= 2:
+            record.rejected_done_reports = rejected
             self.host.stop(record)
             self.writer.move(
                 role="dispatcher",
@@ -2430,7 +2431,15 @@ class DispatcherRuntime:
                 "reason": "worker repeatedly reported rejected SHA",
             }
 
-        self.host.stop(record)
+        # The rework worker opens in this same checkout, so the head that reported the stale done
+        # has to be confirmed gone first. A refusal ends the tick before the comment and before the
+        # relaunch: the next tick retries the stop on an unchanged record.
+        unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+        if unconfirmed is not None:
+            return unconfirmed
+        # Counted only once the bounce actually happens: a tick that stopped at the refusal above
+        # rejected nothing, and charging it would block the card on the retry of the same report.
+        record.rejected_done_reports = rejected
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,

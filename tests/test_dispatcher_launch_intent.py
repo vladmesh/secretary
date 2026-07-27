@@ -387,6 +387,30 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(outcome["action"], "stale-done-rework")
         self.assertEqual(seen[0]["action"], "stale-done-rework")
 
+    def test_a_stale_done_rework_after_an_unconfirmed_stop_starts_nothing(self) -> None:
+        self.run_to_validate()
+        self.tick()
+        self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # rework head up on the rejected sha
+        self.report_done(request_id="worker-done-again")
+        self.host.calls.clear()
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-stop-unconfirmed")
+        self.assertEqual(outcome["status"], "degraded")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.stored_intent(), {}, "no launch was even fixed on disk")
+
+        # Once the host confirms the stop, the rework relaunch happens exactly once.
+        self.host.fail_stop_workspace_reason = ""
+
+        retried = self.tick()
+
+        self.assertEqual(retried["action"], "stale-done-rework")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
     # worker: the round a rework launch belongs to ---------------------------
 
     def rework_after_red_review(self) -> None:
