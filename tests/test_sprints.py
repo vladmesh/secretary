@@ -317,6 +317,48 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         event = TaskAudit(self.tmp.name).events()[-1]
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
 
+    def test_override_retry_reuses_the_denied_request_id_for_the_write(self) -> None:
+        card = self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code", title="owned",
+            sprint=self.ref,
+        )["task"]
+        with self.assertRaisesRegex(TaskError, self.ref) as denied:
+            self.tasks.move(
+                role="po", actor="operator", reference=card["ref"], target="ready", reason="",
+                request_id="po-override-retry",
+            )
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+
+        moved = self.tasks.move(
+            role="po", actor="operator", reference=card["ref"], target="ready", reason="",
+            sprint_override=True, sprint_override_reason="production incident", request_id="po-override-retry",
+        )
+
+        self.assertEqual(moved["task"]["state"], "ready")
+        events = TaskAudit(self.tmp.name).events()
+        denial = next(event for event in events if event["kind"] == "sprint_guard_denied")
+        self.assertEqual(denial["payload"]["operation_request_id"], "po-override-retry")
+        success = next(event for event in events if event["request_id"] == "po-override-retry")
+        self.assertEqual(success["kind"], "moved")
+        self.assertEqual(success["payload"]["sprint_override_reason"], "production incident")
+
+    def test_denied_create_request_can_succeed_after_sprint_closes(self) -> None:
+        with self.assertRaisesRegex(TaskError, self.ref) as denied:
+            self.tasks.create(
+                role="retro", actor="retro", project="secretary", task_type="research", title="finding",
+                request_id="retro-after-close",
+            )
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+        self.sprints.close(role="po", actor="operator", reference=self.ref)
+
+        created = self.tasks.create(
+            role="retro", actor="retro", project="secretary", task_type="research", title="finding",
+            request_id="retro-after-close",
+        )
+
+        self.assertEqual(created["task"]["project"], "secretary")
+        self.assertEqual(created["task"]["state"], "ideas")
+
     def test_dispatcher_cycle_and_observer_move_are_allowed(self) -> None:
         card = self.tasks.create(
             role="observer", actor="observer", project="secretary", task_type="code", title="cycle",

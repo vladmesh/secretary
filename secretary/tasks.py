@@ -70,6 +70,11 @@ def workspace_dirt(workspace: str | os.PathLike[str]) -> list[str]:
     return durability_dirt(completed.stdout)
 
 
+def _sprint_guard_denial_request_id(request_id: str) -> str:
+    """Keep a denied guard check from consuming the operation's retry key."""
+    return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+
+
 _STATE_BY_COLUMN = {
     "Идеи": "ideas",
     "Ready": "ready",
@@ -1022,18 +1027,22 @@ class TaskWriter:
         self, *, code: str, message: str, role: str, actor: str, project: str,
         sprint: str, request_id: str, reference: str, exit_code: int = 3,
     ) -> None:
-        event = self.audit.committed_event(request_id)
+        denial_request_id = _sprint_guard_denial_request_id(request_id)
+        event = self.audit.committed_event(denial_request_id)
         if event is None:
             event = {
                 "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
                 "actor": {"role": role, "id": actor}, "kind": "sprint_guard_denied", "outcome": "denied",
                 "task_id": "", "ref": reference, "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
-                "request_id": request_id,
-                "payload": {"code": code, "message": message, "project": project, "sprint": sprint},
+                "request_id": denial_request_id,
+                "payload": {
+                    "code": code, "message": message, "project": project, "sprint": sprint,
+                    "operation_request_id": request_id,
+                },
             }
-            self.audit.stage(request_id, event)
+            self.audit.stage(denial_request_id, event)
             try:
-                self.audit.append(request_id, event)
+                self.audit.append(denial_request_id, event)
             except OSError:
                 raise TaskError("audit_pending", "sprint write was denied but audit repair is required", 4) from None
         payload = event.get("payload") if isinstance(event, dict) else {}
