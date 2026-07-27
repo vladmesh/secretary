@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatcher_observer import observer_snapshot
 from secretary.dispatcher_pause import ProductionPause
 from secretary.dispatcher_review import command_terminal_status
 from secretary.dispatcher_state import DispatcherRecord
@@ -55,6 +56,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
         "dispatcher": {
             "phase": _text(production.get("phase")) or "new",
             "active_attempts": _attempts(production, probe_panels=not offline and host_fixture is None),
+            "observers": _observers(production),
             "pause": _pause_status(data_dir, production),
             "divergences": _divergences(production),
             "reconciliation": _reconciliation(production),
@@ -186,6 +188,38 @@ class _StatusWatchdogHost:
 
     def codex_tui_activity(self, _task, _record, _kind):
         return None
+
+
+def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
+    """One row per sprint the dispatcher tracks an observer head for.
+
+    Enough to answer "is my sprint being watched, and if not, why" without opening a transcript:
+    the head profile, whether its pid is alive right now, when the dispatcher last acted on it, and
+    the reason a launch is parked.
+    """
+    return [
+        {
+            "sprint": row["sprint"],
+            "head": row["head"] or None,
+            "state": row["state"],
+            "alive": row["alive"],
+            "pid_known": row["pid_known"],
+            "launches": row["launches"],
+            # A live pid here belongs to a bring-up that failed with its terminal still up, not to
+            # a working observer: without this flag `alive: true` would read as a watched sprint.
+            "abandoned_handle": row["abandoned_handle"],
+            # False for a head adopted from a launch intent: it is watching its sprint, but its
+            # terminal handle died with the tick that opened it and its stop goes by workspace.
+            "handle_known": row["handle_known"],
+            "workspace": row["workspace"] or None,
+            "last_action": row["last_action"] or None,
+            "last_action_at": _epoch(row["last_action_at"]),
+            "deferred_reason": row["deferred_reason"] or None,
+            "stopped_reason": row["stopped_reason"] or None,
+            "paused": row["paused"],
+        }
+        for row in observer_snapshot(production)
+    ]
 
 
 def _divergences(production: dict[str, Any]) -> dict[str, Any]:

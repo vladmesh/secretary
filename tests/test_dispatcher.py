@@ -31,6 +31,10 @@ from secretary.dispatcher import (
     default_data_dir,
 )
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_observer import (
+    OBSERVER_HEAD_FALLBACK,
+    ObserverRecord,
+)
 from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
@@ -48,6 +52,7 @@ from secretary.routing_journal import (
     head_run_from_profile,
 )
 from secretary.head_health import HeadReadiness
+from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.dispatcher_watchdog import (
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
@@ -111,20 +116,48 @@ class FakeKanboard:
             13: {"project": "secretary", "task_type": "code", "slug": "neighbor"},
         }
         self.comments: dict[int, list[dict]] = {12: [], 13: []}
+        # The sprint entities live on their own Kanboard board (`Secretary sprints`, project id 8),
+        # so a card is never readable as a sprint and an empty sprint board is the default.
+        self.sprints: list[dict] = []
         self.now = 1720000000
+
+    def add_sprint(self, reference: str, *, status: str = "open", **metadata: object) -> dict:
+        task_id = 100 + len(self.sprints)
+        sprint = {
+            "id": task_id,
+            "reference": reference,
+            "title": metadata.get("sprint_goal", "sprint"),
+            "description": "",
+            "column_id": 1,
+            "position": len(self.sprints) + 1,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        }
+        self.sprints.append(sprint)
+        self.metadata[task_id] = {
+            "sprint_goal": "ship the thing",
+            "sprint_definition_of_done": "the thing ships",
+            "sprint_repositories": '["secretary"]',
+            "sprint_status": status,
+            "sprint_current_task": "",
+            **{key: str(value) for key, value in metadata.items()},
+        }
+        self.comments.setdefault(task_id, [])
+        return sprint
 
     def call(self, method: str, **params: object) -> object:
         self.calls.append((method, params))
         if method == "getProjectByName":
-            return {"id": 7}
+            return {"id": 8} if params.get("name") == SPRINT_BOARD_NAME else {"id": 7}
         if method == "getColumns":
             return self.columns
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
-            return self.tasks
+            return self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
         if method == "getTaskByReference":
-            return next((task for task in self.tasks if task["reference"] == params["reference"]), None)
+            pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
+            return next((task for task in pool if task["reference"] == params["reference"]), None)
         if method == "getTaskMetadata":
             return self.metadata[int(params["task_id"])]
         if method == "saveTaskMetadata":
@@ -174,9 +207,15 @@ class FakeCatalog:
             "openai-sub": {"account": "openai-subscription"},
             "claude-sub": {"account": "claude-subscription"},
         }
+        self.profiles["codex-observer"] = {
+            "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra",
+            "resource": "openai-sub", "codex_mode": "tui",
+        }
         # Mutable, like the role_defaults block of heads.yaml: an operator can re-point a role
         # while cards are in flight.
-        self.role_defaults = {"new_card": "codex", "reviewer": "codex-reviewer"}
+        self.role_defaults = {
+            "new_card": "codex", "reviewer": "codex-reviewer", "observer": "codex-observer",
+        }
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
@@ -251,6 +290,24 @@ class FakeCatalog:
             model_source=model_source,
         )
 
+    def observer_head(self) -> str:
+        # Same rule as InstanceCatalog: the observer's own role_defaults key, with a named fallback
+        # profile rather than the worker's default.
+        head = str(self.role_defaults.get("observer") or OBSERVER_HEAD_FALLBACK)
+        if head not in self.profiles:
+            raise HostError(f"unknown head {head!r}")
+        return head
+
+    def observer_run(self, head: str, *, workspace: str = "") -> HeadRun:
+        profile = self.profiles.get(head, {"adapter": "codex", "resource": "openai-sub"})
+        return head_run_from_profile(
+            role="observer",
+            head=head,
+            head_source="role_default",
+            profile=profile,
+            resources=self.resources,
+        )
+
     def binding(self, project: str) -> dict:
         binding = {"repo": f"/home/dev/{project}"}
         if self._default_branch:
@@ -300,6 +357,20 @@ class FakeHost:
         self.stopped_reviews: list[str] = []
         self.commit = "c0ffee1234567890"
         self.instance_publish_recoveries: set[tuple[str, str]] = set()
+        # Observer heads (secretary-793): which sprints got one, which handles were stopped, and
+        # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
+        # reads as alive; point it at a free pid to model a head that died.
+        self.observers: list[str] = []
+        self.stopped_observers: list[str] = []
+        # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
+        self.observer_terminals: dict[str, str] = {}
+        self.observer_pid = os.getpid()
+        self.fail_observer_reason = ""
+        # A bring-up failure the caller has to read for more than its message, e.g. an
+        # ObserverLaunchAborted that carries the handle of a terminal that stayed up.
+        self.fail_observer_error: Exception | None = None
+        # Orca refusing to close an observer pane: the head must be assumed alive afterwards.
+        self.fail_stop_observer_reason = ""
 
     def prepare_worker(
         self,
@@ -324,6 +395,46 @@ class FakeHost:
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
             "run": launched.run,
         }
+
+    def observer_workspace(self, reference: str) -> str:
+        return str(self.root / "observers" / reference.replace(":", "-"))
+
+    def observer_pid_file(self, reference: str) -> str:
+        return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
+
+    def prepare_observer(self, sprint: dict, head: str, *, prompt: str) -> dict:
+        self.calls.append("prepare_observer")
+        if self.fail_observer_error is not None:
+            raise self.fail_observer_error
+        if self.fail_observer_reason:
+            raise HostError(self.fail_observer_reason)
+        reference = str(sprint["ref"])
+        workspace = Path(self.observer_workspace(reference))
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "SPRINT.md").write_text(prompt, encoding="utf-8")
+        self.observers.append(reference)
+        pid_file = Path(self.observer_pid_file(reference))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(self.observer_pid), encoding="utf-8")
+        handle = f"observer:{reference}"
+        # Like Orca: the terminal is findable by its workspace, which is how a head whose handle
+        # was lost with its tick still gets stopped.
+        self.observer_terminals[str(workspace)] = handle
+        return {
+            "workspace": str(workspace),
+            "handle": handle,
+            "pid_file": str(pid_file),
+            "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
+        }
+
+    def stop_observer(self, record) -> None:
+        self.calls.append("stop_observer")
+        if self.fail_stop_observer_reason:
+            raise HostError(self.fail_stop_observer_reason)
+        handle = record.handle or self.observer_terminals.get(str(record.workspace) or "", "")
+        self.observer_terminals.pop(str(record.workspace) or "", None)
+        if handle:
+            self.stopped_observers.append(handle)
 
     def pane_leaf(self, workspace: str, handle: str) -> str:
         return f"leaf:{handle}"

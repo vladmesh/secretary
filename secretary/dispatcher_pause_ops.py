@@ -17,6 +17,11 @@ from typing import Any
 
 from secretary._fsutil import file_lock
 from secretary.dispatcher_helpers import _last_marker
+from secretary.dispatcher_observer import (
+    freeze_observers,
+    observer_snapshot,
+    resume_observers,
+)
 from secretary.dispatcher_pause import (
     PAUSE_MODES,
     auto_resume_status,
@@ -79,6 +84,7 @@ def pause(
         since = now_rfc3339()
         stopped_worker: list[str] = []
         stopped_reviewer: list[str] = []
+        stopped_observer: list[str] = []
         excluded: list[str] = []
         warnings: list[str] = []
         if resolved == "freeze":
@@ -95,6 +101,19 @@ def pause(
                 stopped_worker, stopped_reviewer, excluded = _freeze_heads(
                     runtime, records, _excluded_paths(exclude_workspaces)
                 )
+                # Observer heads stop with everything else, with the freeze's own reason on the
+                # record. The next tick after the resume brings them back.
+                observer_stops = freeze_observers(
+                    runtime, payload, reason=f"pipeline freeze by {actor}: {reason}"
+                )
+                stopped_observer = observer_stops["stopped"]
+                if observer_stops["failed"]:
+                    # The head is still alive and still on the books as a pending stop, which the
+                    # frozen tick retries. The operator hears it now rather than from the log.
+                    warnings.append(
+                        "observer heads could not be stopped and are retried by the next tick: "
+                        + ", ".join(observer_stops["failed"])
+                    )
                 runtime.production_state.put_records(payload, records)
                 runtime.production_state.save(payload)
         mirror = write_legacy_mirror(mode=resolved, actor=actor, reason=reason, since=since)
@@ -106,6 +125,7 @@ def pause(
                 since=since,
                 stopped_worker=stopped_worker,
                 stopped_reviewer=stopped_reviewer,
+                stopped_observer=stopped_observer,
                 excluded_worker=excluded,
                 legacy_mirror=mirror,
             )
@@ -175,6 +195,10 @@ def resume_locked(runtime: Any, *, actor: str) -> dict[str, Any]:
         else:
             records = runtime.production_state.records(payload)
             buckets = _resume_heads(runtime, state, records)
+            # The observers are not relaunched here: clearing their freeze marks hands them back to
+            # the tick's reconciliation, which is the one bring-up path and already tells a dead
+            # head from a live one.
+            buckets["observers_resumed"] = resume_observers(payload)
             _refresh_watchdog_windows(records)
             runtime.production_state.put_records(payload, records)
             payload["resumed_at"] = now_rfc3339()
@@ -225,6 +249,7 @@ def pause_status(runtime: Any) -> dict[str, Any]:
         "reason": str(state.get("reason") or ""),
         "stopped_worker": stopped_worker,
         "stopped_reviewer": stopped_reviewer,
+        "stopped_observer": list(state.get("stopped_observer") or []),
         "excluded_worker": excluded_worker,
         "on_resume": on_resume_text(mode, stopped_worker, stopped_reviewer),
         # Operator-visible answer to "will this lift itself?": an automation-owned freeze expires,
@@ -232,6 +257,7 @@ def pause_status(runtime: Any) -> dict[str, Any]:
         "auto_resume": auto_resume_status(state),
         "legacy_mirror": state.get("legacy_mirror") if isinstance(state.get("legacy_mirror"), dict) else {},
         "heads": [_head_line(ref, record) for ref, record in sorted(records.items())],
+        "observers": observer_snapshot(payload),
         "warnings": warnings,
     }
     return out

@@ -1029,6 +1029,13 @@ class TaskWriter:
         unresolved = 0
         for event in self.audit.pending_events():
             try:
+                if str(event.get("backend", {}).get("kind") or "") == "dispatcher":
+                    # An observer lifecycle event describes a head, not a backend row: there is
+                    # nothing to re-read and enrich, and it must repair even when the sprint it
+                    # names has already left the board.
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
+                    continue
                 if str(event.get("ref") or "").startswith("sprint:"):
                     from secretary.sprints import SprintWriter
 

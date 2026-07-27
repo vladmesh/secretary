@@ -26,7 +26,12 @@ import unittest
 from pathlib import Path
 
 from secretary import dispatcher as dispatcher_module
-from secretary import dispatcher_production, dispatcher_review, tasks as tasks_module
+from secretary import (
+    dispatcher_observer,
+    dispatcher_production,
+    dispatcher_review,
+    tasks as tasks_module,
+)
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_state import DispatcherRecord
@@ -36,7 +41,12 @@ from secretary.tasks import KanboardClient
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
 
 # Modules that reach through a runtime into the host/catalog collaborators.
-_RUNTIME_MODULES = (dispatcher_module, dispatcher_production, dispatcher_review)
+_RUNTIME_MODULES = (
+    dispatcher_module,
+    dispatcher_production,
+    dispatcher_review,
+    dispatcher_observer,
+)
 
 # Attribute owners as they are spelled at the call sites: `self.host` inside DispatcherRuntime,
 # `runtime.host` / `host.` inside the extracted helper modules.
@@ -224,6 +234,17 @@ class HostBehaviourContractTests(unittest.TestCase):
         self.assertEqual(sorted(real), sorted(fake))
         for key in real:
             self.assertIsInstance(fake[key], type(real[key]), f"prepare_worker[{key!r}] type drift")
+
+    def test_prepare_observer_returns_the_same_keys(self) -> None:
+        sprint = {"ref": "sprint:1", "goal": "g", "definition_of_done": "d", "repositories": []}
+        real = self.real.prepare_observer(sprint, "codex-observer", prompt="# Sprint sprint:1\n")
+        fake = self.fake.prepare_observer(sprint, "codex-observer", prompt="# Sprint sprint:1\n")
+        self.assertEqual(sorted(real), sorted(fake))
+        for key in real:
+            self.assertIsInstance(fake[key], type(real[key]), f"prepare_observer[{key!r}] type drift")
+        # Both write the sprint document the head opens at the workspace root.
+        for result in (real, fake):
+            self.assertTrue((Path(result["workspace"]) / "SPRINT.md").is_file())
 
     def test_gate_check_returns_a_gate_result(self) -> None:
         task = self._task()

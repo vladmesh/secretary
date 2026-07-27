@@ -255,6 +255,7 @@ class ProductionPause:
                 "reason": str(state.get("reason") or ""),
                 "stopped_worker": list(state.get("stopped_worker") or []),
                 "stopped_reviewer": list(state.get("stopped_reviewer") or []),
+                "stopped_observer": list(state.get("stopped_observer") or []),
                 "excluded_worker": list(state.get("excluded_worker") or []),
             }
         )
@@ -271,6 +272,7 @@ def pause_payload(
     stopped_reviewer: list[str],
     excluded_worker: list[str],
     legacy_mirror: dict[str, Any],
+    stopped_observer: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "version": 1,
@@ -280,6 +282,7 @@ def pause_payload(
         "reason": reason,
         "stopped_worker": sorted(stopped_worker),
         "stopped_reviewer": sorted(stopped_reviewer),
+        "stopped_observer": sorted(stopped_observer or []),
         "excluded_worker": sorted(excluded_worker),
         "legacy_mirror": legacy_mirror,
     }
@@ -289,8 +292,9 @@ def on_resume_text(mode: str, stopped_worker: list[str], stopped_reviewer: list[
     if mode == "freeze":
         return (
             f"resume clears the freeze, relaunches {len(stopped_worker)} stopped worker head(s) and "
-            f"{len(stopped_reviewer)} stopped reviewer head(s) in their existing workspaces, and "
-            "gives every wait watchdog a fresh window"
+            f"{len(stopped_reviewer)} stopped reviewer head(s) in their existing workspaces, gives "
+            "every wait watchdog a fresh window, and lets the next tick bring the stopped sprint "
+            "observers back"
         )
     if mode == "drain":
         return (
