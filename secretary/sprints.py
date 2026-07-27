@@ -160,6 +160,7 @@ class SprintReader:
             "ref": sprint["ref"], "goal": sprint["goal"], "status": sprint["status"],
             "current_task": sprint["current_task"], "cards": {key: sorted(value) for key, value in sorted(states.items())},
             "budget": sprint["budget"], "resume_freshness": sprint["resume_freshness"],
+            "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},
         }
 
@@ -293,7 +294,7 @@ class SprintWriter:
         return self._write("budget_recorded", role, actor, reference, request_id, {"event_type": event_type, "source_event_id": source_event_id or None}, mutation)
 
     def resume(self, *, role: str, actor: str, reference: str, entry: dict[str, Any], request_id: str | None = None) -> dict[str, Any]:
-        self._role(role, {"po", "dispatcher", "steward"})
+        self._role(role, {"po", "dispatcher", "observer", "steward"})
         normalized = _resume(entry, required=True)
         assert normalized is not None
         def mutation(sprint: dict[str, Any]) -> None:

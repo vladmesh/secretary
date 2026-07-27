@@ -19,7 +19,7 @@ def add_sprint_subcommands(subparsers) -> None:
     sprint = subparsers.add_parser("sprint", help="manage sprint entities on the dedicated Kanboard board")
     commands = sprint.add_subparsers(dest="sprint_command")
     listed = commands.add_parser("list")
-    listed.add_argument("--status", action="append", choices=("open", "closed"))
+    listed.add_argument("--status", action="append", choices=("open", "closed", "stopped"))
     listed.set_defaults(handler=run_list)
     shown = commands.add_parser("show")
     shown.add_argument("--ref", required=True)
@@ -71,9 +71,12 @@ def not_implemented(args: argparse.Namespace) -> int:
     return 2
 
 
-def _read(operation: Callable[[SprintReader], object]) -> int:
+def _read(
+    operation: Callable[[SprintReader], object], *, data_dir: str | None = None,
+    thresholds: dict | None = None,
+) -> int:
     try:
-        result = operation(SprintReader(KanboardClient()))
+        result = operation(SprintReader(KanboardClient(), data_dir=data_dir, thresholds=thresholds))
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -96,7 +99,9 @@ def run_list(args: argparse.Namespace) -> int:
 
 
 def run_show(args: argparse.Namespace) -> int:
-    return _read(lambda reader: SprintReader(reader.client, data_dir=resolve_data_dir(args), thresholds=_thresholds(args)).show(args.ref))
+    return _read(
+        lambda reader: reader.show(args.ref), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
+    )
 
 
 def run_status(args: argparse.Namespace) -> int:
@@ -106,14 +111,17 @@ def run_status(args: argparse.Namespace) -> int:
     except (OSError, ValueError, UnicodeError):
         raw = {}
     observer = next((row for row in observer_snapshot(raw) if row.get("sprint") == args.ref), None)
-    return _read(lambda reader: SprintReader(reader.client, data_dir=data_dir, thresholds=_thresholds(args)).status(args.ref, observer=observer))
+    return _read(
+        lambda reader: reader.status(args.ref, observer=observer), data_dir=data_dir, thresholds=_thresholds(args),
+    )
 
 
 def _thresholds(args: argparse.Namespace) -> dict | None:
-    instance = Path(getattr(args, "instance", "") or "")
-    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
-    if not instance_file:
+    raw_instance = getattr(args, "instance", "") or ""
+    if not raw_instance:
         return None
+    instance = Path(raw_instance)
+    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
     try:
         config = load_config(instance_file)
     except ConfigError:

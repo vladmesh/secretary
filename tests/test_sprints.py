@@ -200,6 +200,20 @@ class SprintTests(unittest.TestCase):
         self.assertFalse(stale["resume_freshness"]["fresh"])
         self.assertEqual(stale["resume_freshness"]["error"], "resume_stale")
 
+    def test_observer_can_record_a_complete_resume_entry(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="observer resume")["sprint"]["ref"]
+        entry = {
+            "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+            "current_task": "secretary-14", "dod_state": "tests pending", "next_safe_step": "run tests",
+        }
+
+        result = self.writer.resume(
+            role="observer", actor="observer-head", reference=ref, entry=entry, request_id="observer-resume",
+        )
+
+        self.assertEqual(result["action"], "resume_recorded")
+        self.assertEqual(result["sprint"]["resume"]["selected_step"], "implement")
+
 
 if __name__ == "__main__":
     unittest.main()

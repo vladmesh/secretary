@@ -210,8 +210,10 @@ Controlled divergence — сигнал о расхождении между те
 `sprint_budget.signal` в prompt наблюдателя попадает предупреждение пересмотреть вектор. При
 `sprint_budget.hard` sprint становится `stopped`: head штатно останавливается, новые связанные Ready
 карточки пропускаются, а активные карточки остаются в обычном цикле. Оператор проверяет это через
-`secretary sprint status --ref sprint:ID`; там видны разбивка бюджета, resume freshness и состояние
-наблюдателя. Продолжить остановленный sprint может только `secretary sprint reopen --role po`.
+`secretary status --json`: `installation.sprints.items` показывает статус, причину hard-остановки,
+разбивку бюджета, resume freshness и состояние наблюдателя каждого спринта. Недоступность board видна в
+`installation.sprints.error`. Детали одного спринта доступны через `secretary sprint status --ref
+sprint:ID`. Продолжить остановленный sprint может только `secretary sprint reopen --role po`.
 
 Решение тика на спринт видно в `actions` под `{"step": "observer-reconcile"}`:
 

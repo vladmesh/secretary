@@ -542,6 +542,13 @@ def run_status(args: argparse.Namespace) -> int:
     observers = snapshot["dispatcher"]["observers"]
     live = sum(1 for observer in observers if observer["alive"])
     print(f"sprint observers: {live} live of {len(observers)}")
+    sprint_status = snapshot["installation"]["sprints"]
+    if sprint_status["error"]:
+        print(f"sprints: unavailable ({sprint_status['error']['message']})")
+    else:
+        stopped = sum(sprint["status"] == "stopped" for sprint in sprint_status["items"])
+        stale = sum(not sprint["resume_freshness"]["fresh"] for sprint in sprint_status["items"])
+        print(f"sprints: {len(sprint_status['items'])}, {stopped} stopped, {stale} resume errors")
     print(f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}")
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0

@@ -845,24 +845,29 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         data_dir=Path(runtime.audit.board_dir).parent,
         thresholds=thresholds,
     )
+    events = runtime.audit.events()
+    committed = {str(event.get("request_id") or "") for event in events}
     outcomes: list[dict[str, Any]] = []
     sprint_cache: dict[str, str] = {}
-    for event in runtime.audit.events():
+    for event in events:
         reference = str(event.get("ref") or "")
         if not reference or reference.startswith("sprint:"):
             continue
         event_type = _budget_event_type(event)
         if event_type is None:
             continue
-        sprint = _event_sprint(runtime, event, sprint_cache)
-        if not sprint:
-            continue
         identity = str(event.get("event_id") or event.get("request_id") or "")
         if not identity:
             continue
+        request_id = "sprint-budget-" + identity
+        if request_id in committed:
+            continue
+        sprint = _event_sprint(runtime, event, sprint_cache)
+        if not sprint:
+            continue
         result = writer.record_budget(
             role="dispatcher", actor=runtime.owner, reference=sprint, event_type=event_type,
-            request_id="sprint-budget-" + identity, source_event_id=identity,
+            request_id=request_id, source_event_id=identity,
         )
         outcomes.append({
             "status": "ok", "step": "sprint-budget", "sprint": sprint,

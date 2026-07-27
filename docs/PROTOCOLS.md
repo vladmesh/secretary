@@ -123,6 +123,10 @@ its observer and skips new linked claims; active cards continue their normal cyc
 from normal comments and receives a `[sprint:resume]` marker. `show` and `status` compute freshness
 from card audit records: missing data is `resume_missing`, and a record older than the latest
 non-routing card event is `resume_stale`. Neither command reads an observer transcript.
+`secretary status --json` exposes the same entity-derived state for every sprint in
+`installation.sprints.items`, including stopped status, its `budget_hard_limit` reason, budget,
+resume freshness and observer state. If the live board cannot be read, it reports that fact in
+`installation.sprints.error`.
 
 `task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
 `task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives

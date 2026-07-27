@@ -226,8 +226,9 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
         self.assertTrue(self.runtime.sprints.show("sprint:1")["budget"]["signal_reached"])
         self.assertEqual(len([row for row in first["actions"] if row.get("step") == "sprint-budget"]), 1)
-        self.runtime.production_tick()
+        repeated = self.runtime.production_tick()
         self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
+        self.assertEqual([row for row in repeated["actions"] if row.get("step") == "sprint-budget"], [])
         self.writer.move(
             role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
             reason="operator stop", request_id="blocked-card",
