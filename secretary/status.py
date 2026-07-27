@@ -19,6 +19,8 @@ from secretary.dispatcher_types import HostError
 from secretary.host import CollectResult, FixtureHostSource, LiveHostSource, build_doctor_expectations
 from secretary.host_apply import resolve_packaged
 from secretary.secret_store import store_health
+from secretary.sprints import SprintReader, budget_thresholds
+from secretary.tasks import KanboardClient, TaskError
 
 
 STATUS_SCHEMA_VERSION = 1
@@ -45,6 +47,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "projects": report.projects,
             "heads": _heads(report.instance),
             "cards": {"total": _card_count(data_dir), "active_attempts": len(_attempts(production, probe_panels=False))},
+            "sprints": _sprints(data_dir, report.instance, production),
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -90,6 +93,24 @@ def _heads(instance: dict[str, Any]) -> list[dict[str, str]]:
         for item in heads
         if isinstance(item, dict) and isinstance(item.get("role"), str)
     ]
+
+
+def _sprints(data_dir: Path, instance: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+    """Read the sprint entity and live board without consulting observer context."""
+    try:
+        reader = SprintReader(
+            KanboardClient(), data_dir=data_dir, thresholds=budget_thresholds(instance),
+        )
+        observers = {row["sprint"]: row for row in observer_snapshot(production)}
+        return {
+            "items": [
+                reader.status(sprint["ref"], observer=observers.get(sprint["ref"]))
+                for sprint in reader.list(create=False)
+            ],
+            "error": None,
+        }
+    except TaskError as exc:
+        return {"items": [], "error": {"code": exc.code, "message": exc.message}}
 
 
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:

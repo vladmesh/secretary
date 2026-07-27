@@ -15,6 +15,8 @@ from secretary.host import CollectResult, HostInventory, build_doctor_expectatio
 from secretary.host_apply import resolve_packaged
 from secretary.config import validate_instance
 from secretary.secret_store import initialize_store, set_secret
+from secretary.tasks import TaskAudit
+from tests.test_dispatcher import FakeKanboard
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -186,6 +188,52 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Secretary status:", output.getvalue())
         self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
+
+    def test_status_json_includes_stopped_sprint_and_stale_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            (data_dir / "dispatcher").mkdir(parents=True)
+            (data_dir / "dispatcher" / "production-state.json").write_text(json.dumps({"records": {}}), encoding="utf-8")
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: test\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+                "host:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            board = FakeKanboard()
+            board.add_sprint(
+                "sprint:1", status="stopped",
+                sprint_budget=json.dumps({"by_type": {"blocked": 2}}),
+                sprint_resume=json.dumps({
+                    "selected_step": "fix", "selected_why": "blocked", "rejected_alternatives": "wait",
+                    "current_task": "secretary-510-pilot", "dod_state": "pending", "next_safe_step": "test",
+                    "recorded_at": "2020-01-01T00:00:00Z",
+                }),
+            )
+            board.metadata[12]["sprint_ref"] = "sprint:1"
+            TaskAudit(data_dir).append("later-card-event", {
+                "event_id": "evt_later_card_event", "request_id": "later-card-event", "ref": "secretary-510-pilot", "kind": "commented",
+                "occurred_at": "2026-07-27T00:00:00Z",
+            })
+            output = io.StringIO()
+            report = validate_instance(instance)
+            with contextlib.redirect_stdout(output), mock.patch("secretary.status.KanboardClient", return_value=board), mock.patch(
+                "secretary.status.checkpoint_snapshot", return_value={
+                    "last_commit": None, "lag_minutes": None, "remote_diverged": False, "blocked_reason": None,
+                }
+            ):
+                from secretary.status import collect_status
+                snapshot = collect_status(report, offline=True)
+
+        self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        sprint = snapshot["installation"]["sprints"]["items"][0]
+        self.assertEqual(sprint["status"], "stopped")
+        self.assertEqual(sprint["stop_reason"], "budget_hard_limit")
+        self.assertEqual(sprint["budget"]["by_type"]["blocked"], 2)
+        self.assertEqual(sprint["resume_freshness"]["error"], "resume_stale")
 
     def test_invalid_status_json_uses_the_documented_schema(self):
         with tempfile.TemporaryDirectory() as tmp:

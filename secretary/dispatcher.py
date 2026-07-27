@@ -123,7 +123,7 @@ from secretary.routing_journal import (
     run_key as _run_key,
 )
 from secretary.head_health import HeadHealth, HeadReadiness
-from secretary.sprints import SprintReader
+from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -1345,7 +1345,11 @@ class DispatcherRuntime:
         self.head_health = HeadHealth(catalog, state.root.parent)
         # Sprint entities live on their own board, so the observer pass reads them through their
         # own reader rather than the card reader.
-        self.sprints = sprints if sprints is not None else SprintReader(reader.client)
+        instance = getattr(catalog, "instance", {})
+        limits = budget_thresholds(instance if isinstance(instance, dict) else None)
+        self.sprints = sprints if sprints is not None else SprintReader(
+            reader.client, data_dir=Path(audit.board_dir).parent, thresholds=limits
+        )
 
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)

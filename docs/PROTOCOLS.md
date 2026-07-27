@@ -94,17 +94,42 @@ python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --repository REPO --request-id REQUEST_ID
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint show --ref sprint:ID
+python3 -m secretary sprint status --ref sprint:ID
 python3 -m secretary sprint comment --role worker --ref sprint:ID --body-file NOTE.md
 python3 -m secretary sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
 python3 -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
+python3 -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
+python3 -m secretary sprint reopen --role po --ref sprint:ID
 python3 -m secretary sprint close --role po --ref sprint:ID
 ```
 
-Stored fields are goal, Definition of Done text, repositories, open/closed status, budget counter
-by event type, and current card. The six valid budget event types are `red_review`, `blocked`,
-`red_ci`, `preempt`, `recreated_task`, and `hotfix`; completed green cards and observer research do
-not have a budget command and do not change the counter. `show` returns the total and every type
-count, including zeroes.
+Stored fields are goal, Definition of Done text, repositories, open/closed/stopped status, budget
+counter by event type, current card and a structured resume entry. The six valid budget event types
+are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task`, and `hotfix`. Production derives
+them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, an
+active-card preempt to Ready, or tagged recreation/hotfix creation. The card-event id becomes the
+budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity do
+not have a matching event and do not move the counter.
+
+Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6.
+The schema resolves omitted values to those defaults before rejecting a hard limit below the signal
+limit. Each charge is a `budget_recorded` audit event; the charge that stops a sprint is paired with
+a `budget_hard_stopped` event carrying `budget_hard_limit` and the triggering card-event identity.
+`show` returns thresholds and
+`signal_reached`/`hard_reached` with the totals. The signal appears in a newly launched observer
+prompt but does not stop work. At the hard limit the dispatcher marks the sprint `stopped`, stops
+its observer and skips new linked claims; active cards continue their normal cycle. Only
+`sprint reopen --role po` clears the stop.
+
+`sprint resume` accepts JSON with required string fields `selected_step`, `selected_why`,
+`rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored separately
+from normal comments and receives a `[sprint:resume]` marker. `show` and `status` compute freshness
+from card audit records: missing data is `resume_missing`, and a record older than the latest
+non-routing card event is `resume_stale`. Neither command reads an observer transcript.
+`secretary status --json` exposes the same entity-derived state for every sprint in
+`installation.sprints.items`, including stopped status, its `budget_hard_limit` reason, budget,
+resume freshness and observer state. If the live board cannot be read, it reports that fact in
+`installation.sprints.error`.
 
 `task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
 `task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives

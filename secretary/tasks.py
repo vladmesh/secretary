@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class TaskError(Exception):
@@ -454,6 +454,7 @@ class TaskWriter:
         family_preference: str = "auto",
         codex_launch_mode: str = "",
         sprint: str = "",
+        budget_event: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _CREATE_ROLES)
@@ -471,6 +472,7 @@ class TaskWriter:
         family_preference = family_preference.strip() or "auto"
         codex_launch_mode = codex_launch_mode.strip()
         sprint = sprint.strip()
+        budget_event = budget_event.strip()
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
         if task_type not in _TASK_TYPES:
@@ -494,8 +496,12 @@ class TaskWriter:
             from secretary.sprints import SprintReader
 
             linked_sprint = SprintReader(self.client).show(sprint, include_cards=False)
-            if linked_sprint["status"] == "closed":
-                raise TaskError("closed", "cannot link a new card to a closed sprint", 3)
+            if linked_sprint["status"] != "open":
+                raise TaskError("closed", "cannot link a new card to a closed or stopped sprint", 3)
+        if budget_event not in {"", "recreated_task", "hotfix"}:
+            raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
+        if budget_event and not sprint:
+            raise TaskError("validation", "budget event requires a linked sprint", 2)
 
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
@@ -543,6 +549,7 @@ class TaskWriter:
                 "family_preference": family_preference,
                 "codex_launch_mode": codex_launch_mode or None,
                 "sprint": sprint or None,
+                "budget_event": budget_event or None,
                 "title_sha256": _digest(title),
                 "description_sha256": _digest(description),
             },
@@ -823,7 +830,14 @@ class TaskWriter:
                     self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
             except Exception as exc:
                 raise _CommittedWriteError() from exc
-        return self._write("moved", role, actor, reference, request_id, {"to": target, "reason_sha256": _digest(reason) if reason else None}, mutation)
+        return self._write(
+            "moved", role, actor, reference, request_id,
+            lambda task: {
+                "from": task["state"], "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+            },
+            mutation,
+        )
 
     def edit(
         self,
@@ -977,7 +991,7 @@ class TaskWriter:
         actor: str,
         reference: str,
         request_id: str | None,
-        payload: dict[str, Any],
+        payload: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
         mutation: Any,
         *,
         retry_payload: dict[str, Any] | None = None,
@@ -1003,7 +1017,8 @@ class TaskWriter:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
         task = self.reader.show(reference)
-        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": payload}
+        event_payload = payload(task) if callable(payload) else payload
+        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": event_payload}
         self.audit.stage(request_id, event)
         try:
             mutation(task)

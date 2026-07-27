@@ -117,6 +117,16 @@ class SchemaInvalidTests(unittest.TestCase):
         errors = validate(data, "instance", "instance.yaml")
         self.assertTrue(errors)
 
+    def test_instance_rejects_partial_budget_below_resolved_default(self):
+        for budget in ({"hard": 2}, {"signal": 10}):
+            with self.subTest(budget=budget), tempfile.TemporaryDirectory() as tmpdir:
+                instance = Path(tmpdir) / "instance.yaml"
+                document = copy.deepcopy(VALID_INSTANCE)
+                document["sprint_budget"] = budget
+                instance.write_text(json.dumps(document), encoding="utf-8")
+                report = validate_instance(instance)
+                self.assertTrue(any(error.path == "sprint_budget" for error in report.errors), report.errors)
+
     def test_host_units_require_unit_prefix(self):
         data = copy.deepcopy(VALID_INSTANCE)
         # units with no unit_prefix cannot yield unmanaged-on-host, so reject it.

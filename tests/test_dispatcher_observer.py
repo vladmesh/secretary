@@ -28,7 +28,9 @@ from secretary.dispatcher_observer import (
     render_observer_prompt,
     stop_observer_head,
 )
+from secretary.sprints import SprintReader
 from secretary.dispatcher_types import HostError
+from secretary.dispatcher_production import _budget_event_type, _production_claim_ready, _reconcile_sprint_budget
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
@@ -210,6 +212,130 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertNotIn("observers", self.runtime.production_state.load())
         self.assertNotIn("prepare_observer", self.host.calls[before:])
         self.assertNotIn("stop_observer", self.host.calls[before:])
+
+    def test_budget_is_charged_from_card_events_once_and_hard_limit_stops_observer(self) -> None:
+        self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
+        self.runtime.sprints = SprintReader(self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2})  # type: ignore[arg-type]
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
+            body="fix it", request_id="red-review",
+        )
+        first = self.runtime.production_tick()
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
+        self.assertTrue(self.runtime.sprints.show("sprint:1")["budget"]["signal_reached"])
+        self.assertEqual(len([row for row in first["actions"] if row.get("step") == "sprint-budget"]), 1)
+        repeated = self.runtime.production_tick()
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
+        self.assertEqual([row for row in repeated["actions"] if row.get("step") == "sprint-budget"], [])
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
+            reason="operator stop", request_id="blocked-card",
+        )
+        result = self.runtime.production_tick()
+        sprint = self.runtime.sprints.show("sprint:1")
+        self.assertEqual(sprint["status"], "stopped")
+        self.assertEqual(sprint["budget"]["by_type"]["blocked"], 1)
+        hard_stop_events = [
+            event for event in self.audit.events("sprint:1")
+            if event.get("kind") == "budget_hard_stopped"
+        ]
+        self.assertEqual(len(hard_stop_events), 1)
+        self.assertEqual(hard_stop_events[0]["payload"]["reason"], "budget_hard_limit")
+        self.assertIn("observer-stopped", [row.get("action") for row in self.actions(result)])
+
+    def test_budget_event_classification_excludes_green_card_cycle(self) -> None:
+        cases = {
+            "red_review": {"kind": "verdict", "payload": {"marker": "review:red"}},
+            "blocked": {"kind": "moved", "payload": {"to": "blocked"}},
+            "red_ci": {"kind": "moved", "payload": {"to": "in_progress"}, "request_id": "gate-red"},
+            "preempt": {"kind": "moved", "payload": {"from": "validate", "to": "ready"}},
+            "recreated_task": {"kind": "created", "payload": {"budget_event": "recreated_task"}},
+            "hotfix": {"kind": "created", "payload": {"budget_event": "hotfix"}},
+        }
+        self.assertEqual({name: _budget_event_type(event) for name, event in cases.items()}, {name: name for name in cases})
+        self.assertIsNone(_budget_event_type({"kind": "verdict", "payload": {"marker": "review:green"}}))
+        self.assertIsNone(_budget_event_type({"kind": "moved", "payload": {"to": "done"}}))
+
+    def test_full_green_card_cycle_does_not_charge_the_sprint_budget(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+
+        self.writer.claim(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            worker="worker", request_id="green-claim",
+        )
+        self.writer.move(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            target="validate", reason="worker completed", request_id="green-validate",
+        )
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="green-verdict",
+        )
+        self.writer.move(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            target="done", reason="review passed", request_id="green-done",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 0)
+        self.assertEqual([row for row in result["actions"] if row.get("step") == "sprint-budget"], [])
+
+    def test_unlinked_historical_budget_events_are_not_reread_on_every_tick(self) -> None:
+        for index in range(20):
+            task_id = 1000 + index
+            reference = f"secretary-historical-{index}"
+            self.board.tasks.append({
+                "id": task_id, "reference": reference, "title": reference, "description": "",
+                "column_id": 2, "position": task_id, "swimlane_id": 4,
+                "date_creation": 1720000000, "date_modification": 1720000000,
+            })
+            self.board.metadata[task_id] = {"project": "secretary", "task_type": "code"}
+            self.board.comments[task_id] = []
+            self.audit.append(f"historical-red-{index}", {
+                "event_id": f"evt_historical_red_{index}", "request_id": f"historical-red-{index}",
+                "ref": reference, "kind": "verdict", "occurred_at": "2026-07-27T00:00:00Z",
+                "payload": {"marker": "review:red"},
+            })
+
+        self.board.calls.clear()
+        self.assertEqual(_reconcile_sprint_budget(self.runtime), [])
+        first_reads = [
+            params for method, params in self.board.calls
+            if method == "getTaskByReference" and params.get("project_id") == 7
+        ]
+        self.assertEqual(len(first_reads), 20)
+        self.assertEqual(
+            len([event for event in self.audit.events() if event.get("kind") == "budget_unlinked"]), 20,
+        )
+
+        self.board.calls.clear()
+        self.assertEqual(_reconcile_sprint_budget(self.runtime), [])
+        repeated_reads = [
+            params for method, params in self.board.calls
+            if method == "getTaskByReference" and params.get("project_id") == 7
+        ]
+        self.assertEqual(repeated_reads, [])
+
+    def test_unreadable_linked_sprint_skips_only_its_ready_cards_and_is_cached(self) -> None:
+        ready = [
+            {"ref": "broken-1", "sprint": "sprint:broken", "type": "code", "project": "one"},
+            {"ref": "broken-2", "sprint": "sprint:broken", "type": "code", "project": "two"},
+            {"ref": "claimable", "sprint": None, "type": "code", "project": "three"},
+        ]
+        with mock.patch("secretary.dispatcher_production._production_tasks", side_effect=[[], ready]), \
+             mock.patch.object(
+                 self.runtime.sprints, "show", side_effect=TaskError("backend_error", "sprint board is down", 1)
+             ) as show, \
+             mock.patch.object(self.runtime, "_claim", return_value={"action": "claimed"}) as claim:
+            result = _production_claim_ready(self.runtime, {}, {})
+
+        self.assertEqual(show.call_count, 1)
+        self.assertEqual(claim.call_args.args[0]["ref"], "claimable")
+        self.assertEqual([item["ref"] for item in result["skipped_ready"]], ["broken-1", "broken-2"])
 
     def test_unreadable_sprint_board_never_stops_a_live_head(self) -> None:
         self.open_sprint()

@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from secretary.cli import main
-from secretary.sprints import BUDGET_EVENT_TYPES, SprintReader, SprintWriter, ensure_sprint_board
+from secretary.sprints import BUDGET_EVENT_TYPES, SprintReader, SprintWriter, budget_thresholds, ensure_sprint_board
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -98,6 +98,16 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createProject"]), 1)
 
+    def test_read_only_sprint_list_does_not_create_a_board_or_claim_resume_freshness(self) -> None:
+        reader = SprintReader(self.client)  # type: ignore[arg-type]
+        self.assertEqual(reader.list(create=False), [])
+        self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
+
+        created = self.writer.create(role="po", actor="operator", goal="list")
+        listed = reader.list()
+        self.assertEqual(listed[0]["ref"], created["sprint"]["ref"])
+        self.assertNotIn("resume_freshness", listed[0])
+
     def test_create_has_only_contract_fields_and_rejects_duplicate_reference(self) -> None:
         created = self.writer.create(
             role="po", actor="operator", goal="Ship sprint entity", definition_of_done="tests pass",
@@ -106,7 +116,9 @@ class SprintTests(unittest.TestCase):
         sprint = created["sprint"]
         self.assertEqual(sprint["repositories"], ["secretary"])
         self.assertEqual(sprint["status"], "open")
-        self.assertEqual(sprint["budget"], {"total": 0, "by_type": {event: 0 for event in BUDGET_EVENT_TYPES}})
+        self.assertEqual(sprint["budget"]["total"], 0)
+        self.assertEqual(sprint["budget"]["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
+        self.assertFalse(sprint["budget"]["signal_reached"])
         self.assertIsNone(sprint["current_task"])
         self.assertNotIn("title", sprint)
         with self.assertRaisesRegex(TaskError, "already exists") as raised:
@@ -126,7 +138,8 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(sprint["goal"], "")
         self.assertEqual(sprint["definition_of_done"], "")
         self.assertEqual(sprint["repositories"], [])
-        self.assertEqual(sprint["budget"], {"total": 0, "by_type": {event: 0 for event in BUDGET_EVENT_TYPES}})
+        self.assertEqual(sprint["budget"]["total"], 0)
+        self.assertEqual(sprint["budget"]["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
         self.assertIsNone(sprint["current_task"])
 
     def test_budget_is_validated_and_retry_is_one_event(self) -> None:
@@ -140,6 +153,28 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(second["sprint"]["budget"]["by_type"]["red_ci"], 1)
         events = TaskAudit(self.tmp.name).events(reference=ref)
         self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded"])
+
+    def test_hard_budget_stop_has_its_own_durable_event(self) -> None:
+        writer = SprintWriter(self.client, data_dir=self.tmp.name, thresholds={"signal": 1, "hard": 1})  # type: ignore[arg-type]
+        ref = writer.create(role="po", actor="operator", goal="hard limit")["sprint"]["ref"]
+
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked",
+            request_id="hard-stop", source_event_id="evt-card-blocked",
+        )
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked",
+            request_id="hard-stop", source_event_id="evt-card-blocked",
+        )
+
+        events = TaskAudit(self.tmp.name).events(reference=ref)
+        self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded", "budget_hard_stopped"])
+        self.assertEqual(events[-1]["payload"]["reason"], "budget_hard_limit")
+        self.assertEqual(events[-1]["payload"]["source_event_id"], "evt-card-blocked")
+
+    def test_budget_thresholds_reject_hard_limit_below_signal(self) -> None:
+        with self.assertRaisesRegex(TaskError, "hard threshold"):
+            budget_thresholds({"sprint_budget": {"signal": 3, "hard": 2}})
 
     def test_task_link_is_live_metadata_and_closed_sprint_rejects_writes(self) -> None:
         ref = self.writer.create(role="po", actor="operator", goal="link")["sprint"]["ref"]
@@ -170,6 +205,42 @@ class SprintTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["sprint"]["repositories"], ["secretary"])
+
+    def test_resume_requires_all_fields_and_staleness_uses_card_audit(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="resume") ["sprint"]["ref"]
+        with self.assertRaisesRegex(TaskError, "missing required fields"):
+            self.writer.resume(role="po", actor="operator", reference=ref, entry={"selected_step": "x"})
+        entry = {
+            "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+            "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
+            "recorded_at": "2000-01-01T00:00:00Z",
+        }
+        self.writer.resume(role="po", actor="operator", reference=ref, entry=entry, request_id="resume")
+        fresh = SprintReader(self.client, data_dir=self.tmp.name).show(ref)  # type: ignore[arg-type]
+        self.assertTrue(fresh["resume_freshness"]["fresh"])
+        task_writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        task = task_writer.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            sprint=ref, request_id="resume-card",
+        )["task"]
+        task_writer.comment(role="po", actor="operator", reference=task["ref"], body="meaningful", request_id="later")
+        stale = SprintReader(self.client, data_dir=self.tmp.name).show(ref)  # type: ignore[arg-type]
+        self.assertFalse(stale["resume_freshness"]["fresh"])
+        self.assertEqual(stale["resume_freshness"]["error"], "resume_stale")
+
+    def test_observer_can_record_a_complete_resume_entry(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="observer resume")["sprint"]["ref"]
+        entry = {
+            "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+            "current_task": "secretary-14", "dod_state": "tests pending", "next_safe_step": "run tests",
+        }
+
+        result = self.writer.resume(
+            role="observer", actor="observer-head", reference=ref, entry=entry, request_id="observer-resume",
+        )
+
+        self.assertEqual(result["action"], "resume_recorded")
+        self.assertEqual(result["sprint"]["resume"]["selected_step"], "implement")
 
 
 if __name__ == "__main__":

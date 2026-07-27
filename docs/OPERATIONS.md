@@ -206,6 +206,16 @@ Controlled divergence — сигнал о расхождении между те
 открытый спринт с board `Secretary sprints`. Наблюдатель не участвует в claim карточек: он не
 занимает project slot, не появляется в `records` и на очередь Ready не влияет.
 
+Перед запуском production tick сверяет budget audit связанных карточек. При
+`sprint_budget.signal` в prompt наблюдателя попадает предупреждение пересмотреть вектор. При
+`sprint_budget.hard` sprint становится `stopped`: head штатно останавливается, новые связанные Ready
+карточки пропускаются, а активные карточки остаются в обычном цикле. Оператор проверяет это через
+`secretary status --json`: `installation.sprints.items` показывает статус, причину hard-остановки,
+разбивку бюджета, resume freshness и состояние наблюдателя каждого спринта. Недоступность board видна в
+`installation.sprints.error`. Детали одного спринта доступны через `secretary sprint status --ref
+sprint:ID`. Переход в stopped остаётся в audit как `budget_hard_stopped` с причиной
+`budget_hard_limit`. Продолжить остановленный sprint может только `secretary sprint reopen --role po`.
+
 Решение тика на спринт видно в `actions` под `{"step": "observer-reconcile"}`:
 
 - `observer-launched` — открытый спринт без записи получил голову;
