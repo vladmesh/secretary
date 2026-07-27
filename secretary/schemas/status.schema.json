@@ -14,9 +14,19 @@
     "schema_version": {"const": 1},
     "installation": {
       "type": "object",
-      "required": ["name", "instance", "projects", "heads", "cards", "sprints"],
+      "required": ["name", "instance", "projects", "heads", "head_registry", "cards", "sprints"],
       "properties": {
         "cards": {"type": "object", "required": ["total", "active_attempts"]},
+        "head_registry": {
+          "type": "object",
+          "required": ["snapshot", "product_root", "revision", "error"],
+          "properties": {
+            "snapshot": {"type": "string"},
+            "product_root": {"type": ["string", "null"]},
+            "revision": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]}
+          }
+        },
         "sprints": {
           "type": "object",
           "required": ["items", "error"],

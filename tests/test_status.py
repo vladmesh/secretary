@@ -12,9 +12,11 @@ from unittest import mock
 from secretary.cli import main
 from secretary.config import validate
 from secretary.host import CollectResult, HostInventory, build_doctor_expectations
+from secretary.head_registry import materialize_snapshot, product_revision, record_source
 from secretary.host_apply import resolve_packaged
 from secretary.config import validate_instance
 from secretary.secret_store import initialize_store, set_secret
+from secretary.status import collect_status
 from secretary.tasks import TaskAudit
 from tests.test_dispatcher import FakeKanboard
 
@@ -413,6 +415,63 @@ class StatusCliTests(unittest.TestCase):
             any("unresolved controlled divergence" in f["message"] and "secretary-730" in f["message"] for f in dispatcher_findings),
             dispatcher_findings,
         )
+
+
+class HeadRegistrySourceTests(unittest.TestCase):
+    """The checkout the live head registry came from is readable outside the code."""
+
+    def _instance(self, root: Path) -> Path:
+        instance = root / "instance.yaml"
+        instance.write_text(
+            "version: 1\nname: test\n"
+            f"data_dir: {root / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
+        return instance
+
+    def test_status_reports_the_pinned_canon_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = self._instance(root)
+            product_root = Path(__file__).resolve().parents[1]
+            materialize_snapshot(root, product_root)
+            record_source(root, product_root)
+            report = validate_instance(instance)
+
+            snapshot = collect_status(report, offline=True)
+
+        registry = snapshot["installation"]["head_registry"]
+        self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        self.assertIsNone(registry["error"])
+        self.assertEqual(registry["product_root"], str(product_root))
+        self.assertEqual(registry["revision"], product_revision(product_root))
+        self.assertTrue(registry["snapshot"].endswith("heads/heads.yaml"))
+
+    def test_status_names_an_installation_with_no_recorded_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = self._instance(root)
+            materialize_snapshot(root, Path(__file__).resolve().parents[1])
+            report = validate_instance(instance)
+
+            snapshot = collect_status(report, offline=True)
+
+        registry = snapshot["installation"]["head_registry"]
+        self.assertIsNone(registry["product_root"])
+        self.assertIn("secretary upgrade", registry["error"])
+
+    def test_status_names_a_broken_installation_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = self._instance(root)
+            (root / "heads").mkdir()
+            (root / "heads" / "heads.yaml").write_text("profiles: {}\n", encoding="utf-8")
+            report = validate_instance(instance)
+
+            snapshot = collect_status(report, offline=True)
+
+        self.assertIn("[resources] table", snapshot["installation"]["head_registry"]["error"])
 
 
 class SecretStoreObservabilityTests(unittest.TestCase):

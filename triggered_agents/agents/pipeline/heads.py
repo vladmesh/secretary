@@ -274,7 +274,9 @@ def profile_info(profile_id: str, registry: Registry | None = None) -> dict:
     }
 
 
-def _validate(resources: dict, profiles: dict) -> None:
+def validate_registry(resources: dict, profiles: dict) -> None:
+    """Structural check every consumer of the registry shares: the product canon at load time and
+    the installation snapshot the dispatcher runs off."""
     for pid, prof in profiles.items():
         resource = prof.get("resource")
         if resource not in resources:
@@ -317,7 +319,7 @@ def load_registry(path: Path = HEADS_TOML) -> Registry:
         raise HeadRegistryError(f"head registry {path} is not valid TOML: {e}") from e
     resources = data.get("resources") or {}
     profiles = data.get("profiles") or {}
-    _validate(resources, profiles)
+    validate_registry(resources, profiles)
     return Registry(resources=resources, profiles=profiles)
 
 

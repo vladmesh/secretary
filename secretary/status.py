@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary import head_registry
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_observer import observer_snapshot
 from secretary.dispatcher_pause import ProductionPause
@@ -46,6 +47,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "instance": str(report.instance_path),
             "projects": report.projects,
             "heads": _heads(report.instance),
+            "head_registry": _head_registry(report.instance_path.parent),
             "cards": {"total": _card_count(data_dir), "active_attempts": len(_attempts(production, probe_panels=False))},
             "sprints": _sprints(data_dir, report.instance, production),
         },
@@ -93,6 +95,34 @@ def _heads(instance: dict[str, Any]) -> list[dict[str, str]]:
         for item in heads
         if isinstance(item, dict) and isinstance(item.get("role"), str)
     ]
+
+
+def _head_registry(instance_dir: Path) -> dict[str, Any]:
+    """Where the live head registry came from: the snapshot file and the pin next to it.
+
+    The dispatcher runs off the snapshot, so the checkout it was generated from is not derivable
+    from anything else an operator can see. An installation upgraded before the pin existed reads
+    back with null source and an error naming what to run.
+    """
+    snapshot = head_registry.snapshot_path(instance_dir)
+    record: dict[str, Any] = {
+        "snapshot": str(snapshot),
+        "product_root": None,
+        "revision": None,
+        "error": None,
+    }
+    try:
+        source = head_registry.read_source(instance_dir)
+        head_registry.installed_heads(instance_dir)
+    except head_registry.HeadRegistryConfigError as exc:
+        record["error"] = str(exc)
+        return record
+    if source is None:
+        record["error"] = f"no canon source recorded; run `secretary upgrade --instance {instance_dir}`"
+        return record
+    record["product_root"] = _text(source.get("product_root")) or None
+    record["revision"] = _text(source.get("revision")) or None
+    return record
 
 
 def _sprints(data_dir: Path, instance: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:

@@ -36,6 +36,8 @@ from secretary.head_registry import (
     assert_snapshot_current,
     canonical_heads,
     load_snapshot,
+    product_revision,
+    read_source,
 )
 
 UNIT_PREFIX = "secretary-"
@@ -583,6 +585,37 @@ class UpgradeStepTests(unittest.TestCase):
 
             self.assertEqual(result.status, "changed")
             self.assertFalse((instance / "heads" / "heads.yaml").exists())
+            self.assertFalse((instance / "heads" / "source.yaml").exists())
+
+    def test_head_registry_step_pins_the_checkout_the_snapshot_came_from(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            upgrade.step_head_registry(context)
+
+            pin = read_source(instance)
+            self.assertEqual(pin["product_root"], str(context.product_root.resolve()))
+            self.assertEqual(pin["revision"], product_revision(context.product_root))
+
+    def test_head_registry_step_repins_a_moved_checkout_without_snapshot_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+            upgrade.step_head_registry(context)
+            snapshot_before = load_snapshot(instance)
+            (instance / "heads" / "source.yaml").write_text(
+                "product_root: /somewhere/else\nrevision: deadbeef\n", encoding="utf-8"
+            )
+
+            result = upgrade.step_head_registry(context)
+
+            self.assertEqual(result.status, "changed")
+            self.assertIn("source.yaml", result.detail)
+            self.assertEqual(load_snapshot(instance), snapshot_before)
+            self.assertEqual(read_source(instance)["product_root"], str(context.product_root.resolve()))
 
     def test_upgrade_direct_config_path_renders_the_same_units_as_its_checkout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -632,7 +665,7 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertIn(str(instance).encode(), rendered[1]["secretary-memory.service"])
             self.assertNotIn(str(config).encode(), rendered[1]["secretary-memory.service"])
 
-    def test_stale_head_snapshot_fails_the_dispatcher_guard(self):
+    def test_stale_head_snapshot_fails_the_upgrade_verify(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir)
             (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")

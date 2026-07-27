@@ -1101,6 +1101,7 @@ secretary upgrade --instance INSTANCE
 | --- | --- |
 | `pull` | `git fetch` + `merge --ff-only` чекаута продукта. Грязный чекаут — отказ. |
 | `dependencies` | переустановка в `.venv`, если в pull двигался манифест зависимостей |
+| `head-registry` | генерация `heads/heads.yaml` из канона продукта плюс `heads/source.yaml` — чекаут и ревизия, из которых он сгенерирован |
 | `role-skills` | `role_skills sync` в shell-овые skill-директории |
 | `role-worktrees` | ff worktree ролей (`~/orca/workspaces/secretary/<role>`) на base branch |
 | `host` | `reconcile apply`: юниты из `packaging/systemd` + Orca-регистрации |
@@ -1109,6 +1110,23 @@ secretary upgrade --instance INSTANCE
 | `verify` | повторный dry-run: вторая раскатка обязана быть no-op |
 
 Флаги: `--no-pull` (только пере-материализация), `--base-branch`, `--product-root`, `--json`.
+
+### Реестр голов установки
+
+Живой тик читает реестр голов только из `heads/heads.yaml` самой установки и ни в какой чекаут
+продукта не заглядывает. Двигает этот файл единственная операция — `secretary upgrade`; рядом она
+пишет `heads/source.yaml` с путём чекаута и ревизией, из которых снапшот сгенерирован. Поэтому
+правка `triggered_agents/agents/pipeline/heads.toml` в рабочем дереве (ветка, незакоммиченное
+изменение, полуготовый рефакторинг) на работающую установку не влияет вообще.
+
+Источник виден снаружи: `secretary status --json` отдаёт
+`installation.head_registry` с полями `snapshot`, `product_root`, `revision` и `error`, текстовый
+`status` печатает ту же строку. `error` заполнен, когда пин ещё не записан (установка не проходила
+`upgrade` с этой версией) или когда снапшот сам сломан.
+
+Сломанный снапшот тик по-прежнему останавливает и называет причину: отсутствующая таблица,
+неизвестный ресурс или адаптер у профиля, роль в `role_defaults`, указывающая на несуществующую
+голову. Диспетчер отвечает `invalid_heads` с текстом проверки; чинится это `secretary upgrade`.
 
 ### Ownership и fail-closed
 

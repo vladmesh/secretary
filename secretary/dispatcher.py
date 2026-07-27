@@ -130,7 +130,7 @@ from secretary.dispatcher_types import (
     ReviewLaunch,
     review_pane_label,
 )
-from secretary.head_registry import HeadRegistryConfigError, assert_snapshot_current
+from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_RECORD,
@@ -217,10 +217,10 @@ class InstanceCatalog:
             if isinstance(binding, dict) and binding.get("enabled") is True
         }
         try:
-            self._heads = assert_snapshot_current(
-                self.instance_path,
-                Path(__file__).resolve().parents[1],
-            )
+            # The installation's own snapshot, not the checkout this module was imported from.
+            # The dispatcher runs out of a working tree where development happens; comparing the
+            # live registry against that tree made an unmerged commit stop production ticks.
+            self._heads = installed_heads(self.instance_path)
         except HeadRegistryConfigError as exc:
             raise DispatcherError("invalid_heads", str(exc), 2) from None
 
