@@ -1618,6 +1618,198 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
         self.assertNotIn(["terminal", "create"], [args[1:3] for args in self.calls])
 
 
+class RealHostObserverTeardownTests(unittest.TestCase):
+    """The lifecycle over the real host seam: what a closed sprint gives back to Orca.
+
+    The bring-up registers the observer workspace before it asks for a terminal, so a failure after
+    that point leaves a registration behind with no head at all. The record has to keep pointing at
+    it, or the sprint closes and the worktree stays in Orca with nothing left to remove it.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.data_dir = Path(self.tmpdir.name)
+        install_skill_registry(self.data_dir)
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.data_dir / "workspaces"),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        (self.data_dir / "bodies").mkdir(parents=True, exist_ok=True)
+        self.board = FakeKanboard()
+        self.catalog = _ObserverCatalog(instance_dir=self.data_dir)
+        self.host = CommandHostRuntime(self.catalog, self.data_dir / "host", mode="real")  # type: ignore[arg-type]
+        self.audit = TaskAudit(self.data_dir)
+        self.runtime = DispatcherRuntime(
+            TaskReader(self.board),  # type: ignore[arg-type]
+            TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir),  # type: ignore[arg-type]
+            self.audit,
+            CutoverState(self.data_dir),
+            self.catalog,  # type: ignore[arg-type]
+            self.host,  # type: ignore[arg-type]
+            owner="secretary-pilot",
+            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+        )
+        self.runtime.state.save({
+            "version": 1,
+            "phase": "cutover_committed",
+            "pilot_ref": "secretary-510-pilot",
+            "old_owner_paused": True,
+            "records": {},
+        })
+        self.calls: list[list[str]] = []
+        self.registered = False
+        self.terminal_create_fails = False
+        self.worktree_create_fails = False
+        run_json = mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
+        )
+        run_json.start()
+        self.addCleanup(run_json.stop)
+        run = mock.patch.object(
+            CommandHostRuntime, "_run", lambda _self, args, label, **kwargs: self._run(args)
+        )
+        run.start()
+        self.addCleanup(run.stop)
+
+    @property
+    def workspace(self) -> str:
+        return self.host.observer_workspace("sprint:1")
+
+    def _run(self, args: list[str]) -> mock.Mock:
+        if args[:2] == ["git", "-C"] and "init" in args:
+            Path(args[2], ".git").mkdir(parents=True, exist_ok=True)
+        return mock.Mock(stdout="", stderr="", returncode=0)
+
+    def _run_json(self, args: list[str]) -> dict[str, object]:
+        self.calls.append(args)
+        step = args[1:3]
+        if step == ["worktree", "show"] and not self.registered:
+            raise HostError("orca worktree show failed: selector_not_found")
+        if step == ["worktree", "create"]:
+            if not any("observer" in arg for arg in args):
+                # A card worktree of the same tick's pipeline pass, not the observer's.
+                return {"worktree": {"path": str(self.data_dir / "workspaces" / args[6])}}
+            if self.worktree_create_fails:
+                raise HostError("orca worktree create failed: repo is unavailable")
+            Path(self.workspace).mkdir(parents=True, exist_ok=True)
+            self.registered = True
+            return {"worktree": {"path": self.workspace}}
+        if step == ["worktree", "rm"]:
+            self.registered = False
+            return {}
+        if step == ["terminal", "create"]:
+            if self.terminal_create_fails:
+                raise HostError("orca terminal create failed: selector_not_found")
+            return {"handle": "term-obs"}
+        return {}
+
+    def observer_calls(self) -> list[list[str]]:
+        """The tick's calls about the observer. A tick also runs the card pipeline, whose own
+        worktrees and terminals are not what these tests are about."""
+        return [args for args in self.calls if any("observer" in arg for arg in args)]
+
+    def steps(self) -> list[list[str]]:
+        return [args[1:3] for args in self.observer_calls()]
+
+    def observers(self) -> dict:
+        return load_observers(self.runtime.production_state.load())
+
+    def actions(self, result: dict) -> list[str]:
+        return [
+            action["action"]
+            for action in result["actions"]
+            if action.get("step") == "observer-reconcile"
+        ]
+
+    def close_sprint(self) -> None:
+        sprint = next(item for item in self.board.sprints if item["reference"] == "sprint:1")
+        self.board.metadata[int(sprint["id"])]["sprint_status"] = "closed"
+
+    def test_a_bring_up_that_dies_after_the_worktree_still_gives_it_back_on_closure(self) -> None:
+        self.board.add_sprint("sprint:1", status="open")
+        self.terminal_create_fails = True
+
+        deferred = self.runtime.production_tick()
+
+        self.assertEqual(self.actions(deferred), ["observer-launch-deferred"])
+        record = self.observers()["sprint:1"]
+        self.assertFalse(record.head_possible)
+        self.assertTrue(record.workspace_live)
+        self.assertTrue(self.registered)
+
+        self.close_sprint()
+        self.calls.clear()
+        stopped = self.runtime.production_tick()
+
+        self.assertEqual(self.actions(stopped), ["observer-stopped"])
+        self.assertEqual(
+            self.observer_calls(),
+            [
+                ["orca", "worktree", "show", "--worktree", f"path:{self.workspace}", "--json"],
+                ["orca", "terminal", "stop", "--worktree", f"path:{self.workspace}", "--json"],
+                [
+                    "orca", "worktree", "rm",
+                    "--worktree", f"path:{self.workspace}", "--force", "--json",
+                ],
+            ],
+        )
+        self.assertFalse(self.registered)
+        self.assertEqual(self.observers(), {})
+
+    def test_a_bring_up_that_never_registered_a_workspace_leaves_nothing_to_remove(self) -> None:
+        """The other side of it: the stop asks Orca and takes its answer, rather than removing a
+        worktree on the strength of a path the record computed before the host was ever called."""
+        self.board.add_sprint("sprint:1", status="open")
+        self.worktree_create_fails = True
+
+        self.runtime.production_tick()
+        self.close_sprint()
+        self.calls.clear()
+        stopped = self.runtime.production_tick()
+
+        self.assertEqual(self.actions(stopped), ["observer-stopped"])
+        self.assertEqual(self.steps(), [["worktree", "show"]])
+        self.assertEqual(self.observers(), {})
+
+    def test_a_worktree_that_will_not_go_keeps_the_closed_sprint_on_the_books(self) -> None:
+        """A refused teardown of a workspace with no head behind it is still a failed stop: the
+        record survives as `stop-pending` and the next tick comes back to it."""
+        self.board.add_sprint("sprint:1", status="open")
+        self.terminal_create_fails = True
+        self.runtime.production_tick()
+        self.close_sprint()
+        refusing = self._run_json
+
+        def run_json(args: list[str]) -> dict[str, object]:
+            if args[1:3] == ["worktree", "rm"]:
+                self.calls.append(args)
+                raise HostError("orca worktree rm failed: worktree is busy")
+            return refusing(args)
+
+        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
+            failed = self.runtime.production_tick()
+
+        self.assertEqual(self.actions(failed), ["observer-stop-failed"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "stop-pending")
+        self.assertTrue(record.workspace_live)
+        self.assertTrue(self.registered)
+
+        retried = self.runtime.production_tick()
+
+        self.assertEqual(self.actions(retried), ["observer-stopped"])
+        self.assertFalse(self.registered)
+        self.assertEqual(self.observers(), {})
+
+
 class RealHostTuiObserverLaunchTests(unittest.TestCase):
     """The real host on the TUI bring-up path: what a failed prompt delivery hands back."""
 
