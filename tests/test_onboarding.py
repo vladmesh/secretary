@@ -202,6 +202,18 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(stored["plane"], "project")
         self.assertEqual(stored["policy"], {"code_concurrency": 1})
 
+    def test_unexpected_identity_field_is_rejected_instead_of_migrated(self):
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        draft = load_config(self.draft)
+        draft["identity"]["unexpected"] = "value"
+        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertIn("unexpected", load_config(self.draft)["identity"])
+
     def test_missing_and_scanner_failure_are_valid_and_write_nothing(self):
         code, artifact = project_add(str(self.root / "missing"), str(self.instance), dry_run=False)
         self.assertEqual(code, 1)

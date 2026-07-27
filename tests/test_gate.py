@@ -97,6 +97,19 @@ class GateTests(unittest.TestCase):
             sorted(load_config(draft_path)["identity"]), ["adapter", "default_branch", "id", "repo"]
         )
 
+    def test_unexpected_identity_field_still_fails_the_gate(self):
+        self.provision()
+        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        draft = load_config(draft_path)
+        draft["identity"]["unexpected"] = "value"
+        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "draft_invalid")
+        self.assertFalse(load_config(self.binding)["enabled"])
+
     def test_compatibility_is_published_to_legacy_dispatcher_lookup(self):
         legacy = self.root / "control-panel" / "pipeline" / "manifests"
         (self.instance / "instance.yaml").write_text(yaml.safe_dump({

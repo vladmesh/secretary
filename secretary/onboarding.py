@@ -177,13 +177,16 @@ def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any
 
 
 def normalize_identity(document: dict[str, Any]) -> None:
-    """Drop mutable binding fields an older writer copied into ``identity``."""
+    """Drop the legacy mutable binding fields an older writer copied into ``identity``.
+
+    Only the known legacy keys are migrated; any other unexpected key stays in place
+    so schema validation still rejects a corrupt contract.
+    """
     identity = document.get("identity")
     if not isinstance(identity, dict):
         return
-    for field in list(identity):
-        if field not in IDENTITY_FIELDS:
-            del identity[field]
+    for field in MUTABLE_BINDING_FIELDS:
+        identity.pop(field, None)
 
 
 def _binding_conflict(
