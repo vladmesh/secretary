@@ -182,10 +182,11 @@ python3 -m secretary knowledge write --instance ~/secretary-instance --actor sec
 - цель, Definition of Done и границы после создания — контракт. Меняются только явным решением
   человека, не по ходу работы.
 
-Если наблюдатель долго не появляется, смотри причину в данных: `secretary status --json`
-(`installation.sprints`, `dispatcher.observers`) и `secretary sprint status --ref sprint:<ID>`
-(поле `observer`). Частая причина — недоставленный ролевой скилл, лечится
-`secretary role-skills sync`.
+Если наблюдатель долго не появляется, смотри причину в данных:
+`python3 -m secretary status --instance ~/secretary-instance --json` (`installation.sprints`,
+`dispatcher.observers`) и `python3 -m secretary sprint status --ref sprint:<ID>` (поле `observer`).
+Путь инстанса подставь свой: у `status` он обязателен. Частая причина — недоставленный ролевой
+скилл, лечится `python3 -m secretary role-skills sync`.
 
 ## Отчитаться
 
