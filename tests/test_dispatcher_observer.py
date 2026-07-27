@@ -1955,6 +1955,25 @@ class ObserverCodexTrustTests(unittest.TestCase):
 
         self.assertEqual((self.codex_home / "config.toml").read_text(encoding="utf-8"), first)
 
+    def test_worker_and_reviewer_launches_never_touch_the_codex_config(self) -> None:
+        """Trust is written for the observer alone.
+
+        Worker and reviewer workspaces are worktrees of repositories the codex runtime already
+        trusts, so their bring-up has no reason to rewrite the runtime's own `config.toml` and
+        must not: it is installation state, shared by every codex head on the host.
+        """
+        workspace = self.root / "worker-workspace"
+        workspace.mkdir()
+
+        for head, role in (("codex", "worker"), ("codex-reviewer", "reviewer")):
+            with self.subTest(role=role):
+                launch = self.host.catalog.head_launch(
+                    head, "TASK.md", workspace=str(workspace), role=role
+                )
+                self.assertIn(f"CODEX_HOME={self.codex_home} codex exec", launch.command)
+                self.assertIn(f"--role {role}", launch.command)
+                self.assertFalse(self.codex_home.exists())
+
 
 class _ObserverCatalog(FakeCatalog):
     """An observer profile whose head takes its prompt on the command line."""

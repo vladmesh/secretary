@@ -3910,15 +3910,12 @@ class DispatcherLauncherTests(unittest.TestCase):
             task = {"routing": {"head_override": "codex-terra"}}
 
             head = catalog.worker_head(task)  # type: ignore[attr-defined]
-            # The bring-up records the workspace as trusted in the codex home it launches with;
-            # a test must not write that into the installation's own.
-            with mock.patch.dict(os.environ, {"TA_CODEX_HOME": str(Path(tmp) / "codex-home")}):
-                command = catalog.head_command(  # type: ignore[attr-defined]
-                    head,
-                    "TASK.md",
-                    workspace=str(workspace),
-                    role="worker",
-                )
+            command = catalog.head_command(  # type: ignore[attr-defined]
+                head,
+                "TASK.md",
+                workspace=str(workspace),
+                role="worker",
+            )
 
         self.assertEqual(head, "codex-terra")
         self.assertIn("-m gpt-5.6-terra", command)
@@ -4130,7 +4127,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                         "adapter": "codex",
                         "model": "gpt-5.5",
                         "codex_mode": "tui",
-                        "codex_home": str(Path(tmp) / "codex-home"),
+                        "codex_home": "/tmp/codex-home",
                     }
                 }
             }
@@ -5487,7 +5484,7 @@ class DispatcherGateTests(unittest.TestCase):
 class ReviewCatalog(FakeCatalog):
     """FakeCatalog plus the head-launch surface the real bring-up path calls into."""
 
-    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+    def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         return None
 
     def head_launch(
