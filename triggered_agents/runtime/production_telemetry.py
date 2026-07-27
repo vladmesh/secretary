@@ -8,7 +8,9 @@ how each terminal tick ended under `tick_telemetry` in its own state file — se
 Both readers of that record live outside the dispatcher's own process: `runtime/health.py` builds
 the pipeline health line from it, and the steward's `signals.py` reports its unhealthy ticks. They
 share this module so there is one place that knows where the file is and what a missing or
-unusable one means.
+unusable one means. The dispatcher's resource-probe cache sits in the same directory and is
+resolved here too (`resource_health_path`), so every steward signal about the running dispatcher
+comes off one data plane.
 
 Read through the file, never by importing the dispatcher: an agent's unit runs in its own worktree
 with its own environment, and the state file is the durable boundary between the two — the same
@@ -89,9 +91,43 @@ def data_dir() -> Path:
 
 def state_path() -> Path:
     """Recomputed per call, not frozen at import, so a test (or a unit with its own env) sees the
-    override it just set — same reasoning as signals.resolve_pipeline_state_dir()."""
+    override it just set — an import-time constant would freeze the wrong data plane for any
+    process that resolves its environment after import."""
     configured = os.environ.get("TA_PRODUCTION_STATE")
     return Path(configured) if configured else data_dir() / "dispatcher" / "production-state.json"
+
+
+def resource_health_path() -> Path:
+    """The resource-probe cache the production dispatcher keeps, resolved like `state_path()`.
+
+    Writer: `secretary.head_health.HeadHealth`, which puts it next to the dispatcher's own state
+    under `<data_dir>/dispatcher/`. The steward reads it to see the verdict the dispatcher actually
+    acted on instead of running its own paid probes; before secretary-833 it read a same-named file
+    in the pipeline worktree, which the production dispatcher never writes, so a flip on this host
+    could stay invisible. `TA_PRODUCTION_RESOURCE_HEALTH` overrides the file, the same escape hatch
+    `TA_PRODUCTION_STATE` is for the tick record.
+    """
+    configured = os.environ.get("TA_PRODUCTION_RESOURCE_HEALTH")
+    return Path(configured) if configured else data_dir() / "dispatcher" / "resource_health.json"
+
+
+def read_resource_status() -> dict[str, str] | None:
+    """{resource: status} from the dispatcher's cache, or None when it cannot be read.
+
+    None is "nothing was measured", distinct from an empty cache: the caller keeps its previous
+    baseline rather than resetting it, so a transient unreadable file cannot erase a flip that the
+    next real read would otherwise have reported.
+    """
+    try:
+        cache = json.loads(resource_health_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(cache, dict):
+        return None
+    try:
+        return {str(rid): str(entry["status"]) for rid, entry in cache.items()}
+    except (KeyError, TypeError):
+        return None
 
 
 @dataclass(frozen=True)

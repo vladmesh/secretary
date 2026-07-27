@@ -984,7 +984,10 @@ python3 -m triggered_agents health
 дефолт `SECRETARY_DATA_DIR`, иначе `data_dir` из instance — это единственное, что packaged-юнит
 передаёт тиком `--instance`. Правило одно на всех: установка или drop-in, задающая
 `SECRETARY_DATA_DIR` в `runtime.env`, переносит и записи диспетчера, и чтение health со стюардом
-на тот же data plane, так что читатель не может смотреть в файл, которого никто не пишет. Instance
+на тот же data plane, так что читатель не может смотреть в файл, которого никто не пишет. Юнит
+диспетчера забирает `runtime.env` целиком через `EnvironmentFile`, а до процессов ролей эта
+переменная доходит через allowlist `role_env` (`NONSECRET_ENV`) — она адрес data plane, а не
+секрет. Instance
 берётся из `SECRETARY_INSTANCE`, который юниты стюарда задают вместе с `TA_RUNTIME_ENV_FILE`; если
 переменной нет, читатель берёт каталог самого `TA_RUNTIME_ENV_FILE` (`<instance>/runtime.env` в
 рендере юнита) и только потом `/home/dev/secretary-instance`. На установке с нестандартным instance
@@ -1000,6 +1003,14 @@ python3 -m triggered_agents health
 (`scan` и `precheck`), поэтому тихий час, который до `advance` не доходит, не оставляет счётчик
 пустым и следующий упавший тик не читается как «первый скан» и не глушится. Если нездоровых тиков случилось больше, чем
 кольцо хранит, стюард получает отдельный хит `pipeline-telemetry-rotated` с числом потерянных.
+
+Сигнал `resource_flip` того же скана читает кэш вердиктов production dispatcher —
+`<data_dir>/dispatcher/resource_health.json`, тот же файл, что пишет `HeadHealth` перед запуском
+головы, и тот же путь-контракт, что у `tick_telemetry` (`SECRETARY_DATA_DIR`, иначе `data_dir`
+instance; `TA_PRODUCTION_RESOURCE_HEALTH` переопределяет файл целиком). Своих probe стюард не
+гоняет: они стоят токенов и описывали бы проверку, которой сам диспетчер не видел. Нечитаемый или
+отсутствующий кэш оставляет прошлый baseline, а не обнуляет его, иначе флип потерялся бы на первом
+же удачном чтении.
 
 ## Units
 

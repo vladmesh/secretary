@@ -24,7 +24,6 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from ...runtime import production_telemetry, shared_state
 from ...runtime.state import AgentState
@@ -42,24 +41,13 @@ STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
 WORKSPACES_ROOT = shared_state.WORKSPACES_ROOT
 _AGENTS_PROJECT = shared_state.AGENTS_PROJECT
 
-# The pipeline dispatcher's own state is reached across a process boundary, never through
-# AgentState("pipeline"): that resolves STATE_ROOT (runtime/state.py) per process, and the
-# steward's systemd unit runs in its own worktree with its own environment. A path that can never
-# exist there returns no hits, indistinguishable from "checked, nothing new" — the blindness of
-# triggered-agents-253.
-#
-# `resource_health.json` is still the head-health cache the agent dispatch path writes in the
-# pipeline worktree. TA_PIPELINE_STATE_DIR overrides it for tests or a host whose layout diverges.
-# The worktree name "pipeline" is fixed by automation.toml and survives redeploy: `secretary
-# upgrade` fast-forwards each worktree's CODE to origin/main on every run but never touches the
-# gitignored state/ dir underneath it.
-def resolve_pipeline_state_dir() -> Path:
-    """Recomputed on every call (not baked into a constant at import time) so tests can patch
-    WORKSPACES_ROOT and see this follow, the same way _orphan_signals already does."""
-    return shared_state.resolve_pipeline_state_dir(WORKSPACES_ROOT)
-
-
-PIPELINE_RESOURCE_HEALTH = resolve_pipeline_state_dir() / "resource_health.json"
+# Both pipeline signals — unhealthy ticks and resource flips — are reached across a process
+# boundary through the production dispatcher's own data plane (runtime/production_telemetry.py),
+# never through AgentState("pipeline"): that resolves STATE_ROOT (runtime/state.py) per process,
+# and the steward's systemd unit runs in its own worktree with its own environment. A path that
+# can never exist there returns no hits, indistinguishable from "checked, nothing new" — the
+# blindness of triggered-agents-253, which secretary-833 found again on a worktree copy of
+# resource_health.json that the production dispatcher does not write.
 
 
 def _empty_watermark() -> dict:
@@ -220,24 +208,25 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
     new baseline, not a flip — otherwise the very first cold-start scan would "flip" every
     currently-green resource and spawn a head for nothing to report.
 
-    Reads the head-health resource_health.json cache written in the pipeline worktree
-    (PIPELINE_RESOURCE_HEALTH, cross-workspace — see the constant above) instead of calling
-    pipeline_health.refresh() to run a fresh probe from here: refresh() executes real
-    probes (a haiku CLI ping, an OpenRouter completion) that cost tokens/quota on a TTL, so a
-    second independent call from the steward's own worktree would both double that real-world
-    cost AND describe a probe the dispatcher itself never saw, on top of writing yet another
-    disconnected resource_health.json copy in the steward's own state dir. Reading the
-    dispatcher's cache file gives the exact status it actually acted on, for free (2026-07-04
-    decision, triggered-agents-253).
+    Reads the resource_health.json cache the PRODUCTION dispatcher writes next to its own state
+    (production_telemetry.resource_health_path) instead of calling pipeline_health.refresh() to run
+    a fresh probe from here: refresh() executes real probes (a haiku CLI ping, an OpenRouter
+    completion) that cost tokens/quota on a TTL, so a second independent call from the steward's
+    own worktree would both double that real-world cost AND describe a probe the dispatcher itself
+    never saw, on top of writing yet another disconnected resource_health.json copy in the
+    steward's own state dir. Reading the dispatcher's cache file gives the exact status it actually
+    acted on, for free (2026-07-04 decision, triggered-agents-253).
+
+    The file is the one the running dispatcher writes, on the same data plane as its tick record —
+    the pipeline worktree holds a same-named cache that only the legacy agent path ever fills, so a
+    flip the production dispatcher just saw would never reach here (secretary-833 review, round 3).
 
     A missing/unreadable/malformed cache file (broken heads.toml, transient I/O, dispatcher never
     ticked yet) keeps the PREVIOUS baseline rather than resetting to {} — same reasoning as the
     old refresh()-failure fallback: resetting to {} would silently erase whatever flip happened on
     the very next real read (2026-07-04 review, triggered-agents-244 note Z3)."""
-    try:
-        cache = json.loads(PIPELINE_RESOURCE_HEALTH.read_text(encoding="utf-8"))
-        current = {rid: entry["status"] for rid, entry in cache.items()}
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    current = production_telemetry.read_resource_status()
+    if current is None:
         current = dict(mark["resource_status"])
     prev = mark["resource_status"]
     changed = {r: s for r, s in current.items() if r in prev and prev[r] != s}

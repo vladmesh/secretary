@@ -111,6 +111,9 @@ python3 -m triggered_agents steward scan --json
   `TA_STEWARD_STALE_HOURS` (по умолчанию 24ч).
 - `resource_flip` — health-статус ресурса (`claude-sub`, `openrouter`, см. heads.toml) изменился
   с прошлого прогона — как в красное, так и восстановление в зелёное стоит разобрать постфактум.
+  Источник тот же живой data plane, что у `pipeline_ticks`: кэш вердиктов, который production
+  dispatcher пишет перед запуском головы (`<data_dir>/dispatcher/resource_health.json`). Свои
+  probe стюард не гоняет.
 - `new_orphan_workspaces` — воркспейс на диске (`~/orca/workspaces/<project>/*`), которому не
   соответствует ни одна активная карточка проекта ни в одной колонке (сверка по id-префиксу имени
   каталога с доской, не с `state/pipeline/cards.json` — Blocked-карточка намеренно оставляет
@@ -152,7 +155,8 @@ watermark: сигнальный `advance` его не трогает, и нао�
 - **Слепота самих сигналов.** Прогони `python3 -m triggered_agents steward scan --json` и сверь с
   тем, что сигналы ДОЛЖНЫ были поймать за это окно, глядя в сырые источники напрямую: что в
   `tick_telemetry` внутри `<data_dir>/dispatcher/production-state.json` (растёт ли `tick_seq`,
-  свеж ли `last_healthy_at`, что в `unhealthy`), свеж ли `resource_health.json`. Полезен и
+  свеж ли `last_healthy_at`, что в `unhealthy`), свеж ли `<data_dir>/dispatcher/resource_health.json`.
+  Полезен и
   `python3 -m triggered_agents health` — он читает те же живые источники. Тишина сигнала не
   значит «всё чисто» — она может значить «смотрит не туда» (класс дефекта 253).
 - **Доска целиком**, не только Blocked: карточки без движения, разночтения между

@@ -42,7 +42,7 @@ ROLE_SKILLS = Path(__file__).resolve().parents[3] / "scripts" / "role_skills.py"
 def _deep_sweep_file():
     """Recomputed on every call (not a module-level constant) so a test that patches `STATE`
     (or a variant timer resolving a different agent's state dir) sees it follow, same reasoning
-    as signals.resolve_pipeline_state_dir()."""
+    as production_telemetry.state_path()."""
     return STATE.dir / "deep_sweep_watermark.json"
 
 

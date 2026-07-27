@@ -31,6 +31,7 @@ from secretary.dispatcher_production import (
     record_tick_telemetry,
 )
 from secretary.dispatcher import default_data_dir
+from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
@@ -237,8 +238,9 @@ class ProductionTickTelemetryTests(unittest.TestCase):
                                                   return_value=[]))
             stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
                                                   self.data_dir / "no-workspaces"))
-            stack.enter_context(mock.patch.object(steward_signals, "PIPELINE_RESOURCE_HEALTH",
-                                                  self.data_dir / "no-resource-health.json"))
+            stack.enter_context(mock.patch.dict(
+                os.environ,
+                {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")}))
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
             stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
 
@@ -623,6 +625,144 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
                         self.data_dir / "dispatcher" / "production-state.json",
                     )
 
+    def test_a_data_dir_in_runtime_env_reaches_the_steward_process_too(self) -> None:
+        """The dispatcher unit imports runtime.env wholesale; the steward gets it through role_env.
+
+        Setting SECRETARY_DATA_DIR inside the reader's own process would prove nothing: on the live
+        host the variable arrives from that file, and the role allowlist decides whether it
+        survives. Stripped, the steward resolves the instance's data_dir while the dispatcher
+        writes to the env one, and every production signal it reads comes off a file nobody writes
+        (secretary-833 review, round 3).
+        """
+        env_data = self.root / "env-data"
+        (self.instance / "runtime.env").write_text(
+            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
+            "KANBOARD_API_USER=steward\n"
+            "KANBOARD_API_TOKEN=secret\n"
+            f"SECRETARY_DATA_DIR={env_data}\n",
+            encoding="utf-8",
+        )
+        # What the dispatcher unit's own EnvironmentFile gives its process, resolved by the real
+        # CLI parser: the writer side of the same binding.
+        writer_env = role_env.load_env_file(self.instance / "runtime.env")
+        with mock.patch.dict(os.environ, writer_env, clear=False):
+            writer_args = build_parser().parse_args(
+                ["dispatcher", "production-tick", "--instance", str(self.instance)]
+            )
+        self.assertEqual(writer_args.data_dir, str(env_data))
+
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                env = role_env.runtime_env(
+                    "steward", base_env=self.unit_env(name),
+                    env_file=self.instance / "runtime.env", require=True,
+                )
+
+                self.assertEqual(env["SECRETARY_DATA_DIR"], str(env_data))
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(
+                        production_telemetry.state_path(),
+                        env_data / "dispatcher" / "production-state.json",
+                    )
+                    self.assertEqual(
+                        production_telemetry.resource_health_path(),
+                        env_data / "dispatcher" / "resource_health.json",
+                    )
+
+
+class StewardResourceSignalTests(unittest.TestCase):
+    """`resource_flip` reads the cache the running production dispatcher writes.
+
+    The dispatcher probes resources through `secretary.head_health.HeadHealth`, which caches under
+    `<data_dir>/dispatcher/resource_health.json`. The pipeline worktree holds a same-named file the
+    legacy agent path wrote; reading that one leaves the steward blind to a flip the current
+    dispatcher just saw (secretary-833 review, round 3).
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.data_dir = self.root / "srv" / "secretary-data"
+        self.instance = _instance(self.root / "instance", self.data_dir)
+        env = mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("TA_PRODUCTION_RESOURCE_HEALTH", "SECRETARY_DATA_DIR", "TA_RUNTIME_ENV_FILE",
+                     "TA_PIPELINE_STATE_DIR"):
+            os.environ.pop(name, None)
+        workspaces = mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.root / "workspaces")
+        workspaces.start()
+        self.addCleanup(workspaces.stop)
+
+    def write_production(self, statuses: dict[str, str]) -> None:
+        path = HeadHealth(None, self.data_dir).path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            rid: {"resource": rid, "status": status, "reason": "probe", "checked_at": 1.0,
+                  "cached": False}
+            for rid, status in statuses.items()
+        }), encoding="utf-8")
+
+    def write_legacy_worktree(self, statuses: dict[str, str]) -> None:
+        """The pipeline worktree copy, which must not answer for the production dispatcher."""
+        path = (self.root / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
+                / "resource_health.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            rid: {"status": status} for rid, status in statuses.items()
+        }), encoding="utf-8")
+
+    def test_the_reader_lands_where_the_dispatcher_caches(self) -> None:
+        self.assertEqual(
+            production_telemetry.resource_health_path(), HeadHealth(None, self.data_dir).path
+        )
+
+    def test_a_production_only_flip_is_reported(self) -> None:
+        self.write_production({"claude": "unauthenticated"})
+        self.write_legacy_worktree({"claude": "ready"})  # stale worktree copy, still green
+
+        changed, current = steward_signals._resource_signals({"resource_status": {"claude": "ready"}})
+
+        self.assertEqual(changed, {"claude": "unauthenticated"})
+        self.assertEqual(current, {"claude": "unauthenticated"})
+
+    def test_a_stale_worktree_copy_cannot_flip_the_production_status(self) -> None:
+        self.write_production({"claude": "ready"})
+        self.write_legacy_worktree({"claude": "unavailable"})
+
+        changed, current = steward_signals._resource_signals({"resource_status": {"claude": "ready"}})
+
+        self.assertEqual(changed, {})
+        self.assertEqual(current, {"claude": "ready"})
+
+    def test_a_first_seen_resource_is_a_baseline_not_a_flip(self) -> None:
+        self.write_production({"claude": "unavailable"})
+
+        changed, current = steward_signals._resource_signals({"resource_status": {}})
+
+        self.assertEqual(changed, {})
+        self.assertEqual(current, {"claude": "unavailable"})
+
+    def test_a_missing_or_broken_cache_keeps_the_previous_baseline(self) -> None:
+        """Never reset to {}: that would erase the flip the next real read would have reported."""
+        mark = {"resource_status": {"claude": "unavailable"}}
+
+        self.assertEqual(steward_signals._resource_signals(mark), ({}, mark["resource_status"]))
+
+        path = HeadHealth(None, self.data_dir).path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        self.assertEqual(steward_signals._resource_signals(mark), ({}, mark["resource_status"]))
+
+        path.write_text(json.dumps({"claude": {"reason": "no status key"}}), encoding="utf-8")
+        self.assertEqual(steward_signals._resource_signals(mark), ({}, mark["resource_status"]))
+
+    def test_an_explicit_override_wins_like_the_tick_record(self) -> None:
+        elsewhere = self.root / "elsewhere.json"
+        with mock.patch.dict(os.environ, {"TA_PRODUCTION_RESOURCE_HEALTH": str(elsewhere)}):
+            self.assertEqual(production_telemetry.resource_health_path(), elsewhere)
+
 
 class HealthAgentStateTests(unittest.TestCase):
     """The health line for curator/steward/retro reads the state root the units actually write."""
@@ -827,8 +967,10 @@ class StewardPipelineSignalTests(unittest.TestCase):
                                                   return_value=[]))
             stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
                                                   Path(self.tmpdir.name) / "no-workspaces"))
-            stack.enter_context(mock.patch.object(steward_signals, "PIPELINE_RESOURCE_HEALTH",
-                                                  Path(self.tmpdir.name) / "no-resource-health.json"))
+            stack.enter_context(mock.patch.dict(
+                os.environ,
+                {"TA_PRODUCTION_RESOURCE_HEALTH":
+                 str(Path(self.tmpdir.name) / "no-resource-health.json")}))
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
             stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
             yield

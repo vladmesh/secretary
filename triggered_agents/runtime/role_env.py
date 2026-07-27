@@ -20,7 +20,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_PYTHONPATH = os.environ.get("TA_RUNTIME_PYTHONPATH", str(REPO_ROOT))
 
 BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
-NONSECRET_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
+# SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
+# allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
+# data dir through that file moves the WRITER. A role stripped of the same name would fall back to
+# instance.yaml and read a production-state.json nobody writes, calling that silence healthy
+# (secretary-833 review, round 3).
+NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": (*BOARD_ENV, *NONSECRET_ENV),
