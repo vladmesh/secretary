@@ -166,20 +166,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "repo", "adapter", "default_branch"],
-      "description": "The single source of binding identity. Fixed by project add and never re-declared downstream; the enable chain only flips the enabled bit recorded per stage.",
+      "description": "The single source of binding identity. Fixed by project add and never re-declared downstream; mutable binding fields such as plane and policy stay in the binding, so identity cannot diverge between draft, provision and gate.",
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
         "repo": {"type": "string", "minLength": 1},
         "adapter": {"type": "string", "minLength": 1},
-        "default_branch": {"type": "string", "minLength": 1},
-        "plane": {"type": "string", "enum": ["orchestrator", "project", "memory", "ops"]},
-        "policy": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "code_concurrency": {"type": "integer", "minimum": 0}
-          }
-        }
+        "default_branch": {"type": "string", "minLength": 1}
       }
     },
     "scanner": {

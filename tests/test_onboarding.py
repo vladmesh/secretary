@@ -167,7 +167,7 @@ class OnboardingTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertNotEqual(artifact["scanner"]["repo"]["head"], old_head)
-        self.assertEqual(artifact["identity"]["policy"], {"code_concurrency": 2})
+        self.assertNotIn("policy", artifact["identity"])
         self.assertEqual(load_config(self.binding)["policy"], {"code_concurrency": 2})
 
     def test_draft_policy_copy_is_refreshed_from_authoritative_binding(self):
@@ -181,6 +181,26 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("policy", artifact["identity"])
         self.assertNotIn("policy", load_config(self.draft)["identity"])
+
+    def test_legacy_identity_keeps_plane_and_policy_in_the_binding_only(self):
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        binding = load_config(self.binding)
+        binding["plane"] = "project"
+        binding["policy"] = {"code_concurrency": 1}
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        draft = load_config(self.draft)
+        draft["identity"]["plane"] = "project"
+        draft["identity"]["policy"] = {"code_concurrency": 1}
+        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(sorted(artifact["identity"]), ["adapter", "default_branch", "id", "repo"])
+        self.assertEqual(sorted(load_config(self.draft)["identity"]), ["adapter", "default_branch", "id", "repo"])
+        stored = load_config(self.binding)
+        self.assertEqual(stored["plane"], "project")
+        self.assertEqual(stored["policy"], {"code_concurrency": 1})
 
     def test_missing_and_scanner_failure_are_valid_and_write_nothing(self):
         code, artifact = project_add(str(self.root / "missing"), str(self.instance), dry_run=False)

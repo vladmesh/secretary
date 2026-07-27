@@ -15,6 +15,8 @@ from secretary.config import ConfigError, load_config, validate
 
 
 DEFAULT_INSTANCE = "/home/dev/secretary-instance"
+IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
+MUTABLE_BINDING_FIELDS = ("plane", "policy")
 REQUIRED_DECISIONS = [
     "setup.commands",
     "smoke.command",
@@ -71,7 +73,7 @@ def _project_add_locked(
     if existing_binding:
         default_branch = str(existing_binding.get("default_branch", default_branch))
 
-    identity = _identity(repo, project_id, default_branch, existing_binding)
+    identity = _identity(repo, project_id, default_branch)
     if existing_binding:
         conflict = _binding_conflict(existing_binding, identity, allow_enabled=dry_run)
         if conflict:
@@ -90,6 +92,7 @@ def _project_add_locked(
     if error:
         return 1, _fail_draft(artifact, "draft.invalid", error)
     if existing_draft:
+        normalize_identity(existing_draft)
         errors = validate(existing_draft, "onboarding-contract", draft_path.name)
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
@@ -111,6 +114,10 @@ def _project_add_locked(
             _reset_scanner_derived_state(artifact)
 
     binding = dict(identity)
+    if existing_binding:
+        for field in MUTABLE_BINDING_FIELDS:
+            if field in existing_binding:
+                binding[field] = existing_binding[field]
     existing_orca_binding = existing_binding.get("orca_binding") if existing_binding else None
     binding["orca_binding"] = existing_orca_binding if isinstance(existing_orca_binding, str) else repo.name
     binding["enabled"] = False
@@ -160,23 +167,23 @@ def _project_lock_path(instance_dir: Path, project_id: str) -> Path:
     return instance_dir / ".locks" / f"{project_id}.lock"
 
 
-def _identity(
-    repo: Path,
-    project_id: str,
-    default_branch: str,
-    existing: dict[str, Any] | None,
-) -> dict[str, Any]:
-    identity: dict[str, Any] = {
+def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any]:
+    return {
         "id": project_id,
         "repo": str(repo),
         "adapter": project_id,
         "default_branch": default_branch,
     }
-    if existing:
-        for field in ("plane", "policy"):
-            if field in existing:
-                identity[field] = existing[field]
-    return identity
+
+
+def normalize_identity(document: dict[str, Any]) -> None:
+    """Drop mutable binding fields an older writer copied into ``identity``."""
+    identity = document.get("identity")
+    if not isinstance(identity, dict):
+        return
+    for field in list(identity):
+        if field not in IDENTITY_FIELDS:
+            del identity[field]
 
 
 def _binding_conflict(
@@ -184,7 +191,7 @@ def _binding_conflict(
 ) -> str | None:
     if binding.get("enabled") is True and not allow_enabled:
         return "existing binding is enabled"
-    for field in ("id", "repo", "adapter", "default_branch"):
+    for field in IDENTITY_FIELDS:
         if binding.get(field) != identity[field]:
             return f"existing binding has conflicting {field}"
     errors = validate(binding, "project-binding", "existing binding")
@@ -192,10 +199,7 @@ def _binding_conflict(
 
 
 def _identity_core(identity: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(
-        identity.get(field)
-        for field in ("id", "repo", "adapter", "default_branch")
-    )
+    return tuple(identity.get(field) for field in IDENTITY_FIELDS)
 
 
 def _load_optional_mapping(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -383,7 +387,7 @@ def _unresolved_adapter() -> dict[str, Any]:
 def _base_artifact(repo: Path, project_id: str, branch: str, scanner: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": 1,
-        "identity": {"id": project_id, "repo": str(repo), "adapter": project_id, "default_branch": branch},
+        "identity": _identity(repo, project_id, branch),
         "scanner": scanner,
         "draft": {
             "owner": "project-add",
