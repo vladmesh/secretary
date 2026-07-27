@@ -23,6 +23,7 @@ through ``resolve_systemd_layout``/``resolve_packaged``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -41,3 +42,18 @@ _pinned_orca_patcher = mock.patch(
     "secretary.host_apply.pinned_orca_executable", return_value=None
 )
 _pinned_orca_patcher.start()
+
+# `git fetch` ends with `git maintenance run --auto`, and gc detaches by default,
+# so a repository a test built in a temporary directory can still be written to
+# after the test body returns. The write lands in the middle of
+# TemporaryDirectory cleanup and the run dies with "Directory not empty:
+# .../target/.git" against whichever test was running (seen on CI in
+# tests.test_secret_recover, secretary-806). The GIT_CONFIG_* trio is honoured by
+# every git the suite starts, including those production code spawns.
+os.environ.update(
+    GIT_CONFIG_COUNT="2",
+    GIT_CONFIG_KEY_0="gc.auto",
+    GIT_CONFIG_VALUE_0="0",
+    GIT_CONFIG_KEY_1="maintenance.auto",
+    GIT_CONFIG_VALUE_1="false",
+)
