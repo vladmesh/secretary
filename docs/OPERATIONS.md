@@ -216,9 +216,17 @@ Controlled divergence — сигнал о расхождении между те
 ### Identity и mutable-поля binding
 
 Identity проекта это ровно четыре поля: `id`, `repo`, `adapter`, `default_branch`. Их задаёт
-`project add`, и дальше их дословно повторяют draft (`adapter-drafts/<id>.yaml`), задача и результат
-provision и `result.json` gate-прогона. Contract-схема запрещает в `identity` любое пятое поле,
-поэтому identity не может разъехаться между стадиями.
+`project add`, и дальше их дословно повторяют draft (`adapter-drafts/<id>.yaml`), задача provision
+(`provision-runs/<id>/<run_id>/task.yaml`) и `result.json` gate-прогона. Схемы этих трёх артефактов
+требуют все четыре поля и запрещают любое пятое, поэтому identity не может разъехаться между
+стадиями.
+
+Результат provision (`result.yaml`) из этого ряда выпадает намеренно: его схема
+(`secretary/schemas/provision-result.schema.json`) разрешает в `identity` только `id` и `adapter`,
+`repo` и `default_branch` там запрещены. `provision.py:_validate_result` сверяет ровно эту пару с
+draft и отклоняет результат как `result_foreign` при любом расхождении. Provision-агенту не нужны
+путь и ветка в ответе, поэтому доказательством полной identity служат draft, task и gate-result, а
+`result.yaml` подтверждает только `id` и `adapter`.
 
 Маршрутизация в identity не входит. `plane` и `policy.code_concurrency` это mutable-поля binding
 (`projects/<id>.yaml`): их читает provision-задача как constraints, но ни gate, ни contract их не
@@ -229,21 +237,31 @@ provision и `result.json` gate-прогона. Contract-схема запрещ
 
 ### stale.input или невалидная схема
 
-Обе причины останавливают одни и те же команды, различает их scanner HEAD.
+Обе причины останавливают одни и те же команды, но проверяются они не одновременно: сначала
+валидность, потом свежесть.
 
-`stale.input` означает, что в `repo` на `default_branch` появился коммит после записи draft.
-`provision-start` и `provision-apply` отвечают `status: stale_input` и печатают пару
-`expected_scanner_head`/`actual_scanner_head`. Gate публикует `result.json` со `status: stale`,
-findings `[{"code": "stale.input", ...}]` и всеми пятью checks в `not-run`: ни одна команда проекта
-не запускалась.
+Невалидный по схеме вход HEAD не упоминает и выигрывает первым. `project add` валидирует
+существующий draft до того, как перечитает и перезапишет записанный в нём scanner HEAD
+(`secretary/onboarding.py:91-114`), поэтому draft, сломанный по схеме, отвечает `draft.invalid`
+независимо от того, ушёл ли репозиторий вперёд. `provision-*` и `gate` на таком входе отвечают
+`draft_invalid` и ничего не публикуют. В `errors` стоит путь схемы (например `identity`), а не пара
+ревизий.
 
-Невалидный по схеме вход HEAD не упоминает. `project add` кладёт в `draft.findings` запись
-`draft.invalid`, `provision-*` и `gate` отвечают `draft_invalid` и ничего не публикуют. В `errors`
-стоит путь схемы (например `identity`), а не пара ревизий. Отдельный статус `conflict` gate отдаёт на
-другие рассинхроны входа: provision не в `drafted`, канонический адаптер нечитаем или невалиден,
-enabled binding без совпадающего passed-результата.
+Выведенный отказавшим `project add` объект с `draft.findings` это диагностика, а не запись на диск:
+все ошибочные возвраты в `secretary/onboarding.py:91-128` стоят раньше публикации, так что артефакты
+инстанса остаются нетронутыми. Чинить по этому выводу нужно источник, названный в `errors`, а не
+ждать, что повторный вызов подхватит записанный finding.
 
-Разводит их одно сравнение:
+`stale.input` проверяется только после того, как draft и binding прошли валидацию. Он означает, что
+в `repo` на `default_branch` появился коммит после записи draft. `provision-start` и
+`provision-apply` отвечают `status: stale_input` и печатают пару
+`expected_scanner_head`/`actual_scanner_head`. Gate публикует `result.json` со `status: stale` и
+findings `[{"code": "stale.input", ...}]`.
+
+Отдельный статус `conflict` gate отдаёт на другие рассинхроны входа: provision не в `drafted`,
+канонический адаптер нечитаем или невалиден, enabled binding без совпадающего passed-результата.
+
+Когда схемная ошибка исключена, ревизии разводит одно сравнение:
 
 ```bash
 INSTANCE=/home/dev/secretary-instance
@@ -254,7 +272,16 @@ git -C /home/dev/projects/service-template rev-parse --verify refs/heads/main
 
 Ревизии разошлись, значит вход устарел и лечится восстановлением ниже. Ревизии совпали, а команда
 всё равно отказывает, значит виноват артефакт, который назвала ошибка; восстановление тут не
-поможет, и ослаблять guard, схему или policy ради прохода нельзя.
+поможет, и ослаблять guard, схему или policy ради прохода нельзя. Если же ошибка `draft.invalid`
+стоит вместе с разошедшимися ревизиями, восстановление всё равно не пройдёт: пока схемная ошибка
+жива, `project add` не дойдёт до перезаписи HEAD.
+
+Пятёрка checks в `not-run` не универсальный признак stale. Все пять остаются `not-run`, только когда
+gate на свежем disabled draft увидел смену HEAD до сборки worktree (`secretary/gate.py:135-136`) —
+это случай образца `gate-46b8aecb1d8b380eb456`. Stale, опубликованный уже после прогона (draft или
+канонический адаптер сменились по ходу, `gate.py:179-187`), сохраняет те checks, которые успели
+пройти. Про stale на enabled binding см. ниже: там результат наследуется от прошлого passed и может
+показывать все пять `passed`.
 
 ### Штатное восстановление disabled draft
 
@@ -321,13 +348,24 @@ Binding `projects/service-template.yaml` держит те же четыре п�
 manifest, чтобы уметь убрать ровно эти файлы при потере enable.
 
 Предыдущий прогон того же проекта, `gate-46b8aecb1d8b380eb456`, остаётся на диске со `status: stale`,
-findings `stale.input` и пятью `not-run`. Это образец для сравнения при неудачном входе.
+findings `stale.input` и пятью `not-run`. Это образец только для своего случая: свежий прогон на
+disabled draft, оборвавшийся на сверке HEAD до сборки worktree.
 
-`project gate` годится и как проверка. На enabled binding с passed-результатом он ничего не
-запускает: сверяет живой HEAD с записанным и при совпадении отдаёт уже опубликованный результат с
-кодом 0. Но это не read-only команда: если HEAD ушёл, тот же вызов осознанно снимает enable, удаляет
-compatibility manifest вместе с target record и отвечает `stale`. Когда трогать состояние нельзя,
-проверяйте чтением `result.json` и binding.
+Проверять состояние следует этими тремя чтениями. `project gate` для проверки не годится: на enabled
+binding он в двух из трёх исходов меняет состояние.
+
+- Живой HEAD совпал с записанным и канонический адаптер дал прежний дайджест — gate находит
+  опубликованный passed-результат по этой паре и отдаёт его с кодом 0, ничего не трогая.
+- Живой HEAD ушёл вперёд — gate снимает enable, удаляет compatibility manifest вместе с target
+  record и отвечает `stale`.
+- HEAD тот же, но адаптер переписан, и его дайджест не совпал — gate ищет прошлый passed-результат
+  по паре scanner HEAD и provision run_id и, найдя его, делает ровно то же снятие enable
+  (`secretary/gate.py:62-95`). Опубликованный при этом `stale`-результат это копия прошлого passed:
+  `_disable_stale_enabled` меняет в нём только `status` и `findings` (`gate.py:336-356`), так что все
+  пять checks остаются `passed`. Судить о свежести по одним checks нельзя, смотрите `status`.
+
+То есть один и тот же «проверочный» вызов может отозвать рабочий binding. Когда трогать состояние
+нельзя, ограничивайтесь чтением `result.json`, binding и target record.
 
 ### Чего этот lifecycle не доказывает
 
