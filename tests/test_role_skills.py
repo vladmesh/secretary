@@ -18,6 +18,7 @@ from secretary.role_skills import (
 )
 
 OBSERVER_SKILL = "observe-sprint"
+OPEN_SPRINT_SKILL = "open-sprint"
 
 
 class CanonicalRegistryTests(unittest.TestCase):
@@ -51,6 +52,31 @@ class CanonicalRegistryTests(unittest.TestCase):
         """The double loop is deliberate: the observer skill does not replace `run-sprint`."""
         self.assertIn("run-sprint", self.manifest["roles"]["secretary"]["skills"])
         self.assertTrue((roles_root() / "secretary" / "run-sprint" / "SKILL.md").is_file())
+
+    def test_the_document_loop_stays_next_to_the_entity_loop(self) -> None:
+        """`open-sprint` is added beside `start-sprint`, not instead of it."""
+        skills = self.manifest["roles"]["secretary"]["skills"]
+
+        self.assertIn("start-sprint", skills)
+        self.assertTrue((roles_root() / "secretary" / "start-sprint" / "SKILL.md").is_file())
+
+    def test_the_secretary_role_owns_the_sprint_entity_skill(self) -> None:
+        self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["secretary"]["skills"])
+
+    def test_the_canonical_open_sprint_skill_is_in_this_repository(self) -> None:
+        source = roles_root() / "secretary" / OPEN_SPRINT_SKILL / "SKILL.md"
+
+        self.assertTrue(source.is_file(), f"{source} is missing")
+
+    def test_open_sprint_reaches_both_secretary_shells(self) -> None:
+        """Sprint birth must not depend on which secretary the human opened."""
+        shells = {
+            item.shell
+            for item in iter_expected(self.manifest)
+            if item.role == "secretary" and item.skill == OPEN_SPRINT_SKILL
+        }
+
+        self.assertLessEqual({"claude", "codex"}, shells)
 
 
 class SkillDeliveryTests(unittest.TestCase):
