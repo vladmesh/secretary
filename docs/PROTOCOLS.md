@@ -62,6 +62,8 @@ python3 -m secretary task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
 python3 -m secretary task edit --role po --ref PROJECT-N \
   --body-file SPEC.md --head codex-terra --review-head claude-opus
+python3 -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
+  --sprint-override --sprint-override-reason-file REASON.md
 ```
 
 `create` принимает `--description` или `--body-file`, dependency, workspace и routing fields.
@@ -76,7 +78,7 @@ Done остаётся выполненной зависимостью; закр�
 разблокирует `blocked_by`.
 
 `edit` заменяет спеку карточки на месте: `--title`, `--description`/`--body-file` (полный новый
-текст, не дифф), `--head`, `--review-head`. Только для PO и только в Ideas/Ready/Blocked: у
+текст, не дифф), `--head`, `--review-head`. Обычно это только для PO и только в Ideas/Ready/Blocked: у
 активной карточки воркер работает со снапшотом TASK.md, поэтому правка на лету идёт через
 preempt/requeue, а не через тихую подмену. Audit event `edited` хранит старый и новый digest;
 полный текст прошлых версий восстанавливается из git-истории `state/board/cards.ndjson` в
@@ -136,6 +138,20 @@ resume freshness and observer state. If the live board cannot be read, it report
 its `cards` list from this live Pipeline metadata, rather than storing a duplicate card list in the
 sprint. New links and comments are refused after a sprint is closed. `current-task` also requires
 that the selected Pipeline card already carries this sprint reference.
+
+Открытый sprint держит все свои `repositories`: создавать карточку в таком проекте может только
+его observer и только с `--sprint` этого sprint. Перемещать и редактировать связанные карточки
+могут observer и dispatcher, поэтому обычный claim/report/review цикл не получает нового шага.
+PO может выполнить create, move или edit только явным `--sprint-override` вместе с непустым
+`--sprint-override-reason-file`; текст причины лежит отдельным полем `sprint_override_reason` в
+durable audit. Без флага PO получает `sprint_write_forbidden`, как и retro, steward и остальные
+роли. Текст отказа называет удерживающий sprint и просит писать через его сущность. Сам отказ тоже
+попадает в audit как `sprint_guard_denied` и не дублируется при повторе того же request id.
+
+Индекс открытых sprint repositories хранится локально рядом с audit. Для проекта вне открытого
+sprint он не вызывает чтение sprint board. Для записи в удерживаемый проект sprint перечитывается
+live: недоступный board возвращает `sprint_guard_unavailable`, а не разрешает запись. Закрытие или
+остановка sprint снимает удержание; карточки в его репозиториях затем работают обычным путём.
 
 Sprint mutations share `secretary-data/board/events.ndjson` and pending-audit recovery with card
 mutations. They carry the sprint reference as `ref`, and a repeated `--request-id` returns the

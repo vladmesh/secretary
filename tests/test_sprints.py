@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
@@ -78,6 +79,11 @@ class SprintKanboard:
             return True
         if method == "saveTaskMetadata":
             self.metadata[int(params["task_id"])].update(params["values"])
+            return True
+        if method == "moveTaskPosition":
+            task = next(task for task in self.tasks if task["id"] == params["task_id"])
+            task["column_id"] = params["column_id"]
+            task["swimlane_id"] = params["swimlane_id"]
             return True
         if method == "createComment":
             self.comments[int(params["task_id"])].append({"date_creation": "1720000003", "comment": params["content"]})
@@ -241,6 +247,117 @@ class SprintTests(unittest.TestCase):
 
         self.assertEqual(result["action"], "resume_recorded")
         self.assertEqual(result["sprint"]["resume"]["selected_step"], "implement")
+
+
+class SprintSingleWriterGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = SprintKanboard()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.ref = self.sprints.create(
+            role="po", actor="operator", goal="single writer", repositories=["secretary", "other"],
+        )["sprint"]["ref"]
+
+    def test_observer_must_link_to_its_open_sprint_and_other_roles_are_denied(self) -> None:
+        card = self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code", title="owned",
+            sprint=self.ref, request_id="observer-create",
+        )["task"]
+        self.assertEqual(card["sprint"], self.ref)
+        with self.assertRaisesRegex(TaskError, self.ref) as missing:
+            self.tasks.create(
+                role="observer", actor="observer", project="secretary", task_type="code", title="unlinked",
+                request_id="observer-unlinked",
+            )
+        self.assertEqual(missing.exception.code, "sprint_write_forbidden")
+        with self.assertRaisesRegex(TaskError, self.ref) as retro:
+            self.tasks.create(
+                role="retro", actor="retro", project="secretary", task_type="research", title="finding",
+                request_id="retro-denied",
+            )
+        self.assertEqual(retro.exception.code, "sprint_write_forbidden")
+        denied = [event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"]
+        self.assertEqual(len(denied), 2)
+        self.assertEqual(denied[0]["payload"]["sprint"], self.ref)
+
+    def test_po_override_requires_reason_and_is_audited_once(self) -> None:
+        with self.assertRaisesRegex(TaskError, "non-empty reason") as missing:
+            self.tasks.create(
+                role="po", actor="operator", project="secretary", task_type="code", title="urgent",
+                sprint_override=True, request_id="override-empty",
+            )
+        self.assertEqual(missing.exception.code, "validation")
+        first = self.tasks.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="urgent",
+            sprint_override=True, sprint_override_reason="production incident", request_id="override-once",
+        )
+        second = self.tasks.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="urgent",
+            sprint_override=True, sprint_override_reason="production incident", request_id="override-once",
+        )
+        self.assertEqual(first["event_id"], second["event_id"])
+        event = next(event for event in TaskAudit(self.tmp.name).events() if event["request_id"] == "override-once")
+        self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
+
+    def test_po_cannot_edit_a_held_card_without_an_audited_override(self) -> None:
+        card = self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code", title="owned",
+            sprint=self.ref,
+        )["task"]
+        with self.assertRaisesRegex(TaskError, self.ref) as denied:
+            self.tasks.edit(role="po", actor="operator", reference=card["ref"], description="outside edit")
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+        edited = self.tasks.edit(
+            role="po", actor="operator", reference=card["ref"], description="incident edit",
+            sprint_override=True, sprint_override_reason="production incident",
+        )
+        self.assertEqual(edited["task"]["description"], "incident edit")
+        event = TaskAudit(self.tmp.name).events()[-1]
+        self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
+
+    def test_dispatcher_cycle_and_observer_move_are_allowed(self) -> None:
+        card = self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code", title="cycle",
+            sprint=self.ref,
+        )["task"]
+        self.tasks.move(role="observer", actor="observer", reference=card["ref"], target="ready", reason="")
+        self.tasks.claim(role="dispatcher", actor="dispatcher", reference=card["ref"], worker="worker")
+        result = self.tasks.move(role="dispatcher", actor="dispatcher", reference=card["ref"], target="validate", reason="")
+        self.assertEqual(result["task"]["state"], "validate")
+
+    def test_close_releases_every_repository_and_unheld_projects_skip_sprint_board(self) -> None:
+        self.client.calls.clear()
+        card = self.tasks.create(
+            role="po", actor="operator", project="unheld", task_type="code", title="normal",
+        )["task"]
+        self.assertEqual(card["project"], "unheld")
+        self.assertFalse(any(method == "getProjectByName" and params.get("name") == "Secretary sprints" for method, params in self.client.calls))
+        with self.assertRaises(TaskError):
+            self.tasks.create(role="po", actor="operator", project="other", task_type="code", title="cross repo")
+        self.sprints.close(role="po", actor="operator", reference=self.ref)
+        released = self.tasks.create(role="po", actor="operator", project="other", task_type="code", title="released")
+        self.assertEqual(released["task"]["project"], "other")
+
+    def test_unavailable_sprint_board_fails_closed(self) -> None:
+        original = self.client.call
+
+        def unavailable(method: str, **params: object) -> object:
+            if method == "getTaskByReference" and params.get("reference") == self.ref:
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+            return original(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=unavailable):
+            with self.assertRaisesRegex(TaskError, "cannot verify sprint") as raised:
+                self.tasks.create(role="po", actor="operator", project="secretary", task_type="code", title="blocked")
+        self.assertEqual(raised.exception.code, "sprint_guard_unavailable")
+
+    def test_missing_index_bootstraps_from_live_open_sprints(self) -> None:
+        (Path(self.tmp.name) / "sprints" / "active-repositories.json").unlink()
+        with self.assertRaisesRegex(TaskError, self.ref) as denied:
+            self.tasks.create(role="po", actor="operator", project="secretary", task_type="code", title="blocked")
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
 
 if __name__ == "__main__":

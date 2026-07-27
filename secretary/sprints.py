@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,6 +51,104 @@ RESUME_FIELDS = (
     "dod_state",
     "next_safe_step",
 )
+_GUARD_INDEX = "sprints/active-repositories.json"
+
+
+def active_sprint_repositories(data_dir: str | Path) -> dict[str, list[str]]:
+    """Return the local index of repositories held by open sprints.
+
+    This is an index, not a second sprint model.  Task writes use it to avoid a
+    sprint-board read for repositories that no open sprint holds; a listed ref is
+    always checked live before it authorizes a write.
+    """
+    path = Path(data_dir) / _GUARD_INDEX
+    return _read_active_sprint_repositories(path)
+
+
+def _read_active_sprint_repositories(path: Path) -> dict[str, list[str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    repositories = raw.get("repositories") if isinstance(raw, dict) else None
+    if not isinstance(repositories, dict):
+        return {}
+    return {
+        str(repo): sorted({str(ref) for ref in refs if str(ref)})
+        for repo, refs in repositories.items()
+        if isinstance(refs, list) and str(repo)
+    }
+
+
+def sprint_guard_index_initialized(data_dir: str | Path) -> bool:
+    try:
+        raw = json.loads((Path(data_dir) / _GUARD_INDEX).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and raw.get("version") == 1 and isinstance(raw.get("repositories"), dict)
+
+
+def refresh_active_sprint_repositories(data_dir: str | Path, reader: Any) -> None:
+    """Seed the index from the live board without racing a sprint mutation."""
+    with _sprint_guard_index_lock(data_dir):
+        _replace_active_sprint_repositories(data_dir, reader.list(statuses={"open"}, create=False))
+
+
+def _replace_active_sprint_repositories(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
+    repositories: dict[str, list[str]] = {}
+    for sprint in sprints:
+        if sprint.get("status") != "open":
+            continue
+        reference = str(sprint.get("ref") or "")
+        if not reference:
+            continue
+        for repo in sprint.get("repositories") or []:
+            name = str(repo).strip()
+            if name:
+                repositories[name] = sorted(set(repositories.get(name, []) + [reference]))
+    _write_active_sprint_repositories(data_dir, repositories)
+
+
+def update_active_sprint_repositories(data_dir: str | Path, sprint: dict[str, Any]) -> None:
+    """Update one sprint's entries in the local open-repository index."""
+    with _sprint_guard_index_lock(data_dir):
+        repositories = _read_active_sprint_repositories(Path(data_dir) / _GUARD_INDEX)
+        reference = str(sprint.get("ref") or "")
+        for repo in list(repositories):
+            refs = [ref for ref in repositories[repo] if ref != reference]
+            if refs:
+                repositories[repo] = refs
+            else:
+                repositories.pop(repo)
+        if reference and sprint.get("status") == "open":
+            for repo in sprint.get("repositories") or []:
+                name = str(repo).strip()
+                if name:
+                    repositories[name] = sorted(set(repositories.get(name, []) + [reference]))
+        _write_active_sprint_repositories(data_dir, repositories)
+
+
+@contextmanager
+def _sprint_guard_index_lock(data_dir: str | Path):
+    path = Path(data_dir) / _GUARD_INDEX
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _write_active_sprint_repositories(data_dir: str | Path, repositories: dict[str, list[str]]) -> None:
+    path = Path(data_dir) / _GUARD_INDEX
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"version": 1, "repositories": repositories}, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
@@ -391,6 +491,7 @@ class SprintWriter:
         request_id = str(event["request_id"])
         self.audit.stage(request_id, event)
         event_id = self.audit.append(request_id, event)
+        update_active_sprint_repositories(Path(self.audit.board_dir).parent, sprint)
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     def _committed(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:

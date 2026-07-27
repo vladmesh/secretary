@@ -89,10 +89,10 @@ _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
 _CODEX_LAUNCH_MODES = {"exec", "tui"}
-_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro"}
+_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
 _COMMENT_ROLES = _ROLES
-_CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro"}
-_EDIT_ROLES = {"po"}
+_CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
+_EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ideas", "ready", "blocked"}
 _STATES = ("ideas", "ready", "in_progress", "validate", "blocked", "done")
 _TRANSITIONS = {
@@ -103,6 +103,7 @@ _TRANSITIONS = {
         ("in_progress", "ready"), ("validate", "in_progress"),
         ("validate", "blocked"), ("validate", "done"),
     },
+    "observer": {(source, target) for source in _STATES for target in _STATES if source != target},
     "worker": set(), "reviewer": set(), "retro": set(),
     "steward": {
         ("ideas", "ready"), ("blocked", "ready"), ("blocked", "done"),
@@ -455,6 +456,8 @@ class TaskWriter:
         codex_launch_mode: str = "",
         sprint: str = "",
         budget_event: str = "",
+        sprint_override: bool = False,
+        sprint_override_reason: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _CREATE_ROLES)
@@ -473,6 +476,7 @@ class TaskWriter:
         codex_launch_mode = codex_launch_mode.strip()
         sprint = sprint.strip()
         budget_event = budget_event.strip()
+        sprint_override_reason = sprint_override_reason.strip()
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
         if task_type not in _TASK_TYPES:
@@ -492,6 +496,7 @@ class TaskWriter:
             raise TaskError("validation", "codex launch mode must be exec or tui", 2)
         if slug and not _SLUG_RE.match(slug):
             raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
+        linked_sprint: dict[str, Any] | None = None
         if sprint:
             from secretary.sprints import SprintReader
 
@@ -504,6 +509,12 @@ class TaskWriter:
             raise TaskError("validation", "budget event requires a linked sprint", 2)
 
         request_id = request_id or str(uuid.uuid4())
+        override_payload = self._guard_sprint_write(
+            role=role, actor=actor, project=project, card_sprint=sprint,
+            linked_sprint=linked_sprint, sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason, request_id=request_id,
+            reference=reference,
+        )
         committed = self.audit.committed_event(request_id)
         if committed is not None:
             try:
@@ -550,6 +561,7 @@ class TaskWriter:
                 "codex_launch_mode": codex_launch_mode or None,
                 "sprint": sprint or None,
                 "budget_event": budget_event or None,
+                **override_payload,
                 "title_sha256": _digest(title),
                 "description_sha256": _digest(description),
             },
@@ -812,10 +824,22 @@ class TaskWriter:
             mutation,
         )
 
-    def move(self, *, role: str, actor: str, reference: str, target: str, reason: str, request_id: str | None = None) -> dict[str, Any]:
+    def move(
+        self, *, role: str, actor: str, reference: str, target: str, reason: str,
+        sprint_override: bool = False, sprint_override_reason: str = "", request_id: str | None = None,
+    ) -> dict[str, Any]:
         self._role(role, _ROLES)
+        request_id = request_id or str(uuid.uuid4())
+        task = self.reader.show(reference)
+        override_payload = self._guard_sprint_write(
+            role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None, sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id, reference=reference,
+        )
         def mutation(task: dict[str, Any]) -> Any:
             source = task["state"]
+            if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
+                raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
             if (source, target) not in _TRANSITIONS[role]:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
@@ -835,6 +859,7 @@ class TaskWriter:
             lambda task: {
                 "from": task["state"], "to": target,
                 "reason_sha256": _digest(reason) if reason else None,
+                **override_payload,
             },
             mutation,
         )
@@ -849,6 +874,8 @@ class TaskWriter:
         description: str | None = None,
         head: str | None = None,
         review_head: str | None = None,
+        sprint_override: bool = False,
+        sprint_override_reason: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Revise a card's spec in place instead of piling corrections into comments.
@@ -860,11 +887,19 @@ class TaskWriter:
         preempt/requeue, not a silent spec swap.
         """
         self._role(role, _EDIT_ROLES)
+        request_id = request_id or str(uuid.uuid4())
         if title is not None and not title.strip():
             raise TaskError("validation", "edit title must be non-empty", 2)
         if title is None and description is None and head is None and review_head is None:
             raise TaskError("validation", "edit requires a new title, description, head or review head", 2)
         current = self.reader.show(reference)
+        override_payload = self._guard_sprint_write(
+            role=role, actor=actor, project=current["project"], card_sprint=str(current.get("sprint") or ""),
+            linked_sprint=None, sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id, reference=reference,
+        )
+        if role in {"observer", "dispatcher"} and not override_payload and not self._sprint_holds_project(current["project"]):
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         payload = {
             "title_sha256": _digest(title.strip()) if title is not None else None,
             "title_sha256_was": _digest(current["title"]) if title is not None else None,
@@ -874,6 +909,7 @@ class TaskWriter:
             "head_was": current["routing"]["head_override"] if head is not None else None,
             "review_head": review_head.strip() or None if review_head is not None else None,
             "review_head_was": current["routing"]["review_head_override"] if review_head is not None else None,
+            **override_payload,
         }
 
         def mutation(task: dict[str, Any]) -> Any:
@@ -904,6 +940,104 @@ class TaskWriter:
                     raise
 
         return self._write("edited", role, actor, reference, request_id, payload, mutation)
+
+    def _sprint_holds_project(self, project: str) -> bool:
+        from secretary.sprints import active_sprint_repositories
+
+        return bool(active_sprint_repositories(self.data_dir).get(project))
+
+    def _guard_sprint_write(
+        self,
+        *,
+        role: str,
+        actor: str,
+        project: str,
+        card_sprint: str,
+        linked_sprint: dict[str, Any] | None,
+        sprint_override: bool,
+        sprint_override_reason: str,
+        request_id: str,
+        reference: str,
+    ) -> dict[str, str]:
+        """Authorize one create/move/edit against the open-sprint repository index."""
+        from secretary.sprints import (
+            SprintReader,
+            active_sprint_repositories,
+            refresh_active_sprint_repositories,
+            sprint_guard_index_initialized,
+            update_active_sprint_repositories,
+        )
+
+        if not sprint_guard_index_initialized(self.data_dir):
+            try:
+                refresh_active_sprint_repositories(self.data_dir, SprintReader(self.client))
+            except TaskError as exc:
+                self._deny_sprint_write(
+                    code="sprint_guard_unavailable",
+                    message=f"cannot verify open sprints for repository {project}; write it through the sprint entity",
+                    role=role, actor=actor, project=project, sprint="", request_id=request_id, reference=reference,
+                )
+                raise AssertionError("unreachable") from exc
+
+        refs = set(active_sprint_repositories(self.data_dir).get(project, []))
+        if linked_sprint is not None and project in linked_sprint.get("repositories", []):
+            refs.add(str(linked_sprint["ref"]))
+        held: list[str] = []
+        for sprint_ref in sorted(refs):
+            try:
+                sprint = linked_sprint if linked_sprint and sprint_ref == linked_sprint.get("ref") else SprintReader(self.client).show(sprint_ref, include_cards=False)
+            except TaskError as exc:
+                self._deny_sprint_write(
+                    code="sprint_guard_unavailable",
+                    message=f"cannot verify sprint {sprint_ref} holding repository {project}; write it through the sprint entity",
+                    role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
+                )
+                raise AssertionError("unreachable") from exc
+            update_active_sprint_repositories(self.data_dir, sprint)
+            if sprint.get("status") == "open" and project in sprint.get("repositories", []):
+                held.append(sprint_ref)
+        if not held:
+            return {}
+        sprint_ref = held[0]
+        if role == "po" and sprint_override:
+            if not sprint_override_reason:
+                self._deny_sprint_write(
+                    code="validation", message="sprint override requires a non-empty reason",
+                    role=role, actor=actor, project=project, sprint=sprint_ref,
+                    request_id=request_id, reference=reference, exit_code=2,
+                )
+            return {"sprint_override_reason": sprint_override_reason}
+        if role == "observer" and card_sprint == sprint_ref:
+            return {}
+        if role == "dispatcher":
+            return {}
+        self._deny_sprint_write(
+            code="sprint_write_forbidden",
+            message=f"repository {project} is held by open sprint {sprint_ref}; write it through the sprint entity {sprint_ref}",
+            role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
+        )
+        raise AssertionError("unreachable")
+
+    def _deny_sprint_write(
+        self, *, code: str, message: str, role: str, actor: str, project: str,
+        sprint: str, request_id: str, reference: str, exit_code: int = 3,
+    ) -> None:
+        event = self.audit.committed_event(request_id)
+        if event is None:
+            event = {
+                "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
+                "actor": {"role": role, "id": actor}, "kind": "sprint_guard_denied", "outcome": "denied",
+                "task_id": "", "ref": reference, "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+                "request_id": request_id,
+                "payload": {"code": code, "message": message, "project": project, "sprint": sprint},
+            }
+            self.audit.stage(request_id, event)
+            try:
+                self.audit.append(request_id, event)
+            except OSError:
+                raise TaskError("audit_pending", "sprint write was denied but audit repair is required", 4) from None
+        payload = event.get("payload") if isinstance(event, dict) else {}
+        raise TaskError(str(payload.get("code") or code), str(payload.get("message") or message), exit_code)
 
     def archive(
         self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
@@ -1048,6 +1182,10 @@ class TaskWriter:
                     # An observer lifecycle event describes a head, not a backend row: there is
                     # nothing to re-read and enrich, and it must repair even when the sprint it
                     # names has already left the board.
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
+                    continue
+                if event.get("kind") == "sprint_guard_denied":
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
