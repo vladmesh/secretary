@@ -47,16 +47,42 @@ from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegac
 DEAD_PID = 999999
 
 
+def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
+    """A role-skill registry of this test's own, pointed at by SECRETARY_ROLE_SKILLS_MANIFEST.
+
+    The launch gate reads the shell's skill directory, and the shells of the live installation are
+    not a fixture: a test that let the tick look at them would pass or fail on whether somebody had
+    run `role-skills sync` on this machine. Returns the observer skill's path in the fake shell,
+    which `delivered=False` leaves absent.
+    """
+    manifest = root / "registry" / "manifest.toml"
+    shell_root = root / "registry" / "codex-shell"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        '[roles.observer]\nskills = ["observe-sprint"]\n\n'
+        '[targets.codex-test]\nshell = "codex"\n'
+        f'root = "{shell_root}"\nroles = ["observer"]\n',
+        encoding="utf-8",
+    )
+    skill = shell_root / "observe-sprint" / "SKILL.md"
+    if delivered:
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text("# canonical observer skill\n", encoding="utf-8")
+    return skill
+
+
 class ObserverLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name)
+        self.observer_skill = install_skill_registry(self.data_dir)
         env = mock.patch.dict(
             os.environ,
             {
                 "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
                 "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
             },
         )
         env.start()
@@ -528,6 +554,61 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.launches, 0)
         self.assertIn("unauthenticated", record.deferred_reason)
         self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+
+    # role skill delivery ------------------------------------------------------
+
+    def test_an_undelivered_skill_defers_the_launch_instead_of_a_blind_head(self) -> None:
+        self.observer_skill.unlink()
+        self.open_sprint()
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-launch-deferred")
+        self.assertEqual(self.host.observers, [])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "deferred")
+        self.assertEqual(record.launches, 0)
+        self.assertIn("observe-sprint", record.deferred_reason)
+        self.assertIn(str(self.observer_skill), record.deferred_reason)
+        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+        # The same reason has to be readable from outside, or the sprint just looks headless.
+        self.assertIn("observe-sprint", status_observers(self.runtime.production_state.load())[0]["deferred_reason"])
+
+    def test_a_delivered_skill_launches_the_head_on_the_next_tick(self) -> None:
+        self.observer_skill.unlink()
+        self.open_sprint()
+        self.runtime.production_tick()
+
+        install_skill_registry(self.data_dir)
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
+        self.assertEqual(self.observers()["sprint:1"].deferred_reason, "")
+
+    def test_a_shell_without_an_observer_target_defers_the_launch(self) -> None:
+        """The skill exists and is delivered somewhere, just not to the shell of this head."""
+        manifest = self.data_dir / "registry" / "manifest.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace('shell = "codex"', 'shell = "claude"'),
+            encoding="utf-8",
+        )
+        self.open_sprint()
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-launch-deferred")
+        self.assertEqual(self.host.observers, [])
+        self.assertIn("no codex target", self.observers()["sprint:1"].deferred_reason)
+
+    def test_the_launched_prompt_points_at_the_delivered_skill(self) -> None:
+        self.open_sprint()
+
+        self.runtime.production_tick()
+
+        prompt = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(encoding="utf-8")
+        self.assertIn(str(self.observer_skill), prompt)
 
     def test_deferred_launch_retries_on_the_next_tick(self) -> None:
         self.open_sprint()
@@ -1183,14 +1264,18 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertNotIn("UNRELATED_SECRET_TOKEN", env)
 
     def test_the_prompt_is_rendered_from_the_live_sprint(self) -> None:
-        prompt = render_observer_prompt({
-            "ref": "sprint:9",
-            "goal": "make the pipeline autonomous",
-            "definition_of_done": "an operator sleeps through a sprint",
-            "repositories": ["secretary", "codegen"],
-            "current_task": "secretary-800",
-            "budget": {"total": 3},
-        })
+        prompt = render_observer_prompt(
+            {
+                "ref": "sprint:9",
+                "goal": "make the pipeline autonomous",
+                "definition_of_done": "an operator sleeps through a sprint",
+                "repositories": ["secretary", "codegen"],
+                "status": "open",
+                "current_task": "secretary-800",
+                "budget": {"total": 3},
+            },
+            skill_path="/shell/skills/observe-sprint/SKILL.md",
+        )
 
         self.assertIn("sprint:9", prompt)
         self.assertIn("make the pipeline autonomous", prompt)
@@ -1198,7 +1283,25 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("- secretary", prompt)
         self.assertIn("- codegen", prompt)
         self.assertIn("secretary-800", prompt)
-        self.assertIn("run-sprint", prompt)
+        self.assertIn("/shell/skills/observe-sprint/SKILL.md", prompt)
+
+    def test_the_prompt_points_at_the_skill_instead_of_restating_it(self) -> None:
+        """The launch document carries data and one pointer; the instructions live in the skill."""
+        prompt = render_observer_prompt(
+            {"ref": "sprint:9", "goal": "goal", "definition_of_done": "dod"},
+            skill_path="/shell/skills/observe-sprint/SKILL.md",
+        )
+        canonical = (
+            Path(__file__).resolve().parents[1]
+            / "skills" / "roles" / "observer" / "observe-sprint" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        # Every heading the skill owns is a section the prompt must not carry a second copy of.
+        headings = [line for line in canonical.splitlines() if line.startswith("## ")]
+        self.assertTrue(headings)
+        self.assertEqual([heading for heading in headings if heading in prompt], [])
+        self.assertNotIn("sprint resume", prompt)
+        self.assertNotIn("task create", prompt)
 
     def test_request_ids_are_stable_per_launch_generation(self) -> None:
         self.assertEqual(

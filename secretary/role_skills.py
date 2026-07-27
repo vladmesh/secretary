@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tomllib
@@ -16,6 +17,20 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "skills" / "manifest.toml"
 ROLES_ROOT = ROOT / "skills" / "roles"
+# Points the registry at another manifest, and with it at another `roles/` tree beside that file.
+# The delivery check below runs inside the dispatcher tick, so a test needs a registry it can own
+# without writing into the shells of the live installation.
+MANIFEST_ENV = "SECRETARY_ROLE_SKILLS_MANIFEST"
+
+
+def manifest_path() -> Path:
+    raw = os.environ.get(MANIFEST_ENV)
+    return Path(raw).expanduser() if raw else MANIFEST
+
+
+def roles_root() -> Path:
+    """The canonical skill sources, always beside the manifest that names them."""
+    return manifest_path().parent / "roles"
 
 
 @dataclass(frozen=True)
@@ -37,7 +52,7 @@ def _sha256(path: Path) -> str:
 
 
 def load_manifest() -> dict[str, Any]:
-    return tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    return tomllib.loads(manifest_path().read_text(encoding="utf-8"))
 
 
 def find_overlapping_target_roots(manifest: dict[str, Any]) -> list[dict[str, str]]:
@@ -80,11 +95,54 @@ def iter_expected(manifest: dict[str, Any]) -> list[ExpectedSkill]:
                         shell=target["shell"],
                         role=role_name,
                         skill=skill,
-                        source=ROLES_ROOT / role_name / skill,
+                        source=roles_root() / role_name / skill,
                         dest=root / skill,
                     )
                 )
     return expected
+
+
+def skill_delivery(role: str, skill: str, shell: str) -> dict[str, Any]:
+    """Whether one role skill is materialized in one shell, and where it is expected.
+
+    A head is launched into a shell, not into this repository: the canonical skill being present
+    here says nothing about the head being able to open it. `delivered` is what a caller acts on,
+    `reason` is what it shows when it refuses; both are filled for a manifest that cannot be read
+    at all, because an unreadable registry is not evidence that the skill is there.
+    """
+    result: dict[str, Any] = {
+        "role": role,
+        "skill": skill,
+        "shell": shell,
+        "manifest": str(manifest_path()),
+        "delivered": False,
+        "paths": [],
+        "reason": "",
+    }
+    try:
+        expected = [
+            item
+            for item in iter_expected(load_manifest())
+            if item.role == role and item.skill == skill and item.shell == shell
+        ]
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        result["reason"] = f"skill registry {manifest_path()} could not be read: {exc}"
+        return result
+    if not expected:
+        result["reason"] = (
+            f"no {shell} target in {manifest_path()} carries the {role} role"
+        )
+        return result
+    result["paths"] = [str(item.dest / "SKILL.md") for item in expected]
+    missing = [path for path in result["paths"] if not Path(path).is_file()]
+    if missing:
+        result["reason"] = (
+            f"{role}/{skill} is not in the {shell} skill directory ({', '.join(missing)}); "
+            "run `secretary role-skills sync`"
+        )
+        return result
+    result["delivered"] = True
+    return result
 
 
 def audit(target_filter: set[str] | None = None) -> dict[str, Any]:

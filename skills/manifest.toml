@@ -23,6 +23,12 @@ skills = ["retro"]
 [roles.steward]
 skills = ["steward"]
 
+# The sprint observer head. Delivered to the shells its head profiles can come up in
+# (`role_defaults.observer` and the fallback chain in triggered_agents/agents/pipeline/heads.toml),
+# because the dispatcher refuses to launch a head into a shell without this skill.
+[roles.observer]
+skills = ["observe-sprint"]
+
 [targets.claude-secretary-global]
 shell = "claude"
 root = "/home/dev/.claude/skills"
@@ -56,7 +62,7 @@ roles = ["steward"]
 [targets.codex-secretary-roles]
 shell = "codex"
 root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
-roles = ["curator", "retro", "steward"]
+roles = ["curator", "retro", "steward", "observer"]
 
 [targets.hermes-secretary-roles]
 shell = "hermes"
