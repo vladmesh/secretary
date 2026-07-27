@@ -23,13 +23,15 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import host
-from secretary.dispatcher import CutoverState, DispatcherRuntime
+from secretary.cli import build_parser
+from secretary.dispatcher import CutoverState, DispatcherRuntime, runtime_from_args
 from secretary.dispatcher_production import (
     TICK_TELEMETRY_DEGRADATIONS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
 from secretary.dispatcher import default_data_dir
+from secretary.head_registry import materialize_snapshot
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
 
@@ -483,6 +485,84 @@ class ProductionStatePathTests(unittest.TestCase):
         other = _instance(self.root / "other-instance", self.root / "other-data")
         os.environ["SECRETARY_INSTANCE"] = str(other)
         self.assertEqual(production_telemetry.data_dir(), self.root / "other-data")
+
+
+class EnvDataDirConflictTests(unittest.TestCase):
+    """SECRETARY_DATA_DIR disagreeing with the instance must move writer and readers together.
+
+    An installation (or a drop-in) can put SECRETARY_DATA_DIR in runtime.env, which the dispatcher
+    unit imports. If only the readers honored it, health and `steward scan` would report on a file
+    nobody writes and call the silence healthy — the same blindness this card exists to end
+    (secretary-833 review, round 3). So the rule is one rule: the dispatcher parser defaults
+    --data-dir to that variable, exactly as `secretary task` does.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.env_data = self.root / "env-data"
+        self.instance = _instance(self.root / "instance", self.root / "instance-data")
+        # A real instance the dispatcher will accept, so the writer path is resolved by the same
+        # code the unit runs, not by a stub standing in for it.
+        materialize_snapshot(self.instance, Path(__file__).resolve().parents[1])
+        env = mock.patch.dict(
+            os.environ,
+            {"SECRETARY_INSTANCE": str(self.instance), "SECRETARY_DATA_DIR": str(self.env_data)},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("TA_PRODUCTION_STATE", "TA_RUNTIME_ENV_FILE"):
+            os.environ.pop(name, None)
+        self.state = AgentState("steward", state_dir=self.root / "steward")
+        state = mock.patch.object(steward_signals, "STATE", self.state)
+        state.start()
+        self.addCleanup(state.stop)
+
+    def writer_state_path(self) -> Path:
+        """Where the packaged unit's own command line lands, parsed by the real CLI parser."""
+        args = build_parser().parse_args(
+            ["dispatcher", "production-tick", "--instance", str(self.instance)]
+        )
+        with mock.patch("secretary.dispatcher.KanboardClient"):
+            runtime = runtime_from_args(
+                args.instance, args.data_dir, host_mode="noop", owner="secretary-production",
+            )
+        return runtime.production_state.path
+
+    def test_writer_health_and_steward_all_land_on_the_env_data_plane(self) -> None:
+        writer = self.writer_state_path()
+        self.assertEqual(writer, self.env_data / "dispatcher" / "production-state.json")
+        self.assertEqual(production_telemetry.state_path(), writer)
+
+        # A degraded tick written where the dispatcher writes must reach both readers. Left in the
+        # instance's data dir it would be invisible to them, and health would stay green.
+        payload: dict = {}
+        record_tick_telemetry(payload, {"status": "degraded", "step": "production-tick",
+                                        "errors": [{"ref": "secretary-1", "code": "boom",
+                                                    "message": "host is gone"}]})
+        _telemetry_state(writer, payload["tick_telemetry"])
+
+        problems, detail = health._pipeline_status()
+        self.assertTrue(problems)
+        self.assertIn("boom", " ".join(problems))
+        self.assertIn("last tick", detail)
+
+        hits, watermark = steward_signals._pipeline_tick_signals({"pipeline_unhealthy_total": 0})
+        self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
+        self.assertEqual(watermark, 1)
+
+    def test_a_record_left_on_the_instance_data_plane_is_not_read_as_healthy(self) -> None:
+        """Proof the two directories really are different: the readers do not silently find it."""
+        _telemetry_state(
+            self.root / "instance-data" / "dispatcher" / "production-state.json",
+            {"tick_seq": 3, "last": _tick(3, healthy=True), "last_healthy_at": _ts(1),
+             "unhealthy": [], "unhealthy_total": 0},
+        )
+
+        self.assertEqual(production_telemetry.read().unavailable, "production-state-missing")
+        problems, _ = health._pipeline_status()
+        self.assertTrue(problems)
 
 
 class PackagedStewardUnitEnvTests(unittest.TestCase):

@@ -17,8 +17,11 @@ reasoning that already sends the steward across worktrees for the dispatcher's o
 
 Path resolution follows the dispatcher's own, so the reader lands on the file the writer writes on
 any installation, not only on one that kept the default layout: `--data-dir`/`SECRETARY_DATA_DIR`
-first, then `data_dir` out of the instance the dispatcher unit is started with
-(`secretary.task_commands.resolve_data_dir` resolves the same pair the same way). The packaged unit
+first, then `data_dir` out of the instance the dispatcher unit is started with. The dispatcher
+parser defaults `--data-dir` to `SECRETARY_DATA_DIR` for exactly this reason
+(`secretary.dispatcher_commands.add_common`), the same pair `secretary task` resolves
+(`secretary.task_commands.resolve_data_dir`), so an installation that moves its data plane through
+the environment moves writer and readers together. The packaged unit
 passes only `--instance`, and a valid `data_dir` is any absolute path, so the instance file is the
 binding that matters. A reader's own unit gets that instance from `SECRETARY_INSTANCE`, falling back
 to the directory of its rendered `TA_RUNTIME_ENV_FILE` (see `_instance_from_runtime_env`).

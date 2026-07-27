@@ -980,8 +980,11 @@ python3 -m triggered_agents health
   mutation guard не пустил к чужому state), не пишет ничего: он и виден по тому, что здоровые
   тики перестали появляться.
 
-Путь к state диспетчера читатели резолвят так же, как сам диспетчер: `SECRETARY_DATA_DIR`, иначе
-`data_dir` из instance — это единственное, что packaged-юнит передаёт тиком `--instance`. Instance
+Путь к state диспетчера читатели резолвят так же, как сам диспетчер: явный `--data-dir`, у которого
+дефолт `SECRETARY_DATA_DIR`, иначе `data_dir` из instance — это единственное, что packaged-юнит
+передаёт тиком `--instance`. Правило одно на всех: установка или drop-in, задающая
+`SECRETARY_DATA_DIR` в `runtime.env`, переносит и записи диспетчера, и чтение health со стюардом
+на тот же data plane, так что читатель не может смотреть в файл, которого никто не пишет. Instance
 берётся из `SECRETARY_INSTANCE`, который юниты стюарда задают вместе с `TA_RUNTIME_ENV_FILE`; если
 переменной нет, читатель берёт каталог самого `TA_RUNTIME_ENV_FILE` (`<instance>/runtime.env` в
 рендере юнита) и только потом `/home/dev/secretary-instance`. На установке с нестандартным instance
