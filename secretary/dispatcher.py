@@ -22,6 +22,7 @@ from secretary.dispatcher_launcher import (
     HeadLaunchError,
     claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
+    ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
@@ -373,7 +374,7 @@ class InstanceCatalog:
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
-            self.prepare_head_workspace(head, workspace)
+            self.prepare_head_workspace(head, workspace, role=role)
             if adapter == "claude":
                 launch = HeadLaunch(_render_claude_command(profile, prompt_file, launch_prompt=launch_prompt))
             else:
@@ -387,13 +388,21 @@ class InstanceCatalog:
             prompt_after_start=launch.prompt_after_start,
         )
 
-    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+    def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
+        """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
+
+        The codex branch is observer-only on purpose. Worker and reviewer workspaces are worktrees
+        of repositories the codex runtime already trusts, so they never see the dialog, and the
+        role that does see it is the only one whose bring-up may touch the runtime's own
+        `config.toml`.
+        """
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
-        if adapter != "claude":
-            return
         try:
-            _ensure_claude_workspace_ready(workspace)
+            if adapter == "claude":
+                _ensure_claude_workspace_ready(workspace)
+            elif adapter == "codex" and role == OBSERVER_ROLE:
+                _ensure_codex_workspace_trusted(profile, workspace)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
 
@@ -1147,7 +1156,7 @@ class CommandHostRuntime:
             # pid heartbeat wrapper below. That is deliberate: this path exists for tests and
             # manual overrides, not the runtimes the watchdog needs to trust, and it keeps the long
             # inactivity ceiling as its fallback (documented in docs/OPERATIONS.md).
-            self.catalog.prepare_head_workspace(head, workspace)
+            self.catalog.prepare_head_workspace(head, workspace, role=role)
         else:
             launch = self.catalog.head_launch(
                 head,

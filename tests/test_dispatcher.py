@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -39,6 +40,7 @@ from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
     ensure_claude_workspace_trusted,
+    ensure_codex_workspace_trusted,
     role_launch_env,
     with_pid_heartbeat,
 )
@@ -4268,6 +4270,114 @@ class DispatcherLauncherTests(unittest.TestCase):
             data = json.loads(config.read_text(encoding="utf-8"))
         self.assertEqual(data, original)
 
+    def _codex_worktree(self, tmp: Path) -> tuple[Path, Path]:
+        """A worktree of a repo that sits somewhere else, the shape an observer workspace has."""
+        repo = tmp / "root"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet", "-b", "obs", str(repo)], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(repo),
+                "-c", "user.name=t", "-c", "user.email=t@t",
+                "commit", "--quiet", "--allow-empty", "-m", "root",
+            ],
+            check=True,
+        )
+        workspace = tmp / "workspaces" / "sprint-1"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "--quiet", "-b", "w", str(workspace)],
+            check=True,
+        )
+        return repo, workspace
+
+    def test_codex_trust_records_the_repository_root_the_dialog_asks_about(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            repo, workspace = self._codex_worktree(tmp)
+            home = tmp / "codex-home"
+            home.mkdir()
+            config = home / "config.toml"
+            config.write_text(
+                '# keep me\nmodel_reasoning_summary = "auto"\n\n'
+                '[projects."/already/trusted"]\ntrust_level = "trusted"\n',
+                encoding="utf-8",
+            )
+
+            ensure_codex_workspace_trusted({"adapter": "codex", "codex_home": str(home)}, str(workspace))
+            after_first = config.read_text(encoding="utf-8")
+            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+                ensure_codex_workspace_trusted(
+                    {"adapter": "codex", "codex_home": str(home)}, str(workspace)
+                )
+
+        data = tomllib.loads(after_first)
+        # codex asks about the repository root of the directory it starts in, so that is the entry
+        # that has to be there; the workspace itself covers a workspace that is no repo at all.
+        self.assertEqual(data["projects"][str(repo.resolve())]["trust_level"], "trusted")
+        self.assertEqual(data["projects"][str(workspace.resolve())]["trust_level"], "trusted")
+        self.assertEqual(data["projects"]["/already/trusted"]["trust_level"], "trusted")
+        self.assertEqual(data["model_reasoning_summary"], "auto")
+        self.assertIn("# keep me", after_first)
+        replace.assert_not_called()
+
+    def test_codex_trust_writes_the_workspace_alone_outside_a_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            workspace = tmp / "plain"
+            workspace.mkdir()
+            config = tmp / "config.toml"
+
+            ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)
+
+            data = tomllib.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(list(data["projects"]), [str(workspace.resolve())])
+
+    def test_codex_trust_leaves_a_path_somebody_kept_untrusted(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            workspace = tmp / "plain"
+            workspace.mkdir()
+            config = tmp / "config.toml"
+            original = f'[projects.{json.dumps(str(workspace.resolve()))}]\ntrust_level = "untrusted"\n'
+            config.write_text(original, encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "trust_level"):
+                ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)
+
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_codex_trust_rejects_corrupt_or_symlinked_config(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            workspace = tmp / "plain"
+            workspace.mkdir()
+            corrupt = tmp / "corrupt.toml"
+            corrupt.write_text("[projects\n", encoding="utf-8")
+            target = tmp / "target.toml"
+            target.write_text("", encoding="utf-8")
+            symlink = tmp / "link.toml"
+            symlink.symlink_to(target)
+
+            with self.assertRaisesRegex(RuntimeError, "cannot read codex config"):
+                ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), corrupt)
+            with self.assertRaisesRegex(RuntimeError, "refusing symlinked codex config"):
+                ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), symlink)
+
+    def test_codex_trust_fails_closed_when_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            workspace = tmp / "plain"
+            workspace.mkdir()
+            config = tmp / "config.toml"
+            original = 'model_reasoning_summary = "auto"\n'
+            config.write_text(original, encoding="utf-8")
+
+            with mock.patch("secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")):
+                with self.assertRaisesRegex(RuntimeError, "cannot update codex config"):
+                    ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)
+
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
     def test_prepare_worker_lands_on_legacy_pipeline_branch_for_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             host = GitBranchHost(Path(tmp))
@@ -5374,7 +5484,7 @@ class DispatcherGateTests(unittest.TestCase):
 class ReviewCatalog(FakeCatalog):
     """FakeCatalog plus the head-launch surface the real bring-up path calls into."""
 
-    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+    def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         return None
 
     def head_launch(

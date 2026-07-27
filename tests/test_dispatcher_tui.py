@@ -213,7 +213,7 @@ class TuiCatalog:
     def __init__(self) -> None:
         self.modes: list[str | None] = []
 
-    def prepare_head_workspace(self, head: str, workspace: str) -> None:
+    def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         return None
 
     def head_launch(
