@@ -40,7 +40,17 @@ CARD = {
 }
 
 
-def _checkpoint(instance: Path, data_dir: Path) -> None:
+SPRINT = {
+    "reference": "sprint:41", "goal": "Ship sprint entities", "definition_of_done": "restore rebuilds it",
+    "repositories": ["secretary"], "status": "closed", "budget": {"by_type": {"red_ci": 1}},
+    "current_task": "secretary-1", "resume": None,
+    "audit": {"created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-02T00:00:00Z",
+              "board": "Secretary sprints"},
+    "comments": [{"ts": "2026-07-01T10:00:00Z", "text": "[po]\nnote"}],
+}
+
+
+def _checkpoint(instance: Path, data_dir: Path, *, sprints: list[dict] | None = None) -> None:
     board = instance / "state" / "board"
     runs = instance / "state" / "runs"
     facts = instance / "state" / "memory" / "facts"
@@ -58,7 +68,13 @@ def _checkpoint(instance: Path, data_dir: Path) -> None:
     )
     (board / "cards.ndjson").write_text(json.dumps(CARD) + "\n", encoding="utf-8")
     (board / "events.ndjson").write_text("", encoding="utf-8")
-    (board / "export.json").write_text(json.dumps({"card_count": 1}), encoding="utf-8")
+    summary = {"card_count": 1}
+    if sprints is not None:
+        (board / "sprints.ndjson").write_text(
+            "".join(json.dumps(sprint) + "\n" for sprint in sprints), encoding="utf-8"
+        )
+        summary["sprint_count"] = len(sprints)
+    (board / "export.json").write_text(json.dumps(summary), encoding="utf-8")
     (runs / "runs.ndjson").write_text("", encoding="utf-8")
     (runs / "claims.json").write_text('{"claims": {}}', encoding="utf-8")
     (runs / "watermarks.json").write_text('{"files": []}', encoding="utf-8")
@@ -238,6 +254,46 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(cards["cards"], [CARD])
             self.assertFalse((data / "memory" / "index.sqlite").exists())
             self.assertFalse((data / "worktrees").exists())
+
+    def test_checkpoint_materialization_rebuilds_the_sprint_export(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data = root / "data"
+            instance.mkdir()
+            _checkpoint(instance, data, sprints=[SPRINT])
+
+            self.assertEqual(materialize_checkpoint(instance, data), (1, 0))
+
+            sprints = json.loads((data / "board" / "sprints.json").read_text(encoding="utf-8"))
+            self.assertEqual(sprints["sprints"], [SPRINT])
+            self.assertTrue((data / "board" / "sprints.ndjson").is_file())
+
+    def test_checkpoint_sprint_count_mismatch_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data = root / "data"
+            instance.mkdir()
+            _checkpoint(instance, data, sprints=[SPRINT])
+            (instance / "state" / "board" / "sprints.ndjson").write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(InstallError, "sprint count does not match"):
+                materialize_checkpoint(instance, data)
+
+    def test_checkpoint_predating_sprint_export_materializes_an_empty_set(self):
+        """An instance repo whose last tick ran before sprints joined the export."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data = root / "data"
+            instance.mkdir()
+            _checkpoint(instance, data)
+
+            self.assertEqual(materialize_checkpoint(instance, data), (1, 0))
+
+            sprints = json.loads((data / "board" / "sprints.json").read_text(encoding="utf-8"))
+            self.assertEqual(sprints["sprints"], [])
 
     def test_checkpoint_materialization_restores_the_routing_journal(self):
         """secretary-716: per-attempt head telemetry lives only in the journal, so a recovery that

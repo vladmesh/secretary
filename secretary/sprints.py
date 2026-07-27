@@ -32,7 +32,9 @@ SPRINT_METADATA = {
     "sprint_budget",
     "sprint_current_task",
     "sprint_resume",
+    "sprint_source_audit",
 }
+SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
 BUDGET_EVENT_TYPES = (
     "red_review",
     "blocked",
@@ -206,6 +208,36 @@ class SprintReader:
             result.append(sprint)
         return sorted(result, key=lambda sprint: (sprint["status"], sprint["ref"], sprint["id"]))
 
+    def export(self) -> list[dict[str, Any]]:
+        """Every sprint entity with its records, in a deterministic order.
+
+        `show` also lists the sprint's Pipeline cards; the checkpoint keeps the two
+        sets apart, so this reads the entity and its records only.
+        """
+        board_id = _sprint_board(self.client, create=False)
+        if board_id is None:
+            return []
+        raw_sprints = self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
+        if not isinstance(raw_sprints, list):
+            raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
+        result = []
+        for raw in raw_sprints:
+            if not isinstance(raw, dict):
+                continue
+            task_id = _positive_int(raw.get("id"))
+            if task_id is None:
+                raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+            comments_raw = self.client.call("getAllComments", task_id=task_id) or []
+            comments = [
+                {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
+                for comment in comments_raw if isinstance(comment, dict)
+            ]
+            sprint = self._normalize(raw, comments=comments)
+            # Freshness needs the linked cards this view deliberately does not read.
+            sprint.pop("resume_freshness", None)
+            result.append(sprint)
+        return sorted(result, key=lambda sprint: (sprint["ref"], sprint["id"]))
+
     def show(self, reference: str, *, include_cards: bool = True) -> dict[str, Any]:
         board_id = ensure_sprint_board(self.client)
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
@@ -254,6 +286,10 @@ class SprintReader:
                 "created_at": _rfc3339(raw.get("date_creation")),
                 "updated_at": _rfc3339(raw.get("date_modification")),
                 "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": SPRINT_BOARD_NAME},
+                # A restored sprint sits on a fresh Kanboard row, so its own dates
+                # describe the recovery, not the sprint. The dates it was restored
+                # from stay readable here.
+                "source": _source_audit(meta.get("sprint_source_audit")),
             },
         }
         if comments is not None:
@@ -466,6 +502,34 @@ class SprintWriter:
         self._role(role, {"po"})
         return self._write("reopened", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"}))
 
+    def restore(self, *, reference: str, values: dict[str, str], request_id: str | None = None) -> dict[str, Any]:
+        """Rewrite one sprint entity's fields verbatim from a checkpoint export.
+
+        Restore is not a sprint mutation an operator makes: it reproduces fields a
+        closed or stopped sprint already carried, so it is not refused on status the
+        way `comment` or `resume` are.
+        """
+        unknown = sorted(set(values) - SPRINT_METADATA)
+        if unknown:
+            raise TaskError("validation", "restore carries unknown sprint fields: " + ", ".join(unknown), 2)
+
+        def mutation(sprint: dict[str, Any]) -> None:
+            self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=dict(values))
+
+        return self._write(
+            "restored", "steward", "restore", reference, request_id, {"fields": sorted(values)}, mutation
+        )
+
+    def restore_comment(self, *, reference: str, body: str, occurrence: int, request_id: str | None = None) -> dict[str, Any]:
+        """Append one exported record back to the entity, verbatim."""
+        return self._write(
+            "restored_comment", "steward", "restore", reference, request_id,
+            {"body_sha256": _digest(body), "restore_occurrence": occurrence},
+            lambda sprint: self.client.call(
+                "createComment", task_id=_sprint_number(sprint), user_id=0, content=body
+            ),
+        )
+
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
@@ -557,6 +621,20 @@ def _budget(value: Any = None, thresholds: dict[str, int] | None = None) -> dict
     limits = thresholds or budget_thresholds()
     total = sum(counts.values())
     return {"total": total, "by_type": counts, "thresholds": limits, "signal_reached": total >= limits["signal"], "hard_reached": total >= limits["hard"]}
+
+
+def _source_audit(value: Any) -> dict[str, str] | None:
+    """The audit metadata a restored sprint was recreated from, when it has one."""
+    source = value
+    if isinstance(value, str):
+        try:
+            source = json.loads(value or "null")
+        except ValueError:
+            return None
+    if not isinstance(source, dict):
+        return None
+    result = {field: _text(source.get(field)) for field in SOURCE_AUDIT_FIELDS}
+    return result if any(result.values()) else None
 
 
 def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:

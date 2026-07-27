@@ -165,6 +165,7 @@ def export_board(
     *,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     command: list[str] | None = None,
+    sprint_client: Any = None,
 ) -> DataExport:
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
@@ -188,6 +189,10 @@ def export_board(
             continue
         normalized.append(normalize_board_card(card, card))
 
+    # Sprint entities live on their own board and never reach `pipeline export`, so the
+    # checkpoint reads them separately instead of inferring them from linked cards.
+    sprints = export_sprint_entities(sprint_client)
+
     raw_active_task_count = _latest_raw_active_task_count(
         board_dir,
         board_name=os.environ.get("TA_PIPELINE_BOARD", "Pipeline"),
@@ -196,6 +201,7 @@ def export_board(
         "version": 1,
         "source": "triggered_agents pipeline",
         "card_count": len(normalized),
+        "sprint_count": len(sprints),
         "raw_active_task_count": raw_active_task_count,
     }
     try:
@@ -205,11 +211,13 @@ def export_board(
     try:
         _write_json(staging / "cards.json", {"version": 1, "cards": normalized})
         _write_ndjson(staging / "cards.ndjson", normalized)
+        _write_json(staging / "sprints.json", {"version": 1, "sprints": sprints})
+        _write_ndjson(staging / "sprints.ndjson", sprints)
         _write_json(staging / "export.json", summary)
         _publish_component_entries(
             staging,
             board_dir,
-            ["cards.json", "cards.ndjson", "export.json"],
+            ["cards.json", "cards.ndjson", "sprints.json", "sprints.ndjson", "export.json"],
             "board export",
         )
     except RuntimeError:
@@ -263,6 +271,75 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
             for comment in comments
             if isinstance(comment, dict)
         ],
+    }
+
+
+def export_sprint_entities(client: Any = None) -> list[dict[str, Any]]:
+    """Read the sprint board into deterministic checkpoint records."""
+    from secretary.sprints import SprintReader
+    from secretary.tasks import KanboardClient, TaskError
+
+    try:
+        reader = SprintReader(client if client is not None else KanboardClient())
+        return [normalize_sprint_entity(sprint) for sprint in reader.export()]
+    except TaskError as exc:
+        raise RuntimeError(f"sprint export failed: {exc.message}") from None
+
+
+def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
+    """Checkpoint record for one sprint entity.
+
+    The record describes the contract, not the Kanboard row it currently sits on:
+    a restored sprint gets a new task id, and comparing it back to the export has
+    to stay possible. Budget totals and thresholds are left out; they are derived
+    from `by_type` and from installation config.
+    """
+    audit = sprint.get("audit")
+    audit = audit if isinstance(audit, dict) else {}
+    budget = sprint.get("budget")
+    budget = budget if isinstance(budget, dict) else {}
+    by_type = budget.get("by_type")
+    by_type = by_type if isinstance(by_type, dict) else {}
+    resume = sprint.get("resume")
+    comments = sprint.get("comments")
+    return {
+        "reference": str(sprint.get("ref") or ""),
+        "goal": str(sprint.get("goal") or ""),
+        "definition_of_done": str(sprint.get("definition_of_done") or ""),
+        "repositories": [str(repo) for repo in sprint.get("repositories") or []],
+        "status": str(sprint.get("status") or ""),
+        "budget": {"by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())}},
+        "current_task": str(sprint.get("current_task") or ""),
+        "resume": (
+            {str(key): str(value) for key, value in sorted(resume.items())}
+            if isinstance(resume, dict) else None
+        ),
+        "audit": _sprint_audit(audit),
+        "comments": [
+            {"ts": str(comment.get("created_at") or ""), "text": str(comment.get("body") or "")}
+            for comment in (comments if isinstance(comments, list) else [])
+            if isinstance(comment, dict)
+        ],
+    }
+
+
+def _sprint_audit(audit: dict[str, Any]) -> dict[str, str]:
+    """Prefer the audit a restored sprint came from over its recovery row."""
+    from secretary.sprints import SPRINT_BOARD_NAME
+
+    source = audit.get("source")
+    if isinstance(source, dict) and any(source.values()):
+        return {
+            "created_at": str(source.get("created_at") or ""),
+            "updated_at": str(source.get("updated_at") or ""),
+            "board": str(source.get("board") or SPRINT_BOARD_NAME),
+        }
+    backend = audit.get("backend")
+    backend = backend if isinstance(backend, dict) else {}
+    return {
+        "created_at": str(audit.get("created_at") or ""),
+        "updated_at": str(audit.get("updated_at") or ""),
+        "board": str(backend.get("board") or SPRINT_BOARD_NAME),
     }
 
 

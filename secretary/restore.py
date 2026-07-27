@@ -58,11 +58,16 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
 
 
 def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
-    """Populate an empty board from cards.json and prove parity on every retry."""
+    """Populate an empty board from the normalized export and prove parity on every retry.
+
+    Returns the number of restored Pipeline cards; the sprint entities restored
+    alongside them are counted in `restore-state.json`.
+    """
     data_dir = data_dir.expanduser().resolve()
     with file_lock(data_dir / "board" / ".restore.lock"):
         try:
             cards = _normalized_cards(data_dir)
+            sprints = _normalized_sprints(data_dir)
             client = client or KanboardClient()
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
@@ -101,10 +106,114 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed")
+            _import_sprints(data_dir, client, sprints)
         except TaskError as exc:
             raise RestoreError(exc.message) from None
-        _update_restore_state(data_dir, board="complete", board_parity="complete", board_count=len(cards))
+        _update_restore_state(
+            data_dir,
+            board="complete",
+            board_parity="complete",
+            board_count=len(cards),
+            sprints="complete",
+            sprint_parity="complete",
+            sprint_count=len(sprints),
+        )
         return len(cards)
+
+
+def _import_sprints(data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]]) -> None:
+    """Recreate the sprint entities and prove they match the export.
+
+    Cards come first: a restored sprint names its current card, and the entity is
+    only worth as much as the cards it points at.
+    """
+    if not sprints:
+        # An installation that never opened a sprint has no board to create and
+        # nothing to compare; creating an empty one would be recovery inventing state.
+        return
+    from secretary.data import normalize_sprint_entity
+    from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
+
+    ensure_sprint_board(client)
+    reader = SprintReader(client, data_dir=data_dir)
+    writer = SprintWriter(client, data_dir=data_dir)
+    # One read of the board before any write: it decides what already exists and which
+    # records a retry must not append twice. Nothing else writes to it meanwhile.
+    existing = {sprint["ref"]: sprint for sprint in reader.export()}
+    unexpected = set(existing) - {sprint["reference"] for sprint in sprints}
+    if unexpected:
+        raise RestoreError("sprint board is not empty or does not match normalized restore data")
+    for sprint in sprints:
+        reference = sprint["reference"]
+        if reference not in existing:
+            writer.create(
+                role="steward", actor="restore", goal=sprint["goal"],
+                definition_of_done=sprint["definition_of_done"],
+                repositories=list(sprint["repositories"]), reference=reference,
+                request_id=f"restore-sprint-create:{reference}",
+            )
+        writer.restore(
+            reference=reference, values=_restore_sprint_metadata(sprint),
+            request_id=f"restore-sprint:{reference}",
+        )
+        live_comments = Counter(
+            str(comment.get("body") or "")
+            for comment in existing.get(reference, {}).get("comments", [])
+        )
+        occurrences: dict[str, int] = {}
+        for index, comment in enumerate(str(entry["text"]) for entry in sprint["comments"]):
+            occurrence = occurrences.get(comment, 0)
+            occurrences[comment] = occurrence + 1
+            if live_comments[comment] > occurrence:
+                continue
+            writer.restore_comment(
+                reference=reference, body=comment, occurrence=occurrence,
+                request_id=f"restore-sprint-comment:{reference}:{index}",
+            )
+    live = {entity["reference"]: entity for entity in map(normalize_sprint_entity, reader.export())}
+    if any(_sprint_core(live.get(sprint["reference"], {})) != _sprint_core(sprint) for sprint in sprints):
+        _update_restore_state(data_dir, sprints="failed", sprint_parity="failed")
+        raise RestoreError("sprint parity check failed")
+
+
+SPRINT_PARITY_FIELDS = (
+    "reference", "goal", "definition_of_done", "repositories", "status", "budget",
+    "current_task", "resume", "audit",
+)
+
+
+def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
+    """The exported sprint contract, without what a rewrite cannot reproduce.
+
+    Kanboard stamps its own creation time on a restored record, so records compare
+    by body; the source timestamps of the entity travel in its audit metadata and
+    do compare exactly.
+    """
+    core: dict[str, Any] = {field: sprint.get(field) for field in SPRINT_PARITY_FIELDS}
+    core["comments"] = [
+        str(comment.get("text") or "")
+        for comment in sprint.get("comments", [])
+        if isinstance(comment, dict)
+    ]
+    return core
+
+
+def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
+    resume = sprint.get("resume")
+    return {
+        "sprint_goal": str(sprint["goal"]),
+        "sprint_definition_of_done": str(sprint["definition_of_done"]),
+        "sprint_repositories": json.dumps(list(sprint["repositories"]), separators=(",", ":")),
+        "sprint_status": str(sprint["status"]),
+        "sprint_budget": json.dumps(
+            {"by_type": sprint["budget"]["by_type"]}, sort_keys=True, separators=(",", ":")
+        ),
+        "sprint_current_task": str(sprint["current_task"]),
+        "sprint_resume": (
+            json.dumps(resume, sort_keys=True, separators=(",", ":")) if resume else ""
+        ),
+        "sprint_source_audit": json.dumps(sprint["audit"], sort_keys=True, separators=(",", ":")),
+    }
 
 
 DEFAULT_MEMORY_MODEL = "intfloat/multilingual-e5-large"
@@ -195,6 +304,10 @@ def restore_findings(data_dir: Path) -> list[str]:
         findings.append("board restore parity failed")
     elif state.get("board") != "complete":
         findings.append("board restore is incomplete")
+    if state.get("sprint_parity") == "failed":
+        findings.append("sprint restore parity failed")
+    elif state.get("sprints") != "complete":
+        findings.append("sprint restore is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
     if state.get("reconcile") != "complete":
@@ -243,6 +356,59 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
         ):
             raise RestoreError("normalized board export has invalid comments")
     return sorted(cards, key=lambda card: str(card["reference"]))
+
+
+def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
+    """Read the exported sprint entities.
+
+    A checkpoint written before sprints joined the export has no file at all; that
+    reads as an installation without sprint entities, not as a broken export.
+    """
+    from secretary.sprints import SPRINT_REFERENCE_PREFIX
+
+    path = data_dir / "board" / "sprints.json"
+    if not path.is_file():
+        return []
+    try:
+        sprints = json.loads(path.read_text(encoding="utf-8"))["sprints"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise RestoreError("normalized sprint export is unavailable") from None
+    if not isinstance(sprints, list) or any(not isinstance(sprint, dict) for sprint in sprints):
+        raise RestoreError("normalized sprint export is invalid")
+    refs = [sprint.get("reference") for sprint in sprints]
+    if any(
+        not isinstance(ref, str) or not ref.startswith(SPRINT_REFERENCE_PREFIX) for ref in refs
+    ) or len(set(refs)) != len(refs):
+        raise RestoreError("normalized sprint export has invalid references")
+    for sprint in sprints:
+        if not isinstance(sprint.get("goal"), str) or not sprint["goal"].strip():
+            raise RestoreError("normalized sprint export has an invalid goal")
+        if sprint.get("status") not in {"open", "closed", "stopped"}:
+            raise RestoreError("normalized sprint export has an invalid status")
+        if not isinstance(sprint.get("definition_of_done"), str) or not isinstance(
+            sprint.get("current_task"), str
+        ):
+            raise RestoreError("normalized sprint export has invalid entity text")
+        if not isinstance(sprint.get("repositories"), list) or any(
+            not isinstance(repo, str) for repo in sprint["repositories"]
+        ):
+            raise RestoreError("normalized sprint export has invalid repositories")
+        budget = sprint.get("budget")
+        if not isinstance(budget, dict) or not isinstance(budget.get("by_type"), dict) or any(
+            not isinstance(count, int) for count in budget["by_type"].values()
+        ):
+            raise RestoreError("normalized sprint export has an invalid budget")
+        if sprint.get("resume") is not None and not isinstance(sprint.get("resume"), dict):
+            raise RestoreError("normalized sprint export has an invalid resume entry")
+        if not isinstance(sprint.get("audit"), dict):
+            raise RestoreError("normalized sprint export has invalid audit metadata")
+        if not isinstance(sprint.get("comments", []), list) or any(
+            not isinstance(comment, dict) or not isinstance(comment.get("text"), str)
+            for comment in sprint.get("comments", [])
+        ):
+            raise RestoreError("normalized sprint export has invalid records")
+        sprint.setdefault("comments", [])
+    return sorted(sprints, key=lambda sprint: str(sprint["reference"]))
 
 
 def _create_restored_card(writer: TaskWriter, card: dict[str, Any]) -> None:

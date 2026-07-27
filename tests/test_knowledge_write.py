@@ -62,9 +62,10 @@ class KnowledgeRepoCase(unittest.TestCase):
         board = self.data_dir / "board"
         body = "".join(json.dumps(card, sort_keys=True) + "\n" for card in cards)
         (board / "cards.ndjson").write_text(body, encoding="utf-8")
+        (board / "sprints.ndjson").write_text("", encoding="utf-8")
         (board / "events.ndjson").write_text("", encoding="utf-8")
         (board / "export.json").write_text(
-            json.dumps({"version": 1, "card_count": len(cards)}), encoding="utf-8"
+            json.dumps({"version": 1, "card_count": len(cards), "sprint_count": 0}), encoding="utf-8"
         )
 
     def seed_runs(self, records: list[dict]) -> None:

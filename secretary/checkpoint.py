@@ -51,14 +51,14 @@ from triggered_agents.runtime.redact import redact
 
 # Canonical checkpoint entries per component. `events.ndjson` is optional: an
 # instance that has never appended a task event has no audit log yet.
-BOARD_ENTRIES = ("cards.ndjson", "events.ndjson", "export.json")
-BOARD_REQUIRED = ("cards.ndjson", "export.json")
+BOARD_ENTRIES = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json")
+BOARD_REQUIRED = ("cards.ndjson", "sprints.ndjson", "export.json")
 RUNS_ENTRIES = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 RUNS_REQUIRED = RUNS_ENTRIES
 
 # Derived neighbours of the canon. They are never copied into `state/`; the
 # ignore files keep them out if anything else drops them there.
-BOARD_IGNORE = ("cards.json", "kanboard-raw-*/", "pending-audit/", ".audit.lock")
+BOARD_IGNORE = ("cards.json", "sprints.json", "kanboard-raw-*/", "pending-audit/", ".audit.lock")
 RUNS_IGNORE = ("cards.json",)
 
 STAGED_PATHSPEC = BOARD_RUNS_PATHSPEC
@@ -614,6 +614,13 @@ def _validate_board(staging: Path) -> None:
     if declared != actual:
         raise CheckpointBlocked(
             f"board export count mismatch: export.json={declared} cards.ndjson={actual}"
+        )
+    declared_sprints = _int_field(summary, "sprint_count", "board export.json")
+    actual_sprints = _count_lines(staging / "sprints.ndjson", "board sprints.ndjson")
+    if declared_sprints != actual_sprints:
+        raise CheckpointBlocked(
+            f"board sprint count mismatch: export.json={declared_sprints} "
+            f"sprints.ndjson={actual_sprints}"
         )
 
 

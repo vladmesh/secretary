@@ -32,7 +32,8 @@ recovery checkpoint. Между коммитами live-состояние оп�
 Канон, нормализованный минимум для восстановления работы:
 
 - instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`;
-- board export: `state/board/cards.ndjson`, `state/board/events.ndjson`, `state/board/export.json`;
+- board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`, `state/board/events.ndjson`,
+  `state/board/export.json`;
 - run/audit: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
 - memory facts: `state/memory/facts/**`;
 - knowledge documents: `state/knowledge/**` (свободный markdown, см.
@@ -51,8 +52,15 @@ recovery checkpoint. Между коммитами live-состояние оп�
   upgrade` пере-материализуют их идемпотентно на провижининге и recovery (match Orca-автоматизации
   по `name`, edit in place, id/юнит стабильны), поэтому в checkpoint они не входят.
 
-Board export держим только в `cards.ndjson` (построчный diff). Дубль `cards.json` в checkpoint
-не входит.
+Board export держим только в `cards.ndjson` и `sprints.ndjson` (построчный diff). Дубли
+`cards.json` и `sprints.json` в checkpoint не входят.
+
+Карточки Pipeline и сущности спринтов лежат в checkpoint отдельными наборами: спринты живут на
+своей доске и в `pipeline export` не попадают, поэтому writer читает их своим проходом, а не
+выводит из карточек с `sprint_ref`. Запись спринта несёт ref, цель, Definition of Done,
+репозитории, статус, бюджет по типам событий, текущую карточку, resume, все записи к сущности и
+audit-метаданные источника. Производные значения (итог бюджета, пороги установки, свежесть resume)
+в запись не входят: они пересчитываются из неё и конфигурации.
 
 ## Layout
 
@@ -60,7 +68,7 @@ Board export держим только в `cards.ndjson` (построчный d
 <приватный репо>/
   instance.yaml, persona/, projects/, adapters/, heads/, policies/   config, коммитит оператор
   state/                                                             state, коммитит авто-писатель
-    board/   cards.ndjson, events.ndjson, export.json
+    board/   cards.ndjson, sprints.ndjson, events.ndjson, export.json
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
     knowledge/**   брейнштормы, журналы решений, разборы инцидентов
@@ -119,8 +127,8 @@ checkpoint, пишет причину в `status`, ретраит на след�
 попадает.
 
 - task audit сведён, нет pending board-мутации;
-- writer регенерирует `cards.ndjson` из живой доски; счётчики в `export.json` совпадают с числом
-  строк;
+- writer регенерирует `cards.ndjson` и `sprints.ndjson` из живых досок; оба счётчика в
+  `export.json` совпадают с числом строк;
 - memory staging (`memory/.staging`) пуст;
 - секрет-скан `state/` чист. `state/` уходит на remote, это единственное место возможной утечки
   секрета (вставленный токен в карточке или логе). Опора на `redact.py`. Memory- и
@@ -220,14 +228,25 @@ install и не печатает значения и не добавляет ф�
 2. Проверяет remote/checkout, credentials, доступность Kanboard и установленный Orca. Если
    `runtime.env` не появился на шаге 1 и хранилища нет вовсе, это по-прежнему ручной ввод оператора.
 3. Материализует `state/board` и `state/runs` из checkpoint в новый local data plane. Из
-   `cards.ndjson` строится производный `cards.json`; счётчики проверяются до live writes.
+   `cards.ndjson` и `sprints.ndjson` строятся производные `cards.json` и `sprints.json`; счётчики
+   проверяются до live writes.
 4. Идемпотентно импортирует доску и пересобирает `memory/export.ndjson` и `memory/index.sqlite` из
-   `state/memory/facts`.
+   `state/memory/facts`. Импорт доски восстанавливает и сущности спринтов: если экспорт их несёт,
+   `restore-board` создаёт board `Secretary sprints` и возвращает каждую сущность целиком — цель,
+   Definition of Done, репозитории, статус, бюджет, текущую карточку, resume, записи и
+   audit-метаданные источника. Заводить спринт заново после recovery не нужно. Восстановленная
+   сущность лежит на новой строке Kanboard, поэтому её собственные даты описывают восстановление, а
+   даты источника читаются в `audit.source`.
 5. Клонирует отсутствующие project checkouts по `remote` из registry и создаёт
    не-секретные `AGENTS.md` и `config.toml` в managed CODEX_HOME. OAuth остаётся ручным.
 6. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
    регистрирует Orca resources и применяет automations.
 7. Проверяет restore status. Головы подключаются после bootstrap отдельно (Milestone 3).
+
+Parity сверяется отдельно для карточек и для спринтов, и обе сверки fail-closed: расхождение
+оставляет recovery незавершённым (`board restore parity failed` или `sprint restore parity failed`
+в `doctor`), а не молча зачитывает восстановление успешным. Живой backend со сущностью спринта,
+которой нет в экспорте, restore не перезаписывает, а останавливается.
 
 Повторный `secretary recover` безопасен: checkout fast-forward-only, board restore сверяет parity,
 memory index строится заново, materializer на втором проходе не имеет изменений. Терминалы,

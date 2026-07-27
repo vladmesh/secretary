@@ -43,6 +43,20 @@ CARD = {
 }
 
 
+SPRINT = {
+    "reference": "sprint:41",
+    "goal": "Ship sprint entities into the checkpoint",
+    "definition_of_done": "restore rebuilds the entity",
+    "repositories": ["secretary"],
+    "status": "closed",
+    "budget": {"by_type": {"red_ci": 1}},
+    "current_task": "secretary-637",
+    "resume": None,
+    "audit": {"created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-02T00:00:00Z", "board": "Secretary sprints"},
+    "comments": [],
+}
+
+
 class CheckpointWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -64,15 +78,34 @@ class CheckpointWriterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
-    def seed_board(self, cards: list[dict], *, card_count: int | None = None) -> None:
+    def seed_board(
+        self,
+        cards: list[dict],
+        *,
+        card_count: int | None = None,
+        sprints: list[dict] | None = None,
+        sprint_count: int | None = None,
+    ) -> None:
         board = self.data_dir / "board"
         board.mkdir(parents=True, exist_ok=True)
+        sprints = sprints if sprints is not None else []
         body = "".join(json.dumps(card, sort_keys=True) + "\n" for card in cards)
         (board / "cards.ndjson").write_text(body, encoding="utf-8")
+        (board / "sprints.ndjson").write_text(
+            "".join(json.dumps(sprint, sort_keys=True) + "\n" for sprint in sprints),
+            encoding="utf-8",
+        )
         (board / "events.ndjson").write_text("", encoding="utf-8")
         (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
+        (board / "sprints.json").write_text(json.dumps({"sprints": sprints}), encoding="utf-8")
         (board / "export.json").write_text(
-            json.dumps({"version": 1, "card_count": card_count if card_count is not None else len(cards)}),
+            json.dumps(
+                {
+                    "version": 1,
+                    "card_count": card_count if card_count is not None else len(cards),
+                    "sprint_count": sprint_count if sprint_count is not None else len(sprints),
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -151,9 +184,42 @@ class CheckpointWriterTests(unittest.TestCase):
 
         files = self.head_files()
         self.assertNotIn("state/board/cards.json", files)
+        self.assertNotIn("state/board/sprints.json", files)
         self.assertIn("state/board/.gitignore", files)
         ignore = (self.instance_dir / "state" / "board" / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("cards.json", ignore.splitlines())
+        self.assertIn("sprints.json", ignore.splitlines())
+
+    def test_sprint_entities_are_committed_next_to_the_cards(self):
+        self.seed_board([CARD], sprints=[SPRINT])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+        self.assertIn("state/board/sprints.ndjson", self.head_files())
+        committed = git(self.instance_dir, "show", "HEAD:state/board/sprints.ndjson")
+        self.assertEqual(
+            [json.loads(line)["reference"] for line in committed.splitlines() if line.strip()],
+            ["sprint:41"],
+        )
+
+    def test_sprint_count_mismatch_blocks_the_commit(self):
+        self.seed_board([CARD], sprints=[SPRINT], sprint_count=4)
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("board sprint count mismatch", result.reason)
+        self.assertNotIn("state/board/sprints.ndjson", self.head_files())
+
+    def test_board_export_without_sprints_blocks_the_commit(self):
+        self.seed_board([CARD], sprints=[SPRINT])
+        (self.data_dir / "board" / "sprints.ndjson").unlink()
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("missing sprints.ndjson", result.reason)
 
     def test_routing_attempts_reach_the_committed_checkpoint(self):
         """secretary-716: attempt telemetry is journal-only, so a restore that replays the

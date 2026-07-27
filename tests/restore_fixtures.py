@@ -10,6 +10,7 @@ from secretary import state_repo
 from secretary._fsutil import sha256_file
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
+from tests.test_sprints import SprintKanboard
 from tests.test_tasks import WriteKanboard
 
 
@@ -31,6 +32,41 @@ class _EmptyWriteKanboard(WriteKanboard):
                     "description": params.get("description", ""), "column_id": params["column_id"],
                     "position": 1, "swimlane_id": params.get("swimlane_id") or 0,
                     "date_creation": "1720000200", "date_modification": "1720000200",
+                }
+            )
+            self.metadata[task_id] = {}
+            self.comments[task_id] = []
+            return task_id
+        return super().call(method, **params)
+
+
+class _EmptyBoardsKanboard(SprintKanboard):
+    """A disposable backend with both boards and no rows on either.
+
+    `SprintKanboard` already models the Pipeline and sprint boards side by side;
+    a restore target differs only in starting empty, and in stamping its own
+    creation dates so a parity check cannot pass by inheriting the source's.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks = []
+        self.metadata = {}
+        self.comments = {}
+        self.next_task_id = 100
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "createTask":
+            self.calls.append((method, params))
+            task_id = self.next_task_id
+            self.next_task_id += 1
+            self.tasks.append(
+                {
+                    "id": task_id, "project_id": int(params["project_id"]), "reference": "",
+                    "title": params["title"], "description": params.get("description", ""),
+                    "column_id": params["column_id"], "position": len(self.tasks) + 1,
+                    "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1780000000", "date_modification": "1780000000",
                 }
             )
             self.metadata[task_id] = {}
