@@ -35,7 +35,8 @@ tick at the end of it. State that cannot be written means no head is launched at
 data plane costs the sprint a tick rather than putting a second head on it; a tick that dies between
 the host call and its own end leaves the intent behind, and the next tick resolves it from the pid
 file: a live pid is adopted as the head of that sprint (its handle is gone, so the stop goes by
-workspace), and anything else is relaunched after the workspace's terminals are closed.
+workspace), a pid that is not there yet waits out the same grace window every fresh head gets, and
+a dead one is relaunched after the workspace's terminals are closed.
 
 Liveness is the same pid heartbeat the worker/reviewer watchdog uses (`head_process_status` over
 `pid_file_path`). A pid file that does not exist yet is not evidence of death: a head that has just
@@ -421,13 +422,31 @@ def _adopt_launch_intent(
     """Resolve a launch whose tick died before it could record the outcome.
 
     A pid that is readable and alive is this sprint's head: it is adopted with the attempt number
-    the intent reserved, and the event staged before the host call is committed now. Anything else
-    (no pid file, a dead pid) is not evidence of a head, so None is returned and the caller
-    relaunches — closing whatever the intent may have left in the workspace first.
+    the intent reserved, and the event staged before the host call is committed now.
+
+    A head that has not written its pid yet is not a dead one. Inside the grace window the intent
+    is simply left as it is: no stop, no replacement, and the next tick asks again. Killing a head
+    that is still starting would cut the sprint's one continuous session for no reason.
+
+    Anything else (a pid file still missing past the grace window, a dead pid) is not evidence of a
+    head, so None is returned and the caller relaunches, closing whatever the intent may have left
+    in the workspace first.
     """
     liveness = observer_alive(record)
-    if not (liveness["pid_known"] and liveness["alive"]):
+    if not liveness["alive"]:
         return None
+    if not liveness["pid_known"]:
+        # Left exactly as it is, intent and all: the next tick resolves it once the grace window
+        # has either produced a pid or run out.
+        return {
+            "status": "skipped",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-launch-pending",
+            "head": record.head,
+            "reason": "a launch intent is still within its grace window and has written no pid yet",
+            "launches": record.launches,
+        }
     attempt = record.pending_launch or record.launches or 1
     now = time.time()
     record.launches = max(record.launches, attempt)

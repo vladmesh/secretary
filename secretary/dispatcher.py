@@ -575,14 +575,18 @@ class CommandHostRuntime:
         tick that opened it. The observer workspace belongs to that one sprint, so its terminals
         are that head and closing them is the same stop by another name.
 
-        Raises HostError when Orca refuses to close a pane: the record is the only pointer to that
-        head, so the lifecycle keeps it and retries instead of losing a live terminal.
+        Raises HostError when Orca refuses to close a pane, and equally when it refuses to list
+        the workspace's panes at all: the record is the only pointer to that head, so an inventory
+        that could not be read must not pass for an empty one. The lifecycle then keeps the record
+        and retries, instead of dropping it and putting a second head on the sprint later.
         """
         if self.mode == "noop":
             return
         handles = [record.handle] if record.handle else [
             str(terminal.get("handle") or "")
-            for terminal in self._worktree_terminals(str(getattr(record, "workspace", "") or ""))
+            for terminal in self._observer_terminals(
+                str(getattr(record, "workspace", "") or "")
+            )
         ]
         for handle in [handle for handle in handles if handle]:
             try:
@@ -1128,6 +1132,26 @@ class CommandHostRuntime:
             if terminal.get("handle") == handle:
                 return str(terminal.get("leafId") or "")
         return ""
+
+    def _observer_terminals(self, workspace: str) -> list[dict[str, Any]]:
+        """Panes of an observer workspace, or HostError when Orca will not say.
+
+        `_worktree_terminals` degrades an unreadable inventory into `[]`, which is right where the
+        answer only picks a pane. Here it decides whether a head is gone, and "Orca is down" must
+        not read as "nothing is running": that is how a live head loses its record.
+        """
+        if self.mode == "noop" or not workspace:
+            return []
+        data = self._run_json([
+            "orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"
+        ])
+        payload = data.get("result") if isinstance(data.get("result"), dict) else data
+        terminals = payload.get("terminals") if isinstance(payload, dict) else None
+        if terminals is None:
+            return []
+        if not isinstance(terminals, list):
+            raise HostError(f"observer terminal list for {workspace} is unreadable")
+        return [terminal for terminal in terminals if isinstance(terminal, dict)]
 
     def _worktree_terminals(self, workspace: str) -> list[dict[str, Any]]:
         """Terminal inventory for a worktree, or [] when it cannot be read. Callers use it to pick

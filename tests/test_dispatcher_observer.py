@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,11 +23,13 @@ from secretary.dispatcher_observer import (
     ObserverRecord,
     load_observers,
     observer_pid_file,
+    put_observers,
     observer_request_id,
     render_observer_prompt,
     stop_observer_head,
 )
 from secretary.dispatcher_types import HostError
+from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import ROLE_ALLOWLIST, ROLE_REQUIRED, runtime_env
@@ -95,6 +98,14 @@ class ObserverLifecycleTests(unittest.TestCase):
 
     def actions(self, result: dict, step: str = "observer-reconcile") -> list[dict]:
         return [action for action in result["actions"] if action.get("step") == step]
+
+    def expire_launch_grace(self, reference: str = "sprint:1") -> None:
+        """Age a launch intent past the window in which a missing pid still counts as alive."""
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers[reference].launched_at = time.time() - initial_output_stall_seconds() - 1
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
 
     def kill_observer(self, reference: str = "sprint:1") -> None:
         record = self.observers()[reference]
@@ -645,6 +656,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         # The event of that attempt never made it out of pending, so nothing was observed to launch.
         self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_LAUNCHED])
 
+        self.expire_launch_grace()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -652,6 +664,52 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.observers()["sprint:1"].launches, 1)
         self.assertEqual(self.audit.pending_events(), [])
         self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+
+    def test_an_intent_without_a_pid_yet_waits_out_its_grace_window(self) -> None:
+        """A head that has been launched but has not written its pid is not a dead head.
+
+        Its own grace window says so, so the tick leaves the intent alone: no stop, no second
+        prepare_observer. Cutting a head that is still coming up would break the one continuous
+        session the sprint is supposed to have.
+        """
+        self.open_sprint()
+        with mock.patch.object(self.host, "prepare_observer", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.runtime.production_tick()
+        self.host.calls.clear()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-pending"]
+        )
+        self.assertNotIn("prepare_observer", self.host.calls)
+        self.assertNotIn("stop_observer", self.host.calls)
+        intent = self.observers()["sprint:1"]
+        self.assertEqual((intent.state, intent.pending_launch, intent.launches), ("launching", 1, 0))
+        self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_LAUNCHED])
+        self.assertEqual(self.audit.events("sprint:1"), [])
+
+    def test_a_waiting_intent_whose_head_appears_is_adopted(self) -> None:
+        self.open_sprint()
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+        pid_file = Path(self.observers()["sprint:1"].pid_file)
+        written = pid_file.read_text(encoding="utf-8")
+        pid_file.unlink()
+
+        waiting = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(waiting)], ["observer-launch-pending"]
+        )
+
+        pid_file.write_text(written, encoding="utf-8")
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-adopted"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_a_refused_audit_append_still_drops_the_stopped_record(self) -> None:
         self.open_sprint()
@@ -1118,6 +1176,40 @@ class RealHostStopObserverTests(unittest.TestCase):
             self.host.stop_observer(adopted)
 
         self.assertEqual([args[2] for args in self.calls], ["list"])
+
+    def test_an_unreadable_terminal_list_is_not_an_empty_one(self) -> None:
+        """Orca down while the handle is gone: the stop must fail, not report success.
+
+        Reporting success here drops the record of a head that may well still be running, and the
+        next time the sprint opens the tick puts a second observer beside it.
+        """
+        adopted = ObserverRecord(
+            sprint="sprint:1", head="observer", workspace="/ws/observers/sprint-1",
+            head_possible=True,
+        )
+        runtime = mock.Mock()
+        runtime.host = self.host
+
+        def run_json(args: list[str]) -> dict[str, object]:
+            self.calls.append(args)
+            raise HostError("orca terminal list failed: daemon is unreachable")
+
+        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
+            self.assertFalse(stop_observer_head(runtime, adopted))
+
+        self.assertTrue(adopted.head_possible)
+        self.assertEqual(adopted.workspace, "/ws/observers/sprint-1")
+
+    def test_a_terminal_list_that_is_not_a_list_is_not_an_empty_one(self) -> None:
+        adopted = ObserverRecord(
+            sprint="sprint:1", head="observer", workspace="/ws/observers/sprint-1",
+            head_possible=True,
+        )
+        with mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: {"terminals": "nope"}
+        ):
+            with self.assertRaises(HostError):
+                self.host.stop_observer(adopted)
 
     def test_the_pid_file_is_named_before_the_head_exists(self) -> None:
         self.assertEqual(
