@@ -97,12 +97,23 @@ python3 -m triggered_agents steward scan --json
 сигналов, каждый — почему тебя вообще подняли:
 
 - `new_blocked` — карточки, впервые попавшие в Blocked с прошлого прогона.
-- `log` — строки `runs.jsonl` пайплайна (`state/pipeline/runs.jsonl`) с `level: warn`,
-  `result: error` или `event: head-health` (флип ресурса) с прошлого watermark.
+- `pipeline_ticks` — нездоровые тики production dispatcher с прошлого watermark, из его
+  собственной телеметрии (`tick_telemetry` в `<data_dir>/dispatcher/production-state.json`;
+  `data_dir` резолвится из instance, как у самого диспетчера).
+  В каждом хите — время тика, статус, шаг и коды ошибок. Тик, упавший с исключением, попадает
+  сюда как `status: failed`. Тик, у которого не упало ничего, но действие отчиталось
+  `degraded`/`failed` (незакрытый запуск, недоступный рантайм), тоже нездоров — что именно не
+  доделалось, лежит в `degradations` хита. Отдельные события того же вида:
+  `production-state-missing`/`tick-telemetry-missing` (телеметрию не прочитать — это не «всё
+  тихо», а слепота), `pipeline-telemetry-rotated` (нездоровых тиков было больше, чем сохранило
+  кольцо) и `pipeline-telemetry-reset` (state-файл заменили, история счётчика началась заново).
 - `stale` — карточки, застрявшие в одной колонке (Ready/In progress/Validate/Blocked) дольше
   `TA_STEWARD_STALE_HOURS` (по умолчанию 24ч).
 - `resource_flip` — health-статус ресурса (`claude-sub`, `openrouter`, см. heads.toml) изменился
   с прошлого прогона — как в красное, так и восстановление в зелёное стоит разобрать постфактум.
+  Источник тот же живой data plane, что у `pipeline_ticks`: кэш вердиктов, который production
+  dispatcher пишет перед запуском головы (`<data_dir>/dispatcher/resource_health.json`). Свои
+  probe стюард не гоняет.
 - `new_orphan_workspaces` — воркспейс на диске (`~/orca/workspaces/<project>/*`), которому не
   соответствует ни одна активная карточка проекта ни в одной колонке (сверка по id-префиксу имени
   каталога с доской, не с `state/pipeline/cards.json` — Blocked-карточка намеренно оставляет
@@ -142,10 +153,12 @@ watermark: сигнальный `advance` его не трогает, и нао�
 Не ограничивайся пятью сигналами `signals.py` — целиком, за окно с прошлого обхода:
 
 - **Слепота самих сигналов.** Прогони `python3 -m triggered_agents steward scan --json` и сверь с
-  тем, что сигналы ДОЛЖНЫ были поймать за это окно, глядя в сырые источники напрямую: вырос ли
-  `runs.jsonl` пайплайна вообще, нет ли в нём warn/error, которые `log`-сигнал почему-то не
-  показал, свеж ли `resource_health.json`. Тишина сигнала не значит «всё чисто» — она может
-  значить «смотрит не туда» (класс дефекта 253).
+  тем, что сигналы ДОЛЖНЫ были поймать за это окно, глядя в сырые источники напрямую: что в
+  `tick_telemetry` внутри `<data_dir>/dispatcher/production-state.json` (растёт ли `tick_seq`,
+  свеж ли `last_healthy_at`, что в `unhealthy`), свеж ли `<data_dir>/dispatcher/resource_health.json`.
+  Полезен и
+  `python3 -m triggered_agents health` — он читает те же живые источники. Тишина сигнала не
+  значит «всё чисто» — она может значить «смотрит не туда» (класс дефекта 253).
 - **Доска целиком**, не только Blocked: карточки без движения, разночтения между
   `state/pipeline/cards.json` и Kanboard, дубли, колонки, в которые никто не заглядывал.
 - **Воркспейсы на диске** во всех проектах — то же самое, что даёт `new_orphan_workspaces`, но без
@@ -201,9 +214,9 @@ python3 -m triggered_agents steward deep-sweep-advance
 Для каждого сигнала — не только формальный факт, а первопричина. Не ограничивайся тем, что видно
 в `scan`: если сигнал — новый Blocked, читай карточку целиком (`pipeline show --ref <ref>`),
 транскрипт воркера/ревьюера, `state/pipeline/cards.json`, при нужде — сам код, который довёл до
-этого состояния. Если сигнал — warn/error в логе пайплайна, смотри контекст вокруг записи (что
-было до и после в `runs.jsonl`), при нужде — сам дефект в коде дispatcher/worker/validate. Если
-сигнал — застрявшая карточка, пойми, ждёт ли она легитимно (человека, внешний CI) или это баг
+этого состояния. Если сигнал — нездоровый тик диспетчера, смотри контекст вокруг него
+(`journalctl -u secretary-dispatcher-production`, соседние записи в `tick_telemetry`), при нужде —
+сам дефект в коде дispatcher/worker/validate. Если сигнал — застрявшая карточка, пойми, ждёт ли она легитимно (человека, внешний CI) или это баг
 (watchdog не сработал, тик падает молча). Если сигнал — воркспейс-сирота, реши, можно ли его
 безопасно удалить (`rm -rf` строго внутри `~/orca/workspaces/<project>/`, никогда не трогай
 воркстри самих агентов рантайма `~/orca/workspaces/secretary/{curator,pipeline,retro,steward}` —

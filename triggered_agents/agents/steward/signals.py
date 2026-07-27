@@ -2,11 +2,10 @@
 read before anything judges.
 
 Five signal kinds (2026-07-04 design grill, memory id 83 — "стюард присмотр пайплайн дизайн"):
-new Blocked card, warn/error/head-health-flip line in the pipeline's own runs.jsonl since the
-steward's watermark, a card sitting in an active column past STALE_HOURS, a resource health
-flip, a worker/reviewer workspace on disk with no in-flight card record. Any one is enough for
-precheck to spawn the head; finding none costs nothing (a few Kanboard reads and a couple of
-local file stats, no LLM).
+new Blocked card, an unhealthy production dispatcher tick since the steward's watermark, a card
+sitting in an active column past STALE_HOURS, a resource health flip, a worker/reviewer workspace
+on disk with no in-flight card record. Any one is enough for precheck to spawn the head; finding
+none costs nothing (a few Kanboard reads and a couple of local file stats, no LLM).
 
 Every signal dedupes against a persisted "already notified" watermark (state/steward/
 watermark.json), the same shape as curator/retro's watermark but keyed by anomaly kind rather
@@ -25,9 +24,8 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
-from ...runtime import shared_state
+from ...runtime import production_telemetry, shared_state
 from ...runtime.state import AgentState
 from ..pipeline import naming as pipeline_naming
 from ..pipeline import ops as pipeline_ops
@@ -43,33 +41,22 @@ STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
 WORKSPACES_ROOT = shared_state.WORKSPACES_ROOT
 _AGENTS_PROJECT = shared_state.AGENTS_PROJECT
 
-# The pipeline dispatcher's own runs.jsonl/resource_health.json used to be reached through
-# AgentState("pipeline") — but that resolves STATE_ROOT (runtime/state.py) from the checkout
-# running the CURRENT process, and the steward's systemd unit runs entirely inside the steward's
-# OWN worktree, a different checkout from the dispatcher's. So that path pointed at a file that
-# can never exist there: `_log_signals` on a missing file returned no hits, indistinguishable
-# from "checked, nothing new" — the steward was permanently blind to the dispatcher's log
-# (triggered-agents-253). The dispatcher's real state lives in ITS OWN named worktree, a sibling
-# of the steward's under the same workspaces root — cross that boundary explicitly the same way
-# `_orphan_signals` already does for other agents' worktrees via WORKSPACES_ROOT, never through
-# AgentState/STATE_ROOT (those are per-process by design, not meant to reach another agent).
-# TA_PIPELINE_STATE_DIR overrides the whole thing for tests or a host where the layout diverges.
-# The worktree name "pipeline" is fixed by automation.toml and survives redeploy: `secretary
-# upgrade` fast-forwards each worktree's CODE to origin/main on every run but never touches the
-# gitignored state/ dir underneath it.
-def resolve_pipeline_state_dir() -> Path:
-    """Recomputed on every call (not baked into a constant at import time) so tests can patch
-    WORKSPACES_ROOT and see this follow, the same way _orphan_signals already does."""
-    return shared_state.resolve_pipeline_state_dir(WORKSPACES_ROOT)
-
-
-PIPELINE_RUNS = resolve_pipeline_state_dir() / "runs.jsonl"
-PIPELINE_RESOURCE_HEALTH = resolve_pipeline_state_dir() / "resource_health.json"
+# Both pipeline signals — unhealthy ticks and resource flips — are reached across a process
+# boundary through the production dispatcher's own data plane (runtime/production_telemetry.py),
+# never through AgentState("pipeline"): that resolves STATE_ROOT (runtime/state.py) per process,
+# and the steward's systemd unit runs in its own worktree with its own environment. A path that
+# can never exist there returns no hits, indistinguishable from "checked, nothing new" — the
+# blindness of triggered-agents-253, which secretary-833 found again on a worktree copy of
+# resource_health.json that the production dispatcher does not write.
 
 
 def _empty_watermark() -> dict:
     return {
-        "pipeline_log_lines": 0,
+        # None, not 0: no baseline has been taken yet. See _pipeline_tick_signals.
+        "pipeline_unhealthy_total": None,
+        # Which telemetry history the counter above was read from — "" while the dispatcher has
+        # not stamped one. See _pipeline_tick_signals.
+        "pipeline_telemetry_generation": "",
         "notified_blocked": [],
         "notified_stale": {},
         "notified_orphans": [],
@@ -83,45 +70,111 @@ def load_watermark() -> dict:
     return mark
 
 
-def _log_signals(mark: dict) -> tuple[list[dict], int]:
-    """(new warn/error/head-health lines past the watermark's cursor, new total line count).
+def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], int | None, str]:
+    """(unhealthy production dispatcher ticks since the watermark, new counter, its generation).
 
-    A missing PIPELINE_RUNS is NOT "nothing to report" — silently returning `[]` here would be
-    indistinguishable from the steady state "checked, no new lines since last time", which is
-    exactly the blindness this module exists to catch (a wrong path, the dispatcher's worktree
-    never having ticked, a layout change on redeploy). Report it as a synthetic warn hit, so
-    has_signal()/precheck wake the head, AND log it straight into the steward's OWN runs.jsonl so
-    the gap is durably visible there too, not just inside one scan's in-memory batch
-    (2026-07-04, triggered-agents-253)."""
-    if not PIPELINE_RUNS.is_file():
-        STATE.log_run("pipeline-log-missing", level="warn", path=str(PIPELINE_RUNS))
-        return ([{"event": "pipeline-log-missing", "level": "warn", "path": str(PIPELINE_RUNS)}],
-                mark["pipeline_log_lines"])
-    lines = PIPELINE_RUNS.read_text(encoding="utf-8").splitlines()
-    start = mark["pipeline_log_lines"]
-    if start > len(lines):
-        # The file SHRANK below the cursor: runs.jsonl was truncated/replaced (manual cleanup,
-        # rotation, a recreated worktree). The old `min(cursor, len)` clamp skipped the whole new
-        # file and the next advance() then baked that gap in permanently — the 2026-07-09 scan
-        # missed a head-health flip this way (only resource_flip saved the wake-up). A shrunken
-        # file is a NEW file: rescan it from line 0 and surface the reset as a warn hit so the
-        # skill knows the log's history restarted (same visibility reasoning as
-        # pipeline-log-missing above).
-        STATE.log_run("pipeline-log-reset", level="warn", path=str(PIPELINE_RUNS),
-                      cursor=start, lines=len(lines))
-        hits = [{"event": "pipeline-log-reset", "level": "warn", "path": str(PIPELINE_RUNS),
-                 "cursor": start, "lines": len(lines)}]
-        start = 0
-    else:
-        hits = []
-    for line in lines[start:]:
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("level") == "warn" or rec.get("result") == "error" or rec.get("event") == "head-health":
-            hits.append(rec)
-    return hits, len(lines)
+    The source is the production dispatcher's durable tick telemetry — the record written by the
+    timer that actually moves cards on this host (runtime/production_telemetry.py, secretary-833).
+    That is where a failing production tick leaves its trace; a log written by anything else is a
+    file whose silence cannot be told apart from a healthy pipeline (triggered-agents-253).
+
+    Dedup is keyed on `unhealthy_total`, a counter the dispatcher only ever bumps on an unhealthy
+    tick. A healthy tick in between therefore cannot consume an unhealthy one the steward has not
+    looked at yet, which a "have I seen the newest record" cursor would do every minute.
+
+    A first scan with no counter in the watermark takes the current one as a BASELINE and reports
+    nothing from the ring — same rule `_resource_signals` already applies to a resource it has no
+    prior status for. Otherwise a cold start (or the first run after this record was introduced)
+    would replay every retained failure as brand new.
+
+    The counter is only meaningful within one telemetry history, so the watermark stores the
+    `generation` it was read from and rescans the whole ring the moment that changes. A restored
+    or rebuilt state file starts counting again and can land on the number the watermark already
+    holds, and a counter comparison alone reads that as "nothing new" and drops every failure of
+    the new history (secretary-833 review, round 4). A backwards counter is still a reset on its
+    own: a host whose dispatcher predates the generation stamp writes none, and the two states
+    that leaves — neither side stamped, or only one — are "cannot tell", not "changed", or the
+    steward would rescan the ring on every scan.
+
+    Telemetry that cannot be read is NOT "nothing to report": that silence is indistinguishable
+    from a healthy pipeline and is exactly the blindness this module exists to catch. It is
+    reported as a synthetic warn hit AND logged into the steward's own runs.jsonl, so the gap is
+    durably visible outside one scan's in-memory batch (2026-07-04, triggered-agents-253).
+    """
+    telemetry = production_telemetry.read()
+    if not telemetry.available:
+        STATE.log_run(telemetry.unavailable, level="warn", path=str(telemetry.path))
+        return ([{"event": telemetry.unavailable, "level": "warn", "path": str(telemetry.path)}],
+                mark["pipeline_unhealthy_total"], mark["pipeline_telemetry_generation"])
+    generation = telemetry.generation
+    seen = mark["pipeline_unhealthy_total"]
+    if seen is None:
+        return [], telemetry.unhealthy_total, generation
+    seen_generation = str(mark["pipeline_telemetry_generation"] or "")
+    replaced = bool(generation and seen_generation and generation != seen_generation)
+    hits: list[dict] = []
+    if replaced or telemetry.unhealthy_total < seen:
+        # The history restarted: the state file was replaced (a restore, a rebuilt installation, a
+        # hand edit), either under a new generation or with a counter that went BACKWARDS. Rescan
+        # the whole retained ring and surface the reset itself — the same reasoning the old
+        # log-reset branch used.
+        STATE.log_run("pipeline-telemetry-reset", level="warn", path=str(telemetry.path),
+                      cursor=seen, unhealthy_total=telemetry.unhealthy_total,
+                      generation=generation, seen_generation=seen_generation)
+        hits.append({"event": "pipeline-telemetry-reset", "level": "warn",
+                     "path": str(telemetry.path), "cursor": seen,
+                     "unhealthy_total": telemetry.unhealthy_total,
+                     "generation": generation, "seen_generation": seen_generation})
+        seen = 0
+    new_count = telemetry.unhealthy_total - seen
+    retained = list(telemetry.unhealthy)[-new_count:] if new_count > 0 else []
+    hits += [{"event": "pipeline-tick-unhealthy", "level": "warn", "ts": entry.get("at", ""),
+              **entry} for entry in retained]
+    dropped = new_count - len(retained)
+    if dropped > 0:
+        # More unhealthy ticks happened than the ring keeps. The steward must hear that the count
+        # is bigger than the batch it just got, or a storm of failures would read as the handful
+        # that happened to survive rotation.
+        STATE.log_run("pipeline-telemetry-rotated", level="warn", dropped=dropped,
+                      unhealthy_total=telemetry.unhealthy_total)
+        hits.insert(0, {"event": "pipeline-telemetry-rotated", "level": "warn",
+                        "dropped": dropped, "unhealthy_total": telemetry.unhealthy_total})
+    return hits, telemetry.unhealthy_total, generation
+
+
+def ensure_pipeline_baseline(batch: dict) -> None:
+    """Persist the pipeline counter baseline a scan just took, before anything else can consume it.
+
+    The baseline itself is described in _pipeline_tick_signals: a scan with no counter in the
+    watermark reports nothing and takes the current one instead. That value only ever reached the
+    watermark through `advance`, which runs after a steward head was actually dispatched — and the
+    normal hour has no signal at all, so precheck exits PRECHECK_SKIP and writes nothing. The next
+    unhealthy tick then meets an unset counter again, is read as a first-ever scan again, and is
+    suppressed again: every production failure stays invisible forever, which is the opposite of
+    what a baseline is for (secretary-833 review, round 2).
+
+    So the baseline is written the moment it is taken, by both entry points that take one. Only
+    that one field is touched, and only while it is still unset — the per-kind dedup state stays
+    on the two-phase scan/advance contract, where a crash between the two re-scans instead of
+    dropping a signal. A concurrent steward run holding the lock needs no help here: its own
+    advance persists the same counter, so a contended write is skipped rather than waited on.
+    """
+    baseline = batch["pending"]["pipeline_unhealthy_total"]
+    if baseline is None:
+        return  # unreadable telemetry: nothing was measured, so there is no baseline to keep
+    try:
+        with STATE.lock():
+            stored = STATE.load_watermark()
+            if stored.get("pipeline_unhealthy_total") is not None:
+                return
+            stored["pipeline_unhealthy_total"] = baseline
+            # The counter only means anything next to the history it was taken from, so the
+            # generation is written with it and never after it.
+            stored["pipeline_telemetry_generation"] = batch["pending"].get(
+                "pipeline_telemetry_generation", "")
+            STATE.save_watermark(stored)
+    except SystemExit:
+        return
 
 
 def _blocked_signals(mark: dict) -> tuple[list[str], list[str]]:
@@ -177,24 +230,25 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
     new baseline, not a flip — otherwise the very first cold-start scan would "flip" every
     currently-green resource and spawn a head for nothing to report.
 
-    Reads the pipeline dispatcher's OWN resource_health.json cache (PIPELINE_RESOURCE_HEALTH,
-    cross-workspace — same reasoning as PIPELINE_RUNS above) instead of calling
-    pipeline_health.refresh() to run a fresh probe from here: refresh() executes real
-    probes (a haiku CLI ping, an OpenRouter completion) that cost tokens/quota on a TTL, so a
-    second independent call from the steward's own worktree would both double that real-world
-    cost AND describe a probe the dispatcher itself never saw, on top of writing yet another
-    disconnected resource_health.json copy in the steward's own state dir. Reading the
-    dispatcher's cache file gives the exact status it actually acted on, for free (2026-07-04
-    decision, triggered-agents-253).
+    Reads the resource_health.json cache the PRODUCTION dispatcher writes next to its own state
+    (production_telemetry.resource_health_path) instead of calling pipeline_health.refresh() to run
+    a fresh probe from here: refresh() executes real probes (a haiku CLI ping, an OpenRouter
+    completion) that cost tokens/quota on a TTL, so a second independent call from the steward's
+    own worktree would both double that real-world cost AND describe a probe the dispatcher itself
+    never saw, on top of writing yet another disconnected resource_health.json copy in the
+    steward's own state dir. Reading the dispatcher's cache file gives the exact status it actually
+    acted on, for free (2026-07-04 decision, triggered-agents-253).
+
+    The file is the one the running dispatcher writes, on the same data plane as its tick record —
+    the pipeline worktree holds a same-named cache that only the legacy agent path ever fills, so a
+    flip the production dispatcher just saw would never reach here (secretary-833 review, round 3).
 
     A missing/unreadable/malformed cache file (broken heads.toml, transient I/O, dispatcher never
     ticked yet) keeps the PREVIOUS baseline rather than resetting to {} — same reasoning as the
     old refresh()-failure fallback: resetting to {} would silently erase whatever flip happened on
     the very next real read (2026-07-04 review, triggered-agents-244 note Z3)."""
-    try:
-        cache = json.loads(PIPELINE_RESOURCE_HEALTH.read_text(encoding="utf-8"))
-        current = {rid: entry["status"] for rid, entry in cache.items()}
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    current = production_telemetry.read_resource_status()
+    if current is None:
         current = dict(mark["resource_status"])
     prev = mark["resource_status"]
     changed = {r: s for r, s in current.items() if r in prev and prev[r] != s}
@@ -254,21 +308,22 @@ def scan() -> dict:
     """Everything precheck/the skill need: signals since the watermark, plus the raw state to
     fold into the watermark on advance(). Read-only — never touches the watermark file itself."""
     mark = load_watermark()
-    log_hits, log_lines = _log_signals(mark)
+    tick_hits, unhealthy_total, telemetry_generation = _pipeline_tick_signals(mark)
     new_blocked, all_blocked = _blocked_signals(mark)
     stale_hits, stale_current = _stale_signals(mark)
     changed_resources, resource_current = _resource_signals(mark)
     new_orphans, all_orphans = _orphan_signals(mark)
     return {
         "signals": {
-            "log": log_hits,
+            "pipeline_ticks": tick_hits,
             "new_blocked": new_blocked,
             "stale": stale_hits,
             "resource_flip": changed_resources,
             "new_orphan_workspaces": new_orphans,
         },
         "pending": {
-            "pipeline_log_lines": log_lines,
+            "pipeline_unhealthy_total": unhealthy_total,
+            "pipeline_telemetry_generation": telemetry_generation,
             "notified_blocked": all_blocked,
             "notified_stale": stale_current,
             "notified_orphans": all_orphans,
@@ -279,7 +334,7 @@ def scan() -> dict:
 
 def has_signal(batch: dict) -> bool:
     s = batch["signals"]
-    return bool(s["log"] or s["new_blocked"] or s["stale"] or s["resource_flip"]
+    return bool(s["pipeline_ticks"] or s["new_blocked"] or s["stale"] or s["resource_flip"]
                 or s["new_orphan_workspaces"])
 
 
@@ -292,10 +347,10 @@ def render_markdown(batch: dict) -> str:
         lines.append(f"## Новые Blocked ({len(s['new_blocked'])})")
         lines += [f"- {ref}" for ref in s["new_blocked"]]
         lines.append("")
-    if s["log"]:
-        lines.append(f"## runs.jsonl пайплайна ({len(s['log'])})")
+    if s["pipeline_ticks"]:
+        lines.append(f"## Тики production dispatcher ({len(s['pipeline_ticks'])})")
         lines += [f"- {rec.get('ts', '?')} [{rec.get('event', '?')}] "
-                  f"{json.dumps(rec, ensure_ascii=False)}" for rec in s["log"]]
+                  f"{json.dumps(rec, ensure_ascii=False)}" for rec in s["pipeline_ticks"]]
         lines.append("")
     if s["stale"]:
         lines.append(f"## Застряло в колонке дольше {STALE_HOURS:g}ч ({len(s['stale'])})")

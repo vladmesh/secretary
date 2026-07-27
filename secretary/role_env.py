@@ -22,7 +22,10 @@ def runtime_env_path() -> Path:
     """
     return Path(os.environ.get("SECRETARY_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
 BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
-NONSECRET_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
+# SECRETARY_DATA_DIR is carried for the same reason as in triggered_agents.runtime.role_env: it
+# binds a process to the installation's data plane, and a head that reports through
+# `secretary task` must land on the data dir the dispatcher itself uses.
+NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),

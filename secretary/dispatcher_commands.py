@@ -97,7 +97,12 @@ def add_pause_commands(subparsers) -> None:
 
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instance", required=True)
-    parser.add_argument("--data-dir")
+    # Same pair, same order, as `secretary task` (task_commands._add_data_dir_args) and as the
+    # telemetry reader in triggered_agents/runtime/production_telemetry.py: an installation that
+    # points its data plane elsewhere through the environment must move the dispatcher's writes
+    # and its readers together, or health and steward scan would report a file nobody writes
+    # (secretary-833 review, round 3).
+    parser.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR"))
     parser.add_argument("--owner", default=os.environ.get("SECRETARY_DISPATCHER_OWNER", "secretary-dispatcher"))
     parser.add_argument("--actor", default=os.environ.get("BOARD_ACTOR", "operator"))
     parser.add_argument(

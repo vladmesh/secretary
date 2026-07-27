@@ -3515,7 +3515,7 @@ class DispatcherRuntime:
 
 def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, owner: str) -> DispatcherRuntime:
     instance_path = Path(instance)
-    data = Path(data_dir) if data_dir else default_data_dir(instance_path)
+    data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
     client = KanboardClient()
     catalog = InstanceCatalog(instance_path)
     return DispatcherRuntime(

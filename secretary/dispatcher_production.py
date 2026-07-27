@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,174 @@ from secretary.dispatcher_state import (
 )
 from secretary.tasks import TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
+
+
+# Durable telemetry of terminal production ticks, written into production-state.json under
+# `tick_telemetry` (secretary-833). It is the only current record of how a tick ENDED: the
+# `last_tick_*` timestamps say when one ran, not whether it did any good, so a dispatcher failing
+# every minute looks exactly like a healthy one to anything reading them.
+#
+# Two readers outside this module consume it, both through
+# `triggered_agents.runtime.production_telemetry`:
+#   * `python3 -m triggered_agents health` builds the pipeline line from `last`/`last_healthy_at`,
+#     so a fresh failing tick can never read as a healthy one.
+#   * the steward's `scan` reports the `unhealthy` ring against its own watermark, keyed on
+#     `unhealthy_total` — a monotonic counter, so an ordinary healthy tick in between never
+#     consumes an unhealthy one the steward has not looked at yet — and on `generation`, which
+#     says which history that counter belongs to.
+# Keep the shape and the meaning of those three fields in step with that reader.
+TICK_TELEMETRY_UNHEALTHY_KEPT = 50
+TICK_TELEMETRY_ERRORS_KEPT = 5
+TICK_TELEMETRY_DEGRADATIONS_KEPT = 5
+# A frozen tick moves no card on purpose, and the probe already reports a freeze as ok rather than
+# as a dispatcher that cannot work — telemetry says the same, otherwise every freeze would read as
+# an outage for as long as it lasts.
+HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
+# An action outcome saying the dispatcher could not finish the operation it started: a head of an
+# unresolved launch that would not stop (`launch-intent-stop-unconfirmed`), a runtime it could not
+# reach. Nothing raises on those paths, so `errors` stays empty and the tick used to return `ok`
+# and record itself healthy right over the degradation (secretary-833 review, round 3).
+#
+# `blocked` is deliberately not here. A card parked in Blocked is the dispatcher doing its job:
+# the board carries the reason, the steward already reports it as a `new_blocked` signal, and the
+# tick's exit code drives the systemd unit's result — a correctly blocked card must not put the
+# production unit into `failed` and the pipeline health line into RED.
+DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed"})
+
+
+def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:
+    """Action outcomes of a tick that report a failed operation, in the order they happened."""
+    return [
+        outcome
+        for outcome in (outcomes or [])
+        if isinstance(outcome, dict)
+        and str(outcome.get("status") or "") in DEGRADED_ACTION_STATUSES
+    ]
+
+
+def _counter(value: Any) -> int:
+    """A monotonic counter read back from state, defaulting to 0 for anything unusable.
+
+    The file is written by this process, but a hand-edited or half-restored state must degrade to
+    "start counting again", never crash the tick that is trying to record its own outcome.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Fold one terminal tick outcome into `payload["tick_telemetry"]` and return it.
+
+    Called with the result the tick is about to return, right before the state is saved, so the
+    durable record and the returned outcome cannot disagree. A tick that never reaches a save
+    (the singleton lock is held by another tick, the mutation guard refuses because the state is
+    not ours to write) deliberately records nothing: taking the state file in either case would
+    write outside the lock or across an ownership fence, and both leave their own evidence
+    already — a held lock means another tick is recording, and a guard-blocked dispatcher stops
+    producing healthy ticks, which is exactly what the freshness check reads.
+    """
+    telemetry = payload.get("tick_telemetry")
+    telemetry = dict(telemetry) if isinstance(telemetry, dict) else {}
+    # Identity of this telemetry history, minted once and then carried forever. `unhealthy_total`
+    # alone cannot tell a reader that the state file was replaced: a restore or a rebuilt
+    # installation starts a different history whose counter may land on the same number the
+    # steward's watermark already holds, and every failure after it would be deduped away against
+    # a count from a history that no longer exists (secretary-833 review, round 4). The generation
+    # changes exactly when the history does, which is what the reader keys its reset on.
+    if not str(telemetry.get("generation") or ""):
+        telemetry["generation"] = uuid.uuid4().hex
+    seq = _counter(telemetry.get("tick_seq")) + 1
+    status = str(result.get("status") or "")
+    errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
+    # Health is read off the action outcomes as well as the top-level status, not off the status
+    # alone: a caller that builds `ok` while one of its actions reports a failed operation would
+    # otherwise store a healthy tick over it, and health, the unhealthy ring and the steward's
+    # counter would all keep reading green through the degradation.
+    degradations = degraded_actions(result.get("actions"))
+    entry = {
+        "seq": seq,
+        "at": now_rfc3339(),
+        "status": status,
+        "step": str(result.get("step") or ""),
+        "healthy": status in HEALTHY_TICK_STATUSES and not degradations,
+        "reason": str(result.get("reason") or ""),
+        "actions": len(result.get("actions") or []),
+        "error_count": len(errors),
+        "degraded_count": len(degradations),
+        # The diagnostic, not just the count: what the steward and an operator need is which
+        # operation could not finish and on which card, and the outcome is gone once the tick
+        # returns. Bounded for the same reason as `errors`.
+        "degradations": [
+            {
+                # Observer outcomes name their subject `sprint`, card ones `ref`/`pilot_ref`.
+                # All three land in the same field, or a degraded observer action would be
+                # recorded without the one thing an operator needs to find the head.
+                "ref": str(outcome.get("ref") or outcome.get("pilot_ref")
+                           or outcome.get("sprint") or ""),
+                "step": str(outcome.get("step") or ""),
+                "status": str(outcome.get("status") or ""),
+                "action": str(outcome.get("action") or ""),
+                "reason": str(outcome.get("reason") or ""),
+            }
+            for outcome in degradations[:TICK_TELEMETRY_DEGRADATIONS_KEPT]
+        ],
+        # Bounded on purpose: the diagnostic value is in what failed and why, and an unbounded
+        # copy of every error of every tick would grow the state file the whole pipeline reads
+        # and writes each minute.
+        "errors": [
+            {
+                "ref": str(error.get("ref") or ""),
+                "code": str(error.get("code") or ""),
+                "message": str(error.get("message") or ""),
+            }
+            for error in errors[:TICK_TELEMETRY_ERRORS_KEPT]
+        ],
+    }
+    telemetry["tick_seq"] = seq
+    telemetry["last"] = entry
+    unhealthy = [item for item in (telemetry.get("unhealthy") or []) if isinstance(item, dict)]
+    if entry["healthy"]:
+        telemetry["last_healthy_at"] = entry["at"]
+    else:
+        unhealthy.append(entry)
+        telemetry["unhealthy_total"] = _counter(telemetry.get("unhealthy_total")) + 1
+    telemetry["unhealthy"] = unhealthy[-TICK_TELEMETRY_UNHEALTHY_KEPT:]
+    telemetry.setdefault("unhealthy_total", _counter(telemetry.get("unhealthy_total")))
+    payload["tick_telemetry"] = telemetry
+    return telemetry
+
+
+def _record_failed_tick(runtime: Any, exc: BaseException) -> None:
+    """Record a tick that died on an exception instead of returning a result.
+
+    The tick that raises never reaches its own save, and a board outage raises on the very first
+    read, so without this record the pipeline keeps reporting the last healthy tick for the whole
+    freshness window while nothing is moving. The failure is written as a terminal unhealthy tick:
+    same shape as a degraded one, so health and the steward need to know nothing about it.
+
+    The state is re-read rather than reused: the payload the failed tick was mutating is half
+    applied, and only the telemetry belongs on disk. Recording is best effort — the tick's own
+    exception is the one that must reach the caller, not a second one from the state file.
+    """
+    try:
+        payload = runtime.production_state.load()
+        record_tick_telemetry(payload, {
+            "status": "failed",
+            "step": "production-tick",
+            "reason": f"tick raised {type(exc).__name__}",
+            "errors": [{
+                "ref": "",
+                # TaskError carries the backend's own code (backend_unavailable and friends), which
+                # is the one thing that tells an operator a board outage from a product bug.
+                "code": str(getattr(exc, "code", "") or "") or "unexpected_error",
+                "message": type(exc).__name__,
+            }],
+        })
+        runtime.production_state.save(payload)
+    except Exception:
+        return
 
 
 class ProductionState:
@@ -120,76 +289,106 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         if guard is not None:
             return guard
 
-        records = runtime.production_state.records(payload)
-        payload.update({
-            "version": 1,
-            "mode": "production",
-            "phase": "production",
-            "owner": runtime.owner,
-        })
-        payload.setdefault("owner_acquired_at", now_rfc3339())
-        payload["last_tick_started_at"] = now_rfc3339()
-
-        active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
-        active_refs = {str(task.get("ref") or "") for task in active_tasks}
-        reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
-        observer_errors: list[dict[str, str]] = []
-        # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
-        # reconciliation did: those are stamped by every tick regardless of code version, so a
-        # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
-        # on the strength of a field that predates the reconciliation pass itself.
-        payload["last_reconciled_at"] = now_rfc3339()
-        outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
-        outcomes = reconcile_outcomes + outcomes
+        # Past the guard the state is this dispatcher's to write, so every way out of the tick
+        # from here on leaves a durable record, including the ways that raise. A Kanboard outage
+        # makes the first board read inside raise TaskError; without this the preceding healthy
+        # tick would keep answering for the pipeline until it aged out of the freshness window.
         try:
-            outcomes += _reconcile_sprint_budget(runtime)
+            return _production_tick_body(runtime, payload, pause, auto_resume)
+        except Exception as exc:
+            _record_failed_tick(runtime, exc)
+            raise
+
+
+def _production_tick_body(
+    runtime: Any,
+    payload: dict[str, Any],
+    pause: dict[str, Any],
+    auto_resume: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The tick proper, from the first board read to the durable record of how it ended.
+
+    Split out from `production_tick` so the caller can wrap exactly the region that runs under the
+    lock with the state already proven writable: everything before it either writes nothing or
+    records its own outcome.
+    """
+    records = runtime.production_state.records(payload)
+    payload.update({
+        "version": 1,
+        "mode": "production",
+        "phase": "production",
+        "owner": runtime.owner,
+    })
+    payload.setdefault("owner_acquired_at", now_rfc3339())
+    payload["last_tick_started_at"] = now_rfc3339()
+
+    active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
+    active_refs = {str(task.get("ref") or "") for task in active_tasks}
+    reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
+    observer_errors: list[dict[str, str]] = []
+    # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
+    # reconciliation did: those are stamped by every tick regardless of code version, so a
+    # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
+    # on the strength of a field that predates the reconciliation pass itself.
+    payload["last_reconciled_at"] = now_rfc3339()
+    outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
+    outcomes = reconcile_outcomes + outcomes
+    try:
+        outcomes += _reconcile_sprint_budget(runtime)
+    except Exception as exc:
+        errors.append(_unexpected_error("", exc))
+    # Reconcile after budget accounting. A hard limit reached by the card work above then
+    # stops an already-live observer in this tick and prevents a replacement launch.
+    try:
+        outcomes += reconcile_observers(
+            runtime, payload, pause_mode=str(pause.get("mode") or "")
+        )
+    except Exception as exc:
+        observer_errors.append(_unexpected_error("", exc))
+    errors = observer_errors + errors
+    # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
+    claims_allowed = pause.get("mode") != "drain"
+    if claims_allowed and not active_blocked:
+        try:
+            ready_outcome = _production_claim_ready(runtime, records, payload)
         except Exception as exc:
             errors.append(_unexpected_error("", exc))
-        # Reconcile after budget accounting. A hard limit reached by the card work above then
-        # stops an already-live observer in this tick and prevents a replacement launch.
-        try:
-            outcomes += reconcile_observers(
-                runtime, payload, pause_mode=str(pause.get("mode") or "")
-            )
-        except Exception as exc:
-            observer_errors.append(_unexpected_error("", exc))
-        errors = observer_errors + errors
-        # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
-        claims_allowed = pause.get("mode") != "drain"
-        if claims_allowed and not active_blocked:
-            try:
-                ready_outcome = _production_claim_ready(runtime, records, payload)
-            except Exception as exc:
-                errors.append(_unexpected_error("", exc))
-            else:
-                if ready_outcome is not None:
-                    outcomes.append(ready_outcome)
+        else:
+            if ready_outcome is not None:
+                outcomes.append(ready_outcome)
 
-        runtime.production_state.put_records(payload, records)
-        checkpoint = _write_checkpoint(runtime)
-        if checkpoint is not None:
-            payload["checkpoint"] = checkpoint
-        push = _push_checkpoint(runtime, payload)
-        if push is not None:
-            payload["checkpoint_push"] = push
-        payload["last_tick_finished_at"] = now_rfc3339()
-        runtime.production_state.save(payload)
-        result = {
-            "status": "ok" if not errors else "degraded",
-            "step": "production-tick",
-            "owner": runtime.owner,
-            "actions": outcomes,
-            "errors": errors,
-        }
-        if pause.get("paused"):
-            result["pause"] = pause
-        if auto_resume is not None:
-            result["auto_resume"] = auto_resume
-        if checkpoint is not None:
-            result["checkpoint"] = checkpoint
-        if push is not None:
-            result["checkpoint_push"] = push
-        return result
+    runtime.production_state.put_records(payload, records)
+    checkpoint = _write_checkpoint(runtime)
+    if checkpoint is not None:
+        payload["checkpoint"] = checkpoint
+    push = _push_checkpoint(runtime, payload)
+    if push is not None:
+        payload["checkpoint_push"] = push
+    payload["last_tick_finished_at"] = now_rfc3339()
+    # The tick ends degraded on a failed operation it caught as well as on one that raised:
+    # reconciliation and the active pass both return `degraded` outcomes without adding an error
+    # (a launch head that would not stop), and reporting that tick as `ok` told the unit, the
+    # health line and the steward alike that nothing had happened.
+    result = {
+        "status": "ok" if not errors and not degraded_actions(outcomes) else "degraded",
+        "step": "production-tick",
+        "owner": runtime.owner,
+        "actions": outcomes,
+        "errors": errors,
+    }
+    if pause.get("paused"):
+        result["pause"] = pause
+    if auto_resume is not None:
+        result["auto_resume"] = auto_resume
+    if checkpoint is not None:
+        result["checkpoint"] = checkpoint
+    if push is not None:
+        result["checkpoint_push"] = push
+    # Recorded before the save, off the result this call is about to return: the durable
+    # record of how the tick ended and the answer its caller gets are the same object.
+    record_tick_telemetry(payload, result)
+    runtime.production_state.save(payload)
+    return result
 
 
 def _frozen_tick(
@@ -219,15 +418,40 @@ def _frozen_tick(
             "reason": str(guard.get("reason") or "production state is not writable"),
         }
         return result
+    try:
+        return _frozen_tick_body(runtime, payload, result)
+    except Exception as exc:
+        # Same rule as the working tick: past the guard, a raise still leaves a durable record,
+        # or a freeze whose checkpoint machinery is broken would read as a healthy pipeline.
+        _record_failed_tick(runtime, exc)
+        raise
+
+
+def _frozen_tick_body(
+    runtime: Any, payload: dict[str, Any], result: dict[str, Any]
+) -> dict[str, Any]:
     # Reconciliation does not run while frozen, so this is the only place a stop the host refused
     # during the freeze is retried. Nothing else about an observer is touched here.
     try:
         observer_stops = retry_pending_observer_stops(runtime, payload)
     except Exception as exc:
         observer_stops = []
+        # A freeze itself is healthy; a retry that raised inside it is not, and telemetry keys
+        # health off the status. Say so in both places rather than reporting the frozen tick as a
+        # clean one that happens to carry an error field nobody reads.
         result["observer_stop_error"] = _unexpected_error("", exc)
+        result["errors"] = [result["observer_stop_error"]]
+        result["status"] = "degraded"
     if observer_stops:
         result["observer_stops"] = observer_stops
+        # The retried stops are this tick's action outcomes, so a stop the host refused again is
+        # read like any other degraded action: it turns the terminal tick degraded and its reason
+        # reaches the durable record. Before that the row was classified by nobody and a freeze
+        # sitting on a head it could not take down recorded itself healthy, leaving health OK and
+        # the steward without a signal (secretary-833 review, round 4).
+        result["actions"] = observer_stops
+        if degraded_actions(observer_stops):
+            result["status"] = "degraded"
     checkpoint = _write_checkpoint(runtime)
     if checkpoint is not None:
         payload["checkpoint"] = checkpoint
@@ -236,9 +460,12 @@ def _frozen_tick(
     if push is not None:
         payload["checkpoint_push"] = push
         result["checkpoint_push"] = push
-    if checkpoint is not None or push is not None or observer_stops:
-        payload["last_frozen_tick_at"] = now_rfc3339()
-        runtime.production_state.save(payload)
+    payload["last_frozen_tick_at"] = now_rfc3339()
+    # A freeze is a deliberate stop, so this tick is recorded as a healthy terminal one — and it
+    # is saved even when nothing else about this tick changed the state, or a long freeze would
+    # age the last healthy tick out and report the pipeline as dead instead of frozen.
+    record_tick_telemetry(payload, result)
+    runtime.production_state.save(payload)
     return result
 
 

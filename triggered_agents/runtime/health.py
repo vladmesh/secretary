@@ -8,9 +8,16 @@ a permanently down board would look perpetually alive (fresh error every 3 minut
 red. Last `advance` is informational: it can legitimately be days old when nothing changed
 upstream. Exit non-zero if any agent is red.
 
-State lives in the agent's worktree (the systemd unit's WorkingDirectory), not in this
-checkout — so we look under the dispatch workspace, honoring TA_STATE the same way the
-unit would only if it were set globally.
+Both sources here are the live data plane, not a checkout (secretary-833):
+
+  * curator/steward/retro write runs.jsonl through `AgentState`, whose root is TA_STATE or
+    `~/secretary-data/automation-state` — the packaged units set neither TA_STATE nor a different
+    HOME, so that default is where their real records land. Reading a `state/` dir inside the
+    agent's worktree instead reported `no runs.jsonl yet` for agents that were ticking fine.
+  * the pipeline line is the production dispatcher's own tick telemetry
+    (runtime/production_telemetry.py), the record written by the timer that actually moves cards.
+    A recorded tick that ended unhealthy is red on its own: it must never be answered with the
+    last healthy one that came before it.
 """
 from __future__ import annotations
 
@@ -21,7 +28,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from .dispatch import _workspace
+from . import production_telemetry
+from .state import AgentState
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_MAX_AGE = os.environ.get("TA_HEALTH_MAX_AGE_S")  # global override, wins for every agent
@@ -62,7 +70,7 @@ def _timer_active(agent: str) -> bool:
 
 
 def _runs(agent: str) -> list[dict]:
-    path = Path(_workspace(agent)) / "state" / agent / "runs.jsonl"
+    path = AgentState(agent).dir / "runs.jsonl"
     if not path.is_file():
         return []
     out = []
@@ -75,10 +83,71 @@ def _runs(agent: str) -> list[dict]:
 
 
 def _age_s(ts: str) -> float:
-    then = datetime.datetime.fromisoformat(ts)
+    then = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if then.tzinfo is None:
         then = then.replace(tzinfo=datetime.timezone.utc)
     return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()
+
+
+def _stale(ts: str, agent: str) -> str | None:
+    """Problem text when `ts` is older than the agent's freshness budget, else None. An
+    unparseable timestamp is itself a problem: it is a record nobody can date, not a fresh one."""
+    try:
+        age = _age_s(ts)
+    except ValueError:
+        return f"last healthy tick has an unreadable timestamp ({ts!r})"
+    max_age = _max_age_s(agent)
+    if age > max_age:
+        return f"last healthy tick {int(age / 60)}min ago (> {max_age // 60}min)"
+    return None
+
+
+def _runs_status(agent: str) -> tuple[list[str], str]:
+    """(problems, informational detail) from the agent's own runs.jsonl."""
+    runs = _runs(agent)
+    if not runs:
+        return ["no runs.jsonl yet"], ""
+    problems = []
+    healthy = [r for r in runs if r.get("result") != "error"]
+    if not healthy:
+        problems.append("only error events so far — board/env never came up")
+        last_tick = runs[-1]
+    else:
+        last_tick = healthy[-1]
+        stale = _stale(str(last_tick.get("ts") or ""), agent)
+        if stale:
+            problems.append(stale)
+    last_advance = next((r for r in reversed(runs) if r.get("event") == "advance"), None)
+    tick = last_tick.get("ts", "-")
+    adv = last_advance["ts"] if last_advance else "-"
+    return problems, f"last tick {tick}, last advance {adv}"
+
+
+def _pipeline_status() -> tuple[list[str], str]:
+    """(problems, informational detail) from the production dispatcher's durable tick telemetry.
+
+    The unhealthy branch is the point of this line: the dispatcher keeps ticking through a broken
+    board or a failing host, so the last tick's own outcome decides the status and a fresher
+    healthy predecessor never speaks for it. Freshness is checked on top of that, for the case
+    where the timer or the whole tick stopped producing records at all.
+    """
+    telemetry = production_telemetry.read()
+    if not telemetry.available:
+        return [f"{telemetry.unavailable} ({telemetry.path})"], ""
+    problems = []
+    last = telemetry.last
+    if not last:
+        problems.append("no production tick recorded yet")
+    elif not last.get("healthy"):
+        problems.append(f"last tick unhealthy: {production_telemetry.describe(last)}")
+    if not telemetry.last_healthy_at:
+        problems.append("no healthy production tick recorded yet")
+    else:
+        stale = _stale(telemetry.last_healthy_at, "pipeline")
+        if stale:
+            problems.append(stale)
+    detail = f"last tick {last.get('at', '-')}, last healthy {telemetry.last_healthy_at or '-'}"
+    return problems, detail
 
 
 def check(agents: tuple[str, ...]) -> int:
@@ -92,27 +161,10 @@ def check(agents: tuple[str, ...]) -> int:
         problems = []
         if not _timer_active(agent):
             problems.append(f"{timer_unit(agent)} not active")
-        runs = _runs(agent)
-        if not runs:
-            problems.append("no runs.jsonl yet")
-            last_tick = last_advance = None
-        else:
-            healthy = [r for r in runs if r.get("result") != "error"]
-            if not healthy:
-                problems.append("only error events so far — board/env never came up")
-                last_tick = runs[-1]
-            else:
-                last_tick = healthy[-1]
-                age = _age_s(last_tick["ts"])
-                max_age = _max_age_s(agent)
-                if age > max_age:
-                    problems.append(f"last healthy tick {int(age / 60)}min ago (> {max_age // 60}min)")
-            last_advance = next((r for r in reversed(runs) if r.get("event") == "advance"), None)
+        source_problems, detail = _pipeline_status() if agent == "pipeline" else _runs_status(agent)
+        problems += source_problems
         status = "RED " if problems else "OK  "
-        tick = last_tick["ts"] if last_tick else "-"
-        adv = last_advance["ts"] if last_advance else "-"
-        detail = "; ".join(problems) if problems else f"last tick {tick}, last advance {adv}"
-        print(f"{status}{agent}: {detail}")
+        print(f"{status}{agent}: {'; '.join(problems) if problems else detail}")
         if problems:
             rc = 1
     return rc
