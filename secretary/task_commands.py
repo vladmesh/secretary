@@ -23,7 +23,7 @@ def _add_data_dir_args(parser) -> None:
     parser.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help="instance directory (default: SECRETARY_INSTANCE or ~/secretary-instance)",
     )
 
 

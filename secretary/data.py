@@ -37,7 +37,7 @@ from secretary.tasks import TaskAudit
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
 PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "secretary" / "pipeline"
-ORCA_WORKSPACES_ROOT = Path("/home/dev/orca/workspaces")
+ORCA_WORKSPACES_ROOT = Path.home() / "orca" / "workspaces"
 PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state" / "pipeline"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"

@@ -48,7 +48,7 @@ ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 
 # Два типа по одному признаку — меняет ли карточка код: code генерит PR (и участвует
 # в per-project claim-гейте), research отдаёт только отчёт. Тип debug убран (решение
-# vladmesh 2026-07-11): он производил PR как code, но не считался гейтом — две
+# решение владельца 2026-07-11): он производил PR как code, но не считался гейтом — две
 # PR-карточки одного проекта могли ехать параллельно.
 TASK_TYPES = ("code", "research")
 
@@ -176,11 +176,11 @@ MARKER_STAND_RED = "validate:stand-red"
 # The layer-3 reviewer's verdict (Validate layer 3: an independent LLM head, not the worker, reads
 # the whole repo + PR and posts one verdict). green = all layers clear, the card waits for a human
 # merge. red = at least one blocker in any lens; the dispatcher returns the card to In progress
-# with a nudge, up to a cap of returns (then Blocked до vladmesh).
+# with a nudge, up to a cap of returns (then Blocked до владельца).
 MARKER_REVIEW_GREEN = "review:green"
 MARKER_REVIEW_RED = "review:red"
 # Posted once when a stand-project card's green review triggers the dispatcher's own squash merge
-# (all three gates — CI, stand-green, review:green — cleared, per vladmesh's 2026-07-02 decision
+# (all three gates — CI, stand-green, review:green — cleared, per the owner's 2026-07-02 decision
 # that a live-stand e2e run is enough assurance to drop the human from the merge for those projects).
 MARKER_AUTOMERGE = "validate:automerge"
 # The dispatcher's own note when a red verdict sends a card back for rework. Deliberately NOT a

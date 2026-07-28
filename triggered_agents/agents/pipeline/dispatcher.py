@@ -43,6 +43,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from ...runtime.owner import owner
 from ...runtime.state import PRECHECK_SKIP
 from . import (
     health, heads, model, naming, ops, pause as pause_flag, pause_ops, taskdoc, validate, worker,
@@ -861,7 +862,7 @@ def _bring_up(card: dict, worker_id: str, records: dict, head: str) -> None:
     except worker.InjectDeliveryError as e:
         _block(ref, "inject-delivery",
                f"bring-up упал: inject не доставлен в TUI, turn не стартовал после "
-               f"bounded delivery protocol. Карточка в Blocked до vladmesh."
+               f"bounded delivery protocol. Карточка в Blocked до {owner()}."
                + (f"\nВоркспейс {ws} оставлен." if ws else ""),
                error=worker.scrub_secrets(str(e)))
         return

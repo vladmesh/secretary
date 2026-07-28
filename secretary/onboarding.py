@@ -12,6 +12,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_and_remove_atomic, publish_pair_atomic
 from secretary.config import ConfigError, load_config, validate
+from triggered_agents.runtime.paths import default_instance_path
 from secretary.contract_migrations import (  # re-exported: one registry of legacy shapes
     MUTABLE_BINDING_FIELDS,
     normalize_contract,
@@ -19,7 +20,7 @@ from secretary.contract_migrations import (  # re-exported: one registry of lega
 )
 
 
-DEFAULT_INSTANCE = "/home/dev/secretary-instance"
+DEFAULT_INSTANCE = str(default_instance_path())
 IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
 REQUIRED_DECISIONS = [
     "setup.commands",

@@ -21,16 +21,36 @@ from functools import lru_cache
 from pathlib import Path
 
 from ...runtime import role_env
+from ...runtime.paths import configured_instance_path, instance_dir
 
 HEADS_TOML = Path(__file__).with_name("heads.toml")
+# Where an installation keeps its own registry, relative to the instance directory. Which accounts,
+# models and fallback chains exist is installation configuration; the file shipped here is the
+# portable default for a host that has not written its own.
+INSTANCE_HEADS_RELATIVE = Path("heads") / "heads.toml"
+HEADS_TOML_ENV = "TA_HEADS_TOML"
 
 # The CODEX_HOME shared by Orca-managed Codex sessions and pipeline heads. One physical home keeps
 # auth refresh, MCP, skills, hooks, and quota probes on the same state. Pinned explicitly because
 # the health probe is a plain subprocess rather than an Orca terminal. Env-overridable so tests can
 # use a throwaway home.
 CODEX_HOME = os.environ.get(
-    "TA_CODEX_HOME", "/home/dev/.config/orca/codex-runtime-home/home"
+    "TA_CODEX_HOME", str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 )
+
+
+def registry_path() -> Path:
+    """The registry this process reads: the installation's own, else the product default.
+
+    Resolved per call rather than at import so a test — or an operator pointing at another
+    installation through ``SECRETARY_INSTANCE`` — moves the registry without reloading the module.
+    """
+    override = os.environ.get(HEADS_TOML_ENV)
+    if override:
+        return Path(override).expanduser()
+    owned = instance_dir(configured_instance_path()) / INSTANCE_HEADS_RELATIVE
+    return owned if owned.is_file() else HEADS_TOML
+
 
 # The profile a card gets when it names no head at all. New work defaults to Codex; legacy cards
 # with explicit claude-* metadata keep using that exact profile until a PO updates them.
@@ -301,8 +321,13 @@ def validate_registry(resources: dict, profiles: dict) -> None:
                 raise HeadRegistryError(f"profile {pid!r} fallback references unknown profile {fb!r}")
 
 
+def load_registry(path: Path | None = None) -> Registry:
+    """The head registry for this installation, resolved then parsed. See ``_load_registry``."""
+    return _load_registry(path if path is not None else registry_path())
+
+
 @lru_cache(maxsize=None)
-def load_registry(path: Path = HEADS_TOML) -> Registry:
+def _load_registry(path: Path) -> Registry:
     """heads.toml, parsed and validated. Cached per (process, path) — every dispatcher tick is a
     fresh `python3 -m triggered_agents pipeline tick` process, so this only dedupes the 2+ reads
     a single tick already does (claim's `_check_head`, then bring-up's `render_command`), never a

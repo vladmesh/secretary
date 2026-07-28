@@ -9,7 +9,9 @@ import shlex
 import sys
 from pathlib import Path
 
-RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
+from triggered_agents.runtime.paths import default_instance_path
+
+RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 RUNTIME_ENV = Path(os.environ.get("SECRETARY_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
 
 
@@ -25,7 +27,10 @@ BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 # SECRETARY_DATA_DIR is carried for the same reason as in triggered_agents.runtime.role_env: it
 # binds a process to the installation's data plane, and a head that reports through
 # `secretary task` must land on the data dir the dispatcher itself uses.
-NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
+# SECRETARY_OWNER is the human a blocked card is addressed to. Not a secret, and a role
+# stripped of it would write escalation comments naming the product default instead of the
+# person who owns this installation.
+NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO", "SECRETARY_OWNER")
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),

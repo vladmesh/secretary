@@ -13,16 +13,20 @@
 Проверка:
 
 ```bash
-python3 /home/dev/secretary/scripts/role_skills.py audit --json
+python3 "${TA_SECRETARY_REPO:-$HOME/secretary}"/scripts/role_skills.py audit --json
 ```
 
 Синхронизация:
 
 ```bash
-python3 /home/dev/secretary/scripts/role_skills.py sync
+python3 "${TA_SECRETARY_REPO:-$HOME/secretary}"/scripts/role_skills.py sync
 ```
 
-Список ролей, навыков и целевых директорий задаёт `skills/manifest.toml`. Если скилл нужен роли,
+Список ролей, навыков и целевых директорий задаёт `skills/manifest.toml`. Установка может держать
+собственный манифест в `<instance>/skills/manifest.toml` со своим деревом `roles/` рядом; его записи
+ложатся поверх продуктовых, и каждый скилл берётся из дерева рядом с тем манифестом, который его
+объявил. Всё, что имеет смысл только на одной машине (мост к браузеру владельца, инструмент под его
+аккаунты), живёт там, а не здесь. Установка без такого манифеста — полноценная установка. Если скилл нужен роли,
 добавляй его в `skills/roles/<role>/` и в манифест. Не дублируй вручную между Claude, Codex и
 Hermes. Для одной оболочки разные target-группы могут использовать один root, но не вложенные
 root-каталоги: рекурсивное обнаружение скиллов смешивает namespace и выдаёт неверные locator'ы.

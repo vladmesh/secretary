@@ -255,7 +255,7 @@ def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[P
         "component": "dispatcher-production",
         "managed_by": "secretary",
         "runtime": "python3 -m secretary dispatcher production-tick --instance $SECRETARY_INSTANCE",
-        "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER",
+        "env": "SECRETARY_INSTANCE,KANBOARD_URL,KANBOARD_API_USER,KANBOARD_API_TOKEN,SECRETARY_DISPATCHER_OWNER,SECRETARY_OWNER",
     }
     timer_spec = {
         "component": "dispatcher-production",

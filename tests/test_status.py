@@ -447,6 +447,35 @@ class HeadRegistrySourceTests(unittest.TestCase):
         self.assertEqual(registry["product_root"], str(product_root))
         self.assertEqual(registry["revision"], product_revision(product_root))
         self.assertTrue(registry["snapshot"].endswith("heads/heads.yaml"))
+        self.assertEqual(registry["canonical_owner"], "product")
+        self.assertTrue(registry["canonical"].endswith("pipeline/heads.toml"))
+
+    def test_status_names_the_registry_an_installation_owns_itself(self):
+        """A host with its own canon must not read back as if the product supplied its heads."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = self._instance(root)
+            product_root = Path(__file__).resolve().parents[1]
+            (root / "heads").mkdir()
+            owned = root / "heads" / "heads.toml"
+            owned.write_text(
+                "[resources.claude-sub]\naccount = 'a'\nprobe = 'true'\n\n"
+                "[profiles.house-head]\nresource = 'claude-sub'\nadapter = 'claude'\n"
+                "model = 'opus'\nfallback = []\n\n"
+                "[role_defaults]\nnew_card = 'house-head'\n",
+                encoding="utf-8",
+            )
+            materialize_snapshot(root, product_root)
+            record_source(root, product_root)
+            report = validate_instance(instance)
+
+            snapshot = collect_status(report, offline=True)
+
+        registry = snapshot["installation"]["head_registry"]
+        self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        self.assertIsNone(registry["error"])
+        self.assertEqual(registry["canonical"], str(owned))
+        self.assertEqual(registry["canonical_owner"], "instance")
 
     def test_status_names_an_installation_with_no_recorded_source(self):
         with tempfile.TemporaryDirectory() as tmp:

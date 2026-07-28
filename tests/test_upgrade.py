@@ -32,12 +32,16 @@ from secretary.host import (
 )
 from secretary.host_apply import ApplyInputs, HostCommandError, apply_host
 from secretary.head_registry import (
+    INSTANCE_ORIGIN,
+    PRODUCT_ORIGIN,
     HeadRegistryConfigError,
     assert_snapshot_current,
     canonical_heads,
+    canonical_path,
     load_snapshot,
     product_revision,
     read_source,
+    snapshot_path,
 )
 
 UNIT_PREFIX = "secretary-"
@@ -616,6 +620,110 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertIn("source.yaml", result.detail)
             self.assertEqual(load_snapshot(instance), snapshot_before)
             self.assertEqual(read_source(instance)["product_root"], str(context.product_root.resolve()))
+
+    def instance_with_canon(self, tmpdir: str, body: str) -> Path:
+        """An installation that states its own head registry, the way the private repo does."""
+        instance = Path(tmpdir)
+        (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        (instance / "heads").mkdir()
+        (instance / "heads" / "heads.toml").write_text(body, encoding="utf-8")
+        return instance
+
+    OWNED_CANON = (
+        "[resources.claude-sub]\n"
+        'account = "claude-subscription"\n'
+        'probe = "true"\n\n'
+        "[profiles.house-head]\n"
+        'resource = "claude-sub"\n'
+        'adapter = "claude"\n'
+        'model = "opus"\n'
+        "fallback = []\n\n"
+        "[role_defaults]\n"
+        'new_card = "house-head"\n'
+    )
+
+    def test_an_installation_that_owns_a_registry_is_materialized_from_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance_with_canon(tmpdir, self.OWNED_CANON)
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            result = upgrade.step_head_registry(context)
+
+            self.assertEqual(result.status, "changed")
+            snapshot = load_snapshot(instance)
+            self.assertEqual(sorted(snapshot["profiles"]), ["house-head"])
+            self.assertEqual(snapshot["role_defaults"]["new_card"], "house-head")
+            # The product registry is not consulted at all once the installation owns one.
+            self.assertNotIn("codex", snapshot["profiles"])
+
+    def test_a_portable_installation_still_materializes_the_product_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            upgrade.step_head_registry(context)
+
+            path, origin = canonical_path(context.product_root, instance)
+            self.assertEqual(origin, PRODUCT_ORIGIN)
+            self.assertEqual(path, context.product_root / "triggered_agents" / "agents" / "pipeline" / "heads.toml")
+            self.assertEqual(load_snapshot(instance), canonical_heads(context.product_root))
+
+    def test_the_snapshot_records_which_canonical_file_produced_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance_with_canon(tmpdir, self.OWNED_CANON)
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            upgrade.step_head_registry(context)
+
+            owned = instance / "heads" / "heads.toml"
+            pin = read_source(instance)
+            self.assertEqual(pin["canonical"], str(owned))
+            self.assertEqual(pin["canonical_owner"], INSTANCE_ORIGIN)
+            # The pin still says which checkout ran the upgrade, so a stale materializer is visible.
+            self.assertEqual(pin["product_root"], str(context.product_root.resolve()))
+            self.assertIn(str(owned), snapshot_path(instance).read_text(encoding="utf-8"))
+
+    def test_a_portable_snapshot_is_pinned_to_the_product_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            upgrade.step_head_registry(context)
+
+            pin = read_source(instance)
+            self.assertEqual(pin["canonical_owner"], PRODUCT_ORIGIN)
+            self.assertTrue(pin["canonical"].endswith("triggered_agents/agents/pipeline/heads.toml"))
+
+    def test_an_owned_registry_that_is_invalid_stops_the_upgrade_by_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance_with_canon(
+                tmpdir,
+                "[resources.claude-sub]\naccount = 'a'\nprobe = 'true'\n\n"
+                "[profiles.house-head]\nresource = 'nope'\nadapter = 'claude'\nfallback = []\n\n"
+                "[role_defaults]\nnew_card = 'house-head'\n",
+            )
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+
+            result = upgrade.step_head_registry(context)
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn(str(instance / "heads" / "heads.toml"), result.detail)
+
+    def test_verify_compares_the_snapshot_against_the_registry_the_installation_owns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance_with_canon(tmpdir, self.OWNED_CANON)
+            context = self.context(FakeUnitInstaller(), instance_path=instance)
+            upgrade.step_head_registry(context)
+
+            assert_snapshot_current(instance, context.product_root)
+
+            (instance / "heads" / "heads.toml").write_text(
+                self.OWNED_CANON.replace('model = "opus"', 'model = "sonnet"'), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(HeadRegistryConfigError, "is stale"):
+                assert_snapshot_current(instance, context.product_root)
 
     def test_upgrade_direct_config_path_renders_the_same_units_as_its_checkout(self):
         with tempfile.TemporaryDirectory() as tmpdir:

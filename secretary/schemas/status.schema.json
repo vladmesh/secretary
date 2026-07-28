@@ -19,9 +19,11 @@
         "cards": {"type": "object", "required": ["total", "active_attempts"]},
         "head_registry": {
           "type": "object",
-          "required": ["snapshot", "product_root", "revision", "error"],
+          "required": ["snapshot", "canonical", "canonical_owner", "product_root", "revision", "error"],
           "properties": {
             "snapshot": {"type": "string"},
+            "canonical": {"type": ["string", "null"]},
+            "canonical_owner": {"type": ["string", "null"]},
             "product_root": {"type": ["string", "null"]},
             "revision": {"type": ["string", "null"]},
             "error": {"type": ["string", "null"]}

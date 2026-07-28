@@ -212,7 +212,8 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
 
 
 def step_role_skills(context: UpgradeContext) -> StepResult:
-    before = role_skills.audit()
+    """Materialize the product skills and whatever this installation layers on top of them."""
+    before = role_skills.audit(instance_path=context.instance_path)
     if before["ok"]:
         return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
     pending = len(before["missing"]) + len(before["drift"])
@@ -221,7 +222,7 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
     if context.dry_run:
         return StepResult("role-skills", "changed", f"would sync {pending} skill copies")
     try:
-        after = role_skills.sync()
+        after = role_skills.sync(instance_path=context.instance_path)
     except (OSError, ValueError) as exc:
         return StepResult("role-skills", "failed", exc.__class__.__name__)
     if not after["after"]["ok"]:
@@ -230,10 +231,11 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
 
 
 def step_head_registry(context: UpgradeContext) -> StepResult:
-    """Keep the private installation snapshot derived from the product registry.
+    """Keep the installation snapshot derived from whichever registry is canon for this host.
 
-    The pin next to it records which checkout and revision the snapshot came from. Since the live
-    tick reads the snapshot alone, that pin is the only place the canon source is written down.
+    The pin next to it records which canonical file, checkout and revision the snapshot came from.
+    Since the live tick reads the snapshot alone, that pin is the only place the canon source is
+    written down — and with an instance able to own the canon, naming the file is the point.
     """
     target = snapshot_path(context.instance_path)
     try:
@@ -431,7 +433,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
         return StepResult("verify", "failed", f"host is still not reconciled: {result.detail}")
     if result.status == "changed":
         return StepResult("verify", "failed", f"reconcile is not idempotent: {result.detail}")
-    audit = role_skills.audit()
+    audit = role_skills.audit(instance_path=context.instance_path)
     if not audit["ok"]:
         return StepResult("verify", "failed", "role skills are still out of sync")
     try:

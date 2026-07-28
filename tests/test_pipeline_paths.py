@@ -12,7 +12,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.agents.pipeline import health, pause, worker
+from triggered_agents.agents.pipeline import health, heads, pause, worker
+from triggered_agents.runtime.owner import DEFAULT_OWNER, owner
+from triggered_agents.runtime.paths import configured_instance_path, default_instance_path, instance_dir
 from secretary import dispatcher_pause
 
 
@@ -49,6 +51,72 @@ class OpenRouterKeyTests(unittest.TestCase):
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TA_OPENROUTER_KEY", None)
             self.assertIsNone(health._read_openrouter_key())
+
+
+class InstanceResolutionTests(unittest.TestCase):
+    """No absolute path of one developer's host survives in the product's defaults."""
+
+    def test_the_default_instance_is_home_relative(self):
+        self.assertEqual(default_instance_path(), Path.home() / "secretary-instance")
+
+    def test_the_configured_instance_wins_over_the_default(self):
+        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": "/srv/other-instance"}):
+            self.assertEqual(configured_instance_path(), Path("/srv/other-instance"))
+
+    def test_an_instance_named_by_its_config_file_resolves_to_its_directory(self):
+        self.assertEqual(instance_dir("/srv/inst/instance.yaml"), Path("/srv/inst"))
+        self.assertEqual(instance_dir("/srv/inst"), Path("/srv/inst"))
+
+
+class HeadRegistryPathTests(unittest.TestCase):
+    """Which accounts and models exist is installation configuration, not product code."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.instance = Path(tmp.name)
+        env = mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("TA_HEADS_TOML", None)
+
+    def own_registry(self) -> Path:
+        (self.instance / "heads").mkdir(parents=True, exist_ok=True)
+        owned = self.instance / "heads" / "heads.toml"
+        owned.write_text(
+            "[resources.claude-sub]\naccount = 'a'\nprobe = 'true'\n\n"
+            "[profiles.house-head]\nresource = 'claude-sub'\nadapter = 'claude'\n"
+            "model = 'opus'\nfallback = []\n",
+            encoding="utf-8",
+        )
+        return owned
+
+    def test_a_portable_installation_reads_the_product_default(self):
+        self.assertEqual(heads.registry_path(), heads.HEADS_TOML)
+        self.assertIn(heads.DEFAULT_PROFILE, heads.load_registry().profiles)
+
+    def test_an_installation_that_owns_a_registry_is_read_from_it(self):
+        owned = self.own_registry()
+
+        self.assertEqual(heads.registry_path(), owned)
+        self.assertEqual(sorted(heads.load_registry().profiles), ["house-head"])
+
+    def test_an_explicit_override_outranks_both(self):
+        self.own_registry()
+        with mock.patch.dict(os.environ, {"TA_HEADS_TOML": str(heads.HEADS_TOML)}):
+            self.assertEqual(heads.registry_path(), heads.HEADS_TOML)
+
+
+class OwnerNameTests(unittest.TestCase):
+    def test_an_unconfigured_installation_escalates_to_a_neutral_owner(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SECRETARY_OWNER", None)
+            self.assertEqual(owner(), DEFAULT_OWNER)
+            self.assertNotIn("vladmesh", DEFAULT_OWNER)
+
+    def test_a_configured_owner_is_the_name_a_blocked_card_carries(self):
+        with mock.patch.dict(os.environ, {"SECRETARY_OWNER": "sam"}):
+            self.assertEqual(owner(), "sam")
 
 
 class PauseCandidateTests(unittest.TestCase):

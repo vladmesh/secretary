@@ -131,6 +131,8 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from triggered_agents.runtime.owner import owner
+from triggered_agents.agents.pipeline.task_protocol import command_prefix as _secretary_prefix
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_RECORD,
@@ -1569,7 +1571,7 @@ class CommandHostRuntime:
             "",
             "Report through the secretary task protocol only:",
             *_body_file_instructions(body_file),
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
+            f'{_secretary_prefix()} task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -1598,8 +1600,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
+            f'{_secretary_prefix()} task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
+            f'{_secretary_prefix()} task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
             "",
         ])
 
@@ -3250,7 +3252,7 @@ class DispatcherRuntime:
             reason=(
                 f"Механический гейт: {scrub_host_output(result.summary)} — CI висит без "
                 f"терминального результата дольше порога ({GATE_PENDING_STALL_SECONDS}s). "
-                f"Карточка в Blocked до vladmesh."
+                f"Карточка в Blocked до {owner()}."
             ),
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-pending-stall", ref),
         )

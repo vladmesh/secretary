@@ -13,9 +13,10 @@ import shlex
 import sys
 from pathlib import Path
 
-RUNTIME_ENV = Path(
-    os.environ.get("TA_RUNTIME_ENV_FILE", "/home/dev/secretary-instance/runtime.env")
-)
+from .paths import default_instance_path
+
+RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
+RUNTIME_ENV = Path(os.environ.get("TA_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_PYTHONPATH = os.environ.get("TA_RUNTIME_PYTHONPATH", str(REPO_ROOT))
 
@@ -25,7 +26,10 @@ BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 # data dir through that file moves the WRITER. A role stripped of the same name would fall back to
 # instance.yaml and read a production-state.json nobody writes, calling that silence healthy
 # (secretary-833 review, round 3).
-NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
+# SECRETARY_OWNER is the human a blocked card is addressed to. Not a secret, and a role
+# stripped of it would write escalation comments naming the product default instead of the
+# person who owns this installation.
+NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO", "SECRETARY_OWNER")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": (*BOARD_ENV, *NONSECRET_ENV),

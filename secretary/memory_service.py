@@ -239,7 +239,7 @@ def log_search(query: str, k: int, results: list,
 # ── Canon → index (daemon-owned reindex) ──────────────────────────────────────
 # The production canon is the private instance repo's state/memory/facts.
 # Prefer the atomically published export.ndjson snapshot; rollback to the old
-# panelmem-kb repo is one setting, MEMORY_CANON_ROOT=/home/dev/panelmem-kb/memory,
+# panelmem-kb repo is one setting, MEMORY_CANON_ROOT=~/panelmem-kb/memory,
 # and then we read HEAD.
 
 
@@ -817,7 +817,7 @@ def memory_search(query: str, k: int = 5, scope: str = "", caller: str = "") -> 
     (e.g. "orca", "secretary"). Search your own project's scope first,
     then retry without scope. k is clamped to 10. caller: your role (worker/reviewer/
     steward/secretary/curator), telemetry only, always pass it."""
-    # Кап выдачи (решение vladmesh 2026-07-11): скоры у ранжировщика лежат в узкой полке
+    # Кап выдачи (решение владельца 2026-07-11): скоры у ранжировщика лежат в узкой полке
     # (~0.80-0.84 по телеметрии), длинный хвост неотличим от топа и засоряет контекст.
     # В лог пишем исходный k: телеметрия должна видеть, что просили на самом деле.
     requested_k = k

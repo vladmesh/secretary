@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ...runtime.owner import owner
 from . import ops, worker
 from .state import STATE
 
@@ -22,7 +23,7 @@ def block_inject_delivery(
     ops.add_comment("dispatcher", ref,
                     f"Не удалось поднять голову-ревьюера (слой 3): inject не доставлен "
                     f"в TUI, turn не стартовал после bounded delivery protocol. Карточка в Blocked "
-                    f"до vladmesh. {note}")
+                    f"до {owner()}. {note}")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
     STATE.log_run("review", reference=ref, to="Blocked", reason="inject-delivery",

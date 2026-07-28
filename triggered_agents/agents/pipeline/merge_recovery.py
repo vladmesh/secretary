@@ -235,7 +235,7 @@ def _conflict(ref: str, pr: str, card: dict, rec: dict, records: dict, save_card
 
 def _block(ref: str, pr: str, rec: dict, records: dict, base_sha: str, attempts: int,
            merge_state: str | None, clear_review, detail: str = "") -> bool:
-    """Base-freshness recovery budget spent on one base SHA — Blocked до vladmesh, worker workspace
+    """Base-freshness recovery budget spent on one base SHA — Blocked до владельца, worker workspace
     left alive for a human to inspect (AC5)."""
     ws = rec.get("workspace") or "(неизвестен)"
     clear_review(rec)

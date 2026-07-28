@@ -31,7 +31,7 @@ layer 3 (independent review, every project): once the lower layers are green, sp
     worktree to the exact verified sha rather than the branch's live tip) and drive it by its
     verdict exactly the way dispatcher._advance drives an In-progress card by the worker's report:
     spawn once per code state, read the verdict past a baseline, act. Red -> back to In progress
-    with a nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked до vladmesh.
+    with a nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked до владельца.
     Green on a PR project (stand or not) triggers the dispatcher's own squash merge, one-shot, but
     only once the PR's actual base (gh) matches resolve_base_branch(project, card.base_branch) —
     a mismatch (e.g. a sprint-shim card's PR opened against main instead of sprint/NNN) Blocks
@@ -56,6 +56,8 @@ import re
 import time
 from collections.abc import Callable
 
+from ...runtime.owner import owner
+
 from . import (
     health, merge_recovery, model, naming, ops, review_spawn, reviewer, validate_review, worker,
 )
@@ -64,10 +66,10 @@ from .state import STATE
 RefreshWorkerTask = Callable[[dict, dict], None]
 
 # Layer-3 rework cap: a card may be returned by red reviewer verdicts at most this many times over
-# its life. The next red after that goes to Blocked до vladmesh with the full verdict on the card.
+# its life. The next red after that goes to Blocked до владельца with the full verdict on the card.
 REVIEW_RETURN_CAP = int(os.environ.get("TA_REVIEW_RETURN_CAP", "3"))
 # How many consecutive orca failures to bring up the reviewer head we tolerate before Blocking the
-# card до vladmesh — a persistent failure must escalate, not retry (and leak a worktree) forever.
+# card до владельца — a persistent failure must escalate, not retry (and leak a worktree) forever.
 REVIEW_SPAWN_ATTEMPTS = int(os.environ.get("TA_REVIEW_SPAWN_ATTEMPTS", "3"))
 # How many consecutive ticks a Validate card may go without a PR link or with gh unreachable before
 # escalating once to Blocked — a stuck card must eventually surface to a human, not warn forever.
@@ -210,7 +212,7 @@ def _block_rework_worker_failure(ref: str, rec: dict, records: dict,
     ws_note = f"Воркспейс {workspace} оставлен для разбора." if workspace else "Воркспейс неизвестен."
     ops.add_comment("dispatcher", ref,
                     f"Не удалось вернуть карточку в работу после {reason}: worker head не поднят "
-                    f"или TASK.md не обновлён: {scrubbed}. Карточка в Blocked до vladmesh. "
+                    f"или TASK.md не обновлён: {scrubbed}. Карточка в Blocked до {owner()}. "
                     f"{ws_note}")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
@@ -241,7 +243,7 @@ def _stand_gate(ref: str, pr: str, card: dict, cfg: dict, records: dict, view: d
     if result["ok"]:
         ops.add_comment("dispatcher", ref,
                         f"Стенд + e2e зелёные по ветке `{branch}` ({pr}). Слои 1-2 пройдены, "
-                        f"ждёт ручного мержа vladmesh.",
+                        f"ждёт ручного мержа {owner()}.",
                         marker=model.MARKER_STAND_GREEN)
         STATE.log_run("stand", reference=ref, result="green", pr=pr, branch=branch)
         return False
@@ -591,7 +593,7 @@ def _validate_error(ref: str, exc: Exception) -> None:
 # read the verdict comment past a baseline, act. green -> the dispatcher squash-merges the PR
 # itself (TA_AUTOMERGE=off waits for a human merge instead, no redeploy needed), or, for a contrib
 # card, goes straight to Done — no PR to wait on; red -> back to In progress with a
-# nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked до vladmesh. A reviewer
+# nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked до владельца. A reviewer
 # that goes silent without a verdict is caught by the same watchdog as a worker, so the card never
 # sits in Validate forever with a dead head.
 
@@ -719,7 +721,7 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
             clear_review(rec)
             ops.add_comment("dispatcher", ref,
                             f"Не удалось поднять голову-ревьюера (слой 3) {fails} тиков подряд: "
-                            f"{scrubbed}. Карточка в Blocked до vladmesh. {note}")
+                            f"{scrubbed}. Карточка в Blocked до {owner()}. {note}")
             ops.move_card("dispatcher", ref, "Blocked")
             records.pop(ref, None)
             STATE.log_run("review", reference=ref, to="Blocked", reason="spawn-cap",
@@ -751,7 +753,7 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
 def _review_watchdog(ref: str, rec: dict, records: dict, watchdog_seconds: int,
                      statuses: dict[str, str]) -> bool:
     """No verdict yet: track the reviewer head's output and, if it goes silent past the threshold,
-    Block the card до vladmesh — a dead reviewer must never leave the card stuck in Validate.
+    Block the card до владельца — a dead reviewer must never leave the card stuck in Validate.
 
     `statuses` (this tick's resource health, from health.refresh) freezes this clock the same way
     dispatcher._advance freezes the worker's. The reviewer head is stored in `rec["review_head"]`
@@ -815,7 +817,7 @@ def _review_watchdog_block(ref: str, rec: dict, records: dict, ws: str | None, e
         observation = (f"голова-ревьюер (слой 3) молчит {int(elapsed)}s без вердикта "
                        f"(порог {watchdog_seconds}s)")
     ops.add_comment("dispatcher", ref,
-                    f"watchdog: {observation}. Карточка в Blocked до vladmesh, "
+                    f"watchdog: {observation}. Карточка в Blocked до {owner()}, "
                     f"{ws_note}.")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)   # record gone; the reviewer worktree is left alive for a human
@@ -832,7 +834,7 @@ def _review_red(ref: str, pr: str | None, card: dict, rec: dict, records: dict, 
                 refresh_worker_task: RefreshWorkerTask | None = None,
                 contrib: tuple[str, str] | None = None) -> bool:
     """Red verdict (a blocker in some lens). Return the card for rework, or — once the lifetime cap
-    of returns is spent — Block it до vladmesh with the full verdict already on the card. Same cap
+    of returns is spent — Block it до владельца with the full verdict already on the card. Same cap
     and rework path for a contrib card (`contrib` set) as a regular PR card — only the reference
     label in the comments/nudge differs."""
     note = f"PR: {pr}" if pr else f"Ветка: `{contrib[0]}` @ `{contrib[1]}`"
@@ -842,7 +844,7 @@ def _review_red(ref: str, pr: str | None, card: dict, rec: dict, records: dict, 
         clear_review(rec)
         ops.add_comment("dispatcher", ref,
                         f"Красный вердикт ревьюера после {prior} доработок — кап возвратов "
-                        f"({REVIEW_RETURN_CAP}) исчерпан. Карточка в Blocked до vladmesh; полный "
+                        f"({REVIEW_RETURN_CAP}) исчерпан. Карточка в Blocked до {owner()}; полный "
                         f"вердикт — в комментарии выше. {note}")
         ops.move_card("dispatcher", ref, "Blocked")
         records.pop(ref, None)

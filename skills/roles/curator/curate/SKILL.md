@@ -31,7 +31,7 @@ watermark. «Нет новых ходов» → работы нет, выход�
   у Hermes это строки таблицы `messages` в его общей `~/.hermes/state.db` (не файлы
   `~/.hermes/sessions/session_*.json`: тот путь у текущей версии Hermes всегда пуст,
   сессии он хранит в SQLite). Codex-сессии Orca читаются из managed `CODEX_HOME`:
-  `/home/dev/.config/orca/codex-runtime-home/home/sessions/.../*.jsonl`.
+  `~/.config/orca/codex-runtime-home/home/sessions/.../*.jsonl`.
 - **Личная память Claude/Hermes**: новые/изменённые файлы `~/.claude/projects/*/memory/*.md`
   (кроме `MEMORY.md` — это оглавление, не факт) и `~/.hermes/memories/{MEMORY,USER}.md`.
   Это уже дистиллят: голова сама решила, что стоит запомнить, сигнал плотнее транскрипта.

@@ -533,7 +533,7 @@ sprint:ID`. Переход в stopped остаётся в audit как `budget_h
   не останавливается.
 
 Профиль головы берётся из `role_defaults.observer` (`heads/heads.yaml`, генерится
-`secretary upgrade` из `triggered_agents/agents/pipeline/heads.toml`). Перед запуском отрабатывает
+`secretary upgrade` из канонического реестра установки). Перед запуском отрабатывает
 тот же гейт готовности ресурса, что и перед claim карточки, с теми же вердиктами (см. «Готовность
 голов»). Голова запускается через `role_env exec --role observer` в собственном воркспейсе
 `<workspaces root>/observers/<ref>` с собственным терминалом; промпт `SPRINT.md` рендерится из живой
@@ -1107,8 +1107,8 @@ secretary upgrade --instance INSTANCE
 | --- | --- |
 | `pull` | `git fetch` + `merge --ff-only` чекаута продукта. Грязный чекаут — отказ. |
 | `dependencies` | переустановка в `.venv`, если в pull двигался манифест зависимостей |
-| `head-registry` | генерация `heads/heads.yaml` из канона продукта плюс `heads/source.yaml` — чекаут и ревизия, из которых он сгенерирован |
-| `role-skills` | `role_skills sync` в shell-овые skill-директории |
+| `head-registry` | генерация `heads/heads.yaml` из канона установки (или продукта, если своего нет) плюс `heads/source.yaml` — канонический файл, чекаут и ревизия, из которых он сгенерирован |
+| `role-skills` | `role_skills sync` в shell-овые skill-директории: продуктовый `skills/manifest.toml` плюс `<instance>/skills/manifest.toml`, если установка держит свой |
 | `role-worktrees` | ff worktree ролей (`~/orca/workspaces/secretary/<role>`) на base branch |
 | `host` | `reconcile apply`: юниты из `packaging/systemd` + Orca-регистрации |
 | `automations` | create/repoint Orca-автоматизаций из `automation.toml` |
@@ -1121,13 +1121,17 @@ secretary upgrade --instance INSTANCE
 
 Живой тик читает реестр голов только из `heads/heads.yaml` самой установки и ни в какой чекаут
 продукта не заглядывает. Двигает этот файл единственная операция — `secretary upgrade`; рядом она
-пишет `heads/source.yaml` с путём чекаута и ревизией, из которых снапшот сгенерирован. Поэтому
-правка `triggered_agents/agents/pipeline/heads.toml` в рабочем дереве (ветка, незакоммиченное
-изменение, полуготовый рефакторинг) на работающую установку не влияет вообще.
+пишет `heads/source.yaml` с каноническим файлом, путём чекаута и ревизией, из которых снапшот
+сгенерирован. Поэтому правка реестра в рабочем дереве (ветка, незакоммиченное изменение, полуготовый
+рефакторинг) на работающую установку не влияет вообще.
+
+Канон выбирается так: `<instance>/heads/heads.toml`, если установка держит собственный реестр, иначе
+портативный дефолт продукта `triggered_agents/agents/pipeline/heads.toml`. Тот же порядок использует
+пайплайн-тик при чтении профилей; `TA_HEADS_TOML` перебивает оба.
 
 Источник виден снаружи: `secretary status --json` отдаёт
-`installation.head_registry` с полями `snapshot`, `product_root`, `revision` и `error`, текстовый
-`status` печатает ту же строку. `error` заполнен, когда пин ещё не записан (установка не проходила
+`installation.head_registry` с полями `snapshot`, `canonical`, `canonical_owner`, `product_root`,
+`revision` и `error`, текстовый `status` печатает ту же строку. `error` заполнен, когда пин ещё не записан (установка не проходила
 `upgrade` с этой версией) или когда снапшот сам сломан.
 
 Сломанный снапшот тик по-прежнему останавливает и называет причину: отсутствующая таблица,
