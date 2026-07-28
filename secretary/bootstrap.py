@@ -88,6 +88,17 @@ def _project_lanes(instance: Path) -> set[str]:
     return lanes
 
 
+def _rename_column(api: KanboardClient, column: dict, title: str) -> None:
+    """Rename one column, refusing to treat a declined updateColumn as done.
+
+    Kanboard answers this call with a boolean, so a rejected rename returns
+    false instead of raising.  Ignoring it would leave the old title on the
+    board while the caller reports a current schema.
+    """
+    if not api.call("updateColumn", column_id=int(column["id"]), title=title):
+        raise BootstrapError(f"Kanboard did not rename the Pipeline column to {title}")
+
+
 def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = None) -> int:
     """Create the Pipeline board, columns and registry swimlanes without moving cards."""
     try:
@@ -112,7 +123,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             # A board created before the column titles were translated differs only in the
             # first title.  updateColumn renames it where it stands, so every card keeps its
             # column, position and swimlane; the board is then the current schema.
-            api.call("updateColumn", column_id=int(columns[0]["id"]), title=PIPELINE_COLUMNS[0])
+            _rename_column(api, columns[0], PIPELINE_COLUMNS[0])
             titles[0] = PIPELINE_COLUMNS[0]
         if titles != list(PIPELINE_COLUMNS):
             # Kanboard defaults getAllTasks to open cards.  status_id=0 asks
@@ -123,7 +134,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):
                 if index < len(columns) and isinstance(columns[index], dict) and columns[index].get("id"):
-                    api.call("updateColumn", column_id=int(columns[index]["id"]), title=title)
+                    _rename_column(api, columns[index], title)
                 else:
                     api.call("addColumn", project_id=board_id, title=title)
             # Kanboard 1.2.46 creates four defaults. Remove surplus only while empty.
