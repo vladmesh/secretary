@@ -19,6 +19,7 @@ the operator never chose.
 
 from __future__ import annotations
 
+import stat
 import subprocess
 import tomllib
 from pathlib import Path
@@ -83,8 +84,17 @@ def _validated_registry(data: dict[str, Any], origin: Path) -> dict[str, Any]:
 
 
 def _instance_dir(instance_path: Path) -> Path:
-    """The instance directory, whether the caller named it or its ``instance.yaml``."""
-    instance_file = instance_path / "instance.yaml" if instance_path.is_dir() else instance_path
+    """The instance directory, whether the caller named it or its ``instance.yaml``.
+
+    A path that cannot even be stat'd still has to yield a directory, because the caller's job is
+    then to raise a bounded error naming a file under it. So an unreadable path falls back to its
+    own shape instead of letting a raw ``PermissionError`` out of a probe.
+    """
+    try:
+        is_dir = instance_path.is_dir()
+    except OSError:
+        is_dir = instance_path.name != "instance.yaml"
+    instance_file = instance_path / "instance.yaml" if is_dir else instance_path
     return instance_file.parent
 
 
@@ -95,19 +105,39 @@ def canonical_path(product_root: Path, instance_path: Path | None = None) -> tup
     default is only for one that has not. "Has not" means the file is genuinely absent — anything
     else at that path is a canon the operator meant to have, so it fails here by name rather than
     letting the host silently run product heads.
+
+    Every probe goes through one ``lstat``, and every way it can fail is answered here. A
+    ``Path.is_file()`` would raise a bare ``PermissionError`` out of an unreadable ``heads/``
+    directory, past the ``HeadRegistryConfigError`` an upgrade step knows how to report, and the
+    operator would get a traceback instead of the path that is wrong.
     """
     if instance_path is None:
         return product_root / HEADS_RELATIVE, PRODUCT_ORIGIN
     owned = _instance_dir(instance_path) / INSTANCE_HEADS_RELATIVE
-    if owned.is_file():
+    try:
+        mode = owned.lstat().st_mode
+    except FileNotFoundError:
+        return product_root / HEADS_RELATIVE, PRODUCT_ORIGIN
+    except OSError as exc:
+        raise HeadRegistryConfigError(
+            f"cannot inspect instance head registry {owned}: {exc}"
+        ) from None
+    if stat.S_ISLNK(mode):
+        try:
+            mode = owned.stat().st_mode
+        except FileNotFoundError:
+            raise HeadRegistryConfigError(
+                f"instance head registry {owned} is a dangling symlink"
+            ) from None
+        except OSError as exc:
+            raise HeadRegistryConfigError(
+                f"cannot inspect instance head registry {owned}: {exc}"
+            ) from None
+    if stat.S_ISREG(mode):
         return owned, INSTANCE_ORIGIN
-    if owned.is_dir():
+    if stat.S_ISDIR(mode):
         raise HeadRegistryConfigError(f"instance head registry {owned} is a directory, not a file")
-    if owned.is_symlink():
-        raise HeadRegistryConfigError(f"instance head registry {owned} is a dangling symlink")
-    if owned.exists():
-        raise HeadRegistryConfigError(f"instance head registry {owned} is not a regular file")
-    return product_root / HEADS_RELATIVE, PRODUCT_ORIGIN
+    raise HeadRegistryConfigError(f"instance head registry {owned} is not a regular file")
 
 
 def canonical_heads(product_root: Path, instance_path: Path | None = None) -> dict[str, Any]:

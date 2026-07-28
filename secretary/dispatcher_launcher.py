@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from secretary.role_env import RoleEnvError, runtime_env
+from secretary.role_env import RUNTIME_ENV_FILE_ENV, UNIT_BOUND_ENV, RoleEnvError, runtime_env
+
+# What a launched head has to be told about the installation it belongs to. The env file name
+# first: everything else about the head's runtime comes out of that file.
+LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
 
 CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
@@ -431,10 +435,32 @@ def role_launch_env(role: str) -> dict[str, str]:
         return dict(os.environ)
 
 
+def launch_binding() -> list[str]:
+    """The installation binding a launched head has to carry in its own command line.
+
+    A head does not start as a child of the dispatcher: Orca creates the terminal, so nothing the
+    dispatcher's unit exported is guaranteed to be in the environment `role_env exec` then runs
+    in. Without these, a dispatcher rendered for a non-default instance launches heads that read
+    `/home/dev/secretary-instance/runtime.env` and route off that installation's heads. Rendering
+    the names into the command is what binds them; the `UNIT_BOUND_ENV` rule inside `runtime_env`
+    then keeps the file from taking the instance back.
+
+    Only names the launcher was actually given are rendered. Writing out the fallback path when
+    nothing selected an installation would state a choice nobody made, and would override whatever
+    the environment the head starts in has to say about it.
+    """
+    return [
+        f"{name}={shlex.quote(value)}"
+        for name in LAUNCH_BOUND_ENV
+        if (value := os.environ.get(name))
+    ]
+
+
 def wrap_role_shell_command(role: str, command: str) -> str:
     py_path = "\"${TA_SECRETARY_REPO:-/home/dev/secretary}${PYTHONPATH:+:$PYTHONPATH}\""
+    binding = " ".join(launch_binding())
     return (
-        f"PYTHONPATH={py_path} python3 -m secretary.role_env exec "
+        f"{binding} PYTHONPATH={py_path} python3 -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
     )
 

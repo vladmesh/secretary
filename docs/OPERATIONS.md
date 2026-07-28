@@ -916,7 +916,11 @@ this version) or when the snapshot itself is broken.
 `[role_defaults]` in that one snapshot routes every role: the dispatcher's worker, reviewer and observer heads, and the
 head the curator, retro and steward launch on. Each background role's `automation.toml` still carries a `head`, but only
 as a last resort for a registry that routes that role nowhere. The packaged unit of every one of those roles exports
-`SECRETARY_INSTANCE`, so each process resolves the same installation's snapshot rather than the host's default one.
+`SECRETARY_INSTANCE` and the path of its own `runtime.env`, so each process resolves the same installation's snapshot
+rather than the host's default one. A head the dispatcher launches starts in a terminal Orca creates and inherits none
+of that, so the launcher writes both names into the head's own command line. `SECRETARY_INSTANCE` from a `runtime.env`
+never overrides either: which installation a role belongs to is decided by whoever started it, and `runtime.env` is a
+file inside an installation.
 
 A broken snapshot still stops the tick and names the reason: a missing table, an entry of the wrong shape, an unknown
 resource or adapter on a profile, or a role in `role_defaults` pointing at a head that does not exist. A process handed

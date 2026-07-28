@@ -13,9 +13,20 @@ import shlex
 import sys
 from pathlib import Path
 
-RUNTIME_ENV = Path(
-    os.environ.get("TA_RUNTIME_ENV_FILE", "/home/dev/secretary-instance/runtime.env")
-)
+RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
+RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
+RUNTIME_ENV = Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
+
+
+def runtime_env_path() -> Path:
+    """Where the runtime env file lives, resolved per call rather than frozen at import.
+
+    The file is read on every `runtime_env()`, so the name that points at it is read the same way:
+    a process moved onto another installation's file gets it without a module reload.
+    """
+    return Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_PYTHONPATH = os.environ.get("TA_RUNTIME_PYTHONPATH", str(REPO_ROOT))
 
@@ -26,6 +37,12 @@ BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 # instance.yaml and read a production-state.json nobody writes, calling that silence healthy
 # (secretary-833 review, round 3).
 NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
+# Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
+# file, which is itself a file inside one installation. See secretary/role_env.py for the same
+# rule on the dispatcher-to-head path.
+UNIT_BOUND_ENV = ("SECRETARY_INSTANCE",)
+# What a launched process has to be told about the installation it belongs to.
+LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": (*BOARD_ENV, *NONSECRET_ENV),
@@ -80,7 +97,7 @@ def _parse_assignment(line: str) -> tuple[str, str] | None:
 
 def load_env_file(path: Path | str | None = None) -> dict[str, str]:
     """Read simple KEY=value lines from the control-panel env file without logging values."""
-    env_path = Path(path) if path is not None else RUNTIME_ENV
+    env_path = Path(path) if path is not None else runtime_env_path()
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -123,7 +140,9 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
         env[key] = value
 
     for key in allowed:
-        if key in source:
+        if key in base and key in UNIT_BOUND_ENV:
+            env[key] = base[key]
+        elif key in source:
             env[key] = source[key]
         elif key in base:
             env[key] = base[key]
@@ -148,11 +167,28 @@ def apply_runtime_env(role: str, *, env_file: Path | str | None = None, require:
     os.environ.update(env)
 
 
+def launch_binding() -> list[str]:
+    """Leading assignments that tie a launched process to this installation.
+
+    The launched process is a terminal Orca creates, not a child of the launcher, so it inherits
+    none of the launcher's unit environment. Naming the runtime env file and the instance in the
+    command itself is what keeps a role started by a non-default installation from reading
+    ``/home/dev/secretary-instance``. Only names the launcher was actually given are rendered:
+    writing out the fallback would state a choice nobody made.
+    """
+    return [
+        f"{name}={shlex.quote(value)}"
+        for name in LAUNCH_BOUND_ENV
+        if (value := os.environ.get(name))
+    ]
+
+
 def wrap_shell_command(role: str, command: str, *, pythonpath: str | None = None,
                        env_file: Path | str | None = None) -> str:
     """Shell command that execs `command` under the role env without putting secret values in argv."""
     py_path = pythonpath or RUNTIME_PYTHONPATH
     parts = [
+        *launch_binding(),
         f"PYTHONPATH={shlex.quote(py_path)}",
         "python3",
         "-m",

@@ -22,6 +22,7 @@ import ast
 import inspect
 import os
 import pwd
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -37,6 +38,8 @@ from secretary import (
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_launcher import wrap_role_shell_command
+from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
 from secretary import upgrade
 from secretary.head_registry import canonical_heads, materialize_snapshot
@@ -636,6 +639,73 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                     )
                     self.assertEqual(heads.default_head(), "owned-worker")
                     self.assertEqual(heads.reviewer_head(), "owned-reviewer")
+
+    def test_every_role_unit_names_the_runtime_env_file_of_its_own_instance(self) -> None:
+        """A role that reloads runtime.env has to reload the selected installation's copy.
+
+        `EnvironmentFile=` alone only seeds the unit's own process. Both role-env modules resolve
+        the file again for the process they launch, from a name that defaults to the default
+        installation, so the unit has to export it.
+        """
+        expected = str(self.instance / "runtime.env")
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                env = self.unit_env(name)
+                if name == "secretary-dispatcher-production.service":
+                    self.assertEqual(env["SECRETARY_RUNTIME_ENV_FILE"], expected)
+                self.assertEqual(env["TA_RUNTIME_ENV_FILE"], expected)
+
+    def test_the_runtime_env_file_cannot_hand_a_role_another_instance(self) -> None:
+        """The launcher's binding wins over the file's own line, in both role-env modules."""
+        self.decoy_runtime_env()
+        for module, role in ((head_role_env, "worker"), (role_env, "steward")):
+            with self.subTest(module.__name__):
+                base = self.unit_env("secretary-dispatcher-production.service")
+                env = module.runtime_env(
+                    role, base_env=base, env_file=self.instance / "runtime.env", require=True
+                )
+
+                self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
+
+    def test_a_dispatcher_launched_head_resolves_the_selected_instance(self) -> None:
+        """End to end through the rendered command, the way a head actually starts.
+
+        Orca creates the head's terminal, so it inherits nothing the dispatcher unit exported:
+        the binding has to travel inside the command string. The subprocess here is given an
+        environment with no `SECRETARY_*` in it at all, which is what the reviewer's reproduction
+        found routing heads back to `/home/dev/secretary-instance`.
+        """
+        self.decoy_runtime_env()
+        with mock.patch.dict(
+            os.environ, self.unit_env("secretary-dispatcher-production.service"), clear=True
+        ):
+            command = wrap_role_shell_command("worker", "printenv SECRETARY_INSTANCE")
+
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            capture_output=True, text=True, timeout=120,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(self.root),
+                "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(self.instance), result.stderr)
+
+    def decoy_runtime_env(self) -> None:
+        """The selected instance's runtime.env, carrying the default installation's own name.
+
+        A copied or inherited `SECRETARY_INSTANCE` line is exactly how a non-default installation
+        loses its heads, so the fixture keeps one in the file the roles read.
+        """
+        (self.instance / "runtime.env").write_text(
+            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
+            "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n"
+            "SECRETARY_INSTANCE=/home/dev/secretary-instance\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

@@ -940,6 +940,28 @@ class InstanceHeadCanonTests(unittest.TestCase):
 
                 self.assertIn(str(instance / "heads" / "heads.toml"), str(caught.exception))
 
+    @unittest.skipIf(os.geteuid() == 0, "root traverses a directory with no search bit")
+    def test_an_unsearchable_heads_directory_fails_the_step_by_name(self):
+        """The probe that decides which canon wins can itself fail on the filesystem.
+
+        `Path.is_file()` does not swallow EACCES, so a `heads/` directory with no search bit used
+        to hand `secretary upgrade` a raw PermissionError. The step catches the bounded config
+        error and nothing else, so that crashed the upgrade instead of failing one step by path.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir), self.CANON)
+            owned = instance / "heads" / "heads.toml"
+            self.addCleanup(_restore_mode, instance / "heads", mode=0o755)
+            (instance / "heads").chmod(0o000)
+
+            with self.assertRaises(HeadRegistryConfigError) as caught:
+                canonical_path(upgrade.default_product_root(), instance)
+            result = upgrade.step_head_registry(self.context(instance))
+
+            self.assertIn(str(owned), str(caught.exception))
+            self.assertEqual(result.status, "failed")
+            self.assertIn(str(owned), result.detail)
+
     def test_a_canon_with_a_malformed_entry_fails_the_upgrade_step_by_name(self):
         """Not just unparseable files: a parsed canon whose entries are the wrong shape.
 
@@ -1041,10 +1063,10 @@ class InstanceHeadCanonTests(unittest.TestCase):
         )
 
 
-def _restore_mode(path: Path) -> None:
+def _restore_mode(path: Path, mode: int = 0o644) -> None:
     """Give a deliberately unreadable fixture back its permissions so cleanup can remove it."""
     try:
-        path.chmod(0o644)
+        path.chmod(mode)
     except OSError:
         pass
 
