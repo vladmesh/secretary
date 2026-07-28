@@ -340,14 +340,21 @@ dimension come from instance configuration.
 ## Knowledge
 
 Long recoverable documents (brainstorms, decision logs, incident write-ups) live in
-`state/knowledge/<section>/<document>.md`. How this differs from curated memory and the board is described
-in [Architecture](ARCHITECTURE.md#knowledge-planes).
+`state/knowledge/<section>/<document>.md` for the installation itself, and in
+`state/knowledge/projects/<project id>/<section>/<document>.md` for a connected project. How this
+differs from curated memory and the board is described in
+[Architecture](ARCHITECTURE.md#knowledge-planes).
 
 ```bash
 python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
   --path decisions/2026-07-25-sprint-1.md --file DOC.md
+python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+  --path projects/codegen-orchestrator/brainstorms/qa-node.md --file DOC.md
 python3 -m secretary knowledge list --instance INSTANCE
 ```
+
+Path segments are ASCII: letters, digits, `.`, `_` and `-`. A document imported from elsewhere under
+a non-ASCII filename is renamed on the way in.
 
 `write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock, so
 no manual `git commit` is needed and it does not race the tick writer. A document containing a secret is
