@@ -8,6 +8,7 @@ from unittest import mock
 
 from secretary.bootstrap import (
     BOOTSTRAP_STAMP,
+    LEGACY_IDEAS_COLUMN,
     PIPELINE_COLUMNS,
     BootstrapError,
     _host_supported,
@@ -98,6 +99,31 @@ class BootstrapBoardTests(unittest.TestCase):
                 [lane["name"] for lane in board.lanes],
                 ["api", "retired_project", "web_runtime"],
             )
+
+    def test_migrates_the_legacy_first_column_title_on_a_populated_board(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = Path(temporary)
+            board = Board()
+            board.project = {"id": 7, "name": "Pipeline"}
+            board.columns = [
+                {"id": index, "title": title}
+                for index, title in enumerate((LEGACY_IDEAS_COLUMN, *PIPELINE_COLUMNS[1:]), 1)
+            ]
+
+            def populated(method: str, **params: object) -> object:
+                if method == "getAllTasks":
+                    board.calls.append(method)
+                    return [{"id": 3, "column_id": 1}]
+                return Board.call(board, method, **params)
+
+            board.call = populated  # type: ignore[method-assign]
+            self.assertEqual(ensure_pipeline_board(instance, client=board), 7)
+
+            self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
+            self.assertEqual([column["id"] for column in board.columns], [1, 2, 3, 4, 5, 6])
+            self.assertNotIn("removeColumn", board.calls)
+            self.assertNotIn("addColumn", board.calls)
+            self.assertNotIn("getAllTasks", board.calls)
 
     def test_removes_surplus_columns_with_supported_method(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

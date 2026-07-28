@@ -29,7 +29,7 @@ from secretary.installation import (
     _run,
     _set_installation_owner,
 )
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import LEGACY_IDEAS_COLUMN, KanboardClient, TaskError
 
 
 KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
@@ -103,6 +103,17 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
         if not isinstance(columns, list):
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
+        if (
+            titles[:1] == [LEGACY_IDEAS_COLUMN]
+            and titles[1:] == list(PIPELINE_COLUMNS[1:])
+            and isinstance(columns[0], dict)
+            and columns[0].get("id")
+        ):
+            # A board created before the column titles were translated differs only in the
+            # first title.  updateColumn renames it where it stands, so every card keeps its
+            # column, position and swimlane; the board is then the current schema.
+            api.call("updateColumn", column_id=int(columns[0]["id"]), title=PIPELINE_COLUMNS[0])
+            titles[0] = PIPELINE_COLUMNS[0]
         if titles != list(PIPELINE_COLUMNS):
             # Kanboard defaults getAllTasks to open cards.  status_id=0 asks
             # for closed cards, which must count too: removing a column moves
