@@ -1,82 +1,72 @@
 # Roadmap
 
-Roadmap описывает последовательность продуктовых состояний, а не очередь карточек. Единственный
-активный backlog проекта находится на Pipeline board и читается через `secretary task`. Переход
-карточки в Ready позволяет включить её в выбранный спринт; одиночная карточка тоже остаётся
-допустимой единицей работы.
+This roadmap describes a sequence of product states, not a queue of tickets. Each milestone lists the
+outcome it must reach, the gate that decides whether it is done, and the questions still open.
 
-## Текущий baseline
+## Current baseline
 
-Продукт реализует production dispatcher, memory service и Git-backed checkpoint. Task lifecycle,
-worker/reviewer loop, memory journal, onboarding, host planning и checkpoint recovery primitives
-закрыты кодом. Checkpoint проходит validation, коммитится на production-тике и отправляется
-ff-only с RPO до 30 минут; publish изменений instance repo, checkpoint writer и pusher
-сериализованы одним writer lock.
+The product implements a production dispatcher, a memory service and a Git-backed checkpoint. The task
+lifecycle, the worker/reviewer loop, the memory journal, project onboarding, host planning and the
+checkpoint recovery primitives are implemented. The checkpoint passes validation, is committed on the
+production tick and pushed fast-forward only with an RPO of at most 30 minutes; publishing instance-repo
+changes, the checkpoint writer and the pusher are serialised by one writer lock.
 
-Нормализованные board/runs и канон memory facts живут в `state/` приватного instance-репозитория.
-Локальный data plane хранит mutable/derived runtime state и пересоздаваемый memory index,
-отдельным recovery-репозиторием не является.
+Normalised board and run state and the memory-facts canon live in `state/` of the private instance
+repository. The local data plane holds mutable and derived runtime state and a rebuildable memory index;
+it is not a second recovery repository.
 
-Восстановимое хранилище секретов (`secretary secret init/set/import`, `secrets/` приватного
-репозитория) держит installation credentials рядом с board и memory: канон значений зашифрован,
-восстанавливается одной recovery phrase и уезжает тем же push. Секреты входят в recovery-контракт
-наравне с board, memory и operational configuration.
+A recoverable secret store keeps installation credentials next to board and memory: the canonical values
+are encrypted, are rebuilt from a single recovery phrase, and travel out with the same push. Secrets are
+part of the recovery contract alongside board, memory and operational configuration.
 
-Фоновые роли материализуются из продуктового канона: packaged units и `automation.toml` управляют
-curator, steward и retro, их timers и Orca automations без ручного копирования generated files.
-Instance содержит переносимый desired config для materializer. Archive backup, offsite и
-backup timer выведены из основного recovery-контракта; archive остался только ручным optional cold
-archive.
+Background roles are materialised from the product canon: packaged units and each role's
+`automation.toml` drive the curator, steward and retro roles, their timers and their session-manager
+automations, with no hand-copied generated files. The instance holds the portable desired config for the
+materialiser. Archive backup, offsite transfer and the backup timer are out of the recovery contract;
+the archive remains a manual optional cold archive.
 
-Продукт восстанавливает installation user, config/state и local data plane из private remote одной
-поддержанной последовательностью `install` / `recover`. Flow принимает host-only credentials,
-пересобирает board, memory index, role worktrees и применяет materializer на чистом target.
-Bundled package transport Kanboard/Orca и полный adopt существующего live host остаются открытыми
-частями Milestone 1.
+The product restores the installation user, config and state, and the local data plane from a private
+remote through one supported `install` / `recover` sequence. The flow accepts host-only credentials and
+rebuilds the board, memory index and role worktrees, then applies the materialiser on a clean target.
+Bundled package transport for the board and session-manager runtimes, and full adoption of an existing
+live host, remain the open parts of Milestone 1.
 
-## Спринты в текущем состоянии
+## Sprints today
 
-Спринт является единицей работы продукта: сущность на board `Secretary sprints` хранит цель,
-Definition of Done, репозитории, статус, бюджет, текущую карточку и resume-запись. Связанные
-карточки остаются на Pipeline board и несут ссылку на спринт.
+A sprint is the product's unit of work: an entity on the sprints board holds the goal, Definition of Done,
+repositories, status, budget, current card and resume entry. Linked cards stay on the Pipeline board and
+carry a reference to the sprint.
 
-Production dispatcher поднимает одну голову-наблюдателя на открытый спринт и ведёт её жизненный
-цикл. Наблюдатель восстанавливает работу по сущности спринта и живой доске; после значимых
-переходов он пишет структурированную resume-запись. Бюджет берётся из durable audit связанных
-карточек: signal-порог требует пересмотра вектора, hard-порог переводит спринт в `stopped`.
+The production dispatcher launches one observer head per open sprint and runs its lifecycle. The observer
+recovers its work from the sprint entity and the live board, and writes a structured resume entry after
+significant transitions. The budget comes from the durable audit of linked cards: the signal threshold
+calls for reconsidering the plan, the hard threshold moves the sprint to `stopped`.
 
-Пока спринт открыт, его репозитории принадлежат наблюдателю как единственному product writer.
-Изменения карточек извне требуют `--sprint-override` и записанной причины. Ролевой скилл
-`open-sprint` готовит цель, DoD и репозитории, после чего продуктовая команда создаёт сущность.
-Для самого Secretary пока существует и документный контур `start-sprint` /
-`run-sprint`; один спринт относится только к одному из контуров.
+While a sprint is open, its repositories belong to the observer as the only product writer. Changing linked
+cards from outside requires `--sprint-override` and a recorded reason. The `open-sprint` role skill
+prepares the goal, Definition of Done and repositories, after which the product command creates the entity.
 
-В модели ещё нет закрывающих карточек и кодовой проверки полноты закрытия, уровней проверок и
-overlay проектных отклонений, собственного CI-раннера для приватных репозиториев и уборки по
-метке владельца.
+The model does not yet have closing cards or a coded completeness check, review levels or per-project
+overlay deviations, an in-house CI runner for private repositories, or cleanup by owner label. Four gaps in
+the loop itself are known and not yet closed:
 
-Обкатка на самом Secretary добавила к этому перечню четыре разрыва в самом контуре, каждый
-подтверждён работой, а не рассуждением:
+- a stale resume entry is visible from outside but wakes nobody and raises no signal;
+- observer liveness is measured by process, not by work: a head whose agent queue has ended stays
+  `running` and holds the sprint still behind a green summary;
+- a rework round leaves a dead terminal tab in the card's workspace;
+- a change to the sprint contract sent as an entry on the entity does not reach the observer: it accepts
+  material and questions, but not a narrowing of the Definition of Done.
 
-- устаревшая resume-запись видна снаружи, но никого не будит и не поднимает сигнала;
-- живость наблюдателя считается по процессу, а не по работе: голова, чья очередь агента закончилась,
-  остаётся `running` и держит спринт стоящим при зелёной сводке;
-- круг доработок оставляет в воркспейсе карточки мёртвую вкладку терминала;
-- изменение контракта спринта, присланное записью к сущности, до наблюдателя не доходит: материал и
-  вопросы он принимает, сужение Definition of Done — нет.
-
-Первые три заведены карточками, четвёртый пока только описан.
-
-## Milestone 1. Автоматическая новая установка
+## Milestone 1. Automatic fresh install
 
 ### Outcome
 
-Одна bootstrap-команда устанавливает appliance на поддерживаемый чистый VPS. Installer создаёт
-выбранного dedicated OS user, private instance repository и локальный data plane, ставит Kanboard,
-Orca, memory service, dispatcher, фоновые роли и расписания. Ни одна голова не устанавливается
-автоматически.
+One bootstrap command installs the appliance on a supported clean VPS. The installer creates the chosen
+dedicated OS user, the private instance repository and the local data plane, and installs the board,
+session manager, memory service, dispatcher, background roles and schedules. No agent head is installed
+automatically.
 
-### Пользовательский путь
+### User path
 
 ```text
 install secretary
@@ -86,45 +76,46 @@ install secretary
   -> status
 ```
 
-### Уже реализовано
+### Already implemented
 
-- Product materializer идемпотентно планирует и применяет packaged services/timers включённых
-  компонентов.
-- Skills, units и Orca automations фоновых ролей выводятся из product root и `automation.toml`;
-  повторный прогон сохраняет стабильные automation id и unit names.
-- Существующие role worktrees синхронизируются, но создание отсутствующих worktrees остаётся частью
-  незавершённого clean-host flow.
-- `doctor` и verify materializer'а показывают отсутствующие либо drifted host resources.
+- The product materialiser idempotently plans and applies packaged services and timers for the enabled
+  components.
+- Skills, units and the session-manager automations of background roles are derived from the product root
+  and `automation.toml`; a repeat run keeps automation ids and unit names stable.
+- Existing role worktrees are synchronised, but creating missing worktrees is still part of the unfinished
+  clean-host flow.
+- `doctor` and the materialiser's verify step show missing or drifted host resources.
 
-Milestone остаётся открытым до появления поддержанной bootstrap-команды и clean-host E2E без
-заранее подготовленных checkout'ов, board и Orca state.
+The milestone stays open until there is a supported bootstrap command and a clean-host end-to-end run with
+no pre-prepared checkouts, board or session-manager state.
 
 ### Acceptance gate
 
-- Поддержанный Ubuntu 24.04 host не содержит заранее подготовленного домашнего каталога
-  installation user, checkout'ов, board или Orca state.
-- Все host paths и resource names выводятся из instance и обнаруженного host context.
-- Installer ставит и настраивает bundled Kanboard и Orca без заранее подготовленного runtime.
-- Memory, dispatcher, curator, steward, retro и schedules поднимаются materializer'ом без ручного
-  копирования units и редактирования generated files.
-- Повторный apply идемпотентен, а существующий installation user вызывает явный adopt/recover gate.
-- Установка без голов является валидным и наблюдаемым состоянием.
+- A supported host has no pre-prepared home directory for the installation user, no checkouts, no board
+  and no session-manager state.
+- Every host path and resource name is derived from the instance and the discovered host context.
+- The installer installs and configures the bundled board and session manager without a pre-prepared
+  runtime.
+- Memory, dispatcher, curator, steward, retro and the schedules come up through the materialiser with no
+  hand-copied units and no editing of generated files.
+- A repeat apply is idempotent, and an existing installation user triggers an explicit adopt/recover gate.
+- An installation with no heads is a valid, observable state.
 
-### Decision gates
+### Open questions
 
-- Точный package/install transport и поддерживаемая версия Orca.
-- Минимальные CPU, RAM и disk requirements для production memory profile.
+- The exact package and install transport, and the supported session-manager version.
+- Minimum CPU, RAM and disk for the production memory profile.
 
 ## Milestone 2. Git-backed recovery
 
 ### Outcome
 
-Приватный instance repository используется как автоматический durable checkpoint конфигурации и
-нормализованного состояния. Recovery contract не требует отдельного S3 bucket или backup host.
-Archive backup, offsite и backup timer выведены из основного пути; archive остаётся ручным
-optional cold archive, а не вторым равноправным контрактом.
+The private instance repository is used as an automatic durable checkpoint of configuration and normalised
+state. The recovery contract requires no separate object store or backup host. Archive backup, offsite
+transfer and the backup timer are out of the main path; the archive stays a manual optional cold archive
+rather than a second equal contract.
 
-### Пользовательский путь
+### User path
 
 ```text
 install secretary
@@ -134,48 +125,48 @@ install secretary
   -> status
 ```
 
-### Уже реализовано
+### Already implemented
 
-- Checkpoint содержит переносимый config/state canon, валидируется до commit и пишется только при
-  изменениях.
-- Push идёт ff-only раз в 30 минут. Failure и настоящая remote divergence не останавливают работу,
-  но остаются fail-closed для checkpoint и видны через `status`/`doctor` вместе с lag.
-- Параллельные feature publish и checkpoint commits сериализованы. Ожидаемое interleaving
-  восстанавливается автоматически, а чужая remote history остаётся ручной divergence.
-- Derived state исключён из checkpoint; archive/offsite больше не участвуют в основном UX и
-  doctor gates.
+- The checkpoint holds the portable config and state canon, is validated before commit and written only on
+  change.
+- Push is fast-forward only, every 30 minutes. Failures and genuine remote divergence do not stop the work,
+  but stay fail-closed for the checkpoint and are visible through `status` and `doctor` along with the lag.
+- Concurrent feature publishing and checkpoint commits are serialised. Expected interleaving recovers
+  automatically; foreign remote history stays a manual divergence.
+- Derived state is excluded from the checkpoint; archive and offsite no longer appear in the main UX or in
+  `doctor` gates.
 
-Поддержанный recover-from-private-remote flow и destructive-loss parity на чистом втором target
-реализованы. Milestone 2 закрыт; дальнейшие package и live-adopt задачи принадлежат Milestone 1.
+The supported recover-from-private-remote flow and destructive-loss parity on a clean second target are
+implemented. Milestone 2 is closed; the remaining packaging and live-adopt work belongs to Milestone 1.
 
 ### Acceptance gate
 
-- Checkpoint содержит instance config, persona, project/head registry, policies, board export,
-  memory facts и необходимый run/audit state.
-- Vector index, терминалы, worktrees, generated units и host-local caches не считаются каноном.
-- Snapshot проходит validation до commit и push; remote divergence и push failure остаются
-  fail-closed и видны в status вместе с checkpoint lag.
-- Потеря исходного VPS не мешает восстановить доску, память, operational configuration и
-  статические секреты установки из remote.
-- После подтверждённой parity основной UX и документация больше не требуют archive bundle/offsite
-  transport.
+- The checkpoint holds instance config, persona, the project and head registries, policies, the board
+  export, memory facts and the necessary run and audit state.
+- The vector index, terminals, worktrees, generated units and host-local caches are not canonical.
+- A snapshot passes validation before commit and push; remote divergence and push failure stay fail-closed
+  and visible in status together with the checkpoint lag.
+- Losing the original VPS does not prevent restoring the board, memory, operational configuration and the
+  installation's static secrets from the remote.
+- Once parity is confirmed, the main UX and the documentation no longer require an archive bundle or
+  offsite transport.
 
-### Зафиксированные решения
+### Decisions taken
 
-- RPO составляет не более 30 минут; checkpoint push использует отдельное 30-минутное окно поверх
+- The RPO is at most 30 minutes; the checkpoint push uses its own 30-minute window on top of the
   production tick.
-- Cold archive для raw transcripts и artifacts допустим только как ручная опция, без timer,
-  offsite transport и влияния на recovery readiness.
+- A cold archive of raw transcripts and artifacts is allowed only as a manual option, with no timer, no
+  offsite transport and no effect on recovery readiness.
 
-## Milestone 3. Подключение голов и explainable routing
+## Milestone 3. Head onboarding and explainable routing
 
 ### Outcome
 
-Пользователь добавляет головы после bootstrap. Система обнаруживает установленный CLI или предлагает
-установку, проводит внешний auth flow, проверяет capabilities и создаёт runnable profiles.
-Маршрутизация выбирает голову и account без участия нейронной модели.
+The owner adds heads after bootstrap. The system discovers an installed CLI or offers to install it, runs
+the external auth flow, checks capabilities and creates runnable profiles. Routing picks a head and an
+account without a neural model in the loop.
 
-### Пользовательский путь
+### User path
 
 ```text
 secretary head add
@@ -187,29 +178,29 @@ secretary head add
 
 ### Acceptance gate
 
-- Модель различает agent runtime, account, account pool и head profile; runtime не приравнивается к
-  model provider.
-- Карточка выбирает `light`, `standard` или `deep`, но может явно задать model или head.
-- Router сначала применяет overrides и hard availability constraints, затем учитывает мощность,
-  quota/reset state и предпочтение другого model family для review.
-- Account со статусом `unknown` доступен оптимистично; quota/auth/transient failures переводят его
-  в объяснимое circuit-breaker состояние.
-- Каждый run хранит resolved runtime, model, account и decision trace.
+- The model distinguishes agent runtime, account, account pool and head profile; a runtime is not equated
+  with a model provider.
+- A card selects `light`, `standard` or `deep`, but may name a model or head explicitly.
+- The router applies overrides and hard availability constraints first, then weighs capability, quota and
+  reset state, and a preference for a different model family for review.
+- An account in an `unknown` state is available optimistically; quota, auth and transient failures move it
+  into an explainable circuit-breaker state.
+- Every run records the resolved runtime, model, account and decision trace.
 
-### Decision gates
+### Open questions
 
-- Источники quota telemetry для каждого runtime.
-- Политики автоматической ротации accounts после накопления эксплуатационных данных.
+- Quota telemetry sources for each runtime.
+- Policies for automatic account rotation, once there is operational data.
 
-## Milestone 4. Ежедневный control plane
+## Milestone 4. Daily control plane
 
 ### Outcome
 
-Оператор управляет проектами, настройками и runtime через единый продуктовый интерфейс, не собирая
-низкоуровневые команды вручную. CLI остаётся первым интерфейсом; board и live terminal view
-покрывают работу и наблюдение.
+The operator manages projects, settings and runtime through one product interface instead of assembling
+low-level commands by hand. The CLI stays the first interface; the board and a live terminal view cover
+work and observation.
 
-### Пользовательский путь
+### User path
 
 ```text
 add project
@@ -222,64 +213,66 @@ add project
 
 ### Acceptance gate
 
-- Верхнеуровневый project workflow сворачивает текущие add/provision/gate стадии в resumable flow.
-- `secretary status` объединяет services, schedules, heads, quota state, projects, cards, memory и
-  checkpoint freshness; `doctor` остаётся строгой проверкой инвариантов.
-- Install, start, stop, logs, upgrade и uninstall доступны через product CLI.
-- Schedules и их единственный owner задаются централизованно и применяются идемпотентно.
-- Настройки меняются через валидируемые операции, даже пока каноном остаются файлы instance repo.
+- A high-level project workflow folds the current add, provision and gate stages into a resumable flow.
+- `secretary status` combines services, schedules, heads, quota state, projects, cards, memory and
+  checkpoint freshness; `doctor` stays the strict invariant check.
+- Install, start, stop, logs, upgrade and uninstall are available through the product CLI.
+- Schedules and their single owner are configured centrally and applied idempotently.
+- Settings change through validated operations, even while instance-repository files stay canonical.
 
-### Decision gates
+### Open questions
 
-- Когда нужен отдельный web control plane.
-- Когда Git-backed config стоит заменить control-plane database.
+- When a separate web control plane is needed.
+- When Git-backed config should be replaced by a control-plane database.
 
-## Milestone 5. Протокольные runtime boundaries
+## Milestone 5. Protocol runtime boundaries
 
 ### Outcome
 
-Зависимости от Kanboard, Orca и конкретных CLI локализованы за проверяемыми контрактами. Это не
-публичный plugin API, а возможность заменить backend без переписывания task и agent lifecycle.
+Dependencies on the board backend, the session manager and specific CLIs are confined behind checkable
+contracts. This is not a public plugin API, but the ability to replace a backend without rewriting the task
+and agent lifecycle.
 
 ### Acceptance gate
 
-- Board adapter реализует normalized task model, transitions, audit, export и import contract.
-- Session protocol создаёт и перечисляет durable sessions, запускает process, стримит output,
-  принимает input, сообщает exit state, завершает process tree и reconciles orphaned state.
-- Head adapters реализуют discover/install/probe/launch/delivery/observe без смешивания с task
+- A board adapter implements the normalised task model, transitions, audit, and the export and import
+  contract.
+- A session protocol creates and lists durable sessions, starts processes, streams output, accepts input,
+  reports exit state, terminates process trees and reconciles orphaned state.
+- Head adapters implement discover, install, probe, launch, delivery and observe without mixing in task
   routing.
-- У каждого контракта есть backend-independent contract suite.
-- Отказ Orca UI не разрушает task state и recovery semantics.
+- Every contract has a backend-independent contract suite.
+- A failure of the session-manager UI does not destroy task state or recovery semantics.
 
-### Decision gates
+### Open questions
 
-- Оставить Orca, перейти на существующую альтернативу, поддерживать fork или строить минимальный
-  собственный session backend.
-- Появилась ли реальная потребность во втором board backend и публичном extension API.
+- Keep the current session manager, move to an existing alternative, maintain a fork, or build a minimal
+  in-house session backend.
+- Whether there is a real need for a second board backend and a public extension API.
 
-## Milestone 6. Публичный open-source release
+## Milestone 6. Public open-source release
 
 ### Outcome
 
-Новый пользователь может установить поддержанный release, пройти основной путь и понять границы
-без знания внутренней истории проекта.
+A new user can install a supported release, walk the main path and understand its boundaries without
+knowing the project's internal history.
 
 ### Acceptance gate
 
-- Есть versioned package, release notes, compatibility matrix, schema/data migrations и rollback.
-- Clean-VM E2E проходит install, head onboarding, project add, worker/reviewer task, Git checkpoint
-  и recovery на втором target.
-- Документированы trusted single-user security boundary, credential scopes и agent host access.
-- Лицензия, contribution path, issue templates и минимальные deployment requirements опубликованы.
-- Пример не содержит private paths, accounts, projects или исторических repositories автора.
+- There is a versioned package, release notes, a compatibility matrix, schema and data migrations, and
+  rollback.
+- A clean-VM end-to-end run covers install, head onboarding, project add, a worker/reviewer task, the Git
+  checkpoint and recovery on a second target.
+- The trusted single-user security boundary, credential scopes and agent host access are documented.
+- The licence, contribution path, issue templates and minimum deployment requirements are published.
+- The examples contain no private paths, accounts, projects or the author's historical repositories.
 
-### Decision gates
+### Open questions
 
-- Какие telemetry можно собирать локально и только opt-in.
-- Как результаты продукта связываются с публичным профилем и консалтингом.
+- What telemetry may be collected locally, and only opt-in.
 
-## Поздние направления
+## Later directions
 
-После основного delivery path можно добавлять Telegram и голос как новые entry channels, remote
-control plane для телефона, richer model-quality metrics и дополнительные deployment profiles.
-Командная работа, мультитенантный SaaS и собственная модель биллинга не входят в текущий roadmap.
+After the main delivery path, Telegram and voice can be added as new entry channels, together with a remote
+control plane for a phone, richer model-quality metrics and additional deployment profiles. Team work, a
+multi-tenant SaaS and a billing model are not on the current roadmap.

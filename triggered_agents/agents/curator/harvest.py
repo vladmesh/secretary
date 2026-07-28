@@ -252,19 +252,19 @@ def render_markdown(batch: dict) -> str:
     sessions = batch["sessions"]
     memory = batch.get("memory", [])
     if not sessions and not memory:
-        return "# Нет новых ходов с прошлого прогона.\n"
-    lines = ["# Батч транскриптов для куратора", ""]
+        return "# No new turns since the previous run.\n"
+    lines = ["# Transcript batch for the curator", ""]
     for sess in sessions:
         lines.append(f"## {sess['head']} · `{sess['cwd']}` · session {sess['session_id'][:8]}")
         lines.append("")
         for t in sess["turns"]:
-            who = "**Юзер**" if t["role"] == "user" else "**Агент**"
+            who = "**User**" if t["role"] == "user" else "**Agent**"
             ts = f" _{t['ts']}_" if t.get("ts") else ""
             lines.append(f"{who}{ts}:")
             lines.append(t["text"])
             lines.append("")
     if memory:
-        lines.append("# Личная память голов (новое/изменённое)")
+        lines.append("# Personal memory of the heads (new or changed)")
         lines.append("")
         for m in memory:
             lines.append(f"## {m['head']} · `{m['cwd']}` · `{Path(m['path']).name}`")

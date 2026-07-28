@@ -721,8 +721,8 @@ def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | 
                         (board_name,),
                     ).fetchone()
                 if project is None or "project_id" not in columns:
-                    # Нельзя привязать tasks к нужной доске: глобальный счёт зацепил бы
-                    # чужие проекты, поэтому сверку пропускаем, а не считаем что попало.
+                    # The tasks cannot be tied to the right board: a global count would pull in
+                    # other projects, so the check is skipped rather than counting the wrong set.
                     return None
                 if "is_active" in columns:
                     query = "select count(*) from tasks where is_active = 1 and project_id = ?"

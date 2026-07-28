@@ -1,16 +1,16 @@
 """retro agent — deterministic helpers the /retro skill drives via Bash.
 
 Retro scans recent head transcripts (harvest reused from the curator) and the memory-mcp
-search log for concrete failures — answered from a fact in panelmem WITHOUT a memory_search and
+search log for concrete failures — answered from a fact in the memory canon WITHOUT a memory_search and
 got it wrong, repeated a known mistake, looped without progress, burned a session for nothing.
-Output is PROPOSALS only — Идеи cards on the Pipeline board (never Ready, never a merge/push to
+Output is PROPOSALS only — Ideas cards on the Pipeline board (never Ready, never a merge/push to
 any main). All judgment lives in the /retro skill; Python only gathers and redacts.
 
 Flow the agent follows each run:
   1. `python3 -m triggered_agents retro harvest`  -> redacted transcript batch (markdown) plus
                                      the search-log tail for the batch's time window on stdout;
                                      the pending watermark is cached on disk.
-  2. agent judges the batch, files each proposal as an Идеи card on the Pipeline board
+  2. agent judges the batch, files each proposal as an Ideas card on the Pipeline board
      (`pipeline --role retro idea ...`) or concludes there is nothing, optionally
      `retro log-proposal --ref <card reference> [--ref <card reference> ...]`.
   3. `python3 -m triggered_agents retro advance`  -> moves the watermark past step 1.
@@ -70,9 +70,9 @@ def cmd_harvest(as_json: bool) -> int:
     else:
         print("## Done cleanup")
         if cleanup["closed_refs"]:
-            print("Закрыты: " + ", ".join(cleanup["closed_refs"]))
+            print("Closed: " + ", ".join(cleanup["closed_refs"]))
         else:
-            print("Нет старых Done-карточек для закрытия")
+            print("No old Done cards to close")
         print()
         print(harvest.render_markdown(batch))
         print()

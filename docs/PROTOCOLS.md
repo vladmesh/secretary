@@ -1,10 +1,10 @@
-# Протоколы secretary
+# Protocols
 
-`--instance` принимает каталог instance или прямой путь к `instance.yaml`. Instance задаёт
-конфигурацию установки и хранит переносимый checkpoint в `state/`; `secretary-data` хранит
-локальное mutable/derived runtime state.
+`--instance` accepts either an instance directory or a direct path to `instance.yaml`. The instance
+holds installation configuration and the portable checkpoint in `state/`; the data directory holds
+local mutable and derived runtime state.
 
-## Проверка и host ownership
+## Checks and host ownership
 
 ```bash
 python3 -m secretary doctor --instance INSTANCE
@@ -12,40 +12,39 @@ python3 -m secretary doctor --offline --instance INSTANCE
 python3 -m secretary doctor --instance INSTANCE --host-fixture DIR
 ```
 
-`doctor` всегда read-only. Обычный запуск проверяет config, data и live inventory; `--offline`
-оставляет только config/data, а `--host-fixture` заменяет live inventory детерминированным fixture.
-Fixture нельзя сочетать с `--offline`. Exit code `0` означает завершённую проверку без findings,
-`1` означает findings или warnings с `--strict`, `2` означает невалидный input либо недоступный
-inventory. Без `--strict` warnings сами по себе остаются зелёными.
+`doctor` is always read-only. A normal run checks config, data and live inventory; `--offline` keeps
+only config and data; `--host-fixture` replaces live inventory with a deterministic fixture. A fixture
+cannot be combined with `--offline`. Exit code `0` means the check completed with no findings, `1`
+means findings (or warnings under `--strict`), `2` means invalid input or unreachable inventory.
+Without `--strict`, warnings alone stay green.
 
-Live parity выводится из того же desired state, что и `reconcile`: каждый project checkout
-сверяется по нормализованному полному пути из binding, включая путь вне `projects_root`; сам
-`projects_root` нужен для поиска неуправляемых checkout. Недоступный или не нормализуемый expected
-checkout делает inventory projects unavailable и даёт code `2`, а не `missing-on-host`. Проверяются unit-файлы, Orca registration
-и требуемое enabled/active состояние долгоживущих service и timer. Отсутствующий ресурс или
-нездоровый required runtime state даёт finding и code `1`; oneshot service может быть inactive.
-`foreign_units` исключены из managed parity и не считаются conflict. В fixture полный путь checkout
-задаётся строкой в `projects.txt`; старый каталог `projects/<name>` означает checkout именно под
-корнем fixture, а не binding с таким же basename.
+Live parity is derived from the same desired state as `reconcile`: each project checkout is checked
+against the normalised absolute path from its binding, including a path outside the projects root; the
+projects root itself is only needed to find unmanaged checkouts. An unreachable or unnormalisable
+expected checkout makes project inventory unavailable and yields code `2` rather than a missing-on-host
+finding. Unit files, session-manager registrations and the required enabled/active state of
+long-running services and timers are checked. A missing resource or an unhealthy required runtime state
+is a finding and code `1`; a oneshot service may be inactive. Units listed in `foreign_units` are
+excluded from managed parity and are not conflicts.
 
 ```bash
 python3 -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
 python3 -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--yes]
 ```
 
-`reconcile plan` читает desired state и inventory, ничего не применяет и не пишет manifest.
-`--offline` намеренно отклоняется. Code `0` означает plan без conflict, `1` означает conflict,
-`2` означает невалидный input или недоступный inventory.
+`reconcile plan` reads desired state and inventory, applies nothing and writes no manifest.
+`--offline` is deliberately rejected. Code `0` means a plan without conflicts, `1` means conflicts, `2`
+means invalid input or unreachable inventory.
 
-`reconcile adopt` касается одного существующего desired Orca registration. Он сверяет имя и
-нормализованный repo path, показывает fingerprint и без `--yes` остаётся preview. Подтверждённый
-запуск атомарно добавляет managed record, не меняя Orca, systemd или worktree. Unit resources этим
-путём не adopt'ятся.
+`reconcile adopt` touches one existing desired session-manager registration. It checks the name and the
+normalised repository path, shows a fingerprint, and stays a preview without `--yes`. A confirmed run
+atomically adds a managed record without changing the session manager, systemd or worktrees. Unit
+resources are not adopted through this path.
 
-## Задачи
+## Tasks
 
-Публичный путь к доске проходит через `secretary task`. Карточка содержит `ref`, project, type,
-state, dependency, claim, routing, workspace, retry и audit metadata:
+The public path to the board is `secretary task`. A card carries a `ref`, project, type, state,
+dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
 ideas → ready → in_progress → validate → done
@@ -66,31 +65,31 @@ python3 -m secretary task create --role po --project PROJECT --type code --title
   --sprint-override --sprint-override-reason-file REASON.md
 ```
 
-`create` принимает `--description` или `--body-file`, dependency, workspace и routing fields.
-Worker, reviewer и retro могут создавать только Ideas; PO выбирает Ready. `--codex-mode` допустим
-только для worker profile с adapter `codex`. Без override launch mode берётся из head profile.
+`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
+Worker, reviewer and retro roles may only create Ideas; the PO may choose Ready. `--codex-mode` is
+valid only for a worker profile on a `codex` adapter. Without an override, launch mode comes from the
+head profile.
 
-`archive` закрывает карточку в backend и убирает её из обычных active list/export без удаления
-истории Kanboard. Операция только для PO, требует непустую причину, пишет append-only audit и
-поддерживает идемпотентный retry/reconcile через `--request-id`. Архивировать можно только карточку
-без live work: In progress/Validate и карточки с активным claim отклоняются. Закрытая карточка из
-Done остаётся выполненной зависимостью; закрытая карточка из другой колонки не считается Done и не
-разблокирует `blocked_by`.
+`archive` closes a card in the backend and removes it from ordinary active listings and exports without
+deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
+supports idempotent retry through `--request-id`. Only a card with no live work can be archived:
+in-progress and validate cards, and cards with an active claim, are rejected. A card closed from Done
+stays a satisfied dependency; a card closed from any other column is not Done and does not unblock
+anything.
 
-`edit` заменяет спеку карточки на месте: `--title`, `--description`/`--body-file` (полный новый
-текст, не дифф), `--head`, `--review-head`. Править могут PO, dispatcher и observer, но обычная
-карточка доступна для этого только в Ideas/Ready/Blocked: у
-активной карточки воркер работает со снапшотом TASK.md, поэтому правка на лету идёт через
-preempt/requeue, а не через тихую подмену. Audit event `edited` хранит старый и новый digest;
-полный текст прошлых версий восстанавливается из git-истории `state/board/cards.ndjson` в
-checkpoint. Комменты остаются диалогом попытки, спека живёт только в description.
+`edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (the full new text, not
+a diff), `--head`, `--review-head`. PO, dispatcher and observer may edit, but an ordinary card is only
+editable in Ideas, Ready or Blocked: on an active card the worker is working against a snapshot of the
+task document, so an edit goes through preempt and requeue rather than a silent swap. The `edited` audit
+event records the old and new digests; the full text of past versions is recoverable from the Git history
+of the board export in the checkpoint. Comments stay the dialogue of an attempt; the spec lives only in
+the description.
 
-## Спринты
+## Sprints
 
-Спринт является data-сущностью на отдельном Kanboard board `Secretary sprints`, а не карточкой
-Pipeline. Один Kanboard task на этом board представляет один спринт. Board создаётся лениво и
-идемпотентно, поэтому повторный вызов не создаёт дубликат. Reference имеет форму `sprint:ID`; это
-отдельное пространство имён от convention карточек `PROJECT-N`.
+A sprint is a data entity on a separate `Secretary sprints` board, not a Pipeline card. One board task
+is one sprint. The board is created lazily and idempotently, so a repeat call creates no duplicate. A
+reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` card convention.
 
 ```bash
 python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
@@ -106,102 +105,98 @@ python3 -m secretary sprint reopen --role po --ref sprint:ID
 python3 -m secretary sprint close --role po --ref sprint:ID
 ```
 
-Stored fields are goal, Definition of Done text, repositories, open/closed/stopped status, budget
-counter by event type, current card and a structured resume entry. The six valid budget event types
-are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task`, and `hotfix`. Production derives
-them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, an
-active-card preempt to Ready, or tagged recreation/hotfix creation. The card-event id becomes the
-budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity do
-not have a matching event and do not move the counter.
+Stored fields are the goal, the Definition of Done text, repositories, open/closed/stopped status, a
+budget counter by event type, the current card and a structured resume entry. The six valid budget event
+types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
+them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
+an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
+budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity have no
+matching event and do not move the counter.
 
-Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6.
-The schema resolves omitted values to those defaults before rejecting a hard limit below the signal
-limit. Each charge is a `budget_recorded` audit event; the charge that stops a sprint is paired with
-a `budget_hard_stopped` event carrying `budget_hard_limit` and the triggering card-event identity.
-`show` returns thresholds and
-`signal_reached`/`hard_reached` with the totals. The signal appears in a newly launched observer
-prompt but does not stop work. At the hard limit the dispatcher marks the sprint `stopped`, stops
-its observer and skips new linked claims; active cards continue their normal cycle. Only
+Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
+schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
+Each charge is a `budget_recorded` audit event; the charge that stops a sprint is paired with a
+`budget_hard_stopped` event carrying the hard limit and the triggering card-event identity. `show`
+returns the thresholds and `signal_reached`/`hard_reached` with the totals. The signal appears in a newly
+launched observer prompt but does not stop work. At the hard limit the dispatcher marks the sprint
+`stopped`, stops its observer and skips new linked claims; active cards continue their normal cycle. Only
 `sprint reopen --role po` clears the stop.
 
 `sprint resume` accepts JSON with required string fields `selected_step`, `selected_why`,
-`rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored separately
-from normal comments and receives a `[sprint:resume]` marker. `show` and `status` compute freshness
-from card audit records: missing data is `resume_missing`, and a record older than the latest
-non-routing card event is `resume_stale`. Neither command reads an observer transcript.
-`secretary status --json` exposes the same entity-derived state for every sprint in
-`installation.sprints.items`, including stopped status, its `budget_hard_limit` reason, budget,
-resume freshness and observer state. If the live board cannot be read, it reports that fact in
-`installation.sprints.error`.
+`rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored separately from
+normal comments and carries a `[sprint:resume]` marker. `show` and `status` compute freshness from card
+audit records: missing data is `resume_missing`, and a record older than the latest non-routing card event
+is `resume_stale`. Neither command reads an observer transcript. `secretary status --json` exposes the
+same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
+its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
+reported in `installation.sprints.error`.
 
 `task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
-`task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives
-its `cards` list from this live Pipeline metadata, rather than storing a duplicate card list in the
-sprint. New links and comments are refused after a sprint is closed. `current-task` also requires
-that the selected Pipeline card already carries this sprint reference.
+`task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives its
+`cards` list from that live card metadata rather than storing a duplicate list. New links and comments
+are refused after a sprint is closed. `current-task` additionally requires that the selected card already
+carries this sprint reference.
 
-Открытый sprint держит все свои `repositories`: создавать карточку в таком проекте может только
-его observer и только с `--sprint` этого sprint. Перемещать и редактировать связанные карточки
-могут observer и dispatcher, поэтому обычный claim/report/review цикл не получает нового шага.
-PO может выполнить create, move или edit только явным `--sprint-override` вместе с непустым
-`--sprint-override-reason-file`; текст причины лежит отдельным полем `sprint_override_reason` в
-durable audit. Без флага PO получает `sprint_write_forbidden`, как и retro, steward и остальные
-роли. Текст отказа называет удерживающий sprint и просит писать через его сущность. Сам отказ тоже
-попадает в audit как `sprint_guard_denied` и не дублируется при повторе того же request id.
+An open sprint holds all of its `repositories`: only its observer may create a card in such a project, and
+only with `--sprint` naming that sprint. Observer and dispatcher may move and edit linked cards, so the
+ordinary claim, report and review cycle gains no extra step. The PO may create, move or edit only with an
+explicit `--sprint-override` plus a non-empty `--sprint-override-reason-file`; the reason text is stored
+as its own field in the durable audit. Without the flag the PO gets `sprint_write_forbidden`, as do retro,
+steward and every other role. The refusal names the holding sprint and asks the caller to write through
+its entity. The refusal itself is audited as `sprint_guard_denied` and is not duplicated when the same
+request id is retried.
 
-Индекс открытых sprint repositories хранится локально рядом с audit. Для проекта вне открытого
-sprint он не вызывает чтение sprint board. Для записи в удерживаемый проект sprint перечитывается
-live: недоступный board возвращает `sprint_guard_unavailable`, а не разрешает запись. Закрытие или
-остановка sprint снимает удержание; карточки в его репозиториях затем работают обычным путём.
+The index of open sprint repositories is kept locally next to the audit log. For a project outside any open
+sprint it triggers no read of the sprints board. For a write into a held project the sprint is re-read
+live: an unreachable board returns `sprint_guard_unavailable` rather than allowing the write. Closing or
+stopping a sprint releases the hold.
 
-Sprint mutations share `secretary-data/board/events.ndjson` and pending-audit recovery with card
-mutations. They carry the sprint reference as `ref`, and a repeated `--request-id` returns the
-committed event without another event record.
+Sprint mutations share the board event log and pending-audit recovery with card mutations. They carry the
+sprint reference as `ref`, and a repeated `--request-id` returns the committed event without recording a
+second one.
 
-Все write-команды проходят role guards и transition checks. Mutation сначала получает
-append-only pending audit event, затем сверяется с live board и только после этого считается
-committed. Unresolved pending write блокирует согласованный export и recovery checkpoint до
-`reconcile-audit`.
+Every write command passes role guards and transition checks. A mutation first receives an append-only
+pending audit event, is then checked against the live board, and only then counts as committed. An
+unresolved pending write blocks a consistent export and the recovery checkpoint until `reconcile-audit`.
 
-`report --kind done` перед любой записью проверяет `git status --porcelain` воркспейса воркера
-(CWD процесса) и отказывает с `uncommitted`, если там есть незакоммиченные изменения: воркер
-чинит это в своей же сессии, а не узнаёт постфактум из blocked. Untracked runtime tail
-(`secretary-data/`) не считается за грязь, `--kind blocked` не гейтится (WIP допустим), а
-пост-фактум чек диспетчера остаётся как defense-in-depth.
+`report --kind done` checks `git status --porcelain` of the worker's workspace before writing anything and
+refuses with `uncommitted` if there are uncommitted changes: the worker fixes that in its own session
+instead of learning about it later from a blocked card. An untracked runtime tail is not counted as dirt,
+`--kind blocked` is not gated because work in progress is legitimate there, and the dispatcher's after-the-
+fact check stays as defence in depth.
 
-Диспетчер также запоминает SHA, отклонённый механическим гейтом или красным ревью в текущей
-попытке. `done` на том же SHA не идёт в Validate: первый такой отчёт возвращает воркера к
-доработке в том же воркспейсе с требованием нового коммита. Второй переводит карточку в Blocked,
-чтобы не крутить бесконечный rework-цикл. Если код осознанно не меняется, например дефект в тесте
-или самом гейте, воркер сообщает `report --kind blocked` с разбором вместо повторного `done`.
+The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
+attempt. A `done` report on the same SHA does not move to Validate: the first such report sends the worker
+back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so the
+rework loop cannot spin forever. If the code deliberately does not change, for instance when the defect is
+in a test or in the gate itself, the worker reports `--kind blocked` with the analysis instead of another
+`done`.
 
-Audit trail всегда пишется в data dir установки: `--data-dir`, иначе `SECRETARY_DATA_DIR`, иначе
-`data_dir` из instance config (`--instance` / `SECRETARY_INSTANCE`). Относительный `data_dir`
-резолвится от instance file, не от CWD, поэтому вызов из воркспейса чужого проекта не оставляет
-там `secretary-data/`. Если data dir не резолвится, команда падает с usage error вместо записи
-рядом с процессом.
+The audit trail is always written to the installation's data directory: `--data-dir`, else
+`SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
+instance file, not the working directory, so a call from another project's workspace does not leave a data
+directory there. If the data directory cannot be resolved, the command fails with a usage error rather than
+writing next to the process.
 
-### Routing-телеметрия попыток
+### Routing telemetry per attempt
 
-Карточка не хранит историю роутинга: `resolved_review_head` стирается при уходе из Validate, а весь
-routing-блок сбрасывается при возврате в Ready. Поэтому «кто был воркером и кто ревьюером на попытке
-N» живёт только в append-only журнале, событиями `kind: "routing"`. Пишет их диспетчер, backend при
-этом не трогается: у события нет mutation, только запись в `events.ndjson` через обычный
-pending/commit путь, идемпотентная по `request_id`.
+A card does not keep routing history: the resolved review head is cleared when it leaves Validate, and the
+whole routing block is reset on a return to Ready. So "who was the worker and who was the reviewer on
+attempt N" lives only in the append-only journal, as `kind: "routing"` events. The dispatcher writes them
+without touching the backend: the event has no mutation, only a record written through the normal
+pending/commit path, idempotent by request id.
 
-Попытка (round) — это один подъём воркера плюс заработанное им ревью. Claim открывает попытку 1,
-каждый bounce на доработку (red-вердикт, red gate) открывает следующую; respawn, resume после паузы
-и перезапуск после отклонённого SHA остаются в своей попытке. Возврат в Ready и повторный claim
-добавляют попытку, а не затирают предыдущую: номер берётся из журнала, а не из dispatcher state,
-поэтому переживает и потерю record, и restore.
+An attempt (round) is one worker launch plus the review it earned. A claim opens attempt 1; each bounce
+back to rework (a red verdict, a red gate) opens the next. Respawn, resume after a pause and a restart
+after a rejected SHA stay inside their attempt. A return to Ready followed by a new claim adds an attempt
+rather than overwriting the previous one: the number comes from the journal, not from dispatcher state, so
+it survives both a lost record and a restore.
 
-Возврат в Ready считается таковым в обоих видах: и операторский retry уже заблокированной карточки,
-и обычный preempt/requeue живой карточки из in_progress или validate. Диспетчер в этот момент выдаёт
-попытке новый `attempt_id`, иначе повторный claim попал бы в уже закоммиченный
-`dispatcher-<attempt>-claim-<ref>`, вернул старое событие и оставил карточку в Ready. Головы
-прошлой попытки при этом снимаются: новый раунд заходит в тот же workspace. Из validate снимается
-ревьюер, воркерская панель там уже закрыта стартом ревью, иначе старый ревьюер дочитал бы чужой
-чекаут и отдал вердикт в новую попытку.
+A return to Ready counts as such in both forms: an operator retry of an already blocked card, and an
+ordinary preempt or requeue of a live card from in-progress or validate. The dispatcher issues the attempt
+a new attempt id at that moment, otherwise a repeat claim would land on an already committed claim request
+id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
+new round enters the same workspace.
 
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
@@ -212,69 +207,57 @@ pending/commit путь, идемпотентная по `request_id`.
              "resource": "openai-sub", "account": "openai-subscription"}]}}
 ```
 
-`phase` — `worker` (подъём воркера), `review` (подъём ревьюера), `verdict` (исход попытки, несёт обе
-головы), так что пары «воркер-ревьюер» группируются по исходу без join. `outcome` вердикта — `green`
-или `red` от ревьюера; bounce механического гейта закрывает попытку своим значением
-(`gate_red`, `merge-gate_red`, `review-freeze_red`), чтобы возврат на доработку не приписывался тому,
-кто её ревьюил. Если ревьюер уже выдал green, а merge-гейт вернул карточку, в журнале остаются оба
-события: `attempts()` показывает последний исход попытки, сам green из журнала не исчезает.
+`phase` is `worker` (worker launch), `review` (reviewer launch) or `verdict` (the attempt's outcome,
+carrying both heads), so worker/reviewer pairs group by outcome without a join. A verdict `outcome` is
+`green` or `red` from the reviewer; a mechanical-gate bounce closes the attempt with its own value
+(`gate_red`, `merge-gate_red`, `review-freeze_red`) so a return to rework is not attributed to whoever
+reviewed it. If the reviewer already returned green and the merge gate then bounced the card, both events
+stay in the journal.
 
-Фактическая голова совпадает с запрошенной. Решение принимается один раз, при claim, из override
-карточки или `role_defaults`, и механизма подмены в момент запуска нет: ни health-проверок, ни
-fallback-цепочек в диспетчере не существует, а `resolve`/fallback вынесены в отдельную карточку.
-Поэтому запись несёт одну голову на роль и `head_source` — откуда взялся её id: `card` (override
-карточки), `role_default`, `record` (голова, зафиксированная в dispatcher record карточки,
-заклеймленной раньше).
+The actual head matches the requested one. The decision is made once, at claim time, from the card override
+or from `role_defaults`, and there is no substitution at launch: the dispatcher has no health-based
+switching and no fallback chains. So a record carries one head per role plus `head_source`, saying where
+its id came from: `card`, `role_default`, or `record` (the head pinned in the card's dispatcher record when
+it was claimed earlier).
 
-Раз решение принимается один раз, попытка держится за него до конца. Диспетчер, потерявший свой
-record, при adopt берёт пару голов из `resolved_head` / `resolved_review_head` самой карточки, а не
-резолвит override и `role_defaults` заново: иначе переставленный посреди попытки role default отдал
-бы её ревью другой голове, и журнал честно записал бы голову, с которой попытку никто не клеймил.
-Если зафиксированная при claim голова пропала из `heads.yaml`, подъёма не происходит вообще:
-карточка уходит в Blocked с причиной `claimed head is unavailable`, dispatcher record снимается,
-в журнал ничего не дописывается. Подставить текущий `role_defaults` было бы той самой подменой в
-момент запуска, которой в установке нет, поэтому решение принимает человек. Текущее решение остаётся
-fallback'ом только для карточки, заклеймленной до того, как claim начал писать головы: там решения
-не было вовсе.
+Because the decision is made once, the attempt keeps it. A dispatcher that lost its record takes the head
+pair from the card's own resolved worker and reviewer fields when adopting, rather than resolving the
+override and `role_defaults` again: otherwise a role default changed mid-attempt would hand the review to a
+different head and the journal would honestly record a head nobody claimed the attempt with. If the head
+pinned at claim time has disappeared from the registry, nothing is launched: the card moves to Blocked with
+the reason that the claimed head is unavailable, the dispatcher record is dropped, and nothing is appended
+to the journal. Substituting the current `role_defaults` would be exactly the launch-time swap the
+installation does not have, so the decision is left to a person.
 
-Имя профиля не является историческим ключом: `codex`, `codex-terra`, `codex-high` и `codex-extra` —
-одна модель с разным effort, `claude-default` вообще не пинит модель, профили перепиниваются. Поэтому
-каждая голова несёт конфигурацию запуска целиком, снятую в момент подъёма и больше не перечитываемую
-из `heads.toml`. Снимок делает сам bring-up: `CommandHostRuntime._launch` отдаёт
-`LaunchedHead(handle, head, run)`, `prepare_worker`, `restart_worker` и `start_review` пробрасывают
-это наверх, диспетчер пишет `run` в журнал как есть. Перечитывание реестра остаётся только для
-adopted-карточки, чей подъём случился в прошлой жизни диспетчера.
+A profile name is not a historical key: several profiles can be one model at different effort levels, a
+profile may pin no model at all, and profiles get repinned. So each head carries its full launch
+configuration, captured at launch and never re-read from the registry. The bring-up itself takes the
+snapshot and the dispatcher writes it to the journal as is. The registry is re-read only for an adopted
+card whose launch happened in a previous life of the dispatcher.
 
-`model_source` говорит, откуда взялась модель, и `model` пустой только тогда, когда источник это
-прямо называет. Профиль без `model` (`claude-default`) запускается как `claude` без `--model`, и
-модель выбирает сам CLI; в момент подъёма читаются те же источники и в том же порядке, что у CLI:
-`managed_settings`, `profile` (то есть `--model`), `env:ANTHROPIC_MODEL`, `project_settings_local`,
-`project_settings`, `user_settings`. Если модель не запинена нигде, значение остаётся пустым под
-источником `cli_default` — «выбрано рантаймом», а не молчаливый пропуск. Конструктор `HeadRun`
-отвергает пустую модель под любым другим источником.
+`model_source` says where the model came from, and `model` is empty only when the source says so
+explicitly. A profile with no model launches its CLI without a model flag and the CLI picks one; at launch
+the same sources are read in the same order the CLI uses. If the model is pinned nowhere, the value stays
+empty under a `cli_default` source, meaning "chosen by the runtime" rather than a silent omission. The
+launch record rejects an empty model under any other source.
 
-Читаются эти источники не из окружения диспетчера, а из того, которое голова реально получит.
-Команда головы идёт через `wrap_role_shell_command`, то есть через `secretary.role_env exec`, а тот
-выбрасывает всякую переменную из `runtime.env`, не попавшую в role-allowlist; `ANTHROPIC_MODEL`,
-`CLAUDE_CONFIG_DIR` и `CLAUDE_MANAGED_SETTINGS` в allowlist не входят. Поэтому снимок берёт env из
-`role_launch_env(role)` — того же `runtime_env(role)`, что зовёт обёртка, — иначе журнал записал бы
-модель, до CLI не доехавшую.
+Those sources are read from the environment the head will actually get, not the dispatcher's own. A head
+command goes through the role-environment wrapper, which drops every `runtime.env` variable outside the
+role allowlist, so the snapshot reads the role launch environment. Otherwise the journal would record a
+model that never reached the CLI.
 
-Каждый подъём внутри попытки пишет своё событие: respawn после молчания, перезапуск после паузы,
-rework. `request_id` включает дайджест конфигурации, так что повторный подъём той же головы
-коммитится один раз, а подъём на другой adapter/model/effort/resource добавляет второе событие и
-заменяет активную голову попытки — вердикт всегда несёт ту голову, которая его заработала.
-`attempts()` отдаёт все подъёмы попытки в `worker_runs` / `reviewer_runs`, а `worker` / `reviewer` —
-те, что относятся к вердикту.
+Every launch inside an attempt writes its own event: respawn after silence, restart after a pause, rework.
+The request id includes a digest of the configuration, so relaunching the same head commits once, while a
+launch on a different adapter, model, effort or resource adds a second event and replaces the attempt's
+active head. The verdict always carries the head that earned it.
 
-Читающая сторона — `secretary.routing_journal.attempts(events, ref)`: последовательность попыток
-завершённой карточки с головами и исходом. События попадают в recovery checkpoint вместе с остальным
-`events.ndjson` и восстанавливаются при materialize.
-
+The reading side is `secretary.routing_journal.attempts(events, ref)`: the sequence of attempts for a
+finished card, with heads and outcome. These events go into the recovery checkpoint with the rest of the
+event log and are restored on materialise.
 
 ## Production dispatcher
 
-Production runtime запускается одним tick или постоянным loop:
+The production runtime runs as a single tick or a continuous loop:
 
 ```bash
 python3 -m secretary dispatcher production-tick --instance INSTANCE
@@ -282,46 +265,41 @@ python3 -m secretary dispatcher production-observe --instance INSTANCE
 python3 -m secretary dispatcher production-run --instance INSTANCE
 ```
 
-Systemd timer использует one-shot `production-tick`. Runtime обрабатывает только поддержанные
-task transitions, сохраняет claim/review state и сверяет live board перед recovery. Production
-owner записан в dispatcher state; несовпадение owner, dirty workspace, missing report или
-неразрешённый audit state останавливают переход вместо silent fallback.
+The systemd timer uses the one-shot `production-tick`. The runtime handles only supported task
+transitions, persists claim and review state, and checks the live board before recovery. The production
+owner is recorded in dispatcher state; an owner mismatch, a dirty workspace, a missing report or an
+unresolved audit state stops a transition instead of falling back silently.
 
-Старые pilot/cutover subcommands остаются compatibility recovery surface текущей версии, но не
-являются путём установки нового instance.
+## Pause
 
-## Пауза
-
-Пауза общая для пайплайна и живёт поверх продуктового диспетчера:
+The pause is shared across the pipeline and sits on top of the product dispatcher:
 
 ```bash
-python3 -m secretary pause drain|freeze --instance INSTANCE --reason "почему"
+python3 -m secretary pause drain|freeze --instance INSTANCE --reason "why"
 python3 -m secretary resume --instance INSTANCE
 python3 -m secretary pause-status --instance INSTANCE
 ```
 
-Контракт режимов: `drain` останавливает claim новых карточек и диспатч фоновых ролей, но уже
-идущие карточки доезжают цикл; `freeze` дополнительно останавливает живые головы воркера и
-ревьюера (`stop`, никогда `teardown`) и замораживает тик целиком — ничего не продвигается и ни
-один вотчдог не срабатывает на голову, остановленную намеренно. `resume` поднимает остановленные
-головы в тех же воркспейсах, отдаёт карточку с уже поставленным отчётом ближайшему тику и
-перезапускает окна вотчдогов.
+`drain` stops claiming new cards and dispatching background roles, but cards already running finish their
+cycle. `freeze` additionally stops live worker and reviewer heads (a stop, never a teardown) and freezes
+the tick entirely: nothing advances and no watchdog fires on a head that was stopped on purpose. `resume`
+brings stopped heads back up in the same workspaces, hands a card whose report already arrived to the next
+tick, and restarts the watchdog windows.
 
-Флаг: `<data_dir>/dispatcher/pause.json`, читается каждым `production-tick`. Зеркало для фоновых
-ролей — легаси `state/pipeline/pause.json`; его пишет и снимает та же команда. Легаси-вход
-`triggered_agents pipeline pause|resume` отказывает и указывает на продуктовую команду.
+The flag is `<data_dir>/dispatcher/pause.json`, read by every `production-tick`. Background roles read a
+mirror flag, written and cleared by the same command.
 
-Оператор при freeze может исключить свой собственный воркспейс (`--exclude-workspace`): этим
-пользуется `secretary backup create`, который замораживает пайплайн из воркера.
+During a freeze an operator can exclude their own workspace with `--exclude-workspace`; the manual archive
+command uses this to freeze the pipeline from inside a worker.
 
-Freeze, поставленный автоматикой из allowlist `TA_HARD_PAUSE_AUTO_RESUME_ACTORS`, истекает через
-`TA_HARD_PAUSE_AUTO_RESUME_TTL_S` (по умолчанию 45 минут): тик проверяет это до freeze-skip и
-снимает паузу продуктовым `resume` под тем же tick lock. Freeze от человека держится до явного
-`resume`. Замороженный тик карточки не двигает, но checkpoint пишет и пушит.
+A freeze set by an automation on the configured allowlist expires after a configurable TTL (45 minutes by
+default): the tick checks this before skipping on freeze and lifts the pause through the ordinary `resume`
+under the same tick lock. A freeze set by a person holds until an explicit `resume`. A frozen tick moves no
+cards but still writes and pushes the checkpoint.
 
-## Подключение проекта
+## Connecting a project
 
-Текущий низкоуровневый onboarding состоит из стадий:
+The current low-level onboarding has these stages:
 
 ```bash
 python3 -m secretary project add ...
@@ -330,21 +308,20 @@ python3 -m secretary project provision-apply ...
 python3 -m secretary project gate ...
 ```
 
-Identity проекта задаётся один раз top-level binding: `id`, `repo`, `adapter`, `default_branch`.
-Mutable-поля binding `plane` и `policy` в identity не входят и повторным `project add` переносятся в
-переписанный binding. Scanner и provision готовят изменения, но не включают binding. Enable разрешён
-только через успешный gate, привязанный к проверенным revision, provision run и write-set.
-Верхнеуровневый resumable workflow остаётся milestone Roadmap.
+A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`. The
+binding's mutable `plane` and `policy` fields are not part of identity and are carried over into the
+rewritten binding by a repeat `project add`. The scanner and provisioning prepare changes but do not
+enable a binding. Enabling is allowed only through a passing gate tied to verified revisions, a provision
+run and a write set. A higher-level resumable workflow is a roadmap milestone.
 
-Диагностика отказов, восстановление устаревшего disabled draft и проверка passed-результата описаны в
-[Эксплуатации](OPERATIONS.md#подключение-проекта-gate-и-восстановление-устаревшего-входа).
+Diagnosing failures, recovering a stale disabled draft and verifying a passed result are described in
+[Operations](OPERATIONS.md#connecting-a-project-gate-and-stale-input-recovery).
 
-## Память
+## Memory
 
-Facts лежат flat в `memory/facts/global/<slug>.md` или
-`memory/facts/<project-dir>/<slug>.md`. Один факт является одним дистиллированным markdown record.
-Куратор остаётся writer-ролью, остальные агенты читают через `memory_search`, `memory_get` и
-`memory_list`.
+Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-dir>/<slug>.md`. One
+fact is one distilled markdown record. The curator is the writer role; every other agent reads through
+`memory_search`, `memory_get` and `memory_list`.
 
 ```bash
 python3 -m secretary memory verify --instance INSTANCE
@@ -356,15 +333,15 @@ python3 -m secretary memory supersede --instance INSTANCE --actor ACTOR \
 python3 -m secretary memory reindex --instance INSTANCE
 ```
 
-Writer operations требуют actor и проходят journal protocol; прямые edits минуют audit trail.
-`reindex` меняет только derived index и не должен пересекаться с другим index writer. Model и
-dimension берутся из instance configuration.
+Writer operations require an actor and go through the journal protocol; direct edits bypass the audit
+trail. `reindex` changes only the derived index and must not overlap another index writer. Model and
+dimension come from instance configuration.
 
 ## Knowledge
 
-Длинные восстановимые документы (брейнштормы, журналы решений, разборы инцидентов) лежат в
-`state/knowledge/<раздел>/<документ>.md`. Разделение с curated memory и Pipeline описано в
-[Архитектуре](ARCHITECTURE.md#плоскости-знания).
+Long recoverable documents (brainstorms, decision logs, incident write-ups) live in
+`state/knowledge/<section>/<document>.md`. How this differs from curated memory and the board is described
+in [Architecture](ARCHITECTURE.md#knowledge-planes).
 
 ```bash
 python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
@@ -372,12 +349,12 @@ python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
 python3 -m secretary knowledge list --instance INSTANCE
 ```
 
-`write` перезаписывает документ целиком и коммитит только `state/knowledge` под общим writer lock,
-поэтому ручной `git commit` в instance-репозитории не нужен и с тиковым писателем не гоняется.
-Документ с секретом отклоняется с кодом 2, и на диск ничего не попадает. Повторная запись того же
-содержимого возвращает `changed: false` и нового коммита не делает.
+`write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock, so
+no manual `git commit` is needed and it does not race the tick writer. A document containing a secret is
+rejected with code 2 and nothing reaches disk. Rewriting identical content reports `changed: false` and
+makes no commit.
 
-## Секреты
+## Secrets
 
 ```bash
 python3 -m secretary secret init --instance INSTANCE
@@ -390,51 +367,45 @@ python3 -m secretary secret remove --instance INSTANCE --id ID
 python3 -m secretary secret materialize --instance INSTANCE [--target runtime-env|file]
 ```
 
-Значение секрета никогда не идёт через argv: `set` читает его из stdin или `--file`, `import` берёт
-`KEY=VALUE` env-файл (LF, без комментариев и пустых строк; заводит один секрет на переменную).
-Ни одна команда не печатает значение — `list` отдаёт только метаданные каталога, `import` и
-`materialize` печатают id и имена переменных. Чтение значения (`read_secret`) остаётся внутренним
-API, пока у него нет безопасного потребителя вроде broker-карточки.
+A secret value never travels through argv: `set` reads it from stdin or `--file`, and `import` takes a
+`KEY=VALUE` env file (LF-separated, no comments or blank lines, one secret per variable). No command prints
+a value: `list` returns catalog metadata only, and `import` and `materialize` print ids and variable names.
+Reading a value stays an internal API until there is a safe consumer for it.
 
-`secret init` интерактивен по замыслу: он отказывается работать, если stdin или stderr не терминал,
-и делает эту проверку до генерации recovery phrase, а не только перед её печатью — фраза не должна
-успеть попасть в pipe, файл или лог. Фраза печатается один раз на stderr, оператор подтверждает, что
-её записал, экран и scrollback очищаются, и только после этого `init` спрашивает несколько слов
-фразы обратно, прежде чем создать хранилище.
+`secret init` is interactive by design. It refuses to run when stdin or stderr is not a terminal, and makes
+that check before generating the recovery phrase rather than only before printing it, so the phrase cannot
+reach a pipe, a file or a log. The phrase is printed once to stderr, the operator confirms they wrote it
+down, screen and scrollback are cleared, and only then does `init` ask for a few words of the phrase back
+before creating the store.
 
-Раскладка `secrets/` в instance-репозитории:
+Layout of `secrets/` in the instance repository:
 
 ```text
 secrets/
-  catalog.yaml            открытые метаданные: id, scope, purpose, materialize — трекается git
-  installation-key.json   открытые KDF-параметры installation key и verifier — трекается git
-  values/<id>.enc.json    один зашифрованный envelope на секрет — трекается git
-  installation.key        сырой installation key, 0600, вне git (.gitignore)
+  catalog.yaml            open metadata: id, scope, purpose, materialize — tracked in Git
+  installation-key.json   open KDF parameters and verifier for the installation key — tracked in Git
+  values/<id>.enc.json    one encrypted envelope per secret — tracked in Git
+  installation.key        the raw installation key, 0600, outside Git (.gitignore)
 ```
 
-Хранилище — четвёртый писатель instance-репозитория рядом с board/runs, memory и knowledge:
-`init`, `set`, `import` и `remove` берут тот же `state_repo.state_repo_lock` и коммитят свой
-pathspec (`secrets/`, плюс `.gitignore` при `init`) одним коммитом, так что каталог и значения,
-которые он называет, не могут разойтись в истории. `list` не берёт lock и ничего не коммитит: он
-только читает `catalog.yaml`. `materialize` тоже берёт lock — чтобы не пересечься с writer'ом
-посреди чтения каталога и расшифровки, — но пишет только материализованные файлы (`runtime.env`
-или указанный `--materialize-path`) вне `secrets/` и `state_repo.commit` не вызывает: сами цели
-материализации в instance-репозиторий не входят. Открытая часть — `catalog.yaml` и
-`installation-key.json` — проходит тот же redact-гейт, что и `state/`: секрет, случайно попавший в
-поле `purpose`, останавливает запись, а не уходит в коммит. Зашифрованный envelope этот скан не
-проходит — его тело это ciphertext плюс открытые параметры расшифровки, совпадение с паттерном
-redact там было бы случайностью base64, а значение, которое redact распознал бы, это ровно то, что
-хранилище существует хранить.
+The store is the fourth writer of the instance repository, next to board/runs, memory and knowledge:
+`init`, `set`, `import` and `remove` take the same repository lock and commit their own pathspec in a
+single commit, so the catalog and the values it names cannot diverge in history. `list` takes no lock and
+commits nothing. `materialize` takes the lock too, so it does not cross a writer mid-read, but it writes
+only the materialised files outside `secrets/` and makes no commit: materialisation targets are not part of
+the instance repository. The open part passes the same redaction gate as `state/`: a secret accidentally
+pasted into a `purpose` field stops the write instead of reaching a commit. The encrypted envelope does not
+go through that scan, because its body is ciphertext plus open decryption parameters.
 
-Восстановление описано в [Recovery](RECOVERY.md), раздел «Секреты». С
-recovery phrase installation key пересобирается заново и цели материализации переписываются из
-каталога. Без фразы восстанавливается всё несекретное, а `recover` печатает отчёт `locked`/`missing`
-и ничего не пишет: `locked` — значение зашифровано, но ключа нет, `missing` — каталог называет
-секрет, чей envelope отсутствует в репозитории.
+Recovery is described in [Recovery](RECOVERY.md#secrets). With the recovery phrase the installation key is
+rebuilt and materialisation targets are rewritten from the catalog. Without the phrase everything
+non-secret is restored, and `recover` prints a `locked`/`missing` report and writes nothing: `locked` means
+the value is encrypted but the key is absent, `missing` means the catalog names a secret whose envelope is
+not in the repository.
 
-Installation key принадлежит installation user — тому же пользователю, что владеет хостом и
-инсталляцией, не отдельной более узкой роли. Хранилище не обещает worker isolation: у него нет
-своего broker или grants, и installation key открывает все секреты сразу, теми же правами, что и
-раньше читали `runtime.env`.
+The installation key belongs to the installation user, the same user that owns the host and the
+installation, not to a narrower role. The store does not promise worker isolation: it has no broker and no
+grants, and the installation key opens every secret at once, with the same rights that previously read
+`runtime.env`.
 
-Data-plane, archive restore и unit runbooks находятся в [Operations](OPERATIONS.md).
+Data-plane, archive-restore and unit runbooks are in [Operations](OPERATIONS.md).

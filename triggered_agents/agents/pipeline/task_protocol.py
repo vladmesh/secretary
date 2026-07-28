@@ -34,7 +34,7 @@ def command(action: str, reference: str, *, environ: dict[str, str] | None = Non
 
 def launch_instruction(environ: dict[str, str] | None = None) -> str:
     """Tell the worker which write path TASK.md has rendered."""
-    return f"только comment/report через {writer(environ)}"
+    return f"only comment and report through {writer(environ)}"
 
 
 def secretary_repo(environ: dict[str, str] | None = None) -> Path:

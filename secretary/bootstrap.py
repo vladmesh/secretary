@@ -38,7 +38,7 @@ ORCA_APPIMAGE_URL = (
     "https://github.com/stablyai/orca/releases/download/"
     f"{ORCA_VERSION}/orca-linux.AppImage"
 )
-PIPELINE_COLUMNS = ("Идеи", "Ready", "In progress", "Validate", "Blocked", "Done")
+PIPELINE_COLUMNS = ("Ideas", "Ready", "In progress", "Validate", "Blocked", "Done")
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 

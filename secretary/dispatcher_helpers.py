@@ -33,7 +33,7 @@ def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str 
     return result
 
 
-_GATE_RED_PREFIX = "Механический гейт валидации красный"
+_GATE_RED_PREFIX = "The mechanical validation gate is red"
 # Hidden marker line carrying the SHA-independent failure fingerprint (secretary-766): a visible
 # GitHub `detail` always contains the head SHA, which changes on every rework commit, so repeat
 # detection cannot key off the rendered text itself. Stripped back out before the body reaches

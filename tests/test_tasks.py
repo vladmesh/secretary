@@ -47,7 +47,7 @@ class FakeKanboard:
         if method == "getProjectByName":
             return {"id": 7}
         if method == "getColumns":
-            return [{"id": 1, "title": "Идеи"}, {"id": 2, "title": "Ready"}]
+            return [{"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"}]
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
@@ -217,7 +217,7 @@ class WriteKanboard(FakeKanboard):
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
             return [
-                {"id": 1, "title": "Идеи"}, {"id": 2, "title": "Ready"},
+                {"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"},
                 {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
                 {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
             ]

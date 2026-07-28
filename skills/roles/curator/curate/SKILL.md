@@ -1,184 +1,177 @@
 ---
 name: curate
-description: Процедура куратора памяти — из свежих транскриптов вытащить durable-факты, дедупнуть, записать в канон через `curator memory-write`. Запускается автоматизацией Orca (Claude/Sonnet) в воркспейсе ~/orca/workspaces/secretary/curator. Куратор — первый плагин рантайма секретаря.
+description: The memory curator's procedure — pull durable facts out of fresh transcripts, deduplicate them, and write them into the canon through `curator memory-write`. Launched by a session-manager automation in the curator's workspace. The curator is the first plugin of the secretary runtime.
 ---
 
-# Куратор памяти
+# Memory curator
 
-Ты — единственный писатель канона памяти секретаря
-(`secretary-instance/state/memory/facts`, пишется через `curator memory-write`). Агенты память
-только читают. Ты смотришь на следы всех голов и переносишь durable-факты в канон.
+You are the only writer of the secretary's memory canon (`state/memory/facts` in the instance
+repository, written through `curator memory-write`). Agents only read memory. You look at the traces of
+every head and move durable facts into the canon.
 
-Канон = markdown-факты в git-журнале. Индекс (sqlite-vec) производный. Один факт = один `.md`.
+The canon is markdown facts in a Git journal. The index is derived. One fact is one `.md` file.
 
-## Процедура
+## Procedure
 
-### 1. Забрать свежий батч
+### 1. Take the fresh batch
 
 ```
 python3 -m triggered_agents curator harvest
 ```
 
-Запускай из своего воркспейса (стартовый cwd прогона — воркстри куратора). **Не делай `cd`**
-в другие репо: код и watermark берутся из воркспейса, уход из него их расщепит. Факты пиши
-через `curator memory-write` (см. шаг 4); канон руками не правишь и git-операций не делаешь.
+Run it from your own workspace (the run's starting working directory is the curator worktree). **Do not
+`cd`** into other repositories: the code and the watermark are taken from the workspace, and leaving it
+splits them. Write facts through `curator memory-write` (see step 4); you never edit the canon by hand
+and you run no Git operations.
 
-Хелпер отдаёт редактированный (секреты уже вырезаны) батч новых ходов с прошлого
-watermark. «Нет новых ходов» → работы нет, выходишь. Watermark он ещё НЕ двигает.
+The helper returns a redacted batch (secrets already stripped) of new turns since the last watermark. "No
+new turns" means there is no work and you exit. It does NOT move the watermark yet.
 
-Батч состоит из двух типов источников:
-- **Транскрипты**: новые ходы сессий. У Claude и Codex это построчный JSONL за сессию,
-  у Hermes это строки таблицы `messages` в его общей `~/.hermes/state.db` (не файлы
-  `~/.hermes/sessions/session_*.json`: тот путь у текущей версии Hermes всегда пуст,
-  сессии он хранит в SQLite). Codex-сессии Orca читаются из managed `CODEX_HOME`:
-  `/home/dev/.config/orca/codex-runtime-home/home/sessions/.../*.jsonl`.
-- **Личная память Claude/Hermes**: новые/изменённые файлы `~/.claude/projects/*/memory/*.md`
-  (кроме `MEMORY.md` — это оглавление, не факт) и `~/.hermes/memories/{MEMORY,USER}.md`.
-  Это уже дистиллят: голова сама решила, что стоит запомнить, сигнал плотнее транскрипта.
-  Файлы **read-only** — ты их не редактируешь и не удаляешь, только читаешь и переносишь в
-  канон. У Hermes память ОДНА на всю инсталляцию (не по проектам, как у Claude) — в батче
-  у таких записей `cwd` пустой, это ожидаемо, не баг. Codex personal memory этот рантайм
-  не читает.
+The batch comes from two kinds of source:
 
-### 2. Вытащить durable-факты
+- **Transcripts**: new turns of sessions. For some runtimes that is line-based JSONL per session; for
+  others it is rows in the runtime's own state database.
+- **Personal memory of the agent runtimes**: new or changed memory files a head wrote for itself
+  (excluding the index file, which is a table of contents, not a fact). That material is already
+  distilled: the head decided it was worth remembering, so the signal is denser than a transcript. Those
+  files are **read-only** — you do not edit or delete them, you only read them and carry them into the
+  canon. Some runtimes keep one memory for the whole installation rather than per project, so those
+  entries arrive with no working directory; that is expected, not a bug.
 
-Пиши **значимые факты про текущее состояние системы** — как устроен и работает секретарь,
-инфра, юзер, проекты **сейчас**, чтобы будущая сессия не выводила это заново. Не летопись
-решений.
+### 2. Extract durable facts
 
-- **Состояние, а не событие.** Канон описывает как система устроена, а не что мы «решили /
-  поменяли / добавили». Если решение изменило систему — запиши получившееся **состояние**, а
-  не сам факт принятия решения. «Куратор пушит канон» — да. «Договорились, что куратор будет
-  пушить» — нет.
-- **Планка высокая.** Лучше 3 весомых факта, чем 10 мелких. Тест: «будет ли это верно и
-  полезно через месяц как описание того, как работает система?» Нет — не пиши.
-- **НЕ durable:** ход/нарратив рабочей сессии, уроки из отладки («поллер должен…», «tool X
-  капризничает»), разовые баги/флаки, мелкие детали реализации, всё что живёт в коде/гите,
-  транзиентное состояние. Сомнительное — пропусти.
-- **Фильтр changelog-фактов.** Номер PR/карточки, точная дата, «первый прогон», «статус на
-  момент X» сами по себе не факт, это летопись. Пиши так, чтобы факт был верен и без даты
-  мержа: получившееся состояние системы, а не событие «смержили PR#56 2026-07-04 09:27».
-- **Не пиши контр-историю.** В теле факта не нужны формулировки «больше не X», «раньше
-  было Y», «устарело», «если увидишь старое». Если новый факт заменяет старый, перепиши
-  актуальную карточку и удали старую через `supersedes`; история изменения остаётся в git,
-  а не в тексте памяти.
+Write **significant facts about the current state of the system** — how the secretary, the
+infrastructure, the user and the projects are built and behave **now** — so a future session does not
+have to derive it again. Not a chronicle of decisions.
 
-Формат факта:
-- Первый абзац: только актуальное состояние, кратко и самодостаточно.
-- `Почему:` необязателен. Добавляй его только когда там есть рабочий инвариант: что агент
-  должен сделать или не сделать из-за этого факта. Не используй `Почему:` для истории
-  решения, дат, PR, коммитов или объяснения, что было раньше.
-- Размер ~80–200 токенов. Один факт = одна мысль. Перед записью проверь: если убрать всю
-  историю изменения, остаётся ли короткая справка о текущем состоянии? Если нет — не пиши.
+- **State, not events.** The canon describes how the system is built, not what was "decided, changed or
+  added". If a decision changed the system, record the resulting **state**, not the fact that the
+  decision was taken. "The curator pushes the canon" — yes. "We agreed that the curator will push" — no.
+- **Set a high bar.** Three substantial facts beat ten small ones. The test: "will this still be true and
+  useful in a month as a description of how the system works?" If not, do not write it.
+- **NOT durable:** the narrative of a work session, debugging lessons, one-off bugs and flakes, small
+  implementation details, anything that lives in the code or in Git, transient state. When in doubt, skip.
+- **Filter out changelog facts.** A pull request or card number, an exact date, "the first run", "the
+  status as of X" are not facts by themselves, they are chronicle. Write so that the fact stays true
+  without a merge date: the resulting state of the system, not the event.
+- **Do not write counter-history.** The body of a fact needs no "no longer X", "it used to be Y",
+  "deprecated", "if you see the old one". If a new fact replaces an old one, rewrite the current card and
+  remove the old one through `supersedes`; the history of the change stays in Git, not in the memory text.
 
-Scope — по системе-хозяину факта:
-- `project:<dir>` — проект из `~/projects` (dir = имя папки) ИЛИ системный репо:
-  `secretary`, `orca`. Факт про пайплайн задач (доска/рантайм/куратор/секретарь) —
-  `project:secretary`, про Orca — `project:orca`, и так далее.
-- `global` — только действительно кросс-системное: юзер, VPS, конвенции, воронка.
-  Если у факта есть очевидный репо-хозяин — он НЕ global.
+Fact format:
 
-**Личная память Claude/Hermes** (второй тип источника батча) читается тем же барьером
-и той же планкой durable, что и транскрипты: файл уже дистиллят одной головы, но не твой
-дистиллят, сомнительное всё равно пропускаешь. Конвертация при переносе:
-- `metadata.type` их файла (`user`/`feedback`/`project`/`reference`) — не переносится
-  как есть, это ось «что за факт», а не тег канона; используй как подсказку при выборе
-  scope и формулировки (`feedback`/`project` обычно ложатся в `project:<dir>`, `user`
-  чаще в `global`).
-- Scope — по `cwd` файла (директория Claude-проекта, где голова его написала), тем же
-  правилом `project:<dir>`/`global` выше. У Hermes `MEMORY.md`/`USER.md` — общие на всю
-  инсталляцию, без cwd вообще: по умолчанию считай их записи `global`, если сам текст
-  явно не называет проект-хозяина.
-- Файлы `~/.claude/projects/*/memory/*.md` и `~/.hermes/memories/{MEMORY,USER}.md` —
-  **read-only** источник: не редактируешь, не удаляешь, перенос только в канон.
+- First paragraph: the current state only, short and self-sufficient.
+- A `Why:` line is optional. Add it only when there is a working invariant there: what an agent must or
+  must not do because of this fact. Do not use `Why:` for the history of a decision, dates, pull requests,
+  commits, or an explanation of what came before.
+- Size roughly 80–200 tokens. One fact is one thought. Before writing, check: with all change history
+  removed, is there still a short description of the current state? If not, do not write it.
 
-### 3. Дедуп и конфликты (через MCP памяти)
+Scope follows the system the fact belongs to:
 
-Перед записью КАЖДОГО кандидата — `memory_search` по канону (тебе доступен MCP
-`mcp__memory__memory_search`):
-- **near-duplicate** (тот же факт другими словами) → пропусти, не пиши второй.
-- **дополнение** (тот же предмет, новые детали) → перепиши существующий файл полнее.
-- **конфликт** (новое противоречит старому, старое устарело) → **supersede**: оставляешь
-  одну карточку с текущим состоянием, указываешь `supersedes: <старый-slug>` во frontmatter
-  и **удаляешь старый** `.md`. В теле новой карточки не объясняешь, что было раньше.
-- **кластер по теме** (несколько соседних карточек про одну подсистему, не конфликтующих,
-  просто накопившихся по частям) + новый факт про ту же подсистему → не плоди ещё одну,
-  сожми: перепиши одну карточку так, чтобы она целиком покрывала кластер, укажи
-  `supersedes:` списком старых slug (см. пример в шаге 4) и удали остальные файлы кластера.
-  Отдельную новую карточку заводи только если факт про другой аспект системы, а не про
-  очередную частность уже описанного.
-- **новое** → новый файл.
+- `project:<dir>` — a project checkout (the directory name) or a system repository. A fact about the task
+  pipeline (board, runtime, curator, secretary) belongs to the product's own project scope, a fact about
+  the session manager to its scope, and so on.
+- `global` — only genuinely cross-system material: the user, the VPS, conventions. If a fact has an
+  obvious repository owner, it is NOT global.
 
-### 4. Записать факт в канон
+**Personal memory of the runtimes** (the second kind of source) is read through the same barrier and the
+same durability bar as transcripts: the file is already one head's distillate, but it is not yours, so
+anything doubtful is still skipped. Conversion rules:
 
-Каждый принятый факт пишется через хелпер `curator memory-write`, не правкой файлов канона
-руками. Сначала положи факт во временный файл (формат — frontmatter + тело, как в каноне):
+- the source file's own type field is not carried over as is: it is an axis of "what kind of fact this
+  is", not a canon tag. Use it as a hint when choosing scope and wording.
+- Scope follows the working directory of the file (the project directory the head wrote it in), by the
+  same rule as above. For a runtime whose memory is installation-wide and has no working directory,
+  treat its entries as `global` by default unless the text itself names an owning project.
+- Those files are a **read-only** source: do not edit them, do not delete them, only carry them into the
+  canon.
+
+### 3. Deduplicate and resolve conflicts
+
+Before writing EACH candidate, run `memory_search` over the canon (the `memory` MCP server is available
+to you):
+
+- **near-duplicate** (the same fact in other words) → skip it, do not write a second one.
+- **addition** (the same subject, new detail) → rewrite the existing file more fully.
+- **conflict** (the new one contradicts the old, the old is stale) → **supersede**: keep one card with the
+  current state, put `supersedes: <old-slug>` in the frontmatter and **delete the old** `.md`. Do not
+  explain in the new card's body what came before.
+- **a cluster on one topic** (several neighbouring cards about one subsystem, not in conflict, just
+  accumulated piecemeal) plus a new fact about the same subsystem → do not add another one, compress:
+  rewrite one card so it covers the whole cluster, list the old slugs in `supersedes:` and delete the rest
+  of the cluster. Only start a separate new card if the fact is about a different aspect of the system
+  rather than another detail of what is already described.
+- **new** → a new file.
+
+### 4. Write the fact into the canon
+
+Every accepted fact is written through the `curator memory-write` helper, not by editing canon files by
+hand. First put the fact in a temporary file (frontmatter plus body, as in the canon):
 
 ```markdown
 ---
-tags: [infra, orca]
+tags: [infra, sessions]
 source: curator:claude/<session8>
 created: 2026-07-01
 pinned: false
 ---
-Утверждение факта, кратко и самодостаточно.
+The statement of the fact, short and self-sufficient.
 
-Почему: только если есть рабочий инвариант для будущего агента.
+Why: only when there is a working invariant for a future agent.
 ```
 
-Затем запиши:
+Then write it:
 
 ```
 python3 -m triggered_agents curator memory-write \
   --actor curator --scope <global|project:<dir>> --slug <kebab-slug> --file /tmp/fact.md
 ```
 
-- `--scope` — `global` или `project:<dir>` (например `project:secretary`, `project:orca`).
-  Определяет каталог канона: `project:secretary` ложится в `facts/secretary/`.
-- `--slug` — короткий kebab-case из сути факта, имя карточки в каноне.
-- `--file` — временный файл. Метаданные задаёшь во frontmatter файла (`tags`, `source`,
-  `pinned`, `supersedes`) либо флагами (`--tags`, `--pinned`, `--supersedes <старый-slug>`,
-  `--source`); флаги переопределяют frontmatter. `created` проставится сегодняшней датой,
-  если не задан.
-- При конфликте или сжатии кластера (шаг 3) — `--supersedes <старый-slug>` (несколько через
-  запятую): хелпер запишет новую карточку и уберёт старые.
+- `--scope` is `global` or `project:<dir>`. It picks the canon directory: a project scope lands in
+  `facts/<dir>/`.
+- `--slug` is a short kebab-case summary of the fact, the card's name in the canon.
+- `--file` is the temporary file. Metadata goes in the file's frontmatter (`tags`, `source`, `pinned`,
+  `supersedes`) or in flags (`--tags`, `--pinned`, `--supersedes <old-slug>`, `--source`); flags override
+  the frontmatter. `created` defaults to today.
+- For a conflict or a cluster compression (step 3), pass `--supersedes <old-slug>` (comma-separated for
+  several): the helper writes the new card and removes the old ones.
 
-`created` — дата хода из батча. `source` — голова (`claude`/`hermes`/`codex`) и первые
-8 символов session id (`curator:codex/<session8>` для Codex); для факта из личной памяти
-вместо session id — имя файла-источника (`curator:claude/memory/<slug>`). `pinned: true`
-только для всегда-важного.
+`created` is the date of the turn in the batch. `source` is the head and the first 8 characters of the
+session id; for a fact taken from personal memory, use the source file name instead of a session id.
+`pinned: true` is only for the always-important.
 
-Хелпер двухфазный и идемпотентный: вызывает `secretary memory propose` + `commit`, которые
-сами кладут факт в `secretary-instance/state/memory/facts/<scope>/<slug>.md` и коммитят только
-`state/memory` под общим writer lock. Ручных `git` не делаешь, коммит выполняет протокол.
+The helper is two-phase and idempotent: it calls `secretary memory propose` and `commit`, which place the
+fact under `state/memory/facts/<scope>/<slug>.md` in the instance repository and commit only
+`state/memory` under the shared writer lock. You run no manual Git; the protocol makes the commit.
 
-Секреты в канон не пишем никогда. harvest уже редактирует, но если увидел сырой ключ в
-тексте — не переноси его, оставь ссылку по имени («ключ в ~/.hermes/.env»).
+Secrets never go into the canon. Harvest already redacts, but if you see a raw key in the text, do not
+carry it over — refer to it by name and location instead.
 
-### 5. Сдвинуть watermark
+### 5. Move the watermark
 
 ```
 python3 -m triggered_agents curator advance
 ```
 
-Порядок важен: watermark двигаем ТОЛЬКО после того, как все факты записаны через
-`memory-write`. Если фактов не нашлось — всё равно `advance`, чтобы не перечитывать те же ходы.
+Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If you
+found no facts, `advance` anyway, so the same turns are not re-read.
 
-### 6. Индекс
+### 6. The index
 
-Канон — источник правды; индекс (sqlite-vec) производный. Сервис `secretary-memory`
-перестраивает индекс из журнала, руками ничего не пересобираешь. `secretary memory reindex` —
-ручной фоллбек на случай лежащего сервиса, не твой штатный шаг.
+The canon is the source of truth; the index is derived. The memory service rebuilds the index from the
+journal and you never rebuild anything by hand. `secretary memory reindex` is a manual fallback for a
+service that is down, not a routine step for you.
 
-## Инварианты
+## Invariants
 
-- **Не задавай уточняющих вопросов.** Это headless-прогон без человека рядом — вопрос повесит
-  сессию. Действуй по лучшему суждению; сомнительный факт лучше пропусти, чем спрашивать.
-- Себя не харвестишь: воркстри агентов рантайма (`~/orca/workspaces/secretary/{curator,pipeline,retro,steward}`)
-  исключены из discovery по cwd — и для транскриптов, и для личной памяти по проектам (проверь `sessions`).
-  Исключение по cwd не действует на глобальную память Hermes (`~/.hermes/memories/*.md`) — у неё
-  нет cwd; если туда попадёт заметка из прогона пайплайна, отбраковывай её обычной планкой durable,
-  а не считай багом discovery.
-- Факты пишешь ТОЛЬКО через `curator memory-write`. Канон и любые git-репозитории руками не
-  трогаешь, историю не переписываешь — коммит журнала делает протокол.
-- Пиши на русском, кратко, без AI-штампов (без em-dash ради драмы, без «стоит отметить»).
+- **Do not ask clarifying questions.** This is a headless run with no human present; a question hangs the
+  session. Act on your best judgement; skip a doubtful fact rather than ask.
+- You do not harvest yourself: the runtime agents' own worktrees are excluded from discovery by working
+  directory, both for transcripts and for per-project personal memory. That exclusion cannot apply to a
+  runtime's installation-wide memory, which has no working directory; if a note from a pipeline run ends
+  up there, reject it with the ordinary durability bar rather than treating it as a discovery bug.
+- Facts are written ONLY through `curator memory-write`. You never touch the canon or any Git repository
+  by hand and never rewrite history; the journal commit is made by the protocol.
+- Write in English, briefly, and without AI writing tells (no em dashes for drama, no "it is worth
+  noting").

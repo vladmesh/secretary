@@ -567,9 +567,9 @@ def _advance(records: dict, statuses: dict[str, str]) -> bool:
                 rec["last_activity"] = time.time()
                 ops.add_comment(
                     "dispatcher", ref,
-                    "терминал остановлен паузой, перезапуск не удался. "
-                    "Карточка остаётся In progress под обычным watchdog; следующий tick "
-                    f"увидит пустой handle и применит retry policy. Ошибка: "
+                    "the terminal was stopped by the pause and the restart failed. "
+                    "The card stays In progress under the ordinary watchdog; the next tick "
+                    f"will see an empty handle and apply the retry policy. Error: "
                     f"{worker.scrub_secrets(str(e))}.")
                 STATE.log_run("relaunch-after-resume", reference=ref, result="failed",
                               reason="legacy parked worker", level="warn",
@@ -645,8 +645,9 @@ def _watchdog_observation(current_head: str, silent: float, trigger: str,
     if trigger == WATCHDOG_TRIGGER_DEAD_HANDLE:
         shown = handle or "(empty)"
         detail = f" ({handle_status})" if handle_status else ""
-        return f"tracked terminal handle {shown} для головы {current_head} не живой{detail}"
-    return f"голова {current_head} молчала {int(silent)}s (порог {WATCHDOG_SECONDS}s)"
+        return (f"the tracked terminal handle {shown} of head {current_head} is not alive{detail}")
+    return (f"head {current_head} was silent for {int(silent)}s "
+            f"(threshold {WATCHDOG_SECONDS}s)")
 
 
 def _watchdog_log_fields(trigger: str, silent: float, handle_status: str | None,
@@ -705,8 +706,8 @@ def _watchdog_retry(ref: str, card: dict, rec: dict, statuses: dict[str, str], s
         ops.add_comment(
             "dispatcher", ref,
             f"watchdog: {observed}. "
-            f"Авторетрай той же головой (попытка {retry_same}/{RETRY_SAME_BUDGET}), воркспейс "
-            f"{ws or '(неизвестен)'} снесён, карточка в Ready на переклейм.",
+            f"Automatic retry with the same head (attempt {retry_same}/{RETRY_SAME_BUDGET}); "
+            f"workspace {ws or '(unknown)'} removed, card returned to Ready to be re-claimed.",
             marker=model.MARKER_WATCHDOG_RETRY)
         STATE.log_run("advance", reference=ref, to="Ready", reason="watchdog-retry-same",
                       head=current_head, retry_same=retry_same, **log_fields)
@@ -723,10 +724,10 @@ def _watchdog_retry(ref: str, card: dict, rec: dict, statuses: dict[str, str], s
                                 retry_heads=",".join(tried), head=resolved)
             ops.add_comment(
                 "dispatcher", ref,
-                f"watchdog: {observed}, ретрай той же головой исчерпан. Авторетрай сменой головы "
-                f"на {resolved} (попытка {retry_switch}/"
-                f"{RETRY_SWITCH_BUDGET} по цепочке heads.toml), воркспейс снесён, карточка в "
-                f"Ready на переклейм.",
+                f"watchdog: {observed}; retries with the same head are spent. Automatic retry "
+                f"switching the head to {resolved} (attempt {retry_switch}/"
+                f"{RETRY_SWITCH_BUDGET} along the head-registry chain); workspace removed, card "
+                f"returned to Ready to be re-claimed.",
                 marker=model.MARKER_WATCHDOG_RETRY)
             STATE.log_run("advance", reference=ref, to="Ready", reason="watchdog-retry-switch",
                           head=current_head, switched_to=resolved, retry_switch=retry_switch,
@@ -739,21 +740,21 @@ def _watchdog_retry(ref: str, card: dict, rec: dict, statuses: dict[str, str], s
                                 retry_heads=",".join(tried))
             ops.add_comment(
                 "dispatcher", ref,
-                f"watchdog: {observed}, ретрай той же головой исчерпан, а вся оставшаяся цепочка "
-                f"heads.toml сейчас красная. Бюджет смены не тратится, карточка в Ready ждёт "
-                f"зелёного ресурса.",
+                f"watchdog: {observed}; retries with the same head are spent and the whole "
+                f"remaining head chain is red right now. The switch budget is not spent; the card "
+                f"waits in Ready for a green resource.",
                 marker=model.MARKER_WATCHDOG_RETRY)
             STATE.log_run("advance", reference=ref, to="Ready", reason="watchdog-retry-wait",
                           head=current_head, **log_fields)
             return
 
-    ws_note = (f"воркспейс {ws} оставлен для разбора" if ws
-               else "воркспейс неизвестен (подобрана после сбоя)")
+    ws_note = (f"workspace {ws} left in place for investigation" if ws
+               else "workspace unknown (the card was adopted after a failure)")
     ops.add_comment(
         "dispatcher", ref,
-        f"watchdog: бюджет авторетраев исчерпан ({RETRY_SAME_BUDGET} той же головой + "
-        f"{RETRY_SWITCH_BUDGET} сменой). Попытки: {', '.join(tried)}. Последняя голова "
-        f"дала сбой: {observed}. Карточка в Blocked, {ws_note}.")
+        f"watchdog: the automatic retry budget is spent ({RETRY_SAME_BUDGET} with the same head "
+        f"plus {RETRY_SWITCH_BUDGET} switching). Attempts: {', '.join(tried)}. The last head "
+        f"failed: {observed}. Card moved to Blocked, {ws_note}.")
     ops.move_card("dispatcher", ref, "Blocked")
     STATE.log_run("advance", reference=ref, to="Blocked", reason="watchdog", head=current_head,
                   retry_same=retry_same, retry_switch=retry_switch, tried_heads=tried,
@@ -784,14 +785,14 @@ def _block(ref: str, reason: str, body: str, **log_fields) -> None:
 
 def _claim_started_comment_body(worker_id: str, ws: str, now: float) -> str:
     ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    return f"Взята в работу {ts}, воркер {worker_id}, воркспейс {ws}."
+    return f"Claimed at {ts}, worker {worker_id}, workspace {ws}."
 
 
 def _has_claim_started_comment(ref: str, worker_id: str, ws: str, baseline: int) -> bool:
     marker = f"[{model.MARKER_CLAIM_STARTED}]"
     for comment in ops.show_card(ref)["comments"][baseline:]:
         text = comment.get("text", "")
-        if marker in text and f"воркер {worker_id}" in text and f"воркспейс {ws}" in text:
+        if marker in text and f"worker {worker_id}" in text and f"workspace {ws}" in text:
             return True
     return False
 
@@ -842,16 +843,17 @@ def _bring_up(card: dict, worker_id: str, records: dict, head: str) -> None:
     try:
         if card_base and worker.remote_head_sha(project, card_base) is None:
             _block(ref, "base-branch",
-                   f"карточка задаёт base_branch `{card_base}`, которой нет на origin проекта "
-                   f"`{project}` — фолбэк на манифест/main запрещён, карточка в Blocked до "
-                   f"появления ветки на origin.", base_branch=card_base)
+                   f"the card declares base_branch `{card_base}`, which does not exist on the "
+                   f"origin of project `{project}`. Falling back to the manifest or the default "
+                   f"branch is forbidden, so the card is Blocked until the branch appears on "
+                   f"origin.", base_branch=card_base)
             return
         base = worker.resolve_base_branch(project, card_base)
         ws = worker.create_workspace(project, worker_id, base)
         worker.set_branch(ws, naming.worker_branch(ref))
         ok, log = worker.provision(ws)
         if not ok:
-            _block(ref, "smoke", "setup/smoke упал, воркер не стартует:\n```\n" + _tail(log) + "\n```",
+            _block(ref, "smoke", "setup/smoke failed and the worker does not start:\n```\n" + _tail(log) + "\n```",
                    workspace=ws)
             return
         view = ops.show_card(ref)
@@ -860,14 +862,14 @@ def _bring_up(card: dict, worker_id: str, records: dict, head: str) -> None:
         handle = worker.launch_worker(ws, head, worker_id, title)
     except worker.InjectDeliveryError as e:
         _block(ref, "inject-delivery",
-               f"bring-up упал: inject не доставлен в TUI, turn не стартовал после "
-               f"bounded delivery protocol. Карточка в Blocked до vladmesh."
-               + (f"\nВоркспейс {ws} оставлен." if ws else ""),
+               f"bring-up failed: the prompt was not delivered to the TUI and no turn started "
+               f"after the bounded delivery protocol. Card moved to Blocked for a human."
+               + (f"\nWorkspace {ws} left in place." if ws else ""),
                error=worker.scrub_secrets(str(e)))
         return
     except Exception as e:
         stage = "workspace-create" if ws is None else "launch"
-        _block(ref, stage, f"bring-up упал ({stage}): {e}" + (f"\nВоркспейс {ws} оставлен." if ws else ""),
+        _block(ref, stage, f"bring-up failed ({stage}): {e}" + (f"\nWorkspace {ws} left in place." if ws else ""),
                error=worker.scrub_secrets(str(e)))
         return
     now = time.time()

@@ -559,7 +559,7 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def _state_for_column(column: str) -> str | None:
-    return {"Идеи": "ideas", "Ready": "ready", "In progress": "in_progress", "Validate": "validate", "Blocked": "blocked", "Done": "done"}.get(column)
+    return {"Ideas": "ideas", "Ready": "ready", "In progress": "in_progress", "Validate": "validate", "Blocked": "blocked", "Done": "done"}.get(column)
 
 
 def _update_restore_state(data_dir: Path, **changes: Any) -> None:

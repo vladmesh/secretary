@@ -1,6 +1,6 @@
 """Per-attempt routing telemetry: which head ran as worker and as reviewer on each attempt.
 
-Contract: docs/PROTOCOLS.md, "Routing-телеметрия попыток". The card's own metadata cannot answer
+Contract: docs/PROTOCOLS.md, "Routing telemetry per attempt". The card's own metadata cannot answer
 "who reviewed attempt 2": `resolved_review_head` is cleared when the card leaves Validate and the
 whole routing block is reset on the way back to Ready, so the board keeps at most the last worker
 head. The append-only task journal keeps every launch instead, one `routing` event per head

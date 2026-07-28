@@ -20,9 +20,9 @@ def block_inject_delivery(
     clear_review(rec)
     scrubbed = worker.scrub_secrets(str(error))
     ops.add_comment("dispatcher", ref,
-                    f"Не удалось поднять голову-ревьюера (слой 3): inject не доставлен "
-                    f"в TUI, turn не стартовал после bounded delivery protocol. Карточка в Blocked "
-                    f"до vladmesh. {note}")
+                    f"Could not launch the reviewer head (layer 3): the prompt was not delivered "
+                    f"to the TUI and no turn started after the bounded delivery protocol. Card "
+                    f"moved to Blocked for a human. {note}")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
     STATE.log_run("review", reference=ref, to="Blocked", reason="inject-delivery",

@@ -2574,8 +2574,9 @@ class DispatcherRuntime:
                 reference=ref,
                 target="blocked",
                 reason=(
-                    f"Воркер дважды отчитался done без новой работы: HEAD {sha} уже был отклонён "
-                    "механическим гейтом или красным ревью. Нужен разбор человека."
+                    f"The worker reported done twice with no new work: HEAD {sha} was already "
+                    "rejected by the mechanical gate or by a red review. A human needs to look at "
+                    "this."
                 ),
                 request_id=_attempt_request_id(
                     record.attempt_id or attempt_id, "stale-done-blocked", ref, str(record.rejected_done_reports)
@@ -2605,10 +2606,10 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"Отчёт done отклонён: HEAD {sha} уже был отклонён механическим гейтом или "
-                "красным ревью. Сделайте и закоммитьте новую работу, затем отчитайтесь снова. "
-                "Если причина в тесте или гейте и код менять не нужно, используйте report --kind blocked; "
-                "ещё один done на этом SHA переведёт карточку в Blocked."
+                f"The done report was rejected: HEAD {sha} was already rejected by the mechanical "
+                "gate or by a red review. Do and commit new work, then report again. If the cause "
+                "is a test or the gate itself and the code should not change, use "
+                "report --kind blocked; another done on this SHA moves the card to Blocked."
             ),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, "stale-done-rework", ref, str(record.rejected_done_reports)
@@ -3088,10 +3089,12 @@ class DispatcherRuntime:
         # than losing repeat detection outright.
         fingerprint = result.fingerprint or _gate_fingerprint("fallback", log or detail)
         repeat = _gate_red_repeat_count(task, fingerprint)
-        prefix = f"Повторный возврат (заход {repeat + 1}, причина не изменилась). " if repeat else ""
-        body = f"{prefix}Механический гейт валидации красный: {detail}. Карточка возвращена в In progress на доработку."
+        prefix = (f"Repeat return (round {repeat + 1}, the reason has not changed). "
+                  if repeat else "")
+        body = (f"{prefix}The mechanical validation gate is red: {detail}. The card is back in "
+                f"In progress for rework.")
         if log:
-            body += f"\nХвост:\n```\n{log}\n```"
+            body += f"\nTail:\n```\n{log}\n```"
         body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
         # No-op unless a reviewer head is up; when one is, it goes before the worker head comes
         # back, and an unconfirmed stop ends the tick before the card is moved rather than sending
@@ -3248,9 +3251,9 @@ class DispatcherRuntime:
             reference=ref,
             target="blocked",
             reason=(
-                f"Механический гейт: {scrub_host_output(result.summary)} — CI висит без "
-                f"терминального результата дольше порога ({GATE_PENDING_STALL_SECONDS}s). "
-                f"Карточка в Blocked до vladmesh."
+                f"Mechanical gate: {scrub_host_output(result.summary)}. CI has been hanging with "
+                f"no terminal result for longer than the threshold "
+                f"({GATE_PENDING_STALL_SECONDS}s). Card moved to Blocked for a human."
             ),
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-pending-stall", ref),
         )
@@ -3340,9 +3343,9 @@ class DispatcherRuntime:
         if self.host.is_instance_publish_recovery(task, record, record.review_commit, current):
             return ""
         return (
-            f"Ревью выдано для коммита `{record.review_commit[:12]}`, а рабочая копия сейчас на "
-            f"`{current[:12]}`: вердикт относится к другому состоянию кода. Карточка возвращена "
-            f"в In progress — доработай и отчитайся заново."
+            f"The review was given for commit `{record.review_commit[:12]}` while the working copy "
+            f"is now on `{current[:12]}`: the verdict describes a different state of the code. The "
+            f"card is back in In progress; rework it and report again."
         )
 
     def head_run_snapshot(

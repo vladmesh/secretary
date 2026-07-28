@@ -9,7 +9,7 @@ gate runs through its adapter's `validation.ci`:
            typical `on: [push:main, pull_request]` workflow actually fires — a bare feature-branch
            push triggers nothing), then poll GitHub CI for the branch head sha; SUCCESS is green,
            FAILURE is red, PENDING/NONE is pending (a check still running, or none posted yet —
-           «CI не стартовал», deliberately not confused with «CI красный»). `validation
+           "CI did not start", deliberately not confused with "CI is red"). `validation
            .required_checks` narrows the rollup to those check names; without it every check on
            the sha counts.
   none   — no mechanical gate; the card goes straight to review (unchanged pre-633 behaviour).
@@ -175,7 +175,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     tail = _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
     summary = "local validation failed"
     if _INFRA_MARK_RE.search(tail):
-        summary += " — похоже на инфраструктурный отказ подготовки, а не провал теста"
+        summary += "; this looks like an infrastructure setup failure rather than a test failure"
     return GateResult("red", summary, tail, fingerprint=_fingerprint("local", tail))
 
 
@@ -194,11 +194,11 @@ def _github_gate(host, task: dict, workspace: str, base: str, required: list[str
         fragment = _failed_log(host, repo, failed or {})
         where = f"job «{job}»"
         if fragment.step:
-            where += f", шаг «{fragment.step}»"
+            where += f", step \"{fragment.step}\""
         summary = f"CI red: {where} failed on `{branch}` @ `{short}`"
         if fragment.infra:
-            summary += " — похоже на инфраструктурный отказ подготовки, а не провал теста"
-        log = fragment.text if fragment.available else f"лог недоступен: {fragment.reason}"
+            summary += "; this looks like an infrastructure setup failure rather than a test failure"
+        log = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
         cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
         fingerprint = _fingerprint("github", job, fragment.step, cause)
         return GateResult("red", summary, log, fingerprint=fingerprint)
@@ -226,8 +226,8 @@ def _ensure_pr(host, workspace: str, task: dict, branch: str, base: str) -> None
         return
     title = f"{task['ref']}: {branch}"
     body = (
-        f"Автоматический PR ветки воркера `{branch}` для задачи {task['ref']}. "
-        f"Открыт github-CI-гейтом секретаря, чтобы прогнать pull_request-CI."
+        f"Automatic PR for worker branch `{branch}` of task {task['ref']}. "
+        f"Opened by the CI gate so that the pull_request CI runs."
     )
     created = host.run_capture(
         ["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body],
@@ -373,16 +373,17 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     """
     match = _RUN_URL_RE.search(str(item.get("details_url") or item.get("html_url") or item.get("targetUrl") or ""))
     if not match:
-        return _LogFragment(available=False, reason="запись не является Actions-прогоном (нет ссылки на run)")
+        return _LogFragment(available=False,
+                            reason="the entry is not an Actions run (no run link)")
     run_id = match.group(2)
     completed = host.run_capture(
         ["gh", "run", "view", run_id, "-R", repo, "--log-failed"], "gate failed log"
     )
     if completed.returncode != 0:
-        return _LogFragment(available=False, reason="`gh run view --log-failed` вернул ошибку")
+        return _LogFragment(available=False, reason="`gh run view --log-failed` returned an error")
     entries = _parse_job_log((completed.stdout or "").strip())
     if not entries:
-        return _LogFragment(available=False, reason="гейт получил пустой лог")
+        return _LogFragment(available=False, reason="the gate received an empty log")
     job_name = str(item.get("name") or item.get("context") or "")
     scoped = [entry for entry in entries if not job_name or entry[0] == job_name] or entries
     cause_idx = next(
@@ -398,5 +399,5 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     step = next((entry[1] for entry in reversed(tail) if entry[1]), "")
     text = "\n".join(entry[2] for entry in tail).strip()
     if not text:
-        return _LogFragment(available=False, reason="гейт получил пустой лог")
+        return _LogFragment(available=False, reason="the gate received an empty log")
     return _LogFragment(available=True, job=job_name, step=step, text=text, infra=bool(_INFRA_MARK_RE.search(text)))

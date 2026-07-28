@@ -805,8 +805,8 @@ def start_canon_watcher() -> None:
 
 mcp = FastMCP("memory", host="127.0.0.1", port=PORT)
 
-# Память read-only для агентов: пишет только куратор (markdown-канон → reindex).
-# Внутренний add_memory оставлен для миграции/selftest, но через MCP не светится.
+# Memory is read-only for agents: only the curator writes (the markdown canon, then a reindex).
+# The internal add_memory is kept for migration and self-test but is not exposed over MCP.
 
 
 @mcp.tool()
@@ -817,9 +817,9 @@ def memory_search(query: str, k: int = 5, scope: str = "", caller: str = "") -> 
     (e.g. "orca", "secretary"). Search your own project's scope first,
     then retry without scope. k is clamped to 10. caller: your role (worker/reviewer/
     steward/secretary/curator), telemetry only, always pass it."""
-    # Кап выдачи (решение vladmesh 2026-07-11): скоры у ранжировщика лежат в узкой полке
-    # (~0.80-0.84 по телеметрии), длинный хвост неотличим от топа и засоряет контекст.
-    # В лог пишем исходный k: телеметрия должна видеть, что просили на самом деле.
+    # Result cap: the ranker's scores sit in a narrow band (~0.80-0.84 in telemetry), so a long
+    # tail is indistinguishable from the top and just clutters the context.
+    # The original k is written to the log: telemetry must see what was actually asked for.
     requested_k = k
     k = max(1, min(k, 10))
     if not search_ready():

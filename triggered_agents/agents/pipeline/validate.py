@@ -6,7 +6,7 @@ layer 1 (mechanical, PR project): poll the card's PR through gh (worker.poll_pr)
     moves on. Base-freshness recovery runs first, apart from CI (model.merge_status,
     merge_recovery.recover): a PR whose head diverged from its base (GitHub mergeable=CONFLICTING or
     mergeStateStatus=BEHIND) is recovered there instead of sitting under the CI watchdog as «checks
-    не появились» — a clean BEHIND branch is auto-updated (git merge origin/<base> in the worker
+    have not appeared" — a clean BEHIND branch is auto-updated (git merge origin/<base> in the worker
     workspace, a merge commit, a plain push, no rebase/force), then re-validated for the new head
     SHA; a real text conflict goes back to the same worker to resolve. Both are capped per base SHA
     (merge_recovery.MERGE_RECOVERY_ATTEMPTS) so one divergence never loops forever. A rollup stuck on PENDING/NONE
@@ -31,7 +31,7 @@ layer 3 (independent review, every project): once the lower layers are green, sp
     worktree to the exact verified sha rather than the branch's live tip) and drive it by its
     verdict exactly the way dispatcher._advance drives an In-progress card by the worker's report:
     spawn once per code state, read the verdict past a baseline, act. Red -> back to In progress
-    with a nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked до vladmesh.
+    with a nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked for a human.
     Green on a PR project (stand or not) triggers the dispatcher's own squash merge, one-shot, but
     only once the PR's actual base (gh) matches resolve_base_branch(project, card.base_branch) —
     a mismatch (e.g. a sprint-shim card's PR opened against main instead of sprint/NNN) Blocks
@@ -64,10 +64,10 @@ from .state import STATE
 RefreshWorkerTask = Callable[[dict, dict], None]
 
 # Layer-3 rework cap: a card may be returned by red reviewer verdicts at most this many times over
-# its life. The next red after that goes to Blocked до vladmesh with the full verdict on the card.
+# its life. The next red after that goes to Blocked for a human with the full verdict on the card.
 REVIEW_RETURN_CAP = int(os.environ.get("TA_REVIEW_RETURN_CAP", "3"))
 # How many consecutive orca failures to bring up the reviewer head we tolerate before Blocking the
-# card до vladmesh — a persistent failure must escalate, not retry (and leak a worktree) forever.
+# card for a human — a persistent failure must escalate, not retry (and leak a worktree) forever.
 REVIEW_SPAWN_ATTEMPTS = int(os.environ.get("TA_REVIEW_SPAWN_ATTEMPTS", "3"))
 # How many consecutive ticks a Validate card may go without a PR link or with gh unreachable before
 # escalating once to Blocked — a stuck card must eventually surface to a human, not warn forever.
@@ -207,10 +207,12 @@ def _block_rework_worker_failure(ref: str, rec: dict, records: dict,
         except Exception as stop_exc:  # noqa: BLE001, escalation must not be masked by cleanup
             STATE.log_run("rework-worker", reference=ref, result="stop-failed", level="warn",
                           reason=reason, error=worker.scrub_secrets(str(stop_exc)))
-    ws_note = f"Воркспейс {workspace} оставлен для разбора." if workspace else "Воркспейс неизвестен."
+    ws_note = (f"Workspace {workspace} left in place for investigation." if workspace
+               else "Workspace unknown.")
     ops.add_comment("dispatcher", ref,
-                    f"Не удалось вернуть карточку в работу после {reason}: worker head не поднят "
-                    f"или TASK.md не обновлён: {scrubbed}. Карточка в Blocked до vladmesh. "
+                    f"Could not return the card to work after {reason}: the worker head did not "
+                    f"come up or TASK.md was not updated: {scrubbed}. Card moved to Blocked for a "
+                    f"human. "
                     f"{ws_note}")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
@@ -240,22 +242,22 @@ def _stand_gate(ref: str, pr: str, card: dict, cfg: dict, records: dict, view: d
 
     if result["ok"]:
         ops.add_comment("dispatcher", ref,
-                        f"Стенд + e2e зелёные по ветке `{branch}` ({pr}). Слои 1-2 пройдены, "
-                        f"ждёт ручного мержа vladmesh.",
+                        f"Stand and end-to-end run are green on branch `{branch}` ({pr}). "
+                        f"Layers 1-2 passed; waiting for a manual merge.",
                         marker=model.MARKER_STAND_GREEN)
         STATE.log_run("stand", reference=ref, result="green", pr=pr, branch=branch)
         return False
 
     stage = result.get("stage") or "e2e"
-    tail = worker.scrub_secrets(result.get("log") or "(лог недоступен)")
+    tail = worker.scrub_secrets(result.get("log") or "(log unavailable)")
     prior = rec.get("stand_fails", 0) if rec is not None else _count_marker(view, model.MARKER_STAND_RED)
     fails = prior + 1
     last = fails >= 2
     ops.add_comment("dispatcher", ref,
-                    f"Стенд красный на этапе «{stage}» (ветка `{branch}`, {pr}). "
-                    + ("Второй фейл подряд — карточка в Blocked." if last
-                       else "Один авторетрай на следующем тике.")
-                    + f"\nХвост лога:\n```\n{tail}\n```",
+                    f"Stand red at stage \"{stage}\" (branch `{branch}`, {pr}). "
+                    + ("Second failure in a row: card moved to Blocked." if last
+                       else "One automatic retry on the next tick.")
+                    + f"\nLog tail:\n```\n{tail}\n```",
                     marker=model.MARKER_STAND_RED)
     if last:
         ops.move_card("dispatcher", ref, "Blocked")
@@ -354,7 +356,8 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
         if rec is not None:
             clear_review(rec)
         ops.add_comment("dispatcher", ref,
-                        f"PR {pr} закрыт без мержа. Карточка в Blocked, нужна ручная разборка.")
+                        f"PR {pr} was closed without a merge. Card moved to Blocked; needs "
+                        f"manual investigation.")
         ops.move_card("dispatcher", ref, "Blocked")
         records.pop(ref, None)
         STATE.log_run("validate", reference=ref, to="Blocked", reason="pr-closed", pr=pr)
@@ -363,7 +366,7 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
         # Base-freshness recovery runs BEFORE any CI branch below (triggered-agents-442): a
         # conflicting or behind PR often has no CI at all (GitHub can't build the synthetic merge
         # commit, so the pull_request workflow never starts and rollup stays NONE), so left to the
-        # CI branches it would sit in the pending watchdog as «checks не появились» for hours. A
+        # CI branches it would sit in the pending watchdog as "checks have not appeared" for hours. A
         # temporary UNKNOWN (poll's mergeable, still recomputing) is deliberately NOT here — it
         # falls through to the ordinary CI path, treated as neither a conflict nor a green state.
         return merge_recovery.recover(
@@ -372,9 +375,9 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
             block_rework=_block_rework_worker_failure) or changed
     if status["rollup"] == "FAILURE":
         job = status.get("failed_job") or "?"
-        tail = worker.scrub_secrets(status.get("failed_log") or "(лог недоступен)")
-        comment = (f"CI красный: джоба «{job}» упала. Хвост лога:\n```\n{tail}\n```\n"
-                   f"Карточка возвращена в In progress на доработку. PR: {pr}")
+        tail = worker.scrub_secrets(status.get("failed_log") or "(log unavailable)")
+        comment = (f"CI red: job \"{job}\" failed. Log tail:\n```\n{tail}\n```\n"
+                   f"Card returned to In progress for rework. PR: {pr}")
         ops.add_comment("dispatcher", ref, comment, marker=model.MARKER_VALIDATE_RED)
         ops.move_card("dispatcher", ref, model.IN_PROGRESS)
         if rec is not None:
@@ -390,8 +393,8 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
             try:
                 _notify_worker_for_rework(
                     ref, card, rec, records, save_cards, refresh_worker_task,
-                    f"CI по {pr} красный: джоба «{job}» упала, карточка вернулась в "
-                    f"In progress. Разбор в комментарии карточки, почини и снова report done.",
+                    f"CI on {pr} is red: job \"{job}\" failed and the card is back in "
+                    f"In progress. The analysis is in the card comment; fix it and report done again.",
                     "ci-red")
             except Exception as e:  # noqa: BLE001, do not leave In progress with a dead handle
                 _block_rework_worker_failure(ref, rec, records, "ci-red", e)
@@ -417,12 +420,13 @@ def _validate_card(card: dict, records: dict, watchdog_seconds: int, save_cards,
             # No stand: CI is the only mechanical layer. Note it once per code state, then layer 3.
             if not _has_marker_since(view, model.MARKER_VALIDATE_GREEN, baseline):
                 if ci_not_expected:
-                    comment = (f"CI не ожидается по манифесту проекта, GitHub checks для {pr} "
-                               f"отсутствуют. Слой 1 пройден, запускаю независимое ревью (слой 3).")
+                    comment = (f"No CI is expected per the project manifest and there are no "
+                               f"checks on {pr}. Layer 1 passed; starting the independent review "
+                               f"(layer 3).")
                     result = "ci-none-declared"
                 else:
-                    comment = (f"CI зелёный по {pr}. Слой 1 пройден, запускаю независимое "
-                               f"ревью (слой 3).")
+                    comment = (f"CI green on {pr}. Layer 1 passed; starting the independent "
+                               f"review (layer 3).")
                     result = "ci-green"
                 ops.add_comment("dispatcher", ref,
                                 comment,
@@ -485,9 +489,9 @@ def _validate_contrib_card(ref: str, card: dict, rec: dict | None, records: dict
     baseline = int(rec.get("comment_baseline", 0)) if rec is not None else 0
     if not _has_marker_since(view, model.MARKER_VALIDATE_GREEN, baseline):
         ops.add_comment("dispatcher", ref,
-                        f"Contrib-карточка: локальные тесты уже в отчёте воркера (слой 1, без "
-                        f"CI-поллинга). Ветка `{branch}` @ `{sha}`. Запускаю независимое ревью "
-                        f"(слой 3).",
+                        f"Contrib card: the local tests are already in the worker report (layer "
+                        f"1, no CI polling). Branch `{branch}` @ `{sha}`. Starting the independent "
+                        f"review (layer 3).",
                         marker=model.MARKER_VALIDATE_GREEN)
         STATE.log_run("validate", reference=ref, result="contrib-report-green", branch=branch, sha=sha)
         view = ops.show_card(ref)
@@ -513,12 +517,14 @@ def _validate_stall(ref: str, reason: str, rec: dict | None, records: dict, **lo
         return False
     fails = rec.get("validate_stall_fails", 0) + 1
     if fails >= VALIDATE_STALL_ATTEMPTS:
-        ws = rec.get("workspace") or "(неизвестен)"
-        subject = "статус PR" if reason in ("no-pr-ref", "gh-unavailable") else "ветку/head в отчёте"
+        ws = rec.get("workspace") or "(unknown)"
+        subject = ("the PR status" if reason in ("no-pr-ref", "gh-unavailable")
+                   else "the branch and head in the report")
         clear_review(rec)
         ops.add_comment("dispatcher", ref,
-                        f"Validate не может определить {subject} {fails} тиков подряд ({reason}). "
-                        f"Карточка в Blocked, воркспейс {ws} оставлен для разбора.")
+                        f"Validate could not determine {subject} for {fails} ticks in a row "
+                        f"({reason}). Card moved to Blocked; workspace {ws} left in place for "
+                        f"investigation.")
         ops.move_card("dispatcher", ref, "Blocked")
         records.pop(ref, None)
         STATE.log_run("validate", reference=ref, to="Blocked", reason=f"{reason}-stall", fails=fails)
@@ -548,17 +554,17 @@ def _ci_pending_watchdog(ref: str, rec: dict | None, records: dict, pr: str, rol
     stalled = time.time() - since
     if stalled <= CI_PENDING_STALL_SECONDS:
         return False
-    ws = rec.get("workspace") or "(неизвестен)"
+    ws = rec.get("workspace") or "(unknown)"
     # A reviewer may already be up (SUCCESS spawned layer 3, then a later push/re-run sent CI back
     # to PENDING) — tear its throwaway worktree down same as _validate_stall does, so the
     # escalation never leaks it.
     clear_review(rec)
     ops.add_comment(
         "dispatcher", ref,
-        f"CI по {pr} висит в статусе {rollup} {int(stalled)}s (порог {CI_PENDING_STALL_SECONDS}s) "
-        f"без единого терминального результата — похоже на застрявший навсегда required check, "
-        f"джобу на ручном approval или удалённый воркфлоу. Карточка в Blocked, воркспейс {ws} "
-        f"оставлен для разбора.")
+        f"CI on {pr} has been in state {rollup} for {int(stalled)}s (threshold "
+        f"{CI_PENDING_STALL_SECONDS}s) with no terminal result at all, which looks like a required "
+        f"check stuck forever, a job on manual approval or a deleted workflow. Card moved to "
+        f"Blocked; workspace {ws} left in place for investigation.")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
     STATE.log_run("validate", reference=ref, to="Blocked", reason="ci-pending-stall", rollup=rollup,
@@ -575,10 +581,10 @@ def _validate_error(ref: str, exc: Exception) -> None:
     try:
         if not _has_marker(ops.show_card(ref), model.MARKER_VALIDATE_ERROR):
             ops.add_comment("dispatcher", ref,
-                            "Валидация (Validate) не смогла отработать по этой карточке: "
+                            "Validate could not run on this card: "
                             + worker.scrub_secrets(str(exc))
-                            + ". Тик продолжает остальные карточки; нужна ручная проверка "
-                              "манифеста/окружения проекта.",
+                            + ". The tick continues with the other cards; the project manifest "
+                              "or environment needs a manual check.",
                             marker=model.MARKER_VALIDATE_ERROR)
     except Exception:  # noqa: BLE001 — commenting is best-effort; never re-raise from here
         pass
@@ -591,7 +597,7 @@ def _validate_error(ref: str, exc: Exception) -> None:
 # read the verdict comment past a baseline, act. green -> the dispatcher squash-merges the PR
 # itself (TA_AUTOMERGE=off waits for a human merge instead, no redeploy needed), or, for a contrib
 # card, goes straight to Done — no PR to wait on; red -> back to In progress with a
-# nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked до vladmesh. A reviewer
+# nudge, up to REVIEW_RETURN_CAP returns over the card's life, then Blocked for a human. A reviewer
 # that goes silent without a verdict is caught by the same watchdog as a worker, so the card never
 # sits in Validate forever with a dead head.
 
@@ -694,8 +700,8 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
     if review_head is None:
         STATE.log_run("review", reference=ref, result="skip-red", pr=pr, review_head=preferred)
         return False
-    label = pr if pr else f"ветке `{contrib[0]}` @ `{contrib[1]}`"
-    note = f"PR: {pr}" if pr else f"Ветка: `{contrib[0]}` @ `{contrib[1]}`"
+    label = pr if pr else f"branch `{contrib[0]}` @ `{contrib[1]}`"
+    note = f"PR: {pr}" if pr else f"Branch: `{contrib[0]}` @ `{contrib[1]}`"
     try:
         base = worker.resolve_base_branch(project, card.get("base_branch") or "")
         review_md = reviewer.build_task(card, ref, pr, spec, base,
@@ -712,14 +718,14 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
     except worker.WorkspaceError as e:
         # spawn_reviewer already tore down any half-created worktree. Retry a few ticks (transient
         # orca), then escalate to Blocked — a persistent failure must not retry forever with no
-        # signal (the very "залипание без сигнала" class this layer exists to catch).
+        # signal (the very "stalls with no signal" class this layer exists to catch).
         fails = rec.get("review_spawn_fails", 0) + 1
         scrubbed = worker.scrub_secrets(str(e))
         if fails >= REVIEW_SPAWN_ATTEMPTS:
             clear_review(rec)
             ops.add_comment("dispatcher", ref,
-                            f"Не удалось поднять голову-ревьюера (слой 3) {fails} тиков подряд: "
-                            f"{scrubbed}. Карточка в Blocked до vladmesh. {note}")
+                            f"Could not launch the reviewer head (layer 3) for {fails} ticks in "
+                            f"a row: {scrubbed}. Card moved to Blocked for a human. {note}")
             ops.move_card("dispatcher", ref, "Blocked")
             records.pop(ref, None)
             STATE.log_run("review", reference=ref, to="Blocked", reason="spawn-cap",
@@ -731,9 +737,9 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
                       error=scrubbed, fails=fails, pr=pr, review_head=review_head)
         return True
     ops.add_comment("dispatcher", ref,
-                    f"Нижние слои валидации зелёные. Запущена независимая голова-ревьюер (слой 3) "
-                    f"`{review_head}` по {label}: вердикт по каждому criterion спеки и находки "
-                    f"блокер/замечание появятся в комментарии.")
+                    f"The lower validation layers are green. An independent reviewer head (layer "
+                    f"3) `{review_head}` has been launched on {label}: a verdict per spec criterion "
+                    f"and the blocker/remark findings will appear in a comment.")
     ops.set_resolved_review_head(ref, review_head)
     rec.pop("review_spawn_fails", None)
     rec["review_ws"] = ws
@@ -751,7 +757,7 @@ def _spawn_reviewer(ref: str, pr: str | None, card: dict, rec: dict, records: di
 def _review_watchdog(ref: str, rec: dict, records: dict, watchdog_seconds: int,
                      statuses: dict[str, str]) -> bool:
     """No verdict yet: track the reviewer head's output and, if it goes silent past the threshold,
-    Block the card до vladmesh — a dead reviewer must never leave the card stuck in Validate.
+    Block the card for a human — a dead reviewer must never leave the card stuck in Validate.
 
     `statuses` (this tick's resource health, from health.refresh) freezes this clock the same way
     dispatcher._advance freezes the worker's. The reviewer head is stored in `rec["review_head"]`
@@ -805,17 +811,17 @@ def _review_watchdog_block(ref: str, rec: dict, records: dict, ws: str | None, e
                            watchdog_seconds: int, *, trigger: str,
                            handle_status: str | None = None,
                            handle: str | None = None) -> bool:
-    ws_note = (f"воркспейс ревьюера {ws} оставлен для разбора" if ws
-               else "воркспейс ревьюера неизвестен")
+    ws_note = (f"reviewer workspace {ws} left in place for investigation" if ws
+               else "reviewer workspace unknown")
     if trigger == REVIEW_WATCHDOG_TRIGGER_DEAD_HANDLE:
         shown = handle or "(empty)"
         detail = f" ({handle_status})" if handle_status else ""
-        observation = f"tracked terminal handle ревьюера {shown} не живой{detail}"
+        observation = f"the reviewer's tracked terminal handle {shown} is not alive{detail}"
     else:
-        observation = (f"голова-ревьюер (слой 3) молчит {int(elapsed)}s без вердикта "
-                       f"(порог {watchdog_seconds}s)")
+        observation = (f"the reviewer head (layer 3) has been silent for {int(elapsed)}s with no "
+                       f"verdict (threshold {watchdog_seconds}s)")
     ops.add_comment("dispatcher", ref,
-                    f"watchdog: {observation}. Карточка в Blocked до vladmesh, "
+                    f"watchdog: {observation}. Card moved to Blocked for a human, "
                     f"{ws_note}.")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)   # record gone; the reviewer worktree is left alive for a human
@@ -832,26 +838,26 @@ def _review_red(ref: str, pr: str | None, card: dict, rec: dict, records: dict, 
                 refresh_worker_task: RefreshWorkerTask | None = None,
                 contrib: tuple[str, str] | None = None) -> bool:
     """Red verdict (a blocker in some lens). Return the card for rework, or — once the lifetime cap
-    of returns is spent — Block it до vladmesh with the full verdict already on the card. Same cap
+    of returns is spent — Block it for a human with the full verdict already on the card. Same cap
     and rework path for a contrib card (`contrib` set) as a regular PR card — only the reference
     label in the comments/nudge differs."""
-    note = f"PR: {pr}" if pr else f"Ветка: `{contrib[0]}` @ `{contrib[1]}`"
-    phrase = pr if pr else f"ветке `{contrib[0]}` @ `{contrib[1]}`"
+    note = f"PR: {pr}" if pr else f"Branch: `{contrib[0]}` @ `{contrib[1]}`"
+    phrase = pr if pr else f"branch `{contrib[0]}` @ `{contrib[1]}`"
     prior = rec.get("review_returns", 0)
     if prior >= REVIEW_RETURN_CAP:
         clear_review(rec)
         ops.add_comment("dispatcher", ref,
-                        f"Красный вердикт ревьюера после {prior} доработок — кап возвратов "
-                        f"({REVIEW_RETURN_CAP}) исчерпан. Карточка в Blocked до vladmesh; полный "
-                        f"вердикт — в комментарии выше. {note}")
+                        f"A red reviewer verdict after {prior} reworks: the return cap "
+                        f"({REVIEW_RETURN_CAP}) is spent. Card moved to Blocked for a human; the "
+                        f"full verdict is in the comment above. {note}")
         ops.move_card("dispatcher", ref, "Blocked")
         records.pop(ref, None)
         STATE.log_run("review", reference=ref, to="Blocked", reason="return-cap", returns=prior, pr=pr)
         return True
     ops.add_comment("dispatcher", ref,
-                    f"Красный вердикт независимого ревьюера (слой 3): есть блокеры. Карточка "
-                    f"возвращена в In progress на доработку (возврат {prior + 1} из "
-                    f"{REVIEW_RETURN_CAP}). Разбор — в вердикте выше. {note}",
+                    f"A red verdict from the independent reviewer (layer 3): there are blockers. "
+                    f"Card returned to In progress for rework (return {prior + 1} of "
+                    f"{REVIEW_RETURN_CAP}). The analysis is in the verdict above. {note}",
                     marker=model.MARKER_REVIEW_RETURN)
     ops.move_card("dispatcher", ref, model.IN_PROGRESS)
     clear_review(rec)                                   # tear down reviewer ws, drop its baseline
@@ -863,8 +869,8 @@ def _review_red(ref: str, pr: str | None, card: dict, rec: dict, records: dict, 
     try:
         _notify_worker_for_rework(
             ref, card, rec, records, save_cards, refresh_worker_task,
-            f"Ревью по {phrase} красное: есть блокеры (слой 3). Карточка вернулась в "
-            f"In progress. Разбор в вердикте на карточке, почини и снова report done.",
+            f"The review of {phrase} is red: there are blockers (layer 3). The card is back in "
+            f"In progress. The analysis is in the verdict on the card; fix it and report done again.",
             "review-red")
     except Exception as e:  # noqa: BLE001, do not leave In progress with a dead handle
         _block_rework_worker_failure(ref, rec, records, "review-red", e)

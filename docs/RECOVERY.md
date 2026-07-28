@@ -1,297 +1,265 @@
 # Git-centric recovery
 
-Единый recovery contract `secretary`. Приватный Git-репозиторий установки служит durable
-checkpoint конфигурации и переносимого состояния. Переезд на новую машину требует установки
-продукта, доступа к этому репозиторию и ручного повторного ввода не хранимых в нём credentials.
-Отдельный bundle/S3 не является обязательной частью основного пути.
+This is the single recovery contract. The private installation Git repository is the durable
+checkpoint of configuration and portable state. Moving to a new machine requires installing the
+product, access to that repository, and re-entering the credentials it deliberately does not hold. A
+separate bundle or object-store transport is not part of the main path.
 
-Writer, memory flatten, remote push и цельный recover-from-remote flow реализованы. Archive backup,
-offsite-перенос и backup-таймер выведены из основного пути (см. [Отношение к cold archive](#отношение-к-cold-archive));
-git-checkpoint является единственным recovery contract, архив остаётся только ручным optional cold
-archive.
-
-## Топология
+## Topology
 
 ```text
-secretary            публичный репозиторий-шаблон: продукт, CLI, runtime, схемы, generic skills
-<приватный репо>     один приватный репозиторий на пользователя: config + state/
-host runtime         локальный runtime, пересобираемый из checkpoint; не канон
+product repository    public template: product, CLI, runtime, schemas, generic skills
+instance repository   one private repository per owner: config + state/
+host runtime          local runtime, rebuilt from the checkpoint; not canonical
 ```
 
-Приватный репозиторий (нынешний `secretary-instance`) поглощает нормализованный data-plane.
-Отдельный git-канон для `secretary-data` не заводится. Один remote, один HEAD, один RPO.
+The private repository absorbs the normalised data plane. There is no second Git canon for the local
+data directory. One remote, one HEAD, one RPO.
 
 ## Source of truth
 
-Live board backend остаётся оперативным store. Remote Git HEAD является последним подтверждённым
-recovery checkpoint. Между коммитами live-состояние опережает checkpoint на величину RPO. Это
-ожидаемое расхождение, а не рассинхрон.
+The live board backend stays the operational store. The remote Git HEAD is the last confirmed
+recovery checkpoint. Between commits, live state runs ahead of the checkpoint by the RPO. That is the
+expected gap, not a desync.
 
-## Состав checkpoint
+## What the checkpoint contains
 
-Канон, нормализованный минимум для восстановления работы:
+The canon, the normalised minimum needed to resume work:
 
-- instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`;
-  `heads/` включает сгенерированный снапшот `heads.yaml` и пин `source.yaml` — чекаут и ревизию, из
-  которых он сделан; после восстановления пин показывает, с какой версией продукта установка
-  работала, а привести снапшот к новому чекауту заново — задача `secretary upgrade`;
-- board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`, `state/board/events.ndjson`,
-  `state/board/export.json`;
-- run/audit: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
+- instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`.
+  `heads/` includes the generated `heads.yaml` snapshot and the `source.yaml` pin recording the
+  checkout and revision it was made from; after a restore the pin shows which product version the
+  installation was running, and bringing the snapshot up to a new checkout is `secretary upgrade`'s
+  job;
+- board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`,
+  `state/board/events.ndjson`, `state/board/export.json`;
+- run and audit state: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
 - memory facts: `state/memory/facts/**`;
-- knowledge documents: `state/knowledge/**` (свободный markdown, см.
-  [Архитектура](ARCHITECTURE.md#плоскости-знания)).
+- knowledge documents: `state/knowledge/**` (free-form markdown, see
+  [Architecture](ARCHITECTURE.md#knowledge-planes)).
 
-Вне канона (derived или тяжёлое сырьё, пересоздаётся или в optional cold archive):
+Outside the canon, because it is derived or bulky raw material, rebuilt or kept in an optional cold
+archive:
 
-- raw Kanboard dumps (`board/kanboard-raw-*`);
-- vector index (`memory/index.sqlite`), derived exports (`memory/export.ndjson`);
+- raw board dumps;
+- the vector index and derived memory exports;
 - transcripts, artifacts, backups;
-- терминалы, worktrees, generated host state (systemd units из `packaging/systemd/` и Orca-
-  автоматизации фоновых ролей curator/retro/steward). Каноном для них служит продукт, а не
-  checkpoint: юниты компилируются из templates в `packaging/systemd/` для installation user и layout,
-  а расписание/диспетчеризация автоматизаций —
-  из `triggered_agents/agents/<role>/automation.toml`. `secretary reconcile apply` / `secretary
-  upgrade` пере-материализуют их идемпотентно на провижининге и recovery (match Orca-автоматизации
-  по `name`, edit in place, id/юнит стабильны), поэтому в checkpoint они не входят.
+- terminals, worktrees and generated host state (systemd units from `packaging/systemd/` and the
+  session-manager automations of the background roles). The product, not the checkpoint, is canonical
+  for these: units are compiled from the packaging templates for the installation user and layout, and
+  automation schedules come from each role's `automation.toml`. `secretary reconcile apply` and
+  `secretary upgrade` re-materialise them idempotently during provisioning and recovery, matching
+  automations by name and editing in place so ids and unit names stay stable.
 
-Board export держим только в `cards.ndjson` и `sprints.ndjson` (построчный diff). Дубли
-`cards.json` и `sprints.json` в checkpoint не входят.
+The board export is kept only as NDJSON, for line-wise diffs. The JSON duplicates are not part of the
+checkpoint.
 
-Карточки Pipeline и сущности спринтов лежат в checkpoint отдельными наборами: спринты живут на
-своей доске и в `pipeline export` не попадают, поэтому writer читает их своим проходом, а не
-выводит из карточек с `sprint_ref`. Запись спринта несёт ref, цель, Definition of Done,
-репозитории, статус, бюджет по типам событий, текущую карточку, resume, все записи к сущности и
-audit-метаданные источника. Производные значения (итог бюджета, пороги установки, свежесть resume)
-в запись не входят: они пересчитываются из неё и конфигурации.
+Pipeline cards and sprint entities go into the checkpoint as separate sets: sprints live on their own
+board and are not part of the card export, so the writer reads them in its own pass instead of
+deriving them from cards that reference a sprint. A sprint record carries its reference, goal,
+Definition of Done, repositories, status, budget by event type, current card, resume entry, all entries
+on the entity and the source's audit metadata. Derived values (budget totals, installation thresholds,
+resume freshness) are not stored: they are recomputed from the record and configuration.
 
 ## Layout
 
 ```text
-<приватный репо>/
-  instance.yaml, persona/, projects/, adapters/, heads/, policies/   config, коммитит оператор
-  state/                                                             state, коммитит авто-писатель
+<private repository>/
+  instance.yaml, persona/, projects/, adapters/, heads/, policies/   config, committed by the operator
+  state/                                                             state, committed by the auto-writer
     board/   cards.ndjson, sprints.ndjson, events.ndjson, export.json
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
-    knowledge/**   брейнштормы, журналы решений, разборы инцидентов
-  secrets/                                                           хранилище секретов, см. ниже
+    knowledge/**   brainstorms, decision logs, incident write-ups
+  secrets/                                                           secret store, see below
     catalog.yaml, installation-key.json, values/<id>.enc.json
 ```
 
-`secrets/installation.key` — сырой installation key, `0600`, вне git (`.gitignore`), в checkpoint
-не входит. Хранилище описано подробнее в разделе «Секреты» ниже и в
-[Протоколах](PROTOCOLS.md#секреты).
+`secrets/installation.key` is the raw installation key, mode `0600`, outside Git and outside the
+checkpoint. The store is described under [Secrets](#secrets) and in
+[Protocols](PROTOCOLS.md#secrets).
 
-Memory facts хранятся плоско в едином репозитории. Вложенный git-журнал `memory/facts` убирается;
-writer памяти коммитит `propose/commit/supersede` в общий репозиторий. Единая история, один HEAD.
+Memory facts are stored flat in the single repository; the memory writer commits
+`propose`/`commit`/`supersede` into it. One history, one HEAD. `state/memory/facts` is the only canon
+for every derived form of memory, so the instance directory is a required argument on the export and
+index-rebuild paths: a forgotten argument fails rather than pointing the export at someone else's
+memory.
 
-Канон для всех производных (`memory/export.ndjson`, `memory/index.sqlite`, memory-компонент
-архива) — только `state/memory/facts`. Seed-источник `panelmem-kb` годится единственно для
-инстанса без фактов, поэтому `instance_dir` у `export_all`/`export_memory`/
-`export_memory_snapshot`/`rebuild_memory_index` обязателен: забытый аргумент падает, а не уводит
-экспорт на чужую память.
+## Cadence and RPO
 
-## Каденция и RPO
+- commit once per dispatcher tick (60s), on change: if the hash of the normalised `state/` did not
+  move, the tick skips the commit;
+- push to the remote every 30 minutes;
+- durable RPO on machine loss is 30 minutes. Local commits give fine-grained history and fast local
+  rollback, but they do not survive the machine.
 
-- commit раз в тик диспетчера (60с), on-change: если хэш нормализованного `state/` не менялся,
-  тик коммит пропускает;
-- push на remote раз в 30 минут;
-- durable RPO при потере машины = 30 минут. Локальные коммиты дают мелкую гранулярность истории
-  и быстрый локальный откат, но машину не переживают.
+## Writers
 
-## Writer
+Four writers touch the repository, each with its own pathspec:
 
-В репозиторий пишут четверо, каждый своим pathspec:
+- tick writer: `state/board`, `state/runs`, at the end of a dispatcher tick under the tick lock;
+- memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
+- knowledge writer: `state/knowledge`, on `secretary knowledge write`;
+- secret writer: `secrets/` (plus `.gitignore` on first `init`), on `secret init/set/import/remove`.
+  `secret list` and `secret materialize` are not part of this writer.
 
-- tick-writer: `state/board`, `state/runs`, в конце тика диспетчера под `tick_lock`;
-- memory-writer: `state/memory`, по факту `propose/commit/supersede` (`curator memory-write`);
-- knowledge-writer: `state/knowledge`, по факту `secretary knowledge write`;
-- secret-writer: `secrets/` (плюс `.gitignore` при первом `init`), на `secret init/set/import/remove`.
-  `secret list` и `secret materialize` в этот writer не входят: `list` только читает каталог, а
-  `materialize` пишет env-файлы вне `secrets/` и коммита не делает (подробности —
-  [Протоколы](PROTOCOLS.md#секреты)).
+The pathspecs do not overlap, so none of them picks up another's half-written tree. Nobody uses
+`git add -A`: uncommitted manual config edits are left alone. The Git index is not built for
+concurrent writes, so every writer takes a shared repository lock for the duration of staging and
+commit. The memory, knowledge and secret writers commit immediately rather than waiting for a tick;
+the 30-minute push carries the commit out with the rest of the checkpoint.
 
-Pathspec'ы не пересекаются, поэтому чужое недописанное дерево ни один из них не подхватит.
-`git add -A` не использует никто: ручные незакоммиченные правки конфига остаются нетронутыми.
-Индекс git не рассчитан на параллельную запись, поэтому все писатели берут общий
-`state_repo_lock` на время staging+commit. Memory-, knowledge- и secret-writer коммитят сразу, не
-дожидаясь тика: запись попадает в HEAD, и 30-минутный push уносит её вместе с остальным checkpoint.
+## Validation gate
 
-Миграция с вложенного журнала одноразовая и идемпотентная: дерево `memory/facts` сначала
-переносится и коммитится в `state/memory/facts`, вложенный `.git` удаляется только после этого.
-Падение между шагами оставляет факты в обоих местах, следующий запуск это опознаёт и дочищает.
-Расхождение копий не разрешается автоматически, миграция останавливается и зовёт оператора.
+Before each commit the snapshot passes a fail-closed check. If any item fails, the tick skips the
+checkpoint, records the reason in status and retries on the next tick. A torn snapshot never reaches
+history.
 
-## Валидационный гейт
+- task audit is settled, with no pending board mutation;
+- the writer regenerates `cards.ndjson` and `sprints.ndjson` from the live boards, and both counters
+  in `export.json` match the line counts;
+- memory staging is empty;
+- the secret scan of `state/` is clean. `state/` goes to the remote and is the one place a secret could
+  leak, for example a token pasted into a card or a log. The memory and knowledge writers run the same
+  scan over their own text before committing, since their path does not go through the tick gate.
 
-Перед коммитом снапшот проходит fail-closed проверку. При провале любого пункта тик пропускает
-checkpoint, пишет причину в `status`, ретраит на следующем тике. Рваный снапшот в историю не
-попадает.
+## Failure and divergence
 
-- task audit сведён, нет pending board-мутации;
-- writer регенерирует `cards.ndjson` и `sprints.ndjson` из живых досок; оба счётчика в
-  `export.json` совпадают с числом строк;
-- memory staging (`memory/.staging`) пуст;
-- секрет-скан `state/` чист. `state/` уходит на remote, это единственное место возможной утечки
-  секрета (вставленный токен в карточке или логе). Опора на `redact.py`. Memory- и
-  knowledge-writer гоняют тот же скан по своему тексту перед коммитом: их путь в тик-гейт не
-  заходит.
+Push failure (network, forge or auth unavailable during the push window) is fail-closed on the
+checkpoint, not on the work. Local commits continue, the dispatcher keeps running, and the growing
+checkpoint lag is visible in `status` and `doctor`. The next 30-minute push retries.
 
-## Failure и divergence
+Remote divergence (the remote has commits that are not local) leaves the auto-writer fast-forward
+only. Force-push and history rewriting are forbidden. On a non-fast-forward the push stops, `status`
+raises a `remote diverged` alarm, and the operator resolves it.
 
-Push failure (сеть, GitHub, auth недоступны в окно пуша): fail-closed на checkpoint, не на работе.
-Локальные коммиты продолжаются, диспетчер работает, растущий checkpoint lag виден в `status` и
-`doctor`. Следующий 30-минутный push ретраит.
+## Secrets
 
-Remote divergence (на remote есть коммиты, которых нет локально): авто-писатель только
-fast-forward. Force-push и перезапись истории запрещены. При non-ff push останавливается, `status`
-поднимает алярм `remote diverged`, разбор выполняет оператор (pull/rebase/merge).
+The host `runtime.env` is mode `0600`, is not part of the checkpoint, and holds only the
+machine-generated board URL, API user and API token. Forge access and interactive head logins stay in
+the operator's password manager and are never copied to the host by the product.
 
-## Секреты
+The secret store (`secretary/secret_store.py`, `secrets/` in the instance repository) is a separate,
+recoverable canon on the same repository: a metadata catalog and versioned envelopes tracked in Git
+next to board and memory, travelling out with the same push. The only things the repository never
+contains are the raw installation key (`secrets/installation.key`, gitignored, `0600`) and the recovery
+phrase, which is generated once at `secret init`, shown to the operator and stored nowhere by the
+product. With the phrase, the key is rebuilt and values return byte for byte; without it, `recover`
+prints a locked/missing report and writes nothing. Losing the phrase means reissuing the secrets, not
+losing the rest of the installation.
 
-sops/age не используется. Host `runtime.env` имеет права `0600`, не входит в checkpoint и
-содержит только машинно-сгенерированные `KANBOARD_URL`, `KANBOARD_API_USER` и
-`KANBOARD_API_TOKEN`. Доступ к GitHub и интерактивные логины голов остаются в password
-manager оператора и не копируются на хост продуктом.
+Security boundary: a trusted single-user host. Board and memory endpoints listen on loopback. External
+tokens are protected by host access control, `.gitignore` and the secret scan of `state/`, not by
+at-rest encryption. A private key on the same host as the data does not protect that data from host
+compromise; what at-rest encryption did protect was copies that left the host, in Git and offsite, and
+this contract removes those.
 
-Хранилище секретов (`secretary/secret_store.py`, `secretary-instance/secrets/`) — отдельный,
-восстановимый канон поверх того же instance-репо: каталог метаданных и версионированные envelope
-трекаются git-ом рядом с board и memory и уезжают тем же push. Единственное, что репо
-никогда не содержит — сырой installation key (`secrets/installation.key`, gitignored, `0600`) и
-recovery phrase, которая генерируется один раз при `secret init`, печатается оператору и нигде не
-хранится продуктом. Восстановление на чистом хосте описано ниже, в разделе «Fresh install и
-recovery»: с фразой ключ пересобирается и значения возвращаются побайтово; без фразы
-recover печатает отчёт locked/missing и ничего не пишет; потеря фразы означает перевыпуск
-секретов заново, а не потерю остальной установки.
-
-Security boundary: доверенный single-user host. Board и memory эндпоинты слушают loopback.
-Внешние токены (GitHub, providers) прикрыты host access control, `.gitignore` и секрет-сканом
-`state/`, а не at-rest шифрованием. Приватный ключ на том же хосте, что и данные, от компрометации
-хоста at-rest крипто не защищает, а защищала она только вынесенные копии в git и offsite, которые
-контракт убирает.
-
-Installation key принадлежит installation user (тому же пользователю, что владеет хостом и
-инсталляцией), а не отдельной, более узкой роли. Централизация секретов в одном хранилище не
-сузила границу доверия и не расширила её: любой процесс, который раньше мог прочитать
-`runtime.env`, и сегодня может прочитать installation key и открыть тем же ключом всё, что в
-хранилище. Продукт не обещает worker isolation: broker, grants и раздельный доступ voркеров к
-подмножеству секретов — вне контракта этой карточки и не реализованы. Формулировка "хранилище
-секретов" не означает, что секреты защищены от кого-то на этом же хосте сильнее, чем были в
-`runtime.env` — она означает только то, что они теперь наблюдаемы, версионированы и
-восстановимы без ручного набора значений.
+The installation key belongs to the installation user, the same user that owns the host and the
+installation, not a narrower role. Centralising secrets in one store neither narrowed nor widened the
+trust boundary: any process that could previously read `runtime.env` can read the installation key today
+and open everything in the store with it. The product does not promise worker isolation; a broker,
+grants and per-worker access to a subset of secrets are outside this contract and are not implemented.
+"Secret store" does not mean the secrets are better protected from anyone else on the same host than
+they were in `runtime.env`. It means they are observable, versioned and recoverable without retyping
+values.
 
 ## Observability
 
-`status` и `doctor` показывают checkpoint freshness: время и хэш последнего коммита, время
-последнего успешного push, checkpoint lag в минутах и коммитах, причину блокировки гейта,
-состояние `remote diverged`.
+`status` and `doctor` show checkpoint freshness: the time and hash of the last commit, the time of the
+last successful push, checkpoint lag in minutes and commits, the reason the gate is blocked, and the
+`remote diverged` state.
 
-`status --json` несёт отдельную секцию `secret_store`: инициализировано ли хранилище, число
-секретов, время последнего изменения каталога, есть ли пригодный installation key и сводку по
-целям материализации — без единого значения, ключа или recovery phrase в любом виде. `doctor`
-даёт finding, когда каталог и values разошлись, ключ отсутствует или непригоден при непустом
-каталоге, либо права на ключе шире `0600`; здоровое и полностью отсутствующее хранилище findings
-не дают.
+`status --json` carries a `secret_store` section: whether the store is initialised, how many secrets it
+holds, when the catalog last changed, whether a usable installation key exists, and a summary of
+materialisation targets — without a single value, key or phrase in any form. `doctor` raises a finding
+when catalog and values diverge, when the key is missing or unusable while the catalog is non-empty, or
+when the key's permissions are wider than `0600`. A healthy store and a completely absent one both
+produce no findings.
 
-## Fresh install и recovery
+## Fresh install and recovery
 
-Сначала установить продукт с memory extra. `secretary bootstrap` на Ubuntu 24.04 ставит pinned
-Kanboard и Orca, генерирует `runtime.env` и создаёт Pipeline. `secretary install` их не ставит и
-fail-closed проверяет оба runtime до изменения live state.
+Install the product with the memory extra first. `secretary bootstrap` installs the pinned board and
+session-manager runtimes on a supported host, generates `runtime.env` and creates the Pipeline board.
+`secretary install` installs neither and fail-closed checks both runtimes before changing live state.
 
-На чистом хосте сначала bootstrap создаёт checkout, локальный `runtime.env` с mode `0600` и
-Pipeline без ручного ввода Kanboard credentials:
+On a clean host, bootstrap creates the checkout, a local `0600` `runtime.env` and the Pipeline board
+without manual entry of board credentials:
 
 ```bash
 python3 -m pip install '.[memory]'
 sudo secretary bootstrap \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir INSTANCE \
-  --installation-user dev
+  --installation-user INSTALL_USER
 
 sudo secretary install \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir INSTANCE \
-  --installation-user dev
+  --installation-user INSTALL_USER
 ```
 
-`runtime.env` остаётся gitignored обычным файлом с mode `0600` и содержит как минимум
-`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`. Bootstrap генерирует его на fresh
-install и не печатает значения и не добавляет файл в Git.
+`runtime.env` stays a gitignored ordinary file with mode `0600`. Bootstrap generates it on a fresh
+install, prints no values and adds it to no commit.
 
-`recover` выполняет одну поддержанную последовательность:
+`recover` runs one supported sequence:
 
-1. Открывает хранилище секретов (если оно инициализировано в этом instance-репо) раньше, чем
-   читает `runtime.env`: с `--recovery-phrase-file` / `--recovery-phrase-stdin` (или интерактивным
-   prompt на TTY, если ключа ещё нет на диске) installation key пересобирается и материализует
-   значения в файлы, которые называет каталог, включая `runtime.env`, если в нём материализован
-   какой-то секрет. Без фразы этот шаг ничего не пишет и репортит locked/missing, а `runtime.env`
-   остаётся тем, что уже на диске. Раздел «Секреты» ниже разбирает это подробнее.
-2. Проверяет remote/checkout, credentials, доступность Kanboard и установленный Orca. Если
-   `runtime.env` не появился на шаге 1 и хранилища нет вовсе, это по-прежнему ручной ввод оператора.
-3. Материализует `state/board` и `state/runs` из checkpoint в новый local data plane. Из
-   `cards.ndjson` и `sprints.ndjson` строятся производные `cards.json` и `sprints.json`; счётчики
-   проверяются до live writes.
-4. Идемпотентно импортирует доску и пересобирает `memory/export.ndjson` и `memory/index.sqlite` из
-   `state/memory/facts`. Импорт доски восстанавливает и сущности спринтов: если экспорт их несёт,
-   `restore-board` создаёт board `Secretary sprints` и возвращает каждую сущность целиком — цель,
-   Definition of Done, репозитории, статус, бюджет, текущую карточку, resume, записи и
-   audit-метаданные источника. Заводить спринт заново после recovery не нужно. Восстановленная
-   сущность лежит на новой строке Kanboard, поэтому её собственные даты описывают восстановление, а
-   даты источника читаются в `audit.source`.
-5. Клонирует отсутствующие project checkouts по `remote` из registry и создаёт
-   не-секретные `AGENTS.md` и `config.toml` в managed CODEX_HOME. OAuth остаётся ручным.
-6. Запускает тот же materializer, что `secretary upgrade`: пересоздаёт role worktrees, ставит units,
-   регистрирует Orca resources и применяет automations.
-7. Проверяет restore status. Головы подключаются после bootstrap отдельно (Milestone 3).
+1. Opens the secret store, if this instance repository has one, before reading `runtime.env`. With
+   `--recovery-phrase-file` or `--recovery-phrase-stdin` (or an interactive prompt on a TTY when the key
+   is not yet on disk), the installation key is rebuilt and values are materialised into the files the
+   catalog names, including `runtime.env` if any secret materialises there. Without the phrase this step
+   writes nothing and reports locked/missing, and `runtime.env` stays whatever is already on disk.
+2. Checks the remote and checkout, credentials, board reachability and the installed session manager. If
+   `runtime.env` did not appear in step 1 and there is no store at all, it remains a manual operator
+   step.
+3. Materialises `state/board` and `state/runs` from the checkpoint into a new local data plane. The
+   derived JSON forms are built from the NDJSON, and counters are verified before any live write.
+4. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`.
+   The board import also restores sprint entities: if the export carries them, `restore-board` creates
+   the sprints board and returns each entity whole — goal, Definition of Done, repositories, status,
+   budget, current card, resume, entries and the source's audit metadata. There is no need to recreate a
+   sprint after recovery. A restored entity occupies a new board row, so its own dates describe the
+   restore while the source dates are read from its audit metadata.
+5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
+   runtime-home files for the agent CLIs. Provider authentication stays manual.
+6. Runs the same materialiser as `secretary upgrade`: recreates role worktrees, installs units,
+   registers session-manager resources and applies automations.
+7. Checks restore status. Heads are connected after bootstrap as a separate step.
 
-Parity сверяется отдельно для карточек и для спринтов, и обе сверки fail-closed: расхождение
-оставляет recovery незавершённым (`board restore parity failed` или `sprint restore parity failed`
-в `doctor`), а не молча зачитывает восстановление успешным. Живой backend со сущностью спринта,
-которой нет в экспорте, restore не перезаписывает, а останавливается.
+Parity is checked separately for cards and for sprints, and both checks are fail-closed: a mismatch
+leaves recovery unfinished and visible in `doctor` rather than silently counting the restore as
+successful. A live backend holding a sprint entity that is not in the export stops the restore instead of
+being overwritten.
 
-Повторный `secretary recover` безопасен: checkout fast-forward-only, board restore сверяет parity,
-memory index строится заново, materializer на втором проходе не имеет изменений. Восстановленный
-инстанс сам остаётся восстановимым: его audit-записи о restore попадают в следующий checkpoint, и
-recovery в очередной пустой backend пишет свои события под новым namespace, а не зачитывает чужие
-как уже применённые. Namespace живёт в `restore-state.json`, поэтому retry одного recovery остаётся
-идемпотентным.
+Running `secretary recover` again is safe: the checkout is fast-forward only, the board restore checks
+parity, the memory index is rebuilt, and the materialiser is a no-op on a second pass. A restored instance
+stays recoverable itself: its own audit records about the restore go into the next checkpoint, and a
+later recovery into another empty backend writes its events under a new namespace instead of counting
+someone else's as already applied. That namespace lives in the restore state file, so retrying one
+recovery stays idempotent.
 
-Checkpoint, снятый до того, как сущности спринтов вошли в export, восстанавливается по-прежнему:
-`sprints.ndjson` в нём нет, это читается как установка без спринтов, и `doctor` у уже завершённого
-восстановления такого инстанса остаётся зелёным. Терминалы,
-worktrees, vector index, generated units и host caches из remote не копируются. S3 и отдельный
-backup host не требуются.
+A checkpoint taken before sprint entities entered the export still restores: it has no sprints file, which
+reads as an installation without sprints, and `doctor` stays green on a completed restore. Terminals,
+worktrees, the vector index, generated units and host caches are not copied from the remote. No object
+store or separate backup host is required.
 
-`secretary recover --dry-run` проверяет checkout, credentials, runtime prerequisites и целостность
-checkpoint, затем печатает шаги как `would-change`. Preview не пишет local data plane, не меняет
-доску, не запускает memory reindex и host materializer.
+`secretary recover --dry-run` checks the checkout, credentials, runtime prerequisites and checkpoint
+integrity, then prints the steps as `would-change`. The preview writes no local data plane, does not touch
+the board, and runs neither the memory reindex nor the host materialiser.
 
-Fresh mode не принимает существующего installation user или checkout. Он отказывает с явным
-выбором `--recover` для этой же установки либо отдельного adopt workflow для живого хоста. Recover
-не перезаписывает dirty checkout, другой remote, произвольный непустой data target или unowned host
-resource. Полный adopt существующего live host в этот flow не входит.
+Fresh mode does not accept an existing installation user or checkout. It refuses with an explicit choice:
+`--recover` for the same installation, or a separate adopt workflow for a live host. Recover does not
+overwrite a dirty checkout, a different remote, an arbitrary non-empty data target or an unowned host
+resource. Fully adopting an existing live host is not part of this flow.
 
-## Отношение к cold archive
+## Relation to the cold archive
 
-git-checkpoint является единственным recovery contract. Ручной cold archive сохраняется для
-сырья и совместимости, без timer, offsite transport и doctor gate. Scheduled archive backup,
-offsite-перенос и archive-age проверка из основного пути выведены и в продукте отсутствуют.
+The Git checkpoint is the only recovery contract. A manual cold archive remains available for raw material
+and compatibility, with no timer, no offsite transport and no `doctor` gate. Scheduled archive backups,
+offsite transfer and archive-age checks are not part of the product.
 
-## Acceptance gate
+## Not covered
 
-- В product docs описан один основной recovery contract: публичный product repo, приватный
-  Git-backed instance/state repo, локальный runtime из checkpoint.
-- Зафиксирован состав checkpoint и исключения derived state.
-- Определены cadence, атомарная validation/commit/push, поведение при push failure и remote
-  divergence, наблюдаемый RPO/lag.
-- Описаны пути fresh install и recovery из приватного remote без обязательного S3.
-- Ручные archives обозначены optional cold storage, не вторым recovery contract.
-
-## Out of scope
-
-- Bundled package transport и установка Kanboard/Orca на голый host.
-- Перенос конфигурации в control-plane database.
-- Автоматизация provider credentials, `.env` и авторизации голов.
-- Обязательный S3 transport, полный архив transcripts/artifacts, публичный plugin API.
+- Bundled package transport and installing the board and session-manager runtimes on a bare host.
+- Moving configuration into a control-plane database.
+- Automating provider credentials, `.env` and head authorisation.
+- A mandatory object-store transport, a full archive of transcripts and artifacts, a public plugin API.

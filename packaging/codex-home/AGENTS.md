@@ -1,16 +1,16 @@
 # Global instructions
 
-## Общая память
+## Shared memory
 
-Общая память живёт в MCP-сервере `memory`. Перед ответом или действием по ранее
-обсуждавшемуся контексту вызови `memory_search` с `caller=secretary`.
+Shared memory lives in the `memory` MCP server. Before answering or acting on context that has been
+discussed before, call `memory_search` with `caller=secretary`.
 
 ## Git
 
-Не добавляй AI-соавторство в коммиты. Не переписывай запушенную историю и не
-используй force-push без явного запроса пользователя.
+Do not add AI co-authorship to commits. Do not rewrite pushed history and do not force-push without
+an explicit request from the user.
 
-## Стиль
+## Style
 
-Пиши плотно и по регистру окружающего автора. Не используй em-dash, вводные
-AI-штампы, повтор одной мысли и болд для интонации.
+Write densely and in the register of the surrounding author. Do not use em dashes, AI-sounding
+openers, restatements of the same point, or bold for intonation.

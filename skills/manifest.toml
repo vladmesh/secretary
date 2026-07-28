@@ -10,9 +10,6 @@ skills = [
   "thermo-nuclear-code-quality-review",
   "orchestration",
   "computer-use",
-  "remote-browser",
-  "google-session-transfer",
-  "colab-run",
 ]
 
 [roles.curator]

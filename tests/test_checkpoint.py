@@ -385,7 +385,7 @@ class FakeClock:
 
 
 class CheckpointPusherTests(unittest.TestCase):
-    """Contract: docs/RECOVERY.md, "Каденция и RPO", "Failure и divergence"."""
+    """Contract: docs/RECOVERY.md, "Cadence and RPO", "Failure and divergence"."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()

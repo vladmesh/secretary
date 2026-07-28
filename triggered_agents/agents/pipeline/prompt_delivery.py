@@ -91,7 +91,7 @@ def confirm_initial_prompt_delivered(
         time.sleep(sleep_for)
     log(result="failed", reason=last_reason, resends=resends)
     raise InjectDeliveryError(
-        f"inject не доставлен: turn не стартовал после {timeout_s:.1f}s "
+        f"the prompt was not delivered: no turn started after {timeout_s:.1f}s "
         f"(reason={last_reason}, resends={resends})")
 
 

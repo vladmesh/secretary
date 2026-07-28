@@ -1,204 +1,202 @@
 ---
 name: open-sprint
-description: "Открыть спринт Secretary как сущность на доске: собрать живой контекст, догриллить нерешённые продуктовые развилки, зафиксировать цель, Definition of Done и репозитории, создать сущность командой `secretary sprint create` и записать в knowledge только «почему». Использовать по запросам «открой спринт», «заведи спринт», «новый спринт как сущность», `$open-sprint`."
+description: "Open a sprint as a board entity: gather live context, finish grilling the unresolved product forks, fix the goal, Definition of Done and repositories, create the entity with `secretary sprint create`, and record only the 'why' in knowledge. Use on requests like 'open a sprint', 'start a sprint', 'a new sprint as an entity', `$open-sprint`."
 ---
 
 # Open Sprint
 
-Спринт рождается как сущность на доске `Secretary sprints`, а не как документ. Твоя работа
-заканчивается на созданной сущности: дальше наблюдателя поднимает диспетчер, и спринт ведётся без
-тебя.
+A sprint is born as an entity on the sprints board, not as a document. Your work ends at the created
+entity: after that the dispatcher launches the observer and the sprint runs without you.
 
-Ты не исполняешь спринт. Карточки не создаёшь, работу не начинаешь, наблюдателя руками не
-запускаешь.
+You do not execute the sprint. You create no cards, start no work and launch no observer by hand.
 
-## Что не делегируется
+## What is not delegated
 
-Выбор цели. Ошибка в цели стоит спринта целиком, и её не поймает ни ревьюер, ни CI, ни бюджет: она
-проявится только при чтении результатов. Цель формулирует человек в диалоге с тобой. Не подставляй
-цель за него, не выводи её из бэклога «по большинству» и не отдавай выбор подагенту.
+The choice of goal. A wrong goal costs the whole sprint, and neither a reviewer, nor CI, nor the budget
+will catch it: it only shows up when the results are read. A person formulates the goal in dialogue with
+you. Do not supply the goal for them, do not derive it from the backlog "by majority", and do not hand
+the choice to a subagent.
 
-Всё остальное — сбор контекста, поднятие deferred, чтение roadmap и Ideas, формулировки — твоя
-подготовительная работа.
+Everything else — gathering context, surfacing deferred items, reading the roadmap and Ideas, wording —
+is your preparation work.
 
-## Канон хранения
+## Where things are stored
 
-- Сущность спринта: цель, текст Definition of Done, репозитории, статус, бюджет, текущая карточка,
-  resume-запись, комментарии. Это то, что читает код и на что смотрит человек в сводке.
-- Документ в `secretary-instance/state/knowledge/`: только сложноформализуемое — контекст момента,
-  почему выбрали эту цель, какие альтернативы отвергли и почему.
-- Поля сущности документ не повторяет. Два источника правды про одно и то же расходятся, и
-  расходятся молча.
+- The sprint entity: goal, Definition of Done text, repositories, status, budget, current card, resume
+  entry, comments. This is what the code reads and what a person sees in the summary.
+- A document in the instance repository's knowledge directory: only what is hard to formalise — the
+  context of the moment, why this goal was chosen, which alternatives were rejected and why.
+- The document does not repeat the entity's fields. Two sources of truth about one thing diverge, and
+  they diverge silently.
 
-Критерий: если по факту можно принять решение автоматически — это поле сущности; если факт нужен,
-чтобы понять «почему» — документ; не проходит ни один тест — не пишем вообще.
+The test: if a decision can be made automatically from a fact, it is a field of the entity; if the fact
+is needed to understand "why", it goes in the document; if it passes neither test, do not write it at
+all.
 
-## 1. Собрать живой контекст
+## 1. Gather live context
 
-Читай живые источники, а не свою память о них.
+Read live sources, not your memory of them.
 
 ```bash
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint list --status closed
-python3 -m secretary task list --state ideas --project secretary
-python3 -m secretary task list --state ready --project secretary
+python3 -m secretary task list --state ideas --project <project>
+python3 -m secretary task list --state ready --project <project>
 python3 -m secretary task list --sprint sprint:<ID>
 ```
 
-Что нужно на входе:
+What you need as input:
 
-- открытые и последние закрытые спринты: их цели, репозитории и что осталось незакрытым;
-- deferred прошлых спринтов — они лежат в resume-записях и комментариях сущностей
-  (`python3 -m secretary sprint show --ref sprint:<ID>`), а не в отдельном списке;
-- roadmap и vision продукта (`docs/ROADMAP.md`, `docs/VISION.md` затронутых репозиториев);
-- Ideas затронутых репозиториев: это входной материал для будущих карточек, а не план спринта;
-- зафиксированные факты инстанса (`secretary-instance/state/memory/facts`) и относящиеся к теме
-  документы `state/knowledge/`.
+- open and recently closed sprints: their goals, repositories and what was left unclosed;
+- deferred items from past sprints, which live in the resume entries and comments of their entities
+  (`python3 -m secretary sprint show --ref sprint:<ID>`), not in a separate list;
+- the product roadmap and vision (`docs/ROADMAP.md`, `docs/VISION.md` of the affected repositories);
+- the Ideas of the affected repositories, as input material for future cards rather than as a plan;
+- the recorded facts of the installation and the relevant knowledge documents.
 
-Ideas в Ready не переводи и карточки не трогай. Свежие карточки режет наблюдатель из текущего
-понимания.
+Do not promote Ideas to Ready and do not touch cards. Fresh cards are cut by the observer from current
+understanding.
 
-## 2. Проверить, что репозитории свободны
+## 2. Check that the repositories are free
 
-Открытый спринт держит свои репозитории как единственный писатель. Второй спринт на тот же
-репозиторий не открывается.
+An open sprint holds its repositories as their only writer. A second sprint on the same repository is not
+opened.
 
 ```bash
 python3 -m secretary sprint list --status open
 ```
 
-Сверь поле `repositories` каждого открытого спринта с репозиториями, которые нужны новому. При
-пересечении:
+Compare the `repositories` field of each open sprint against the repositories the new one needs. On an
+overlap:
 
-1. Не создавай сущность. Отказ здесь дешевле, чем два писателя на один репозиторий.
-2. Назови человеку конфликтующий спринт (`ref`, цель) и предложи выбор: дождаться его закрытия,
-   сузить новый спринт до свободных репозиториев или закрыть текущий явным решением
-   (`python3 -m secretary sprint close --role po --actor <ты> --ref sprint:<ID>`).
-3. Закрывать чужой открытый спринт «чтобы не мешал» самостоятельно нельзя.
+1. Do not create the entity. A refusal here is cheaper than two writers on one repository.
+2. Name the conflicting sprint (ref, goal) to the person and offer a choice: wait for it to close, narrow
+   the new sprint to the free repositories, or close the current one by an explicit decision
+   (`python3 -m secretary sprint close --role po --actor <you> --ref sprint:<ID>`).
+3. You may not close someone else's open sprint on your own "so it stops getting in the way".
 
-Срочное, что попадает в репозиторий идущего спринта, не заводится отдельным спринтом: оно
-докидывается записью к сущности этого спринта.
+Anything urgent that lands in a running sprint's repository does not become a separate sprint: it is added
+as an entry on that sprint's entity.
 
 ```bash
-python3 -m secretary sprint comment --ref sprint:<ID> --role po --actor <ты> --body-file /tmp/note.md
+python3 -m secretary sprint comment --ref sprint:<ID> --role po --actor <you> --body-file /tmp/note.md
 ```
 
-## 3. Догриллить развилки
+## 3. Finish grilling the forks
 
-Сначала выведи то, что доказуемо из кода, доски и документов. Гриллинг тратится только на то, что
-из них не следует: нерешённые продуктовые развилки.
+First derive what is provable from the code, the board and the documents. Grilling is spent only on what
+does not follow from them: unresolved product forks.
 
-Правила те же, что в `grilling`: один вопрос за раз, к каждому вопросу свой рекомендуемый ответ,
-ждёшь ответа и только потом следующий вопрос. Вопрос, на который отвечает чтение кода, задавать
-нельзя — иди и прочитай.
+The rules are the same as in `grilling`: one question at a time, each with your recommended answer, and
+you wait for the answer before the next question. A question that reading the code would answer must not
+be asked — go and read it.
 
-Гриллинг закончен, когда зафиксированы:
+Grilling is finished when these are fixed:
 
-- одно предложение продуктовой цели: конечное состояние продукта, а не список исправлений;
-- Definition of Done проверяемыми пунктами;
-- список репозиториев;
-- границы: что заведомо вне спринта.
+- one sentence of product goal: an end state of the product, not a list of fixes;
+- a Definition of Done as checkable items;
+- the list of repositories;
+- the boundaries: what is definitely outside the sprint.
 
-Если цель расходится с vision, остановись и вынеси противоречие человеку, а не сглаживай его
-формулировкой.
+If the goal conflicts with the product vision, stop and put the contradiction to the person rather than
+smoothing it over with wording.
 
-## 4. Сформулировать Definition of Done
+## 4. Formulate the Definition of Done
 
-Каждый пункт — проверяемый факт о продукте, который наблюдатель сможет подтвердить против `main`
-затронутых репозиториев и живой системы. Не «улучшено», не «покрыто», не «рассмотрено».
+Each item is a checkable fact about the product that the observer can confirm against the default branch
+of the affected repositories and the live system. Not "improved", not "covered", not "considered".
 
-Пункт годится, если понятно, чем именно он закрывается: команда, которую можно выполнить; состояние,
-которое видно в данных; поведение, которое воспроизводится через продуктовый интерфейс. Пункт, для
-которого доказательство не описывается одной фразой, переформулируй или выброси.
+An item is good if it is clear what closes it: a command that can be run, a state that is visible in data,
+a behaviour that reproduces through a product interface. Rephrase or drop any item whose evidence cannot be
+described in one phrase.
 
-Разложения DoD на фазы, task pool и соответствия «пункт = карточка» не существует.
+There is no decomposition of the Definition of Done into phases, a task pool or a one-item-per-card
+mapping.
 
-Текст DoD подготовь файлом, чтобы он попал в сущность целиком:
+Prepare the Definition of Done text as a file so it goes into the entity whole:
 
 ```bash
-# /tmp/dod.md — маркированный список проверяемых пунктов
+# /tmp/dod.md — a bulleted list of checkable items
 ```
 
-## 5. Создать сущность
+## 5. Create the entity
 
-Единственный способ — продуктовая команда. Спринт заводит PO.
+The only way is the product command. A sprint is opened by the PO.
 
 ```bash
-python3 -m secretary sprint create --role po --actor <ты> \
-  --goal "<одно предложение о конечном продуктовом состоянии>" \
+python3 -m secretary sprint create --role po --actor <you> \
+  --goal "<one sentence about the end product state>" \
   --dod-file /tmp/dod.md \
-  --repository secretary --repository secretary-instance
+  --repository <repo> --repository <repo>
 ```
 
-- `--role` принимает `po` и `steward`. Рождение спринта — `po`.
-- `--repository` повторяется по одному разу на репозиторий.
-- `--ref` не задавай: сущность получит `sprint:<ID>` сама. Если задаёшь, значение обязано
-  начинаться с `sprint:` и не должно совпадать ни с существующим спринтом, ни с карточкой Pipeline.
-- Вместо `--dod-file` есть `--definition-of-done` строкой; для многострочного текста используй файл.
+- `--role` accepts `po` and `steward`. Opening a sprint is `po`.
+- `--repository` is repeated once per repository.
+- Do not set `--ref`: the entity gets its own `sprint:<ID>`. If you do set it, the value must start with
+  `sprint:` and must clash with neither an existing sprint nor a card.
+- Instead of `--dod-file` there is a `--definition-of-done` string; use the file for multi-line text.
 
-Сразу перечитай созданное и проверь, что поля те, о которых договорились:
+Read back what you created immediately and check the fields are the ones agreed:
 
 ```bash
 python3 -m secretary sprint show --ref sprint:<ID>
 python3 -m secretary sprint status --ref sprint:<ID>
 ```
 
-`show` отдаёт goal, definition_of_done, repositories, status, budget, current_task, resume и
-комментарии. `status` отдаёт сводку: состояние карточек, бюджет, свежесть resume-записи и состояние
-наблюдателя. Свежесозданный спринт штатно показывает `resume_freshness.error: resume_missing` —
-первую resume-запись пишет наблюдатель.
+`show` returns the goal, Definition of Done, repositories, status, budget, current task, resume entry and
+comments. `status` returns the summary: card states, budget, resume freshness and observer state. A newly
+created sprint normally reports a missing resume entry — the first one is written by the observer.
 
-## 6. Записать документ «почему»
+## 6. Write the "why" document
 
-Документ пишется после сущности и ссылается на неё.
+The document is written after the entity and references it.
 
 ```bash
-python3 -m secretary knowledge write --instance ~/secretary-instance --actor secretary \
+python3 -m secretary knowledge write --instance <instance dir> --actor secretary \
   --path decisions/YYYY-MM-DD-<slug>.md --file /tmp/<slug>.md
 ```
 
-В документ уходит:
+The document holds:
 
-- ссылка на сущность (`sprint:<ID>`) как указатель, без пересказа её полей;
-- почему спринт открыт сейчас: что в продукте этого потребовало;
-- какие цели рассматривались и почему выбрана эта;
-- отвергнутые альтернативы и причина отказа;
-- предпосылки, которые могут не подтвердиться, и что тогда меняется.
+- a pointer to the entity (`sprint:<ID>`), without retelling its fields;
+- why the sprint is being opened now: what in the product demanded it;
+- which goals were considered and why this one was chosen;
+- the rejected alternatives and the reason for rejecting them;
+- the premises that may not hold, and what changes if they do not.
 
-В документ не уходит: цель дословно, текст Definition of Done, список репозиториев, статус, бюджет,
-текущая карточка. Это поля сущности; копия в документе устареет молча.
+The document does not hold: the goal verbatim, the Definition of Done text, the repository list, status,
+budget or current card. Those are fields of the entity; a copy in the document would go stale silently.
 
-`STATUS.md` и указатель на активный спринт для сущностного контура не пишутся: состояние спринта
-хранится там же, где карточки, и разойтись с ними не может.
+No status pointer file is written for this loop: sprint state lives where the cards are and cannot diverge
+from them.
 
-## 7. Дальше руками спринт не ведут
+## 7. From here the sprint is not run by hand
 
-После создания сущности:
+Once the entity exists:
 
-- наблюдателя поднимает диспетчер сам, ближайшим production tick; руками голову не запускай;
-- общение с идущим спринтом идёт записями к сущности (`sprint comment`), а не сообщениями голове;
-- статус читается из данных (`sprint status`, `task list --sprint`), а не спрашивается у
-  наблюдателя;
-- цель, Definition of Done и границы после создания — контракт. Меняются только явным решением
-  человека, не по ходу работы.
+- the dispatcher launches the observer itself on the next production tick; do not launch a head by hand;
+- communication with a running sprint goes through entries on the entity (`sprint comment`), not messages
+  to the head;
+- status is read from data (`sprint status`, `task list --sprint`), not asked of the observer;
+- after creation the goal, Definition of Done and boundaries are a contract. They change only by an
+  explicit human decision, not in passing.
 
-Если наблюдатель долго не появляется, смотри причину в данных:
-`python3 -m secretary status --instance ~/secretary-instance --json` (`installation.sprints`,
-`dispatcher.observers`) и `python3 -m secretary sprint status --ref sprint:<ID>` (поле `observer`).
-Путь инстанса подставь свой: у `status` он обязателен. Частая причина — недоставленный ролевой
-скилл, лечится `python3 -m secretary role-skills sync`.
+If the observer does not appear for a long time, find the reason in data:
+`python3 -m secretary status --instance <instance dir> --json` (`installation.sprints`,
+`dispatcher.observers`) and `python3 -m secretary sprint status --ref sprint:<ID>` (the `observer` field).
+The instance path is mandatory for `status`. A common cause is an undelivered role skill, fixed with
+`python3 -m secretary role-skills sync`.
 
-## Отчитаться
+## Report back
 
-Сообщи человеку: `ref` сущности, цель, пункты Definition of Done, репозитории, путь к документу и
-что дальше спринт ведёт наблюдатель. Карточку «на всякий случай» не создавай.
+Tell the person: the entity's ref, the goal, the Definition of Done items, the repositories, the path to
+the document, and that the observer runs the sprint from here. Do not create a card "just in case".
 
-## Старый контур
+## The document loop
 
-`start-sprint` и `run-sprint` остаются на месте и работают по-прежнему: sprint-документ в
-`state/knowledge/sprints/`, `STATUS.md` как указатель, исполнение спринта интерактивным секретарём.
-Сам Secretary до отдельного инкремента ведётся этим контуром, поэтому двойной контур сейчас
-сознательный, а не забытый хвост.
+`start-sprint` and `run-sprint` remain in place and work as before: a sprint document in the knowledge
+directory, a status pointer, and execution by the interactive secretary. Both loops exist deliberately.
 
-Не сноси старые скиллы, не переписывай их семантику и не смешивай контуры в одном спринте: спринт
-либо сущность (`open-sprint` + наблюдатель), либо документ (`start-sprint` + `run-sprint`).
+Do not remove the older skills, do not rewrite their semantics and do not mix the loops inside one sprint:
+a sprint is either an entity (`open-sprint` plus an observer) or a document (`start-sprint` plus
+`run-sprint`).

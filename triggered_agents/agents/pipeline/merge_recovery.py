@@ -2,7 +2,7 @@
 
 When a Validate PR's head diverges from its base — GitHub reports mergeable=CONFLICTING or
 mergeStateStatus=BEHIND (normalized by model.merge_status, carried on poll_pr's `mergeable`) — the
-branch is recovered here instead of hanging under the CI watchdog as «checks не появились» (the
+branch is recovered here instead of hanging under the CI watchdog as "checks have not appeared" (the
 codegen_orchestrator-440 incident: a behind/conflicting PR never starts its pull_request workflow,
 so rollup stays NONE forever). A branch that is only BEHIND (base moved ahead, no textual conflict)
 is auto-updated: an ordinary `git merge origin/<base>` in the worker's existing workspace, a merge
@@ -150,7 +150,7 @@ def recover(ref: str, pr: str, card: dict, rec: dict | None, records: dict, stat
     if kind in ("conflict", "dirty"):
         return _conflict(ref, pr, card, rec, records, save_cards, refresh_worker_task, result, base,
                          base_sha, head_sha, attempts, clear_review, notify_rework, block_rework)
-    scrubbed = worker.scrub_secrets(result.get("reason") or "(без деталей)")
+    scrubbed = worker.scrub_secrets(result.get("reason") or "(no details)")
     STATE.log_run("validate", reference=ref, result=f"merge-{kind}", level="warn", pr=pr,
                   base_sha=base_sha, attempts=attempts, error=scrubbed)
     if attempts >= MERGE_RECOVERY_ATTEMPTS:
@@ -171,12 +171,14 @@ def _update(ref: str, pr: str, rec: dict, base: str, branch: str, result: dict, 
     rec["stand_fails"] = 0
     rec.pop("ci_pending_since", None)
     if kind == "updated":
-        body = (f"Ветка PR отставала от базы `{base}` без текстового конфликта — сделан обычный "
-                f"merge базы в `{branch}` (merge-коммит, без rebase/force-push), новый head "
-                f"`{new_head}`. Слои валидации сброшены, ждём CI нового состояния. PR: {pr}")
+        body = (f"The PR branch was behind base `{base}` with no text conflict, so the base was "
+                f"merged into `{branch}` the ordinary way (a merge commit, no rebase or force "
+                f"push); the new head is `{new_head}`. The validation layers are reset and we are "
+                f"waiting for CI on the new state. PR: {pr}")
     else:
-        body = (f"Ветка PR уже содержала базу `{base}`, origin синхронизирован (head `{new_head}`). "
-                f"Слои валидации сброшены, ждём CI нового состояния. PR: {pr}")
+        body = (f"The PR branch already contained base `{base}`; origin is synchronised (head "
+                f"`{new_head}`). The validation layers are reset and we are waiting for CI on the "
+                f"new state. PR: {pr}")
     ops.add_comment("dispatcher", ref, body)
     rec["comment_baseline"] = len(ops.show_card(ref)["comments"])
     STATE.log_run("validate", reference=ref, result=f"merge-{kind}", pr=pr, base_sha=base_sha,
@@ -197,22 +199,22 @@ def _conflict(ref: str, pr: str, card: dict, rec: dict, records: dict, save_card
         return _block(ref, pr, rec, records, base_sha, attempts, "CONFLICTING", clear_review,
                       detail="conflict not resolved within budget")
     if result.get("result") == "dirty":
-        detail = ("В воркспейсе воркера есть незакоммиченные изменения — автослияние базы отменено, "
-                  "ничего не тронуто.")
+        detail = ("The worker workspace has uncommitted changes, so the automatic base merge was "
+                  "cancelled and nothing was touched.")
         files_note = ""
     else:
         files = result.get("conflict_files") or []
         shown = "\n".join(f"- `{worker.scrub_secrets(f)}`" for f in files) if files else \
-            "(git не назвал файлы)"
-        detail = f"Ветка PR конфликтует с базой `{base}` при обычном merge."
-        files_note = f"\nКонфликтные файлы:\n{shown}"
+            "(git named no files)"
+        detail = f"The PR branch conflicts with base `{base}` on an ordinary merge."
+        files_note = f"\nConflicting files:\n{shown}"
     ops.add_comment(
         "dispatcher", ref,
-        f"Требуется ручное разрешение расхождения с базой. {detail}{files_note}\n"
-        f"База: `{base}` (sha `{base_sha or '?'}`), head PR: `{head_sha or '?'}`. Карточка "
-        f"возвращена в In progress: в своей ветке сделай "
-        f"`git fetch origin {base} && git merge origin/{base}`, разреши конфликт, прогони "
-        f"проверки, запушь merge-коммит (без rebase/force-push) и снова report done. PR: {pr}")
+        f"The divergence from the base needs manual resolution. {detail}{files_note}\n"
+        f"Base: `{base}` (sha `{base_sha or '?'}`), PR head: `{head_sha or '?'}`. The card is back "
+        f"in In progress: on your own branch run "
+        f"`git fetch origin {base} && git merge origin/{base}`, resolve the conflict, run the "
+        f"checks, push the merge commit (no rebase or force push) and report done again. PR: {pr}")
     ops.move_card("dispatcher", ref, model.IN_PROGRESS)
     clear_review(rec)
     rec["comment_baseline"] = len(ops.show_card(ref)["comments"])
@@ -222,8 +224,9 @@ def _conflict(ref: str, pr: str, card: dict, rec: dict, records: dict, save_card
     try:
         notify_rework(
             ref, card, rec, records, save_cards, refresh_worker_task,
-            f"Расхождение ветки с базой по {pr}: нужно вручную смержить базу и разрешить конфликт. "
-            f"Разбор в комментарии карточки, почини, запушь и снова report done.",
+            f"The branch on {pr} has diverged from its base: merge the base in and resolve the "
+            f"conflict by hand. The analysis is in the card comment; fix it, push and report done "
+            f"again.",
             "merge-conflict")
     except Exception as e:  # noqa: BLE001, do not leave In progress with a dead handle
         block_rework(ref, rec, records, "merge-conflict", e)
@@ -235,15 +238,15 @@ def _conflict(ref: str, pr: str, card: dict, rec: dict, records: dict, save_card
 
 def _block(ref: str, pr: str, rec: dict, records: dict, base_sha: str, attempts: int,
            merge_state: str | None, clear_review, detail: str = "") -> bool:
-    """Base-freshness recovery budget spent on one base SHA — Blocked до vladmesh, worker workspace
+    """Base-freshness recovery budget spent on one base SHA — Blocked for a human, worker workspace
     left alive for a human to inspect (AC5)."""
-    ws = rec.get("workspace") or "(неизвестен)"
+    ws = rec.get("workspace") or "(unknown)"
     clear_review(rec)
     tail = f" ({detail})" if detail else ""
     ops.add_comment("dispatcher", ref,
-                    f"Recovery расхождения ветки с базой не сошёлся за {attempts} попыток на одном "
-                    f"base sha `{base_sha or '?'}`{tail}. Карточка в Blocked, воркспейс {ws} "
-                    f"оставлен для разбора. PR: {pr}")
+                    f"Base-divergence recovery did not converge in {attempts} attempts on a single "
+                    f"base sha `{base_sha or '?'}`{tail}. Card moved to Blocked; workspace {ws} "
+                    f"left in place for investigation. PR: {pr}")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
     STATE.log_run("validate", reference=ref, to="Blocked", reason="merge-recovery-budget",

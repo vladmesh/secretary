@@ -1,5 +1,5 @@
-"""Stand deploy + e2e — the host side of Validate layer 2 (design-task-pipeline.md, «Стенд +
-e2e до мержа»).
+"""Stand deploy + e2e — the host side of Validate layer 2 (a stand and an end-to-end run before
+the merge).
 
 Layer 1 (worker.poll_pr) only reads gh. This module does the expensive part: it checks out a
 PR branch into the project's persistent stand worktree, brings the stand's compose namespace up

@@ -3,14 +3,14 @@ binary).
 
 Role is a global `--role` (or env BOARD_ROLE) checked before the command runs: create is
 PO-, steward-, or worker-only (a worker's own create is further gated in ops — straight to Ready
-only as a continuation of its own chain, see ops._check_worker_continuation, otherwise Идеи like
+only as a continuation of its own chain, see ops._check_worker_continuation, otherwise Ideas like
 any other agent idea), claim is dispatcher-only, report/feedback are worker-only, move/ready defer
 to the transition matrix for the role, comment is open to any role (the role becomes the marker).
 update accepts any role at this layer but is PO-only in ops (GuardError otherwise), same as
 move's per-role matrix. `move --reason` records a comment on the moved card. steward gets every po
 transition (via move/ready) plus one more: Blocked -> Done, which additionally needs a non-empty
 reason in the same call, see model.STEWARD_OVERRIDE and ops.move_card. steward escalations to
-Blocked also need a non-empty reason. idea is reviewer- or retro-only (both file an Идеи-only card,
+Blocked also need a non-empty reason. idea is reviewer- or retro-only (both file an Ideas-only card,
 never move anything, model.TRANSITIONS leaves each an empty set).
 setup/list/show/probe need no role. Guards live in model/ops; this layer only wires argv to them
 and maps failures to exit codes.
@@ -121,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("--type", required=True, dest="task_type")
     p_create.add_argument("--title", required=True)
     p_create.add_argument("--ref")
-    p_create.add_argument("--column", default="Идеи")
+    p_create.add_argument("--column", default="Ideas")
     p_create.add_argument("--blocked-by", dest="blocked_by")
     p_create.add_argument("--head", dest="head")
     p_create.add_argument(
@@ -179,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verdict.add_argument("--body")
     p_verdict.add_argument("--body-file")
 
-    p_idea = sub.add_parser("idea")           # reviewer: file a finding as an Идеи card
+    p_idea = sub.add_parser("idea")           # reviewer: file a finding as an Ideas card
     p_idea.add_argument("--project", required=True)
     p_idea.add_argument("--title", required=True)
     p_idea.add_argument("--type", default="code", dest="task_type")
@@ -295,8 +295,8 @@ def main(argv=None) -> int:
             if not _need_role(role, ("reviewer", "retro")):
                 return 2
             # The reviewer's one code-creation exception: findings out of the card's scope go to
-            # Идеи (never Ready) so they enter the queue only via a human, not the reviewer.
-            # retro's only board write is the same shape: a fail-pattern proposal, Идеи-only.
+            # Ideas (never Ready) so they enter the queue only via a human, not the reviewer.
+            # retro's only board write is the same shape: a fail-pattern proposal, Ideas-only.
             desc = _text_arg(args.description, args.description_file)
             fn = ops.reviewer_idea if role == "reviewer" else ops.retro_idea
             return _emit(fn(

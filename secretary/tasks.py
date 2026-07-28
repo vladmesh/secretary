@@ -76,7 +76,7 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
 
 
 _STATE_BY_COLUMN = {
-    "Идеи": "ideas",
+    "Ideas": "ideas",
     "Ready": "ready",
     "In progress": "in_progress",
     "Validate": "validate",
