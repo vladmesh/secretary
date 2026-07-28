@@ -2010,7 +2010,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIsNone(neighbor["claim"]["worker"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
         self.assertEqual(self.host.torn_down, ["secretary-510-pilot-pilot"])
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot", "secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
     def _run_worker_to_validate(self, request_id: str = "worker-done") -> None:
@@ -2627,7 +2628,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.start_pilot()
         self.runtime.tick(self.selector)
         self.host.fail_retain_worker_reason = "head is gone"
-        self.host.fail_stop_workspace_reason = "Orca cannot confirm terminal stop"
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
             body="done", request_id="worker-done-unconfirmed-retention",
@@ -2963,7 +2964,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(task["state"], "blocked")
         self.assertIn("non-fast-forward", task["comments"][-1]["body"])
         self.assertEqual(self.host.torn_down, [], "a failed merge must not remove the workspace")
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot", "secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
 
     def test_rework_bringup_failure_after_red_review_blocks_the_card(self) -> None:
         """The rework workspace can be gone by the time a red verdict lands. The card has already
@@ -3302,7 +3304,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(card["state"], "in_progress")
         self.assertEqual(card["routing"]["resolved_worker_head"], "claude-opus")
         # The preempted head is not left running in the workspace the new round claims.
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertEqual(self.host.stopped, [])
         history = self.routing_history()
         self.assertEqual([attempt.attempt for attempt in history], [1, 2])
         self.assertEqual([attempt.worker.head for attempt in history], ["codex", "claude-opus"])
@@ -3425,9 +3428,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
             ["review:secretary-510-pilot"],
             "a red verdict must end the reviewer's pane",
         )
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
         self.assertEqual(
             self.host.stopped,
-            ["secretary-510-pilot-pilot"],
+            [],
             "the green gate stops the retained worker before review; a red verdict stops only the reviewer",
         )
         self.assertEqual(self.host.torn_down, [], "rework must reuse the workspace, not tear it down")

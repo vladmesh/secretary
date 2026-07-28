@@ -1562,6 +1562,15 @@ class CommandHostRuntime:
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("retained worker workspace is missing")
+        if record.worker_resume_delivery == "confirmed":
+            if status.get("stopped"):
+                raise HostError("confirmed retained continuation is no longer running")
+            return
+        if not status.get("stopped") and _terminal_turn_started(record.handle, run_json=self._run_json):
+            # The dispatcher may have died after the provider started but before it recorded
+            # that confirmation. Returning lets recovery checkpoint it before finishing, without
+            # touching a TASK.md or report body the resumed worker may already be using.
+            return
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_body_file("report", task["ref"], record.review_baseline)
         self._write_prompt(
@@ -1569,8 +1578,6 @@ class CommandHostRuntime:
             self._worker_task_doc(task, base, record.attempt_id, record.review_baseline),
         )
         try:
-            if not status.get("stopped") and _terminal_turn_started(record.handle, run_json=self._run_json):
-                return
             if status.get("stopped"):
                 self._signal_head(record.worker_pid_file, signal.SIGCONT)
             prompt = (
@@ -2387,6 +2394,7 @@ class DispatcherRuntime:
             # turn that established fact into a permanent rework failure.
             record.worker_retained_at = 0.0
             record.worker_resume_phase = ""
+            record.worker_resume_delivery = ""
             return None
         try:
             self.host.stop_head(record, "worker")
@@ -2401,6 +2409,7 @@ class DispatcherRuntime:
         _forget_role_head(record, WORKER_ROLE)
         record.worker_retained_at = 0.0
         record.worker_resume_phase = ""
+        record.worker_resume_delivery = ""
         return None
 
     def _worker_launch_aborted(
@@ -2598,6 +2607,9 @@ class DispatcherRuntime:
                     task, record, records, payload, attempt_id,
                     continuation_reason=scrub_host_output(str(exc)), phase=record.worker_resume_phase or "gate",
                 )
+            record.worker_resume_delivery = "confirmed"
+            records[ref] = record
+            self.save_records(payload, records)
             return self._finish_retained_worker_resume(
                 task, record, records, payload, attempt_id, phase=record.worker_resume_phase or "gate"
             )
@@ -3291,6 +3303,7 @@ class DispatcherRuntime:
             # completion from the new rework round.
             record.state = "worker_resuming"
             record.worker_resume_phase = phase
+            record.worker_resume_delivery = "pending"
             records[ref] = record
             self.save_records(payload, records)
             try:
@@ -3301,6 +3314,9 @@ class DispatcherRuntime:
                     continuation_reason=scrub_host_output(str(exc)), phase=phase,
                 )
             else:
+                record.worker_resume_delivery = "confirmed"
+                records[ref] = record
+                self.save_records(payload, records)
                 return self._finish_retained_worker_resume(
                     moved, record, records, payload, attempt_id, phase=phase
                 )
@@ -3320,6 +3336,7 @@ class DispatcherRuntime:
         ref = task["ref"]
         record.worker_retained_at = 0.0
         record.worker_resume_phase = ""
+        record.worker_resume_delivery = ""
         record.state = "claimed"
         rework_round = record.attempt_round + 1
         retained_run = dict(record.worker_run)

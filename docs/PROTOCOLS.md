@@ -209,10 +209,12 @@ its heartbeat has exited; it does not stop every terminal in the worktree, so an
 pane remains a split anchor for the reviewer.
 
 A red gate first returns the card to In progress and updates `TASK.md` with the failure and the
-next report identity. The dispatcher persists a resuming boundary before delivery, so recovery
-after a crash cannot mistake the previous `done` report for a new completion. Recovery also checks
-that the resumed provider visibly started the continuation turn: a crash after SIGCONT but before
-delivery replays the prompt, while a turn already underway is not sent again. When the retained
+next report identity. The dispatcher persists a pending-delivery boundary before SIGCONT, then
+checkpoints confirmation only after the provider visibly starts the continuation turn. Recovery
+after a crash cannot mistake the previous `done` report for a new completion, replay an incomplete
+delivery as if it were confirmed, or overwrite a confirmed continuation. A crash after SIGCONT but
+before delivery replays the prompt, while a turn already underway is checkpointed and not sent
+again. When the retained
 provider session is still live and accepts delivery, the same terminal and session continue the
 rework. Codex TUI and Claude interactive workers support this path; one-shot Codex exec workers
 do not. The routing record and card comment name this as a reused continuation with the worker

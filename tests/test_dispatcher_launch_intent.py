@@ -489,6 +489,7 @@ class LaunchIntentTests(unittest.TestCase):
         retained = self.record()
         assert retained is not None
         self.assertEqual(retained.state, "worker_resuming")
+        self.assertEqual(retained.worker_resume_delivery, "pending")
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
         recovered = self.tick()
@@ -1594,6 +1595,24 @@ class HostLaunchContourTests(unittest.TestCase):
         self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
         self.assertTrue(any(command[2] == "wait" for command in calls))
         self.assertTrue(any(command[2] == "send" for command in calls))
+
+    def test_a_confirmed_retained_continuation_is_not_delivered_twice_on_recovery(self) -> None:
+        """A crash after checkpointing delivery must leave the active worker alone."""
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude", "head": "claude-opus"},
+            worker_resume_delivery="confirmed",
+        )
+        calls: list[list[str]] = []
+
+        with mock.patch.object(self.host, "_run_json", lambda command: calls.append(command) or {}):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+        self.assertEqual(calls, [])
 
     def test_dead_or_missing_retained_worker_refuses_continuation(self) -> None:
         record = DispatcherRecord(
