@@ -37,7 +37,7 @@ from secretary._fsutil import publish_component_entries, write_json, write_text_
 from secretary.automations import OrcaAutomationClient
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
-from secretary.host_apply import LiveOrcaRegistrar, SystemdUnitInstaller
+from secretary.host_apply import LiveOrcaRegistrar, SystemdUnitInstaller, resolve_runtime_owner
 from secretary.restore import (
     RestoreError,
     import_normalized_board,
@@ -513,6 +513,10 @@ def materialize_host(
     report = validate_instance(instance)
     if not report.ok:
         raise InstallError("invalid instance config: " + "; ".join(map(str, report.errors)))
+    try:
+        installation_user, runtime_home = resolve_runtime_owner(instance, installation_user)
+    except ValueError as exc:
+        raise InstallError(str(exc)) from None
     context = UpgradeContext(
         instance_path=instance,
         product_root=product_root,
@@ -525,9 +529,11 @@ def materialize_host(
         pull=False,
         report=report,
         runtime_user=installation_user,
+        runtime_home=runtime_home,
     )
-    home = pwd.getpwnam(installation_user).pw_dir if installation_user else None
-    with _runtime_environment({"HOME": home} if home else {}):
+    # The steps resolve their own paths against `runtime_home`; HOME is exported for the
+    # subprocesses they start, which read the environment and not this context.
+    with _runtime_environment({"HOME": str(runtime_home)}):
         result = run_steps(context)
     if not result.ok:
         failed = result.steps[-1]

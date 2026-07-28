@@ -159,8 +159,15 @@ class PortableFixture(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
+        # Two homes, because they are two accounts. `home` belongs to the installation being
+        # materialized; `invoker_home` is whoever typed the command — an operator repairing
+        # somebody else's installation, or root after a recovery. Everything an upgrade writes
+        # belongs in the first, and a step that reads the process environment lands in the second,
+        # where these tests can see it.
         self.home = self.root / "home"
+        self.invoker_home = self.root / "invoker"
         self.home.mkdir()
+        self.invoker_home.mkdir()
         self.product = self.root / "product"
         self.instance = self.root / "instance"
         self.data = self.root / "data"
@@ -175,14 +182,15 @@ class PortableFixture(unittest.TestCase):
         # this fixture exists to rule out.
         env = mock.patch.dict(
             os.environ,
-            {"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            {"HOME": str(self.invoker_home), "PATH": os.environ.get("PATH", "")},
             clear=True,
         )
         env.start()
         self.addCleanup(env.stop)
-        account = SimpleNamespace(pw_dir=str(self.home))
+        account = SimpleNamespace(pw_dir=str(self.home), pw_name="operator")
         for target, kwargs in (
             ("secretary.host_apply.pwd.getpwnam", {"return_value": account}),
+            ("secretary.host_apply.pwd.getpwuid", {"return_value": account}),
             ("secretary.host_apply.find_orca_executable", {"return_value": Path("/usr/local/bin/orca")}),
             ("secretary.host_apply._is_executable", {"return_value": True}),
         ):
@@ -254,11 +262,35 @@ class PortableFixture(unittest.TestCase):
             pull=False,
             report=report,
             runtime_user="operator",
+            runtime_home=self.home,
         )
         return base if not overrides else upgrade.replace(base, **overrides)
 
     def run_upgrade(self, **overrides) -> upgrade.UpgradeResult:
         return upgrade.run_steps(self.context(**overrides))
+
+    def run_upgrade_command(self, **overrides) -> int:
+        """The public entry point, with only the host-touching clients replaced by doubles.
+
+        Everything an upgrade decides about which account it is materializing for is left to the
+        command itself: it is the caller that has no `runtime_user` to pass, and the reason the
+        argument exists is that the command has to work it out.
+        """
+        args = SimpleNamespace(
+            instance=str(self.instance),
+            product_root=str(self.product),
+            base_branch="main",
+            dry_run=False,
+            no_pull=True,
+            host_fixture=str(self.host_fixture),
+            json=False,
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        with mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units), \
+                mock.patch.object(upgrade, "LiveOrcaRegistrar", FakeRegistrar), \
+                mock.patch.object(upgrade, "OrcaAutomationClient", FakeAutomations):
+            return upgrade.run_upgrade(args)
 
     def run_cli(self, argv: list[str]) -> tuple[int, str]:
         output = io.StringIO()
@@ -273,8 +305,11 @@ class PortableFixture(unittest.TestCase):
     def statuses(self, result: upgrade.UpgradeResult) -> dict[str, str]:
         return {step.name: step.status for step in result.steps}
 
-    def shell_skill(self, shell: str, skill: str) -> Path:
-        return self.home / "shells" / shell / "skills" / skill / "SKILL.md"
+    def shell_skill(self, shell: str, skill: str, home: Path | None = None) -> Path:
+        return (home or self.home) / "shells" / shell / "skills" / skill / "SKILL.md"
+
+    def assert_invoker_home_untouched(self) -> None:
+        self.assertEqual(sorted(path.name for path in self.invoker_home.iterdir()), [])
 
     def assert_hermetic(self, text: str) -> None:
         """Nothing in a result may name the developing machine's home or this checkout."""
@@ -302,6 +337,7 @@ class PortableInstallationTests(PortableFixture):
         self.assertEqual(
             sorted(path.name for path in self.home.iterdir()), ["bin", "shells"]
         )
+        self.assert_invoker_home_untouched()
         self.assert_hermetic(result.render())
 
     def test_the_head_canon_falls_back_to_the_named_checkout_not_the_running_one(self) -> None:
@@ -402,15 +438,110 @@ class PortableInstallationTests(PortableFixture):
         self.assertNotEqual(manifest, role_skills.manifest_path())
 
     def test_the_command_line_delivers_the_named_checkouts_skills(self) -> None:
+        """A hand-run sync has no installation owner to resolve and uses the caller's own home."""
         code, output = self.run_cli([
             "role-skills", "sync",
             "--instance", str(self.instance),
             "--product-root", str(self.product),
         ])
 
-        self.assertTrue(self.shell_skill("codex", "portable-skill").is_file())
+        self.assertTrue(self.shell_skill("codex", "portable-skill", self.invoker_home).is_file())
         self.assertEqual(code, 0, output)
         self.assert_hermetic(output)
+
+
+class InstallationOwnerTests(PortableFixture):
+    """Whose home an upgrade materializes into, when that is not the caller's.
+
+    The reproduction is a repair: root, or an operator on the same box, runs `secretary upgrade`
+    against an installation owned by somebody else. Every home-relative path the run writes has to
+    be the owner's, because the units the same run renders name the owner's home and nothing else
+    will go looking in `/root` for the skills they were supposed to find.
+    """
+
+    def test_the_upgrade_command_resolves_the_installation_owner_from_the_instance(self) -> None:
+        seen: list[upgrade.UpgradeContext] = []
+
+        with mock.patch.object(
+            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult()
+        ):
+            code = self.run_upgrade_command(dry_run=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0].runtime_user, "operator")
+        self.assertEqual(seen[0].runtime_home, self.home)
+        self.assertNotEqual(seen[0].runtime_home, self.invoker_home)
+
+    def test_an_explicit_runtime_user_wins_over_the_directory_owner(self) -> None:
+        seen: list[upgrade.UpgradeContext] = []
+
+        with mock.patch.object(
+            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult()
+        ), mock.patch("secretary.host_apply.pwd.getpwuid", side_effect=AssertionError("owner probed")):
+            code = self.run_upgrade_command(dry_run=True, runtime_user="named")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0].runtime_user, "named")
+        self.assertEqual(seen[0].runtime_home, self.home)
+
+    def test_the_command_delivers_skills_and_entry_points_under_the_owners_home(self) -> None:
+        code = self.run_upgrade_command()
+
+        self.assertEqual(code, 0)
+        self.assertTrue(self.shell_skill("codex", "portable-skill").is_file())
+        self.assertTrue(self.shell_skill("claude", "portable-skill").is_file())
+        self.assertEqual(
+            (self.home / "bin" / "portable-skill").resolve(),
+            self.product / "skills" / "roles" / "secretary" / "portable-skill" / "portable-skill.sh",
+        )
+        self.assert_invoker_home_untouched()
+
+    def test_role_worktrees_and_automation_workspaces_belong_to_the_owner(self) -> None:
+        """Neither is written here; both are decided from a home, and it must be the owner's."""
+        agent = self.product / "triggered_agents" / "agents" / "curator"
+        agent.mkdir(parents=True, exist_ok=True)
+        (agent / "automation.toml").write_text(
+            'name = "curator"\nskill = "curate"\n', encoding="utf-8"
+        )
+
+        worktrees = upgrade.desired_role_worktrees(self.product, self.home)
+        specs = upgrade.load_specs(self.product, home=self.home)
+
+        self.assertEqual(worktrees, [self.home / "orca" / "workspaces" / "secretary" / "curator"])
+        self.assertEqual(
+            [spec.workspace for spec in specs],
+            [str(self.home / "orca" / "workspaces" / "secretary" / "curator")],
+        )
+
+    def test_a_configured_workspaces_root_still_wins_over_the_owners_home(self) -> None:
+        elsewhere = self.root / "elsewhere"
+
+        with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(elsewhere)}):
+            roots = upgrade.workspaces_root(self.home)
+
+        self.assertEqual(roots, elsewhere)
+
+    def test_a_configured_bin_dir_still_wins_over_the_owners_home(self) -> None:
+        elsewhere = self.root / "elsewhere-bin"
+
+        with mock.patch.dict(os.environ, {role_skills.BIN_DIR_ENV: str(elsewhere)}):
+            self.assertEqual(role_skills.bin_dir(self.home), elsewhere)
+        self.assertEqual(role_skills.bin_dir(self.home), self.home / "bin")
+
+    def test_an_installation_owned_by_a_missing_account_is_refused_before_any_write(self) -> None:
+        with mock.patch("secretary.host_apply.pwd.getpwnam", side_effect=KeyError("operator")):
+            code, output = self.capture(lambda: self.run_upgrade_command())
+
+        self.assertEqual(code, 2)
+        self.assertIn("operator", output)
+        self.assertFalse((self.home / "shells").exists())
+        self.assert_invoker_home_untouched()
+
+    def capture(self, call) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = call()
+        return code, output.getvalue()
 
 
 class InstallationOwnedLayersTests(PortableFixture):
@@ -510,6 +641,36 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         failed = [step for step in result.steps if step.failed]
         self.assertEqual([step.name for step in failed], ["role-skills"], result.render())
         self.assertFalse((self.home / "shells").exists())
+
+    def test_a_bad_registry_stops_the_run_before_the_checkout_is_reinstalled(self) -> None:
+        """`pip install -e` writes into the version being installed, so it is a materializing step.
+
+        A pulled checkout with a virtualenv and a moved dependency manifest reinstalls itself. Doing
+        that and only then refusing the manifest leaves the host part-way onto a version it never
+        finished installing, which is the state the `registries` step exists to make impossible.
+        """
+        venv_python = self.product / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        marker = self.root / "pip-ran"
+        venv_python.write_text(
+            f"#!/bin/sh\nprintf '' > {marker}\nexit 0\n", encoding="utf-8"
+        )
+        venv_python.chmod(0o755)
+        manifest = role_skills.product_manifest_path(self.product)
+        manifest.write_text("[roles.secretary\n", encoding="utf-8")
+
+        result = self.run_upgrade(changed_paths=("pyproject.toml",))
+
+        self.assertEqual(
+            [step.name for step in result.steps], ["pull", "registries"], result.render()
+        )
+        self.assertFalse(marker.exists(), "the checkout was reinstalled before the refusal")
+        self.wrote_nothing()
+
+    def test_the_registries_step_runs_before_every_step_that_writes(self) -> None:
+        names = [step.__name__ for step in upgrade.STEPS]
+
+        self.assertEqual(names[:2], ["step_pull", "step_registries"])
 
     def test_a_malformed_instance_canon_is_named_before_the_snapshot_is_written(self) -> None:
         canon = self.own_a_canon()

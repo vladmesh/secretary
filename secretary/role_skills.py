@@ -115,10 +115,32 @@ def configured_instance_path() -> Path:
     return _absolute(os.environ.get(INSTANCE_ENV) or DEFAULT_INSTANCE)
 
 
-def bin_dir() -> Path:
+def _expand_home(value: Path | str, home: Path | str | None) -> Path:
+    """A manifest path with ``~`` read as the installation's home, not the caller's.
+
+    A manifest writes ``~/shells/codex/skills`` because the product ships no absolute path. Which
+    home that is belongs to the installation being materialized: an upgrade repairing another
+    account's installation, or one running as root, would otherwise deliver every skill under the
+    invoking process's home while the units it renders name the owner's. When no home is named the
+    process's own is the right answer, which is the operator running ``role-skills sync`` by hand.
+    """
+    if home is None:
+        return Path(os.path.expanduser(str(value)))
+    text = str(value)
+    if text == "~":
+        return Path(home)
+    if text.startswith("~/"):
+        return Path(home) / text[2:]
+    # ``~other`` names a different account outright; the caller does not get to redirect that.
+    return Path(os.path.expanduser(text))
+
+
+def bin_dir(home: Path | str | None = None) -> Path:
     """The directory on ``PATH`` that a skill's command is linked into."""
     raw = os.environ.get(BIN_DIR_ENV)
-    return _absolute(raw) if raw else Path.home() / "bin"
+    if raw:
+        return _absolute(raw)
+    return _absolute(Path(home) / "bin") if home is not None else Path.home() / "bin"
 
 
 def instance_manifest_path(instance_path: Path | str | None = None) -> Path:
@@ -310,11 +332,13 @@ def load_registry(
     return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets)
 
 
-def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str]]:
+def find_overlapping_target_roots(
+    registry: SkillRegistry, home: Path | str | None = None
+) -> list[dict[str, str]]:
     """Reject nested roots for one shell: recursive discovery mixes their namespaces."""
     errors: list[dict[str, str]] = []
     items = [
-        (name, target["shell"], Path(target["root"]).expanduser().resolve())
+        (name, target["shell"], _expand_home(target["root"], home).resolve())
         for name, (target, _) in sorted(registry.targets.items())
     ]
     for index, (left_name, left_shell, left_root) in enumerate(items):
@@ -334,7 +358,7 @@ def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str
     return errors
 
 
-def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
+def iter_expected(registry: SkillRegistry, home: Path | str | None = None) -> list[ExpectedSkill]:
     """Every skill the registry expects in a shell, with both ends of the copy checked.
 
     Names are validated when the manifests are read, so containment here is the second lock rather
@@ -343,7 +367,7 @@ def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
     """
     expected: list[ExpectedSkill] = []
     for target_name, (target, source_of_target) in sorted(registry.targets.items()):
-        root = Path(target["root"]).expanduser()
+        root = _expand_home(target["root"], home)
         for role_name in target["roles"]:
             for skill, source in registry.roles.get(role_name, []):
                 item = ExpectedSkill(
@@ -411,7 +435,9 @@ def command_script(role: str, skill: str, source: ManifestSource) -> Path | None
     return script if script.is_file() else None
 
 
-def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
+def iter_expected_commands(
+    registry: SkillRegistry, home: Path | str | None = None
+) -> list[ExpectedCommand]:
     """Every command the registry ships, keyed by the name the operator types.
 
     A command belongs to the skill, not to a shell: however many targets a skill is copied into,
@@ -419,7 +445,7 @@ def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
     same name would want the same link, and that is an operator configuration nothing can satisfy,
     so it is refused here, before an audit reads the filesystem or a sync writes to it.
     """
-    root = bin_dir()
+    root = bin_dir(home)
     by_name: dict[str, ExpectedCommand] = {}
     for role in sorted(registry.roles):
         for skill, source in registry.roles[role]:
@@ -590,10 +616,11 @@ def audit(
     *,
     instance_path: Path | str | None = None,
     product_manifest: Path | str | None = None,
+    home: Path | str | None = None,
 ) -> dict[str, Any]:
     registry = load_registry(instance_path, product_manifest=product_manifest)
-    config_errors = find_overlapping_target_roots(registry)
-    expected = iter_expected(registry)
+    config_errors = find_overlapping_target_roots(registry, home)
+    expected = iter_expected(registry, home)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
     destination_conflicts = find_conflicting_destinations(expected)
@@ -640,7 +667,7 @@ def audit(
     # A filtered audit is about named shell targets; commands do not belong to one.
     entry_points = [] if target_filter else [
         _entry_point_state(command, registry.owned_roots)
-        for command in iter_expected_commands(registry)
+        for command in iter_expected_commands(registry, home)
     ]
     entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
 
@@ -665,6 +692,7 @@ def sync(
     *,
     instance_path: Path | str | None = None,
     product_manifest: Path | str | None = None,
+    home: Path | str | None = None,
 ) -> dict[str, Any]:
     """Deliver every expected skill and entry point, or refuse before writing anything.
 
@@ -673,10 +701,10 @@ def sync(
     audit cannot tell the two apart.
     """
     registry = load_registry(instance_path, product_manifest=product_manifest)
-    config_errors = find_overlapping_target_roots(registry)
+    config_errors = find_overlapping_target_roots(registry, home)
     if config_errors:
         raise RegistryError(f"overlapping skill target roots: {config_errors}")
-    expected = iter_expected(registry)
+    expected = iter_expected(registry, home)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
 
@@ -696,7 +724,7 @@ def sync(
                 f"(declared by {item.manifest})"
             )
 
-    commands = [] if target_filter else iter_expected_commands(registry)
+    commands = [] if target_filter else iter_expected_commands(registry, home)
     states = [_entry_point_state(command, registry.owned_roots) for command in commands]
     for state in states:
         if state["status"] == "conflict":
@@ -740,7 +768,10 @@ def sync(
         "copied": copied,
         "linked": linked,
         "after": audit(
-            target_filter, instance_path=instance_path, product_manifest=product_manifest
+            target_filter,
+            instance_path=instance_path,
+            product_manifest=product_manifest,
+            home=home,
         ),
     }
 

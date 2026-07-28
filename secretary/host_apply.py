@@ -279,6 +279,31 @@ def _is_executable(path: Path) -> bool:
         return False
 
 
+def resolve_runtime_owner(
+    instance_path: Path, runtime_user: str | None = None
+) -> tuple[str, Path]:
+    """The account that owns an installation, and the home its paths hang off.
+
+    The instance checkout is durable installation state. When a command runs
+    as root after recovery, its owner identifies the runtime account. Failure
+    to resolve that owner is an error: falling back to the invoking account
+    would turn a read or repair command into a different desired state, and a
+    repair run as root would materialize skills, entry points and worktrees
+    under ``/root`` while rendering units that name the owner's home.
+    """
+    target = instance_path.expanduser().resolve(strict=False)
+    if runtime_user is None:
+        try:
+            runtime_user = pwd.getpwuid(target.stat().st_uid).pw_name
+        except (KeyError, OSError):
+            raise ValueError(f"could not resolve installation user from {target}") from None
+    try:
+        home = Path(pwd.getpwnam(runtime_user).pw_dir).expanduser().resolve(strict=False)
+    except KeyError:
+        raise ValueError(f"installation user does not exist: {runtime_user}") from None
+    return runtime_user, home
+
+
 def resolve_systemd_layout(
     instance: dict[str, Any],
     packaging_root: Path | None = None,
@@ -288,28 +313,13 @@ def resolve_systemd_layout(
     runtime_user: str | None = None,
     orca_executable: Path | None = None,
 ) -> SystemdLayout:
-    """Resolve the one systemd layout used for an installation command.
-
-    The instance checkout is durable installation state. When a command runs
-    as root after recovery, its owner identifies the runtime account. Failure
-    to resolve that owner is an error: falling back to the invoking account
-    would turn a read or repair command into a different desired state.
-    """
+    """Resolve the one systemd layout used for an installation command."""
     root = (packaging_root or default_packaging_root()).resolve(strict=False)
     # Units run with the product checkout as their working directory. Keep every
     # rendered filesystem value absolute so a caller's relative spelling cannot
     # change the service's interpretation of its own layout.
     target = instance_path.expanduser().resolve(strict=False)
-    if runtime_user is None:
-        try:
-            runtime_user = pwd.getpwuid(target.stat().st_uid).pw_name
-        except (KeyError, OSError):
-            raise ValueError(f"could not resolve installation user from {target}") from None
-    user = runtime_user
-    try:
-        home = Path(pwd.getpwnam(user).pw_dir).expanduser().resolve(strict=False)
-    except KeyError:
-        raise ValueError(f"installation user does not exist: {user}") from None
+    user, home = resolve_runtime_owner(target, runtime_user)
     executable = orca_executable or find_orca_executable(user, home) or Path("/usr/local/bin/orca")
     host = instance.get("host", {}) if isinstance(instance.get("host"), dict) else {}
     return SystemdLayout(

@@ -69,11 +69,22 @@ def agents_root(product_root: Path) -> Path:
     return product_root / "triggered_agents" / "agents"
 
 
-def workspaces_root() -> Path:
-    return Path(os.environ.get("TA_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")))
+def workspaces_root(home: Path | str | None = None) -> Path:
+    """Where role workspaces live: the configured root, else under the named home.
+
+    ``home`` is the installation owner's, which is not the invoking process's when a repair runs
+    as root or against another account's installation. Registering root's workspace paths in an
+    automation the owner then runs is how a workspace ends up somewhere nothing materialized.
+    """
+    configured = os.environ.get("TA_WORKSPACES_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(home if home is not None else Path.home()) / "orca" / "workspaces"
 
 
-def load_specs(product_root: Path, repo: str | None = None) -> list[AutomationSpec]:
+def load_specs(
+    product_root: Path, repo: str | None = None, *, home: Path | str | None = None
+) -> list[AutomationSpec]:
     """Read every shipped automation spec that describes an Orca automation.
 
     A spec marked ``dispatcher`` routes to runtime code rather than an agent
@@ -109,7 +120,7 @@ def load_specs(product_root: Path, repo: str | None = None) -> list[AutomationSp
                 reuse_session=bool(raw.get("reuse_session", False)),
                 trigger=str(trigger.get("orca", "")),
                 enabled=bool(trigger.get("enabled", True)),
-                workspace=str(workspaces_root() / "secretary" / str(name)),
+                workspace=str(workspaces_root(home) / "secretary" / str(name)),
                 repo=repo_path,
             )
         )
