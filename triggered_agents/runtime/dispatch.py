@@ -304,6 +304,32 @@ def _pipeline_paused() -> bool:
         return False
 
 
+def _preferred_head(agent: str) -> str | None:
+    """The profile this agent should launch on, before any health resolution — or None when the
+    installation routes it nowhere and the bare `claude` invocation stands.
+
+    Which profiles exist and which role runs on which one is installation configuration, so the
+    route lives in the head registry (`[role_defaults]` in heads.toml, installation-owned when the
+    instance ships its own file) and the shipped automation.toml names no profile id. A spec that
+    does pin `head` still wins — an installation may pin one agent without re-pointing the whole
+    role — but a pin the registry does not know is dropped in favour of the role route instead of
+    silently degrading the agent to a bare `claude` on a host that pays for no Claude subscription.
+
+    Raises whatever a broken registry raises; every caller already treats that as "nothing to
+    resolve" and keeps the bare invocation.
+    """
+    from ..agents.pipeline import heads as pipeline_heads
+    return _preferred_head_from(_load_spec(agent), agent, pipeline_heads.load_registry())
+
+
+def _preferred_head_from(spec: dict, agent: str, registry) -> str | None:
+    """`_preferred_head`'s rule against an already-loaded spec and registry."""
+    pinned = spec.get("head")
+    if pinned and pinned in registry.profiles:
+        return str(pinned)
+    return registry.role_default(agent)
+
+
 def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
     """Whether the profile the idle terminal was ACTUALLY launched with is currently sitting on a
     red resource — the check idle-reuse needs before sending into an already-warm terminal, since
@@ -324,7 +350,7 @@ def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
     confirmed (triggered-agents-274, triggered-agents-275).
     """
     try:
-        head = _load_spec(agent).get("head")
+        head = _preferred_head(agent)
         if not head:
             return False
         profile = state.load_head_profile() or head
@@ -340,18 +366,19 @@ def _launch_cmd(agent: str, variant: str | None = None,
                 card_ref: str | None = None) -> tuple[str, str, str | None]:
     """(skill, full claude launch command, resolved head profile) from the agent's
     automation.toml. The third element is the profile id actually rendered into the launch
-    command (None for a spec with no `head`, or when resolution raised) — the caller records it
+    command (None for an agent routed nowhere, or when resolution raised) — the caller records it
     via `AgentState.save_head_profile` so a later idle-reuse tick can check the resource this very
     terminal is running against instead of just the agent's static preferred head
     (triggered-agents-275).
 
-    A spec naming a `head` (a profile id in pipeline/heads.toml, e.g. the steward's claude-fable)
-    launches through that registry: same adapter/model/fallback machinery a worker/reviewer head
-    gets, resolved against this run's live resource health so a red claude-sub falls back to
-    claude-opus instead of launching on a rate-limited account. curator/retro name no head
-    and keep the bare default-model `claude` invocation they always had. Any failure to resolve
-    (a broken heads.toml is itself the kind of anomaly the steward exists to catch) falls back to
-    the same bare invocation rather than leaving the agent undispatched for the whole tick.
+    The profile comes from `_preferred_head` (the installation's route for this role, or a pin in
+    its automation.toml) and launches through the head registry: same adapter/model/fallback
+    machinery a worker/reviewer head gets, resolved against this run's live resource health so a
+    red claude-sub falls back to the other family instead of launching on a rate-limited account.
+    An agent the installation routes nowhere keeps the bare default-model `claude` invocation.
+    Any failure to resolve (a broken heads.toml is itself the kind of anomaly the steward exists
+    to catch) falls back to that same bare invocation rather than leaving the agent undispatched
+    for the whole tick.
 
     `variant` (e.g. the steward's "deep-sweep", triggered-agents-254) reads `skill` from
     `spec["variants"][variant]` instead of the top-level one — a second, differently-scheduled
@@ -367,13 +394,13 @@ def _launch_cmd(agent: str, variant: str | None = None,
     skill = spec["variants"][variant]["skill"] if variant else spec["skill"]
     if card_ref:
         skill = f"{skill} --card {card_ref}"
-    head = spec.get("head")
     bare_claude = role_env.wrap_shell_command(agent, f"claude --dangerously-skip-permissions {skill!r}")
-    if not head:
-        return skill, bare_claude, None
     try:
         from ..agents.pipeline import health as pipeline_health
         from ..agents.pipeline import heads as pipeline_heads
+        head = _preferred_head(agent)
+        if not head:
+            return skill, bare_claude, None
         statuses = pipeline_health.refresh()
         resolved = pipeline_health.resolve_head(head, statuses) or head
         return skill, pipeline_heads.render_command(resolved, role=agent, prompt=skill), resolved

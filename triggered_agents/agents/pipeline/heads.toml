@@ -14,6 +14,13 @@
 # secretary.head_registry.canonical_path). Adding a head is a new [profiles.<id>] entry plus, only
 # if its launch shape is genuinely new, one more render_<adapter> function in heads.py — the
 # dispatcher and worker.py never change.
+#
+# Because the portable default cannot know which of the two subscriptions a host actually has, its
+# chains cross the families in both directions: every codex profile falls back to a claude one and
+# every claude profile to a codex one, so a host with only a Claude subscription (openai-sub red)
+# and a host with only an OpenAI one (claude-sub red) both run every role in [role_defaults]. An
+# installation that pays for both and wants a red resource to mean claim-skip instead of a
+# cross-family switch states empty chains in its own registry.
 
 [resources.claude-sub]
 # A Claude subscription every claude-* profile below draws from — one account, no per-profile
@@ -48,7 +55,7 @@ resource = "openai-sub"
 adapter = "codex"
 model = "gpt-5.6-terra"
 effort = "default"
-fallback = []
+fallback = ["claude-default"]
 
 [profiles.codex-terra]
 # The same model under an explicit id, for a card that wants to pin it rather than inherit it.
@@ -56,7 +63,7 @@ resource = "openai-sub"
 adapter = "codex"
 model = "gpt-5.6-terra"
 effort = "default"
-fallback = []
+fallback = ["claude-default"]
 
 [profiles.codex-high]
 # Explicit high reasoning for harder implementation/debug cards.
@@ -64,7 +71,7 @@ resource = "openai-sub"
 adapter = "codex"
 model = "gpt-5.6-terra"
 effort = "high"
-fallback = []
+fallback = ["claude-opus"]
 
 [profiles.codex-extra]
 # Extra reasoning (Codex CLI value: xhigh) for pipeline/core/system changes.
@@ -72,7 +79,7 @@ resource = "openai-sub"
 adapter = "codex"
 model = "gpt-5.6-terra"
 effort = "extra"
-fallback = []
+fallback = ["claude-opus"]
 
 [profiles.codex-tui]
 # Interactive Codex worker profile. Same account and model as `codex`, but worker.py launches the
@@ -82,7 +89,7 @@ adapter = "codex"
 model = "gpt-5.6-terra"
 effort = "default"
 codex_mode = "tui"
-fallback = []
+fallback = ["claude-default"]
 
 [profiles.codex-reviewer]
 # Layer-3 reviewer: extra reasoning, with the other family as second priority so a red
@@ -104,26 +111,36 @@ adapter = "codex"
 model = "gpt-5.6-terra"
 effort = "extra"
 codex_mode = "tui"
-fallback = []
+fallback = ["claude-observer"]
 
 [profiles.claude-default]
 # Bare `claude --dangerously-skip-permissions <skill>`, no --model flag: the CLI picks the model
 # from its own settings. The launch shape for a host that pins nothing.
 resource = "claude-sub"
 adapter = "claude"
-fallback = []
+fallback = ["codex"]
 
 [profiles.claude-sonnet]
 resource = "claude-sub"
 adapter = "claude"
 model = "sonnet"
-fallback = []
+fallback = ["codex"]
 
 [profiles.claude-opus]
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
-fallback = []
+fallback = ["codex-high"]
+
+[profiles.claude-observer]
+# The Claude-family sprint observer, the counterpart of codex-observer: opus rather than sonnet
+# because the observer slices cards and judges drift from the sprint goal. A profile of its own,
+# not a pointer at claude-opus, so an installation can move the observer without moving the worker
+# default with it.
+resource = "claude-sub"
+adapter = "claude"
+model = "opus"
+fallback = ["codex-observer"]
 
 [profiles.hermes]
 # Non-Anthropic, non-OpenAI head on pay-per-token credit. Deliberately absent from every default
@@ -139,7 +156,12 @@ fallback = []
 # Installation snapshots are generated from this table together with resources/profiles. Keeping
 # role routing in the same source prevents the production dispatcher and triggered-agents from
 # selecting different generations. An installation that pays for one family only overrides the
-# whole table in its own registry.
+# whole table in its own registry; until it does, the cross-family fallback chains above keep every
+# role below launchable on either subscription alone.
+#
+# curator/steward/retro are the routes the triggered agents read (runtime/dispatch._preferred_head)
+# instead of pinning a profile id in their own automation.toml, so re-pointing a role here moves
+# both the pipeline and the scheduled agents at once.
 new_card = "codex"
 reviewer = "codex-reviewer"
 curator = "claude-sonnet"

@@ -248,9 +248,19 @@ ADAPTERS = {
 
 
 class Registry:
-    def __init__(self, resources: dict, profiles: dict):
+    def __init__(self, resources: dict, profiles: dict, role_defaults: dict | None = None):
         self.resources = resources
         self.profiles = profiles
+        self.role_defaults = role_defaults or {}
+
+    def role_default(self, role: str) -> str | None:
+        """The profile this installation routes `role` to, or None when it names none. Role
+        routing lives in the same file as the profiles it names (`[role_defaults]`), so an
+        installation that pays for one family only re-points every role in one place — the
+        triggered agents read the route from here rather than carrying a profile id of their own
+        in automation.toml."""
+        head = self.role_defaults.get(role)
+        return str(head) if head else None
 
     def profile(self, profile_id: str) -> dict:
         """The profile dict for `profile_id`, or HeadRegistryError with the known ids — the text
@@ -345,7 +355,8 @@ def _load_registry(path: Path) -> Registry:
     resources = data.get("resources") or {}
     profiles = data.get("profiles") or {}
     validate_registry(resources, profiles)
-    return Registry(resources=resources, profiles=profiles)
+    return Registry(resources=resources, profiles=profiles,
+                    role_defaults=data.get("role_defaults") or {})
 
 
 def render_command(profile_id: str, *, role: str, prompt: str, registry: Registry | None = None) -> str:

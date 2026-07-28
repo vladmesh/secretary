@@ -16,7 +16,10 @@ reuse_session = false
 # down and starts a brand new `claude` process instead (triggered-agents-445). See dispatch.py's
 # module docstring and its "idle: an ephemeral agent..." branch.
 ephemeral = true
-head = "codex-curator"
+# No head profile here: which profiles exist is installation configuration, so the curator's head
+# comes from `role_defaults.curator` in the head registry (product default: heads.toml here,
+# overridden by <instance>/heads/heads.toml). runtime/dispatch.py resolves that route through
+# pipeline.health the same way a worker/reviewer head is resolved at claim time.
 # Skip the run when no session has new turns since the watermark. Gated in the systemd unit,
 # not Orca's field (manual `automations run` ignores --precheck).
 precheck = "python3 -m triggered_agents curator precheck"
