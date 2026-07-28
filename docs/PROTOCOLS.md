@@ -204,15 +204,15 @@ After a worker reports `done`, the dispatcher suspends its live, addressable wor
 moving the card to Validate. The record carries that retained state while the mechanical gate is
 pending or running, so the worker cannot change the checkout during validation. A green gate
 confirms the retained worker has stopped before an independent reviewer starts; the reviewer is
-then the only head allowed to act on that checkout.
-
-The stop can leave no worker pane to split from, so the reviewer may be created as a separate
-terminal for the same worktree. Operators who watch a card in the terminal UI should open that
-worktree rather than assume the reviewer appears beside the retained worker's closed pane.
+then the only head allowed to act on that checkout. The handoff stops that worker head and confirms
+its heartbeat has exited; it does not stop every terminal in the worktree, so an existing connected
+pane remains a split anchor for the reviewer.
 
 A red gate first returns the card to In progress and updates `TASK.md` with the failure and the
 next report identity. The dispatcher persists a resuming boundary before delivery, so recovery
-after a crash cannot mistake the previous `done` report for a new completion. When the retained
+after a crash cannot mistake the previous `done` report for a new completion. Recovery also checks
+that the resumed provider visibly started the continuation turn: a crash after SIGCONT but before
+delivery replays the prompt, while a turn already underway is not sent again. When the retained
 provider session is still live and accepts delivery, the same terminal and session continue the
 rework. Codex TUI and Claude interactive workers support this path; one-shot Codex exec workers
 do not. The routing record and card comment name this as a reused continuation with the worker

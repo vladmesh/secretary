@@ -397,7 +397,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()  # rework head up on the rejected sha
         self.report_done(request_id="worker-done-again")
         self.host.calls.clear()
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal stop failed"
 
         outcome = self.tick()
 
@@ -407,7 +407,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.stored_intent(), {}, "no launch was even fixed on disk")
 
         # Once the host confirms the stop, the rework relaunch happens exactly once.
-        self.host.fail_stop_workspace_reason = ""
+        self.host.fail_stop_head_reason = ""
 
         retried = self.tick()
 
@@ -497,6 +497,23 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
         self.assertEqual(self.record().state, "claimed")  # type: ignore[union-attr]
 
+    def test_a_red_delivery_recovery_keeps_the_phase_it_persisted(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.tick()
+        record = self.record()
+        assert record is not None
+        record.state = "worker_resuming"
+        record.worker_retained_at = time.time()
+        record.worker_resume_phase = "merge-gate"
+        payload = self.runtime.state.load()
+        payload["records"][REF] = record.to_json()
+        self.runtime.state.save(payload)
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "merge-gate-red-reused-worker")
+        continuation = self.reader.show(REF)["comments"][-1]["body"]
+        self.assertIn("merge-gate red continuation", continuation)
+
     def test_a_freeze_crash_replays_the_validate_move_without_waking_the_worker(self) -> None:
         self.tick()
         self.report_done("worker-done-freeze-crash")
@@ -546,7 +563,7 @@ class LaunchIntentTests(unittest.TestCase):
         recovered = self.tick()
 
         self.assertEqual(recovered["action"], "review-started")
-        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("start_review"))
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("start_review"))
 
     def test_a_dead_rework_intent_relaunches_inside_the_round_it_reserved(self) -> None:
         """The reservation outlives the head the rework never got.
@@ -907,7 +924,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
 
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
         self.assertFalse(self.head_alive("worker"), "the adopted worker must be stopped")
         record = self.record()
         assert record is not None
@@ -1182,7 +1199,7 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_worker_respawn_after_an_unconfirmed_stop_starts_nothing(self) -> None:
         self.tick()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal stop failed"
 
         outcome = self.tick()
 
@@ -1192,7 +1209,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.stored_intent(), {}, "no launch was even fixed on disk")
 
         # Once the stop goes through, the respawn happens exactly once.
-        self.host.fail_stop_workspace_reason = ""
+        self.host.fail_stop_head_reason = ""
         respawned = self.tick()
 
         self.assertEqual(respawned["action"], "worker-respawned")
@@ -1519,12 +1536,63 @@ class HostLaunchContourTests(unittest.TestCase):
             calls.append(command)
             if command[2] == "send":
                 task_at_delivery.append((self.data_dir / "TASK.md").read_text())
+            if command[2] == "read":
+                return {"terminal": {"tail": ["Thinking"]}}
             return {}
 
         with mock.patch.object(self.host, "_run_json", run_json):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
+        self.assertTrue(any(command[2] == "send" for command in calls))
+
+    def test_a_running_retained_claude_replays_delivery_after_a_crash_before_send(self) -> None:
+        """SIGCONT alone is not a delivered continuation.
+
+        The first call models a dispatcher dying in that boundary. The recovery call sees a
+        running but idle provider, waits for its TUI to settle, sends the prompt and confirms the
+        turn rather than treating process liveness as delivery evidence.
+        """
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude", "head": "claude-opus"},
+        )
+        os.kill(head.pid, signal.SIGSTOP)
+        time.sleep(0.05)
+        real_signal = self.host._signal_head
+
+        class DispatcherDied(BaseException):
+            pass
+
+        def die_after_continuing(pid_file: str, signal_number: int) -> None:
+            real_signal(pid_file, signal_number)
+            raise DispatcherDied()
+
+        with mock.patch.object(self.host, "_signal_head", die_after_continuing):
+            with self.assertRaises(DispatcherDied):
+                self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+        calls: list[list[str]] = []
+        sent = False
+
+        def run_json(command: list[str]) -> dict:
+            nonlocal sent
+            calls.append(command)
+            if command[2] == "send":
+                sent = True
+            if command[2] == "read":
+                return {"terminal": {"tail": ["Thinking"] if sent else [""]}}
+            return {}
+
+        with mock.patch.object(self.host, "_run_json", run_json):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+        self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
+        self.assertTrue(any(command[2] == "wait" for command in calls))
         self.assertTrue(any(command[2] == "send" for command in calls))
 
     def test_dead_or_missing_retained_worker_refuses_continuation(self) -> None:

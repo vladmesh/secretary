@@ -120,6 +120,8 @@ from secretary.dispatcher_tui import (
     TuiDeliveryError,
     close_terminal as _close_tui_terminal,
     close_terminal_strict as _close_tui_terminal_strict,
+    deliver_interactive_prompt as _deliver_interactive_prompt,
+    terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
@@ -735,8 +737,12 @@ class CommandHostRuntime:
                 self._close_observer_pane(record.handle)
             return
         if not self._observer_workspace_registered(workspace):
+            self._confirm_head_process_gone(str(getattr(record, "pid_file", "") or ""))
             return
         self._stop_observer_terminals(workspace)
+        # Heartbeat-wrapped heads have their own session, so terminal stop alone cannot prove the
+        # observer died. Do not remove its worktree or forget its record until this confirms it.
+        self._confirm_head_process_gone(str(getattr(record, "pid_file", "") or ""))
         self._run_json([
             "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
         ])
@@ -1531,6 +1537,8 @@ class CommandHostRuntime:
             retained = _head_process_status(record.worker_pid_file)
             if retained.get("known") and retained.get("alive") and retained.get("stopped"):
                 return
+            if not retained.get("alive"):
+                break
             time.sleep(HEAD_STOP_POLL_SECONDS)
         raise HostError("worker session could not be confirmed suspended")
 
@@ -1539,8 +1547,8 @@ class CommandHostRuntime:
 
         Codex TUI and Claude's interactive terminal are both live provider conversations.  A
         Codex exec worker has already spent its turn, so it deliberately follows the replacement
-        path.  A resuming record can be replayed after a crash: a process that is already running
-        has already been sent its continuation, so it is never sent a duplicate prompt.
+        path. A running process after a crash is only known to have received the prompt when its
+        provider turn is visibly underway; otherwise replay resumes at the SIGCONT/send boundary.
         """
         status = _head_process_status(record.worker_pid_file)
         if not status.get("known") or not status.get("alive"):
@@ -1551,8 +1559,6 @@ class CommandHostRuntime:
             adapter == "claude" or (adapter == "codex" and run.get("codex_mode") == "tui")
         ):
             raise HostError("retained worker session cannot accept a continuation")
-        if not status.get("stopped"):
-            return
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("retained worker workspace is missing")
@@ -1563,7 +1569,10 @@ class CommandHostRuntime:
             self._worker_task_doc(task, base, record.attempt_id, record.review_baseline),
         )
         try:
-            self._signal_head(record.worker_pid_file, signal.SIGCONT)
+            if not status.get("stopped") and _terminal_turn_started(record.handle, run_json=self._run_json):
+                return
+            if status.get("stopped"):
+                self._signal_head(record.worker_pid_file, signal.SIGCONT)
             prompt = (
                 "The mechanical validation gate returned red. Read the updated TASK.md, "
                 "fix the failure, then report through its command."
@@ -1574,10 +1583,7 @@ class CommandHostRuntime:
                     prompt_text=prompt,
                 )
             else:
-                self._run_json([
-                    "orca", "terminal", "send", "--terminal", record.handle,
-                    "--text", prompt, "--enter", "--json",
-                ])
+                _deliver_interactive_prompt(record.handle, prompt, run_json=self._run_json)
         except (TuiDeliveryError, HostError) as exc:
             raise HostError(f"retained worker continuation was not delivered: {exc}") from None
 
@@ -2375,8 +2381,15 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any] | None:
         """Stop this card's worker head before a replacement opens, or answer with the refusal."""
+        if not record.handle and not record.worker_pid_file:
+            # A reviewer path already confirmed this worker stopped and forgot its identity. There
+            # is no live head left to name here; asking stop_head to prove an absent head would
+            # turn that established fact into a permanent rework failure.
+            record.worker_retained_at = 0.0
+            record.worker_resume_phase = ""
+            return None
         try:
-            self.host.stop_workspace(record)
+            self.host.stop_head(record, "worker")
         except HostError as exc:
             return _head_stop_unconfirmed(
                 step=step,
@@ -2387,6 +2400,7 @@ class DispatcherRuntime:
             )
         _forget_role_head(record, WORKER_ROLE)
         record.worker_retained_at = 0.0
+        record.worker_resume_phase = ""
         return None
 
     def _worker_launch_aborted(
@@ -2582,9 +2596,11 @@ class DispatcherRuntime:
             except HostError as exc:
                 return self._restart_gate_red_worker(
                     task, record, records, payload, attempt_id,
-                    continuation_reason=scrub_host_output(str(exc)), phase="gate",
+                    continuation_reason=scrub_host_output(str(exc)), phase=record.worker_resume_phase or "gate",
                 )
-            return self._finish_retained_worker_resume(task, record, records, payload, attempt_id, phase="gate")
+            return self._finish_retained_worker_resume(
+                task, record, records, payload, attempt_id, phase=record.worker_resume_phase or "gate"
+            )
         if marker == "report:done":
             if record.state == "worker_retained":
                 # The process was frozen and recorded before a tick died between retention and
@@ -3274,6 +3290,7 @@ class DispatcherRuntime:
             # delivery, replay stays on this branch instead of treating the old done marker as a
             # completion from the new rework round.
             record.state = "worker_resuming"
+            record.worker_resume_phase = phase
             records[ref] = record
             self.save_records(payload, records)
             try:
@@ -3288,7 +3305,6 @@ class DispatcherRuntime:
                     moved, record, records, payload, attempt_id, phase=phase
                 )
         else:
-            continuation = "replacement"
             continuation_reason = "no retained worker session was available"
         # Same reservation as the review-red bounce: the round the rework head belongs to is fixed
         # on disk with the intent, so an adoption resumes it instead of the round the gate closed.
@@ -3303,6 +3319,7 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         ref = task["ref"]
         record.worker_retained_at = 0.0
+        record.worker_resume_phase = ""
         record.state = "claimed"
         rework_round = record.attempt_round + 1
         retained_run = dict(record.worker_run)

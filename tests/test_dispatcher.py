@@ -2563,7 +2563,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "review-started")
         self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
-        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("start_review"))
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("start_review"))
 
     def test_gate_red_reuses_the_retained_worker_conversation(self) -> None:
         """A live TUI session keeps both its terminal identity and its provider conversation."""
@@ -2604,7 +2604,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(gated["action"], "gate-red-rework")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("restart_worker"))
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
         self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_gate_red_with_an_old_record_stops_before_replacement(self) -> None:
@@ -2621,7 +2621,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(gated["action"], "gate-red-rework")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("restart_worker"))
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
 
     def test_failed_retention_with_an_unconfirmed_stop_never_enters_validate(self) -> None:
         self.start_pilot()
@@ -3462,11 +3462,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record["review_leaf"], "leaf:secretary-510-pilot")
         self.assertEqual(record["review_commit"], self.host.commit)
         self.assertNotEqual(record["review_handle"], record["handle"])
-        self.assertEqual(
-            self.host.split_from,
-            [""],
-            "the green gate ends the retained worker before the reviewer is launched",
+        self.assertNotIn(
+            "stop_workspace",
+            self.host.calls,
+            "green handoff must leave unrelated worktree panes available as reviewer anchors",
         )
+        self.assertIn("stop_head:worker", self.host.calls)
 
     def test_interrupted_review_tick_reuses_the_existing_pane(self) -> None:
         """A tick killed between the launch and its verdict leaves the card in review_starting with

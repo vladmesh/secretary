@@ -77,6 +77,9 @@ class DispatcherRecord:
     # Unlike a pause, this is a short per-card handoff: a red gate can resume the same provider
     # conversation, while a green gate confirms it stopped before review begins.
     worker_retained_at: float = 0.0
+    # The red gate phase is saved before waking the retained worker. Recovery must keep the
+    # original phase instead of turning merge-gate or review-freeze retries into ordinary gates.
+    worker_resume_phase: str = ""
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -130,6 +133,7 @@ class DispatcherRecord:
             "review_pid_file": self.review_pid_file,
             "worker_progress_at": self.worker_progress_at,
             "worker_retained_at": self.worker_retained_at,
+            "worker_resume_phase": self.worker_resume_phase,
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
@@ -171,6 +175,7 @@ class DispatcherRecord:
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
             worker_retained_at=float(payload.get("worker_retained_at") or 0.0),
+            worker_resume_phase=str(payload.get("worker_resume_phase") or ""),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),

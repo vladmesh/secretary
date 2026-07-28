@@ -21,7 +21,7 @@ TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S"
 TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
 TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
+_WORKING_RE = re.compile(r"\b(?:working|thinking|esc to interrupt|ctrl-c to interrupt)\b", re.IGNORECASE)
 
 
 class TuiDeliveryError(RuntimeError):
@@ -60,6 +60,40 @@ def deliver_tui_prompt(
         "--json",
     ])
     _confirm_delivered(handle, workspace, prompt, sent_at, run_json=run_json, session_root=session_root)
+
+
+def terminal_turn_started(handle: str, *, run_json: RunJson) -> bool:
+    """Whether an interactive provider pane already accepted a prompt into a turn.
+
+    This is screen-based so it also works for Claude, whose local conversation has no Codex
+    session JSONL. A retained worker can be running after a dispatcher dies between SIGCONT and
+    prompt delivery; replay uses this signal before sending anything again.
+    """
+    return _screen_started_turn(read_terminal_text(handle, run_json=run_json))
+
+
+def deliver_interactive_prompt(handle: str, prompt: str, *, run_json: RunJson) -> None:
+    """Deliver a Claude-style terminal prompt and confirm the provider started a turn.
+
+    Terminal send succeeding only means Orca accepted keystrokes. Wait for the terminal to be
+    idle first, then require visible turn activity, retrying Enter when the prompt was swallowed
+    during a repaint. Failure reaches the caller so the dispatcher can take the replacement path.
+    """
+    run_json([
+        "orca", "terminal", "wait",
+        "--terminal", handle,
+        "--for", "tui-idle",
+        "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS),
+        "--json",
+    ])
+    run_json([
+        "orca", "terminal", "send",
+        "--terminal", handle,
+        "--text", prompt,
+        "--enter",
+        "--json",
+    ])
+    _confirm_interactive_turn(handle, run_json=run_json)
 
 
 def close_terminal(handle: str, *, run_json: RunJson) -> None:
@@ -115,6 +149,30 @@ def _confirm_delivered(
     raise TuiDeliveryError(
         f"TUI prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
         f"(reason={last_reason}, resends={resends})"
+    )
+
+
+def _confirm_interactive_turn(handle: str, *, run_json: RunJson) -> None:
+    deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
+    next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
+    resends = 0
+    while time.monotonic() < deadline:
+        if terminal_turn_started(handle, run_json=run_json):
+            return
+        if resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
+            run_json([
+                "orca", "terminal", "send",
+                "--terminal", handle,
+                "--text", "",
+                "--enter",
+                "--json",
+            ])
+            resends += 1
+            next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
+        time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
+    raise TuiDeliveryError(
+        f"interactive prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
+        f"(resends={resends})"
     )
 
 
