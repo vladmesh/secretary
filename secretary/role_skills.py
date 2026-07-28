@@ -424,25 +424,21 @@ def _link_target(link: Path) -> Path:
     return raw if raw.is_absolute() else _absolute(link.parent / raw)
 
 
-def _entry_point_is_owned(
-    link_target: Path, command: ExpectedCommand, owned_roots: tuple[Path, ...]
-) -> bool:
-    """Whether a link we did not write is one of ours to repoint, or somebody else's file.
+def _entry_point_is_owned(link_target: Path, owned_roots: tuple[Path, ...]) -> bool:
+    """Whether a link we did not write is one of ours to repoint, or somebody else's.
 
-    Two cases are ours. A link into a ``roles/`` tree this registry reads is an entry point of an
-    older layout of the same registry. A dangling link with the shape a skill source has,
-    ``roles/<role>/<skill>/<skill>.sh``, is what the move of a skill out of a tree that is gone
-    leaves behind; it resolves to nothing, so repointing it destroys nothing.
+    Ownership is a location this registry reads skills from, not a path that looks like one. A link
+    into a ``roles/`` tree of one of our manifests is an entry point of an older layout of the same
+    registry: a skill that changed role, or one that moved between the product and the installation
+    and left the link behind pointing at the tree it used to live in. That the target no longer
+    exists says nothing either way, so the tree decides and existence is not consulted.
 
-    A link to a file that exists outside those trees is not ours whatever its path looks like.
+    Everything else stays somebody else's, however much its path resembles a skill source. A
+    dangling link is the case where a suffix match is most tempting and least safe: nothing on disk
+    can contradict the guess, and the command it would take over may be the one that reaches the
+    operator's private browser session.
     """
-    if any(link_target == root or root in link_target.parents for root in owned_roots):
-        return True
-    if link_target.exists():
-        return False
-    tail = ("roles", command.role, command.skill, command.source.name)
-    parts = link_target.parts
-    return len(parts) > len(tail) and tuple(parts[-len(tail) :]) == tail
+    return any(link_target == root or root in link_target.parents for root in owned_roots)
 
 
 def _entry_point_state(command: ExpectedCommand, owned_roots: tuple[Path, ...]) -> dict[str, str]:
@@ -460,7 +456,7 @@ def _entry_point_state(command: ExpectedCommand, owned_roots: tuple[Path, ...]) 
         link_target = _link_target(command.dest)
         if link_target == command.source:
             return base | {"status": "ok", "reason": ""}
-        if _entry_point_is_owned(link_target, command, owned_roots):
+        if _entry_point_is_owned(link_target, owned_roots):
             return base | {
                 "status": "stale",
                 "reason": f"points at {link_target}, which is no longer where the skill lives",
@@ -729,15 +725,19 @@ def render_markdown(result: dict[str, Any]) -> str:
         if result[key]:
             lines.extend(["", f"{title}:"])
             for item in result[key]:
+                # The operator reading this has two manifests open; the finding has to say which
+                # one to edit, not only which layer it came from.
                 lines.append(
                     f"- {item['target']} {item['role']}/{item['skill']} "
-                    f"[{item.get('origin', PRODUCT_ORIGIN)}] -> {item['dest']}"
+                    f"[{item.get('origin', PRODUCT_ORIGIN)} {item.get('manifest', manifest_path())}]"
+                    f" -> {item['dest']}"
                 )
     if result.get("entry_points"):
         lines.extend(["", "Command entry points:"])
         for item in result["entry_points"]:
             lines.append(
-                f"- {item['command']} [{item['origin']}] {item['status']}: {item['reason']}"
+                f"- {item['command']} [{item['origin']} {item['manifest']}] "
+                f"{item['status']}: {item['reason']}"
             )
     if result.get("destination_conflicts"):
         lines.extend(["", "Destination conflicts:"])

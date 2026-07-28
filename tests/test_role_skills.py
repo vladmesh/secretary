@@ -242,6 +242,20 @@ class LayeredRegistryTests(OverlayFixture):
             ],
         )
 
+    def test_the_text_audit_attributes_every_finding_to_the_manifest_that_owns_it(self) -> None:
+        """`audit` without `--json` is the operator path, and it has to say which file to edit."""
+        overlay = self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["audit", "--instance", str(self.instance)])
+        lines = out.getvalue().splitlines()
+
+        shipped = next(line for line in lines if "secretary/shipped" in line)
+        personal = next(line for line in lines if "secretary/personal" in line)
+        self.assertIn(str(self.product), shipped)
+        self.assertIn(str(overlay), personal)
+
     def test_an_overlay_target_replaces_the_product_target_of_the_same_name(self) -> None:
         """A target is one shell root: merging two of them means nothing, so the last one wins."""
         other = self.root / "other-shell"
@@ -452,10 +466,14 @@ class CommandEntryPointTests(OverlayFixture):
         )
 
     def test_sync_repairs_a_link_left_behind_by_the_move_out_of_the_product(self) -> None:
-        """The skill moved from the product tree into the installation; the old link dangles."""
+        """The skill moved from the product tree into the installation; the old link dangles.
+
+        The link still names the product `roles/` tree, which is where this registry reads product
+        skills from, so the tree it points into is the proof that the link is ours.
+        """
         self.install_personal_skill()
         self.bin_dir.mkdir(parents=True, exist_ok=True)
-        moved_from = self.root / "old-product" / "skills" / "roles" / "secretary" / "personal"
+        moved_from = self.product.parent / "roles" / "secretary" / "personal"
         self.link.symlink_to(moved_from / "personal.sh")
         self.assertFalse(self.link.exists(), "the fixture link is supposed to dangle")
 
@@ -537,6 +555,26 @@ class CommandEntryPointTests(OverlayFixture):
         self.assertIn(str(script), str(caught.exception))
         self.assertEqual(self.link.resolve(), script)
 
+    def test_sync_refuses_a_foreign_dangling_link_shaped_like_a_skill_source(self) -> None:
+        """A path outside both trees is not ours to take over because nothing is there to break.
+
+        The dangling case is where a name-shaped guess is least checkable: no file contradicts it,
+        and the command being claimed can be the one that opens the operator's browser session.
+        """
+        self.install_personal_skill()
+        theirs = self.root / "elsewhere" / "roles" / "secretary" / "personal" / "personal.sh"
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        self.link.symlink_to(theirs)
+        self.assertFalse(self.link.exists(), "the fixture link is supposed to dangle")
+
+        result = audit(instance_path=self.instance)
+        with self.assertRaises(RegistryError) as caught:
+            sync(instance_path=self.instance)
+
+        self.assertEqual([item["status"] for item in result["entry_points"]], ["conflict"])
+        self.assertIn(str(theirs), str(caught.exception))
+        self.assertEqual(Path(os.readlink(self.link)), theirs)
+
     def test_a_conflicting_entry_point_stops_sync_before_any_skill_is_copied(self) -> None:
         self.install_personal_skill()
         self.bin_dir.mkdir(parents=True, exist_ok=True)
@@ -587,6 +625,19 @@ class CommandEntryPointTests(OverlayFixture):
             ],
             [("personal", "missing", INSTANCE_ORIGIN, str(overlay))],
         )
+
+    def test_the_text_audit_names_the_manifest_behind_a_broken_entry_point(self) -> None:
+        overlay = self.install_personal_skill()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["audit", "--instance", str(self.instance)])
+
+        line = next(
+            line for line in out.getvalue().splitlines() if line.startswith("- personal ")
+        )
+        self.assertIn(str(overlay), line)
+        self.assertIn(INSTANCE_ORIGIN, line)
 
     def test_a_skill_that_ships_no_command_has_no_entry_point_to_answer_for(self) -> None:
         self.install_personal_skill(with_command=False)
