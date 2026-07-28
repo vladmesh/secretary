@@ -1,210 +1,50 @@
-# Head registry — a worker/reviewer head is data here, not the hardcoded `claude` binary in
-# worker.py. A resource is a shared account/limit a head draws from (probe is a health-check
-# command for that resource, run on a TTL by pipeline/health.py — red lives on the resource, every
-# profile drawing from it inherits that redness). A profile names its resource, an adapter (which
-# render_<adapter> in heads.py turns role+prompt into a launch command), and an ordered fallback
-# chain of other profile ids health.resolve_head walks at claim time when the preferred profile's
-# resource is red (the data shape existed before the walk did, so this card is a pure consumer, no
-# registry rework).
+# The product's portable default head registry — the fallback for an installation that has not
+# written its own. An installation owns its heads by putting `heads/heads.toml` in its instance
+# directory; `secretary upgrade` prefers that file and only falls back here. So this file stays
+# deliberately small and neutral: enough to bring a clean host up on a Claude subscription, an
+# OpenAI subscription, or both, and nothing that encodes one installation's account policy, model
+# choices or spend decisions.
 #
-# Adding a head (Codex, another Hermes model, ...) is a new [profiles.<id>] entry here plus, only
-# if its launch shape is genuinely new, one more render_<adapter> function in heads.py — the
-# dispatcher and worker.py never change.
+# A resource is a shared account/limit a head draws from (probe is a health-check command for that
+# resource, run on a TTL by pipeline/health.py — red lives on the resource, every profile drawing
+# from it inherits that redness). A profile names its resource, an adapter (which render_<adapter>
+# in heads.py turns role+prompt into a launch command), and an ordered fallback chain of other
+# profile ids health.resolve_head walks at claim time when the preferred profile's resource is red.
+# [role_defaults] names the head each role runs on; every consumer — the dispatcher's worker,
+# reviewer and observer routing and the curator/retro/steward launch selection — reads that one
+# table, so no two of them can disagree about which head a role is on.
+#
+# Adding a head (another model, another runtime) is a new [profiles.<id>] entry plus, only if its
+# launch shape is genuinely new, one more render_<adapter> function in heads.py — the dispatcher
+# and worker.py never change.
 
 [resources.claude-sub]
-# The shared Claude subscription every claude-* profile below draws from — one account, no
-# per-profile credential. Probe: one real haiku token through the shared OAuth-authenticated
-# `claude` CLI (health.probe_claude_sub) — red exactly during a subscription rate-limit or an API
-# outage, free the rest of the time (once per health.PROBE_TTL_S, not per tick).
+# A Claude subscription reached through the OAuth-authenticated `claude` CLI — one account, no
+# per-profile credential. Probe: one real haiku token through that CLI (health.probe_claude_sub),
+# red exactly during a subscription rate-limit or an API outage, free the rest of the time (once
+# per health.PROBE_TTL_S, not per tick).
 account = "claude-subscription"
 probe = "python3 -m triggered_agents pipeline probe --resource claude-sub"
 
-[resources.openrouter]
-# Pay-per-token OpenRouter credit (key: ~/.hermes/.env open_router_key). Since 2026-07-04
-# only the steward's last-resort hermes profile draws from it — product tasks are Claude-only, so
-# this is spent when the whole claude-sub resource is red and the watcher still has to wake.
-# Probe: one real 1-token chat completion against gemini-flash (health.probe_openrouter) — red on
-# a missing key, a non-2xx response, or a timeout.
-account = "openrouter-pooled-key"
-probe = "python3 -m triggered_agents pipeline probe --resource openrouter"
-
 [resources.openai-sub]
-# The ChatGPT/OpenAI subscription codex draws from via its native `codex` CLI — one account, no
-# per-profile credential, mirroring resources.claude-sub. Authed once with `codex login` (ChatGPT
-# OAuth) into the Orca-managed CODEX_HOME (heads.CODEX_HOME), which also holds MCP, skills, hooks,
-# and the global AGENTS.md. Probe: one real `codex exec` token through that home (health.probe_openai_sub)
-# — red exactly when the subscription is rate-limited or the CLI can't reach the API.
+# An OpenAI/ChatGPT subscription reached through the native `codex` CLI, mirroring claude-sub.
+# Authed once with `codex login` into the Orca-managed CODEX_HOME (heads.CODEX_HOME), which also
+# holds MCP, skills, hooks and the global agent instructions. Probe: one real `codex exec` token
+# through that home (health.probe_openai_sub).
 account = "openai-subscription"
 probe = "python3 -m triggered_agents pipeline probe --resource openai-sub"
 
-[profiles.codex]
-# Stable default/compatibility id for the native OpenAI Codex head. This is the default-effort
-# GPT-5.6 Terra profile: no model_reasoning_effort override is passed, so Codex uses the model
-# default. Standalone fallback: a red openai-sub means claim-skip.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "default"
-fallback = []
-
-# Explicit model profiles mirror the visible catalog returned by
-# `CODEX_HOME=/home/dev/.config/orca/codex-runtime-home/home codex debug models` (2026-07-23).
-# Keep `codex` above as the stable default/compatibility id; these entries add explicit per-card
-# choices, including the equivalent `codex-terra` id.
-[profiles.codex-sol]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-sol"
-effort = "default"
-fallback = []
-
-[profiles.codex-terra]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "default"
-fallback = []
-
-[profiles.codex-luna]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-luna"
-effort = "default"
-fallback = []
-
-[profiles.codex-5-4]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.4"
-effort = "default"
-fallback = []
-
-[profiles.codex-mini]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.4-mini"
-effort = "default"
-fallback = []
-
-[profiles.codex-spark]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.3-codex-spark"
-effort = "default"
-fallback = []
-
-[profiles.codex-high]
-# Terra with explicit high reasoning for harder implementation/debug cards.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "high"
-fallback = []
-
-[profiles.codex-extra]
-# Terra with extra reasoning (Codex CLI value: xhigh) for pipeline/core/system changes.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-fallback = []
-
-[profiles.codex-tui]
-# Opt-in interactive Codex worker profile. Same account/model as `codex`, but worker.py launches
-# the TUI, waits for Orca `tui-idle`, then sends the task prompt into that live session.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "default"
-codex_mode = "tui"
-fallback = []
-
-[profiles.codex-high-tui]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "high"
-codex_mode = "tui"
-fallback = []
-
-[profiles.codex-extra-tui]
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-codex_mode = "tui"
-fallback = []
-
-[profiles.codex-reviewer]
-# Layer-3 reviewer: prefer Terra xhigh, keep claude-opus as second priority.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-fallback = ["claude-opus"]
-
-[profiles.codex-reviewer-tui]
-# Opt-in interactive reviewer profile. TA_REVIEWER_HEAD can point here while `codex-reviewer`
-# remains the one-shot rollback profile.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-codex_mode = "tui"
-fallback = ["claude-opus"]
-
-[profiles.codex-curator]
-# Curator is critical memory infrastructure. Prefer Terra xhigh, then fall back to the same bare
-# Claude invocation it used before it had a head profile.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-fallback = ["claude-default"]
-
-[profiles.codex-steward]
-# Steward is the safety watcher. Prefer Terra xhigh, then keep the previous steward chain:
-# claude-fable -> claude-opus -> hermes.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-fallback = ["claude-fable"]
-
-[profiles.codex-retro]
-# Retro is reflective and less urgent than steward/curator: Terra high is enough, with the old
-# bare Claude runtime as backup if the OpenAI subscription is red.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "high"
-fallback = ["claude-default"]
-
-[profiles.codex-observer]
-# Sprint observer: one long-lived head per open sprint, launched by the dispatcher and held until
-# the sprint closes. Terra xhigh like the other watcher roles: it slices cards and judges drift from
-# the sprint goal, which is planning work rather than implementation. TUI rather than exec, because
-# the observer is one continuous session for the whole sprint: a one-shot `codex exec` would exit
-# after its first turn and the tick would read that as a dead head every time.
-resource = "openai-sub"
-adapter = "codex"
-model = "gpt-5.6-terra"
-effort = "extra"
-codex_mode = "tui"
-fallback = []
+# Claude heads. No fallback chain of their own: they ARE the fallback the codex heads below walk
+# to, so a host with only a Claude subscription still runs every role.
 
 [profiles.claude-default]
-# The historical curator/retro launch shape before role agents got explicit head profiles:
-# bare `claude --dangerously-skip-permissions <skill>`, no --model flag.
+# Bare `claude --dangerously-skip-permissions <prompt>`, no --model flag: whatever the CLI's own
+# default model is. The one profile that keeps working when a named model is retired.
 resource = "claude-sub"
 adapter = "claude"
 fallback = []
 
 [profiles.claude-sonnet]
-# No fallback by deliberate decision: product tasks run on Claude only. A cheaper fallback once
-# burned three worker attempts without ever reaching the report step, so a
-# red claude-sub now means claim-skip — the card waits in Ready until the resource recovers
-# (health.resolve_head returns None) instead of spending openrouter tokens on work that won't land.
 resource = "claude-sub"
 adapter = "claude"
 model = "sonnet"
@@ -217,46 +57,58 @@ model = "opus"
 fallback = []
 
 [profiles.claude-observer]
-# Sprint observer on the Claude subscription, used while the openai-sub quota is spent. Opus rather
-# than sonnet for the same reason codex-observer is xhigh: the observer slices cards and judges
-# drift from the sprint goal. It stays a profile of its own, not a pointer at claude-opus, so the
-# observer's head remains a deliberate choice rather than whatever the worker default happens to be.
+# The observer's Claude head is a profile of its own rather than a pointer at claude-opus: the
+# observer slices cards and judges drift from the sprint goal, so its head stays a deliberate
+# choice and not whatever the worker default happens to be.
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
 fallback = []
 
-[profiles.claude-fable]
-# Fable head for the steward agent. Fallback: claude-opus first (Fable itself leaving the
-# subscription), then hermes on a non-Anthropic model — the steward is the watcher of last resort
-# and must wake even when
-# the whole claude-sub resource is red; a few paid openrouter tokens are the accepted price.
-resource = "claude-sub"
-adapter = "claude"
-model = "fable"
-fallback = ["claude-opus", "hermes"]
+# Codex heads. Each falls back to its Claude counterpart, so a host whose OpenAI subscription is
+# red — or that never had one — keeps running without editing this file.
 
-[profiles.hermes]
-# Last-resort head for the steward chain ONLY — deliberately absent from every product profile's
-# fallback, by deliberate decision. The model is gpt-5.5 rather than a flash tier: a flash-tier
-# model finished worker turns declaring success without a push, PR or report, so the one place
-# hermes still runs gets a model smart enough to follow the protocol.
-resource = "openrouter"
-adapter = "hermes"
-model = "openai/gpt-5.5"
-provider = "openrouter"
-fallback = []
+[profiles.codex]
+# Stable default id for the native OpenAI head, at the model's own default reasoning effort. No
+# `model` pin: the product does not choose which model an installation pays for, and the CLI's
+# default is the one id that cannot go stale when a model is retired.
+resource = "openai-sub"
+adapter = "codex"
+effort = "default"
+fallback = ["claude-sonnet"]
+
+[profiles.codex-high]
+# Explicit high reasoning for harder implementation and debug work.
+resource = "openai-sub"
+adapter = "codex"
+effort = "high"
+fallback = ["claude-opus"]
+
+[profiles.codex-reviewer]
+# Layer-3 reviewer: extra reasoning (Codex CLI value: xhigh), Claude second so a review is still
+# possible on a single-subscription host.
+resource = "openai-sub"
+adapter = "codex"
+effort = "extra"
+fallback = ["claude-opus"]
+
+[profiles.codex-observer]
+# Sprint observer: one long-lived head per open sprint, launched by the dispatcher and held until
+# the sprint closes. TUI rather than exec, because the observer is one continuous session for the
+# whole sprint — a one-shot `codex exec` would exit after its first turn and the tick would read
+# that as a dead head every time.
+resource = "openai-sub"
+adapter = "codex"
+effort = "extra"
+codex_mode = "tui"
+fallback = ["claude-observer"]
 
 [role_defaults]
-# Installation snapshots are generated from this table together with resources/profiles. Keeping
-# role routing in the same source prevents the production dispatcher and triggered-agents from
-# selecting different generations.
-# 2026-07-28: the openai-sub quota is spent, so every role runs on claude-sub until it comes back.
-# Review is same-family while this holds: the worker and the reviewer draw on one account and one
-# model. Point reviewer and observer back at their codex profiles once the quota resets.
-new_card = "claude-opus"
-reviewer = "claude-opus"
-curator = "claude-sonnet"
-steward = "claude-sonnet"
-retro = "claude-sonnet"
-observer = "claude-observer"
+# Which head each role runs on. An installation that wants different models, efforts or accounts
+# per role repoints these in its own canon rather than editing the product.
+new_card = "codex"
+reviewer = "codex-reviewer"
+observer = "codex-observer"
+curator = "codex"
+retro = "codex"
+steward = "codex-high"

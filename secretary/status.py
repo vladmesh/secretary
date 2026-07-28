@@ -100,13 +100,18 @@ def _heads(instance: dict[str, Any]) -> list[dict[str, str]]:
 def _head_registry(instance_dir: Path) -> dict[str, Any]:
     """Where the live head registry came from: the snapshot file and the pin next to it.
 
-    The dispatcher runs off the snapshot, so the checkout it was generated from is not derivable
-    from anything else an operator can see. An installation upgraded before the pin existed reads
-    back with null source and an error naming what to run.
+    The dispatcher runs off the snapshot, so neither the file it was generated from nor the
+    checkout that generated it is derivable from anything else an operator can see. `canonical`
+    answers the first — an installation may own its registry, in which case the product revision
+    alone would credit the wrong file, and `canonical_owner` says which side owns it. An
+    installation upgraded before the pin existed reads back with null source and an error naming
+    what to run. Nothing here consults a checkout: the snapshot is validated on its own.
     """
     snapshot = head_registry.snapshot_path(instance_dir)
     record: dict[str, Any] = {
         "snapshot": str(snapshot),
+        "canonical": None,
+        "canonical_owner": None,
         "product_root": None,
         "revision": None,
         "error": None,
@@ -120,6 +125,8 @@ def _head_registry(instance_dir: Path) -> dict[str, Any]:
     if source is None:
         record["error"] = f"no canon source recorded; run `secretary upgrade --instance {instance_dir}`"
         return record
+    record["canonical"] = _text(source.get("canonical")) or None
+    record["canonical_owner"] = _text(source.get("canonical_owner")) or None
     record["product_root"] = _text(source.get("product_root")) or None
     record["revision"] = _text(source.get("revision")) or None
     return record

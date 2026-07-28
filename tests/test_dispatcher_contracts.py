@@ -20,10 +20,14 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
+import pwd
+import subprocess
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import (
@@ -34,8 +38,15 @@ from secretary import (
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_launcher import wrap_role_shell_command
+from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.host import SystemdLayout, render_systemd_unit
+from secretary import upgrade
+from secretary.head_registry import canonical_heads, materialize_snapshot
+from secretary.host import SystemdLayout, default_packaging_root, render_systemd_unit
+from secretary.host_apply import resolve_packaged
+from triggered_agents.agents.pipeline import heads
+from triggered_agents.runtime import dispatch, role_env
 from secretary.tasks import KanboardClient
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
@@ -423,6 +434,278 @@ class HeadRegistrySourceContractTests(unittest.TestCase):
 
                 self.assertEqual(caught.exception.code, "invalid_heads")
                 self.assertIn("heads.yaml", str(caught.exception))
+
+
+class RoleRoutingGenerationTests(unittest.TestCase):
+    """One registry generation routes all six roles, whichever process is asking.
+
+    The dispatcher routes worker, reviewer and observer off the installation snapshot; the
+    background agents' driver resolves curator, retro and steward through the pipeline registry.
+    Those used to be two different files — the checkout's `heads.toml` and the installation's
+    `heads.yaml` — so a role could be routed by one generation and launched by another.
+    """
+
+    CANON = (
+        "[resources.owned-sub]\naccount = \"owned\"\nprobe = \"true\"\n"
+        "[profiles.owned-worker]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
+        "[profiles.owned-reviewer]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
+        "[profiles.owned-observer]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
+        "[profiles.owned-watcher]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
+        "[role_defaults]\nnew_card = \"owned-worker\"\nreviewer = \"owned-reviewer\"\n"
+        "observer = \"owned-observer\"\ncurator = \"owned-watcher\"\nretro = \"owned-watcher\"\n"
+        "steward = \"owned-watcher\"\n"
+    )
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.instance = Path(tmp.name)
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: routing\ndata_dir: " + str(self.instance / "data")
+            + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+            + "host:\n  unit_prefix: secretary-\n",
+            encoding="utf-8",
+        )
+        (self.instance / "heads").mkdir()
+        heads._load_registry.cache_clear()
+        self.addCleanup(heads._load_registry.cache_clear)
+
+    def materialize(self, canon: str | None) -> None:
+        if canon is not None:
+            (self.instance / "heads" / "heads.toml").write_text(canon, encoding="utf-8")
+        materialize_snapshot(self.instance, upgrade.default_product_root())
+
+    def test_the_installations_own_canon_routes_every_role(self) -> None:
+        self.materialize(self.CANON)
+        catalog = InstanceCatalog(self.instance)
+
+        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
+            self.assertEqual(heads.registry_path(), self.instance / "heads" / "heads.yaml")
+            self.assertEqual(catalog.worker_head({}), "owned-worker")
+            self.assertEqual(catalog.review_head({}), "owned-reviewer")
+            self.assertEqual(catalog.observer_head(), "owned-observer")
+            for agent in ("curator", "retro", "steward"):
+                with self.subTest(agent=agent):
+                    spec = {"head": "product-static-head"}
+                    self.assertEqual(dispatch._preferred_head(agent, spec), "owned-watcher")
+
+    def test_an_installation_with_no_canon_runs_the_product_defaults(self) -> None:
+        self.materialize(None)
+        product = canonical_heads(upgrade.default_product_root())["role_defaults"]
+        catalog = InstanceCatalog(self.instance)
+
+        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
+            self.assertEqual(catalog.worker_head({}), product["new_card"])
+            self.assertEqual(catalog.review_head({}), product["reviewer"])
+            self.assertEqual(catalog.observer_head(), product["observer"])
+            for agent in ("curator", "retro", "steward"):
+                with self.subTest(agent=agent):
+                    self.assertEqual(dispatch._preferred_head(agent, {}), product[agent])
+
+    def test_a_checkout_with_no_installation_reads_the_shipped_registry(self) -> None:
+        """No `SECRETARY_INSTANCE` means no installation to read — never the host's own."""
+        env = {key: value for key, value in os.environ.items() if key != "SECRETARY_INSTANCE"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(heads.registry_path(), heads.HEADS_TOML)
+
+    def test_a_selected_installation_without_a_usable_snapshot_fails_by_its_path(self) -> None:
+        """The product default is for no installation at all, not for a broken one.
+
+        Falling back here would route a packaged role off whichever checkout the process happens
+        to run from — the mutable file the snapshot exists to keep out of a live tick — and would
+        abandon the instance the operator selected without saying so.
+        """
+        for name, build in (
+            ("missing", lambda snapshot: None),
+            ("directory", lambda snapshot: snapshot.mkdir()),
+            ("dangling", lambda snapshot: snapshot.symlink_to(snapshot.parent / "gone.yaml")),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                instance = Path(tmp)
+                (instance / "heads").mkdir()
+                (instance / "heads" / "heads.toml").write_text(self.CANON, encoding="utf-8")
+                snapshot = instance / "heads" / "heads.yaml"
+                build(snapshot)
+
+                with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}):
+                    heads._load_registry.cache_clear()
+                    self.assertEqual(heads.registry_path(), snapshot)
+                    with self.assertRaises(heads.HeadRegistryError) as caught:
+                        heads.load_registry()
+
+                self.assertIn(str(snapshot), str(caught.exception))
+
+
+class PackagedRoleUnitInstanceTests(unittest.TestCase):
+    """Every packaged role process resolves the instance its unit was rendered for.
+
+    A role that is handed no `SECRETARY_INSTANCE` falls back to the default installation path, so
+    on a host with a real installation a unit rendered for another instance would quietly route
+    off `~/secretary-instance`'s heads instead of its own.
+    """
+
+    UNITS = (
+        "secretary-dispatcher-production.service",
+        "secretary-curator.service",
+        "secretary-retro.service",
+        "secretary-steward.service",
+        "secretary-steward-deep-sweep.service",
+    )
+
+    # The layout resolves a home directory through `pwd`, so the account has to exist wherever
+    # the suite runs. The invoking account is the one guaranteed to.
+    RUNTIME_USER = pwd.getpwuid(os.getuid()).pw_name
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        # Deliberately not the default instance path: the assertion below is only worth anything
+        # if the wrong answer is a different directory.
+        self.instance = self.root / "other-instance"
+        (self.instance / "heads").mkdir(parents=True)
+        (self.instance / "heads" / "heads.toml").write_text(
+            RoleRoutingGenerationTests.CANON, encoding="utf-8"
+        )
+        (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        (self.instance / "runtime.env").write_text(
+            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
+            "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n",
+            encoding="utf-8",
+        )
+        materialize_snapshot(self.instance, upgrade.default_product_root())
+        self.layout = SystemdLayout(
+            product_root=self.root / "product",
+            instance_path=self.instance,
+            data_dir=self.root / "data",
+            runtime_user=self.RUNTIME_USER,
+            runtime_home=self.root / "home",
+        )
+        heads._load_registry.cache_clear()
+        self.addCleanup(heads._load_registry.cache_clear)
+
+    def unit_env(self, name: str) -> dict[str, str]:
+        rendered = render_systemd_unit(
+            (default_packaging_root() / name).read_bytes(), self.layout
+        ).decode()
+        env = {}
+        for line in rendered.splitlines():
+            if line.startswith("Environment="):
+                key, value = line[len("Environment="):].split("=", 1)
+                env[key] = value
+        return env
+
+    def test_every_role_unit_carries_the_rendered_instance_path(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                self.assertEqual(self.unit_env(name)["SECRETARY_INSTANCE"], str(self.instance))
+
+    def test_the_units_apply_would_install_carry_it_too(self) -> None:
+        """Through `resolve_packaged`, the compile step `reconcile apply` actually installs from."""
+        packaged = resolve_packaged(
+            {"host": {"unit_prefix": "secretary-"}, "data_dir": str(self.root / "data")},
+            default_packaging_root(),
+            product_root=self.root / "product",
+            instance_path=self.instance,
+            runtime_user=self.RUNTIME_USER,
+            orca_executable=Path("/usr/local/bin/orca"),
+        )
+        compiled = {unit.name: unit.content for unit in packaged}
+
+        self.assertLessEqual(set(self.UNITS), set(compiled))
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                self.assertIn(
+                    f"Environment=SECRETARY_INSTANCE={self.instance}".encode(), compiled[name]
+                )
+
+    def test_the_role_process_resolves_that_instances_registry(self) -> None:
+        """Through role_env, the way the unit actually starts the process."""
+        for name, role in (("secretary-curator.service", "curator"),
+                           ("secretary-retro.service", "retro"),
+                           ("secretary-steward.service", "steward"),
+                           ("secretary-steward-deep-sweep.service", "steward"),
+                           ("secretary-dispatcher-production.service", "pipeline")):
+            with self.subTest(unit=name):
+                env = role_env.runtime_env(
+                    role, base_env=self.unit_env(name),
+                    env_file=self.instance / "runtime.env", require=True,
+                )
+
+                with mock.patch.dict(os.environ, env, clear=True):
+                    heads._load_registry.cache_clear()
+                    self.assertEqual(
+                        heads.registry_path(), self.instance / "heads" / "heads.yaml"
+                    )
+                    self.assertEqual(heads.default_head(), "owned-worker")
+                    self.assertEqual(heads.reviewer_head(), "owned-reviewer")
+
+    def test_every_role_unit_names_the_runtime_env_file_of_its_own_instance(self) -> None:
+        """A role that reloads runtime.env has to reload the selected installation's copy.
+
+        `EnvironmentFile=` alone only seeds the unit's own process. Both role-env modules resolve
+        the file again for the process they launch, from a name that defaults to the default
+        installation, so the unit has to export it.
+        """
+        expected = str(self.instance / "runtime.env")
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                env = self.unit_env(name)
+                if name == "secretary-dispatcher-production.service":
+                    self.assertEqual(env["SECRETARY_RUNTIME_ENV_FILE"], expected)
+                self.assertEqual(env["TA_RUNTIME_ENV_FILE"], expected)
+
+    def test_the_runtime_env_file_cannot_hand_a_role_another_instance(self) -> None:
+        """The launcher's binding wins over the file's own line, in both role-env modules."""
+        self.decoy_runtime_env()
+        for module, role in ((head_role_env, "worker"), (role_env, "steward")):
+            with self.subTest(module.__name__):
+                base = self.unit_env("secretary-dispatcher-production.service")
+                env = module.runtime_env(
+                    role, base_env=base, env_file=self.instance / "runtime.env", require=True
+                )
+
+                self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
+
+    def test_a_dispatcher_launched_head_resolves_the_selected_instance(self) -> None:
+        """End to end through the rendered command, the way a head actually starts.
+
+        Orca creates the head's terminal, so it inherits nothing the dispatcher unit exported:
+        the binding has to travel inside the command string. The subprocess here is given an
+        environment with no `SECRETARY_*` in it at all, which is what the reviewer's reproduction
+        found routing heads back to `/home/dev/secretary-instance`.
+        """
+        self.decoy_runtime_env()
+        with mock.patch.dict(
+            os.environ, self.unit_env("secretary-dispatcher-production.service"), clear=True
+        ):
+            command = wrap_role_shell_command("worker", "printenv SECRETARY_INSTANCE")
+
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            capture_output=True, text=True, timeout=120,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(self.root),
+                "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(self.instance), result.stderr)
+
+    def decoy_runtime_env(self) -> None:
+        """The selected instance's runtime.env, carrying the default installation's own name.
+
+        A copied or inherited `SECRETARY_INSTANCE` line is exactly how a non-default installation
+        loses its heads, so the fixture keeps one in the file the roles read.
+        """
+        (self.instance / "runtime.env").write_text(
+            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
+            "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n"
+            "SECRETARY_INSTANCE=/home/dev/secretary-instance\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

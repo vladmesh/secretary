@@ -304,6 +304,22 @@ def _pipeline_paused() -> bool:
         return False
 
 
+def _preferred_head(agent: str, spec: dict) -> str | None:
+    """The head this agent launches on: the selected registry's role default for it.
+
+    Role routing belongs to the installation, not to the product's automation spec — the same
+    `[role_defaults]` table the dispatcher routes worker, reviewer and observer through also names
+    curator's, retro's and steward's head, so one registry generation decides all six. The spec's
+    own `head` stays as the last resort for a registry that routes this role nowhere.
+    """
+    try:
+        from ..agents.pipeline import heads as pipeline_heads
+        routed = pipeline_heads.load_registry().role_default(agent)
+    except Exception:
+        routed = None
+    return routed or spec.get("head")
+
+
 def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
     """Whether the profile the idle terminal was ACTUALLY launched with is currently sitting on a
     red resource — the check idle-reuse needs before sending into an already-warm terminal, since
@@ -324,7 +340,7 @@ def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
     confirmed (triggered-agents-274, triggered-agents-275).
     """
     try:
-        head = _load_spec(agent).get("head")
+        head = _preferred_head(agent, _load_spec(agent))
         if not head:
             return False
         profile = state.load_head_profile() or head
@@ -345,12 +361,12 @@ def _launch_cmd(agent: str, variant: str | None = None,
     terminal is running against instead of just the agent's static preferred head
     (triggered-agents-275).
 
-    A spec naming a `head` (a profile id in pipeline/heads.toml, e.g. the steward's claude-fable)
-    launches through that registry: same adapter/model/fallback machinery a worker/reviewer head
-    gets, resolved against this run's live resource health so a red claude-sub falls back to
-    claude-opus instead of launching on a rate-limited account. curator/retro name no head
-    and keep the bare default-model `claude` invocation they always had. Any failure to resolve
-    (a broken heads.toml is itself the kind of anomaly the steward exists to catch) falls back to
+    The head comes from `_preferred_head` — the selected registry's role default for this agent,
+    else the spec's own `head` — and launches through that same registry: same adapter/model/
+    fallback machinery a worker/reviewer head gets, resolved against this run's live resource
+    health so a red claude-sub falls back instead of launching on a rate-limited account. An agent
+    routed nowhere at all keeps the bare default-model `claude` invocation. Any failure to resolve
+    (a broken registry is itself the kind of anomaly the steward exists to catch) falls back to
     the same bare invocation rather than leaving the agent undispatched for the whole tick.
 
     `variant` (e.g. the steward's "deep-sweep", triggered-agents-254) reads `skill` from
@@ -367,7 +383,7 @@ def _launch_cmd(agent: str, variant: str | None = None,
     skill = spec["variants"][variant]["skill"] if variant else spec["skill"]
     if card_ref:
         skill = f"{skill} --card {card_ref}"
-    head = spec.get("head")
+    head = _preferred_head(agent, spec)
     bare_claude = role_env.wrap_shell_command(agent, f"claude --dangerously-skip-permissions {skill!r}")
     if not head:
         return skill, bare_claude, None

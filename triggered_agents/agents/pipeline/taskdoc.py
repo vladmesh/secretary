@@ -5,8 +5,8 @@ from . import card_comments, heads, naming, task_protocol, worker
 
 
 def _metadata(card: dict, base: str) -> list[str]:
-    worker_head = card.get("effective_head") or card.get("head") or heads.DEFAULT_PROFILE
-    review_head = card.get("effective_review_head") or card.get("review_head") or worker.REVIEWER_HEAD
+    worker_head = card.get("effective_head") or card.get("head") or heads.default_head()
+    review_head = card.get("effective_review_head") or card.get("review_head") or heads.reviewer_head()
     lines = [
         "## Metadata",
         "",

@@ -9,8 +9,9 @@ import shlex
 import sys
 from pathlib import Path
 
+RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
 RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
-RUNTIME_ENV = Path(os.environ.get("SECRETARY_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
+RUNTIME_ENV = Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
 
 
 def runtime_env_path() -> Path:
@@ -20,12 +21,18 @@ def runtime_env_path() -> Path:
     same way rather than frozen at import: an in-process caller that has to model what a launched
     head will receive sees the same file the launched process would open.
     """
-    return Path(os.environ.get("SECRETARY_RUNTIME_ENV_FILE", RUNTIME_ENV_DEFAULT))
+    return Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
 BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 # SECRETARY_DATA_DIR is carried for the same reason as in triggered_agents.runtime.role_env: it
 # binds a process to the installation's data plane, and a head that reports through
 # `secretary task` must land on the data dir the dispatcher itself uses.
 NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
+# Names the launcher binds and the runtime env file may not take back. Which installation a role
+# belongs to is decided by whoever started it (the rendered unit, or a dispatcher launching a
+# head), and runtime.env is a file inside an installation. Letting its copy of the name win lets a
+# stale or copied line under one instance route a role to another one: a unit rendered for a
+# non-default instance launched heads that came up on ~/secretary-instance (secretary-859 review).
+UNIT_BOUND_ENV = ("SECRETARY_INSTANCE",)
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),
@@ -120,7 +127,9 @@ def runtime_env(
         env[key] = value
 
     for key in allowed:
-        if key in source:
+        if key in base and key in UNIT_BOUND_ENV:
+            env[key] = base[key]
+        elif key in source:
             env[key] = source[key]
         elif key in base:
             env[key] = base[key]

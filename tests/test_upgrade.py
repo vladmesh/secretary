@@ -12,7 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
+from secretary import status, upgrade
+from triggered_agents.agents.pipeline import health, heads
 from secretary.automations import (
     AutomationSpec,
     create_argv,
@@ -32,12 +33,17 @@ from secretary.host import (
 )
 from secretary.host_apply import ApplyInputs, HostCommandError, apply_host
 from secretary.head_registry import (
+    INSTANCE_ORIGIN,
+    PRODUCT_ORIGIN,
     HeadRegistryConfigError,
     assert_snapshot_current,
     canonical_heads,
+    canonical_path,
+    installed_heads,
     load_snapshot,
     product_revision,
     read_source,
+    snapshot_path,
 )
 
 UNIT_PREFIX = "secretary-"
@@ -572,8 +578,8 @@ class UpgradeStepTests(unittest.TestCase):
 
             self.assertEqual(result.status, "changed")
             self.assertEqual(again.status, "unchanged")
-            self.assertEqual(load_snapshot(instance), canonical_heads(context.product_root))
-            self.assertEqual(load_snapshot(instance)["profiles"]["codex-terra"]["model"], "gpt-5.6-terra")
+            self.assertEqual(load_snapshot(instance), canonical_heads(context.product_root, instance))
+            self.assertEqual(load_snapshot(instance)["role_defaults"]["new_card"], "codex")
 
     def test_head_registry_dry_run_reports_drift_without_writing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -678,16 +684,46 @@ class UpgradeStepTests(unittest.TestCase):
             with self.assertRaisesRegex(HeadRegistryConfigError, "is stale"):
                 assert_snapshot_current(instance, upgrade.default_product_root())
 
-    def test_product_profiles_have_no_gpt_5_5_pin_except_openrouter_hermes(self):
-        profiles = canonical_heads(upgrade.default_product_root())["profiles"]
+    def test_the_shipped_registry_runs_every_role_on_either_subscription(self):
+        """The portable default has to bring a clean host up with only one account authed.
 
-        stale = {
-            name: profile.get("model")
-            for name, profile in profiles.items()
-            if name != "hermes" and profile.get("model") == "gpt-5.5"
-        }
-        self.assertEqual(stale, {})
-        self.assertEqual(profiles["codex-reviewer"]["model"], "gpt-5.6-terra")
+        Both directions: an OpenAI-only host runs the role defaults as written, and a Claude-only
+        host reaches a green head for every one of them through the fallback chains.
+        """
+        canon = canonical_heads(upgrade.default_product_root())
+        registry = heads.Registry(canon["resources"], canon["profiles"], canon["role_defaults"])
+        roles = ("new_card", "reviewer", "observer", "curator", "retro", "steward")
+
+        self.assertEqual(set(canon["resources"]), {"claude-sub", "openai-sub"})
+        for role in roles:
+            with self.subTest(role=role):
+                preferred = registry.role_default(role)
+                self.assertIsNotNone(preferred, f"{role} is routed nowhere")
+                for red in ("claude-sub", "openai-sub"):
+                    statuses = {red: health.RED}
+                    resolved = health.resolve_head(preferred, statuses, registry)
+                    self.assertIsNotNone(resolved, f"{role} has no head with {red} red")
+                    self.assertNotEqual(
+                        registry.profile(resolved)["resource"], red,
+                        f"{role} resolved onto the red resource",
+                    )
+
+    def test_the_shipped_registry_carries_no_installation_account_policy(self):
+        """Account policy and model routing are the private canon's, not the product's."""
+        canon = canonical_heads(upgrade.default_product_root())
+
+        self.assertEqual(
+            [name for name, resource in canon["resources"].items()
+             if resource.get("account") not in {"claude-subscription", "openai-subscription"}],
+            [],
+        )
+        # A pinned model version is a spend decision that ages out of the product; the shipped
+        # profiles name a family or nothing at all.
+        self.assertEqual(
+            [name for name, profile in canon["profiles"].items()
+             if any(char.isdigit() for char in str(profile.get("model", "")))],
+            [],
+        )
 
     def test_missing_role_worktrees_are_recreated_from_product_head(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -833,6 +869,206 @@ class HealthUnitNameTests(unittest.TestCase):
         }
         for agent in AGENTS:
             self.assertIn(health.timer_unit(agent), shipped, agent)
+
+
+class InstanceHeadCanonTests(unittest.TestCase):
+    """Which registry an installation materializes from, and what the snapshot says about it.
+
+    Every fixture here is a temporary instance directory, never the host's own: the point is what
+    an arbitrary installation gets, and the developing machine's installation owns a canon that
+    would answer for it.
+    """
+
+    CANON = (
+        "[resources.local-sub]\naccount = \"local\"\nprobe = \"true\"\n"
+        "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\nfallback = []\n"
+        "[profiles.local-reviewer]\nresource = \"local-sub\"\nadapter = \"claude\"\nfallback = []\n"
+        "[role_defaults]\nnew_card = \"local-head\"\nreviewer = \"local-reviewer\"\n"
+        "curator = \"local-head\"\nretro = \"local-head\"\nsteward = \"local-head\"\n"
+        "observer = \"local-reviewer\"\n"
+    )
+
+    def instance(self, root: Path, canon: str | None = None) -> Path:
+        (root / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        (root / "heads").mkdir(exist_ok=True)
+        if canon is not None:
+            (root / "heads" / "heads.toml").write_text(canon, encoding="utf-8")
+        return root
+
+    def test_an_installation_that_owns_a_canon_materializes_from_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir), self.CANON)
+            product = upgrade.default_product_root()
+
+            path, origin = canonical_path(product, instance)
+            heads_data = canonical_heads(product, instance)
+
+            self.assertEqual(path, instance / "heads" / "heads.toml")
+            self.assertEqual(origin, INSTANCE_ORIGIN)
+            self.assertEqual(heads_data["role_defaults"]["new_card"], "local-head")
+            self.assertNotEqual(heads_data, canonical_heads(product))
+
+    def test_an_installation_with_no_canon_stays_runnable_on_the_product_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir))
+            product = upgrade.default_product_root()
+
+            path, origin = canonical_path(product, instance)
+
+            self.assertEqual(path, product / "triggered_agents" / "agents" / "pipeline" / "heads.toml")
+            self.assertEqual(origin, PRODUCT_ORIGIN)
+            self.assertEqual(canonical_heads(product, instance), canonical_heads(product))
+
+    def test_a_present_but_unusable_canon_fails_by_name_instead_of_falling_back(self):
+        product = upgrade.default_product_root()
+        for name, build in (
+            ("malformed", lambda root: (root / "heads" / "heads.toml").write_text("nope = [", encoding="utf-8")),
+            ("directory", lambda root: (root / "heads" / "heads.toml").mkdir()),
+            ("dangling", lambda root: (root / "heads" / "heads.toml").symlink_to(root / "gone.toml")),
+            ("unreadable", lambda root: (
+                (root / "heads" / "heads.toml").write_text(self.CANON, encoding="utf-8"),
+                (root / "heads" / "heads.toml").chmod(0o000),
+            )),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                instance = self.instance(Path(tmpdir))
+                build(instance)
+                self.addCleanup(_restore_mode, instance / "heads" / "heads.toml")
+
+                with self.assertRaises(HeadRegistryConfigError) as caught:
+                    canonical_heads(product, instance)
+
+                self.assertIn(str(instance / "heads" / "heads.toml"), str(caught.exception))
+
+    @unittest.skipIf(os.geteuid() == 0, "root traverses a directory with no search bit")
+    def test_an_unsearchable_heads_directory_fails_the_step_by_name(self):
+        """The probe that decides which canon wins can itself fail on the filesystem.
+
+        `Path.is_file()` does not swallow EACCES, so a `heads/` directory with no search bit used
+        to hand `secretary upgrade` a raw PermissionError. The step catches the bounded config
+        error and nothing else, so that crashed the upgrade instead of failing one step by path.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir), self.CANON)
+            owned = instance / "heads" / "heads.toml"
+            self.addCleanup(_restore_mode, instance / "heads", mode=0o755)
+            (instance / "heads").chmod(0o000)
+
+            with self.assertRaises(HeadRegistryConfigError) as caught:
+                canonical_path(upgrade.default_product_root(), instance)
+            result = upgrade.step_head_registry(self.context(instance))
+
+            self.assertIn(str(owned), str(caught.exception))
+            self.assertEqual(result.status, "failed")
+            self.assertIn(str(owned), result.detail)
+
+    def test_a_canon_with_a_malformed_entry_fails_the_upgrade_step_by_name(self):
+        """Not just unparseable files: a parsed canon whose entries are the wrong shape.
+
+        The entries are hand-written, so any of them can be a list where a table or a name
+        belongs. Every one of those has to come back as the bounded config error naming the file
+        — the upgrade step handles that error and nothing else, so a raw AttributeError or
+        TypeError would escape the step instead of failing it.
+        """
+        broken = {
+            "list profile": "[resources.local-sub]\naccount = \"local\"\n"
+                            "profiles = { local-head = [] }\n",
+            "list resource": "resources = { local-sub = [] }\n"
+                             "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\n"
+                             "[role_defaults]\nnew_card = \"local-head\"\n",
+            "list role default": "[resources.local-sub]\naccount = \"local\"\n"
+                                 "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\n"
+                                 "[role_defaults]\nnew_card = []\n",
+            "list fallback entry": "[resources.local-sub]\naccount = \"local\"\n"
+                                   "[profiles.local-head]\nresource = \"local-sub\"\n"
+                                   "adapter = \"claude\"\nfallback = [[]]\n"
+                                   "[role_defaults]\nnew_card = \"local-head\"\n",
+            "list adapter": "[resources.local-sub]\naccount = \"local\"\n"
+                            "[profiles.local-head]\nresource = \"local-sub\"\nadapter = []\n"
+                            "[role_defaults]\nnew_card = \"local-head\"\n",
+        }
+        for name, canon in broken.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                instance = self.instance(Path(tmpdir), canon)
+                owned = str(instance / "heads" / "heads.toml")
+
+                with self.assertRaises(HeadRegistryConfigError) as caught:
+                    canonical_heads(upgrade.default_product_root(), instance)
+                result = upgrade.step_head_registry(self.context(instance))
+
+                self.assertIn(owned, str(caught.exception))
+                self.assertEqual(result.status, "failed")
+                self.assertIn(owned, result.detail)
+                self.assertFalse(snapshot_path(instance).exists())
+
+    def test_status_reports_a_malformed_installed_snapshot_instead_of_crashing(self):
+        """`secretary status` validates the snapshot on its own, so it meets the same shapes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir))
+            snapshot_path(instance).write_text(
+                "resources:\n  local-sub:\n    account: local\n"
+                "profiles:\n  local-head: []\n"
+                "role_defaults:\n  new_card: local-head\n",
+                encoding="utf-8",
+            )
+
+            snapshot = str(snapshot_path(instance))
+            with self.assertRaises(HeadRegistryConfigError) as caught:
+                installed_heads(instance)
+            record = status._head_registry(instance)
+
+            self.assertIn(snapshot, str(caught.exception))
+            self.assertIn(snapshot, record["error"])
+
+    def test_the_snapshot_and_pin_name_the_canon_that_actually_won(self):
+        for name, canon, origin in (("instance", self.CANON, INSTANCE_ORIGIN),
+                                    ("product", None, PRODUCT_ORIGIN)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                instance = self.instance(Path(tmpdir), canon)
+                context = self.context(instance)
+                expected, _ = canonical_path(context.product_root, instance)
+
+                upgrade.step_head_registry(context)
+
+                header = snapshot_path(instance).read_text(encoding="utf-8").splitlines()[0]
+                pin = read_source(instance)
+                self.assertIn(str(expected), header)
+                self.assertEqual(pin["canonical"], str(expected))
+                self.assertEqual(pin["canonical_owner"], origin)
+                self.assertEqual(pin["product_root"], str(context.product_root.resolve()))
+
+    def test_a_snapshot_built_from_the_instance_canon_is_not_stale_against_it(self):
+        """Verify compares the snapshot with the canon that made it, not with the product's."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir), self.CANON)
+            context = self.context(instance)
+
+            upgrade.step_head_registry(context)
+
+            self.assertEqual(
+                assert_snapshot_current(instance, context.product_root)["role_defaults"]["new_card"],
+                "local-head",
+            )
+
+    def context(self, instance: Path) -> upgrade.UpgradeContext:
+        return upgrade.UpgradeContext(
+            instance_path=instance,
+            product_root=upgrade.default_product_root(),
+            base_branch="main",
+            dry_run=False,
+            units=FakeUnitInstaller(),
+            orca=FakeRegistrar(),
+            automations=None,
+            report=_Report(),
+        )
+
+
+def _restore_mode(path: Path, mode: int = 0o644) -> None:
+    """Give a deliberately unreadable fixture back its permissions so cleanup can remove it."""
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 class _Report:

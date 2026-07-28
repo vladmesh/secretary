@@ -144,7 +144,7 @@ def _load_cards() -> dict:
 
 
 def _current_head(card: dict, rec: dict) -> str:
-    return rec.get("head") or card.get("head") or heads.DEFAULT_PROFILE
+    return rec.get("head") or card.get("head") or heads.default_head()
 
 
 def _auto_resume_stale_hard_pause(state: dict, *, source: str) -> dict:
@@ -914,7 +914,7 @@ def _claim_next(records: dict, statuses: dict[str, str]) -> None:
             STATE.log_run("claim-skip", reference=ref, task_id=card.get("id"),
                           reason="missing project/task_type metadata")
             continue
-        preferred = card.get("head") or heads.DEFAULT_PROFILE
+        preferred = card.get("head") or heads.default_head()
         try:
             heads.load_registry().profile(preferred)
         except heads.HeadRegistryError:

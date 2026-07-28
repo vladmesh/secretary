@@ -882,7 +882,7 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | --- | --- |
 | `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
 | `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
-| `head-registry` | generate `heads/heads.yaml` from the product canon plus `heads/source.yaml`, the checkout and revision it came from |
+| `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, and the checkout and revision it came from |
 | `role-skills` | `role_skills sync` into the shells' skill directories |
 | `role-worktrees` | fast-forward the role worktrees onto the base branch |
 | `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
@@ -896,16 +896,38 @@ Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--
 
 A live tick reads the head registry only from the installation's own `heads/heads.yaml` and never looks into a product
 checkout. The only operation that moves that file is `secretary upgrade`, which writes `heads/source.yaml` next to it
-with the checkout path and revision the snapshot was generated from. So editing the product's head canon in a working
-tree (a branch, an uncommitted change, a half-finished refactor) has no effect at all on a running installation.
+with the canon it generated the snapshot from and the checkout path and revision of the product that generated it. So
+editing the product's head canon in a working tree (a branch, an uncommitted change, a half-finished refactor) has no
+effect at all on a running installation.
+
+Which heads exist is installation configuration. An installation owns its registry by keeping `heads/heads.toml` in its
+instance directory; that file is then the canon `upgrade` materialises from. An installation without one materialises
+from the product's shipped default, which is deliberately small: two resources (a Claude and an OpenAI subscription), a
+handful of profiles whose fallback chains cross between them, and a role default per role — enough to bring a clean host
+up on either subscription, and no account policy or model routing belonging to any one installation. A `heads/heads.toml`
+that is present but unusable — malformed, unreadable, a directory, a dangling symlink — fails the upgrade by name instead
+of silently reverting the host to product heads.
 
 The source is visible from outside: `secretary status --json` returns `installation.head_registry` with `snapshot`,
-`product_root`, `revision` and `error`, and the text `status` prints the same line. `error` is filled when the pin has
-not been written yet (the installation never ran `upgrade` on this version) or when the snapshot itself is broken.
+`canonical`, `canonical_owner` (`instance` or `product`), `product_root`, `revision` and `error`, and the text `status`
+prints the same line. `error` is filled when the pin has not been written yet (the installation never ran `upgrade` on
+this version) or when the snapshot itself is broken.
 
-A broken snapshot still stops the tick and names the reason: a missing table, an unknown resource or adapter on a
-profile, or a role in `role_defaults` pointing at a head that does not exist. The dispatcher answers `invalid_heads`
-with the text of the check; the fix is `secretary upgrade`.
+`[role_defaults]` in that one snapshot routes every role: the dispatcher's worker, reviewer and observer heads, and the
+head the curator, retro and steward launch on. Each background role's `automation.toml` still carries a `head`, but only
+as a last resort for a registry that routes that role nowhere. The packaged unit of every one of those roles exports
+`SECRETARY_INSTANCE` and the path of its own `runtime.env`, so each process resolves the same installation's snapshot
+rather than the host's default one. A head the dispatcher launches starts in a terminal Orca creates and inherits none
+of that, so the launcher writes both names into the head's own command line. `SECRETARY_INSTANCE` from a `runtime.env`
+never overrides either: which installation a role belongs to is decided by whoever started it, and `runtime.env` is a
+file inside an installation.
+
+A broken snapshot still stops the tick and names the reason: a missing table, an entry of the wrong shape, an unknown
+resource or adapter on a profile, or a role in `role_defaults` pointing at a head that does not exist. A process handed
+`SECRETARY_INSTANCE` whose snapshot is missing, unreadable, a directory or a dangling link fails by that snapshot path
+too — the shipped registry is the fallback for a checkout with no installation selected, not for a selected installation
+that has none of its own. The dispatcher answers `invalid_heads` with the text of the check; the fix is
+`secretary upgrade`.
 
 ### Ownership and fail-closed behaviour
 

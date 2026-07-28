@@ -9,11 +9,12 @@ name = "steward"          # Orca automation name; the match key across re-provis
 skill = "/steward"        # automation prompt = skill invocation (skill lives in .claude/skills/steward)
 provider = "claude"
 reuse_session = true
-# heads.toml profile (triggered_agents/agents/pipeline/heads.toml): codex-steward uses Codex
-# GPT-5.6 Terra xhigh first, then falls back to the previous steward chain (claude-fable -> claude-opus
-# -> hermes). runtime/dispatch.py resolves this through pipeline.health/heads the same way a
-# worker/reviewer head is resolved at claim time.
-head = "codex-steward"
+# Last resort only. The steward launches on `role_defaults.steward` in the selected head
+# registry — the same table the dispatcher routes worker, reviewer and observer through — and
+# runtime/dispatch.py resolves it through pipeline.health/heads the same way a worker head is
+# resolved at claim time, walking the profile's fallback chain when its resource is red. This
+# line answers only for a registry that routes the steward nowhere at all.
+head = "codex-high"
 # Skip the run unless the deterministic scan finds a real anomaly signal (new Blocked card,
 # warn/error/head-health-flip line in the pipeline's own runs.jsonl, a card stuck past the
 # staleness threshold, a resource health flip, a worker/reviewer workspace on disk with no

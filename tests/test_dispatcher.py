@@ -4002,13 +4002,24 @@ class LegacyPauseProbeTests(unittest.TestCase):
 
 
 class DispatcherLauncherTests(unittest.TestCase):
-    def test_explicit_codex_terra_card_uses_terra_model(self) -> None:
+    # Which model a codex head runs on is installation configuration, not something the shipped
+    # registry decides, so the model-pinning cases here run against a fixture registry of their own.
+    PINNED_REGISTRY = {
+        "resources": {"openai-sub": {"account": "openai-subscription"}},
+        "profiles": {
+            "pinned-terra": {"resource": "openai-sub", "adapter": "codex",
+                             "model": "gpt-5.6-terra", "effort": "extra"},
+        },
+        "role_defaults": {"new_card": "pinned-terra"},
+    }
+
+    def test_a_card_head_override_launches_that_profiles_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             catalog = object.__new__(InstanceCatalog)
-            catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
-            task = {"routing": {"head_override": "codex-terra"}}
+            catalog._heads = self.PINNED_REGISTRY  # type: ignore[attr-defined]
+            task = {"routing": {"head_override": "pinned-terra"}}
 
             head = catalog.worker_head(task)  # type: ignore[attr-defined]
             command = catalog.head_command(  # type: ignore[attr-defined]
@@ -4018,36 +4029,41 @@ class DispatcherLauncherTests(unittest.TestCase):
                 role="worker",
             )
 
-        self.assertEqual(head, "codex-terra")
+        self.assertEqual(head, "pinned-terra")
         self.assertIn("-m gpt-5.6-terra", command)
 
-    def test_head_run_snapshots_the_real_registry_configuration(self) -> None:
-        """The launch record must carry the configuration, not just the profile id: `codex`,
-        `codex-terra` and `codex-extra` are one model with different effort, so the id alone
-        cannot answer which head reviewed what."""
+    def test_head_run_snapshots_the_launched_profiles_configuration(self) -> None:
+        """The launch record must carry the configuration, not just the profile id: two profiles
+        can be one model at different effort, so the id alone cannot answer which head ran."""
         catalog = object.__new__(InstanceCatalog)
-        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+        catalog._heads = self.PINNED_REGISTRY  # type: ignore[attr-defined]
 
         worker = catalog.head_run(  # type: ignore[attr-defined]
-            {"routing": {"head_override": "codex-extra", "codex_launch_mode": "tui"}}, role="worker"
+            {"routing": {"head_override": "pinned-terra", "codex_launch_mode": "tui"}}, role="worker"
         )
-        reviewer = catalog.head_run({"routing": {}}, role="reviewer")  # type: ignore[attr-defined]
 
         self.assertEqual(worker.to_json(), {
-            "role": "worker", "head": "codex-extra", "head_source": "card",
+            "role": "worker", "head": "pinned-terra", "head_source": "card",
             "adapter": "codex", "model": "gpt-5.6-terra", "model_source": "profile",
             "effort": "extra",
             # The card pinned the launch mode, so the record shows the mode the head really ran in.
             "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
         })
-        self.assertEqual(reviewer.head_source, "role_default")
-        # Which profile reviews is configuration and moves with the quota that is up; what this
-        # asserts is that the record carries that profile's real configuration rather than its id.
+
+    def test_head_run_reads_the_reviewer_role_default_from_the_registry(self) -> None:
+        """Which profile reviews is configuration and moves with the quota that is up; what this
+        asserts is that the record carries that profile's real configuration rather than its id."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
+
+        reviewer = catalog.head_run({"routing": {}}, role="reviewer")  # type: ignore[attr-defined]
+
         expected = catalog._heads["role_defaults"]["reviewer"]  # type: ignore[attr-defined]
         profile = catalog._heads["profiles"][expected]  # type: ignore[attr-defined]
+        self.assertEqual(reviewer.head_source, "role_default")
         self.assertEqual(reviewer.head, expected)
         self.assertEqual(reviewer.effort, profile.get("effort", ""))
-        self.assertEqual(reviewer.model, profile["model"])
+        self.assertEqual(reviewer.model, profile.get("model", ""))
 
     def test_head_run_snapshots_the_cli_model_for_a_profile_that_pins_none(self) -> None:
         """`claude-default` pins no model, so the CLI picks one from its settings at startup. The
