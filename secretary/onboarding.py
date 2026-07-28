@@ -17,9 +17,12 @@ from secretary.contract_migrations import (  # re-exported: one registry of lega
     normalize_contract,
     project_lock_path,
 )
+from triggered_agents.runtime.paths import default_instance_path
 
 
-DEFAULT_INSTANCE = "/home/dev/secretary-instance"
+# The installation of a host that configured none. One spelling of the fallback, shared with the
+# runtime, so the CLI and a launched role cannot disagree about which installation they mean.
+DEFAULT_INSTANCE = str(default_instance_path())
 IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
 REQUIRED_DECISIONS = [
     "setup.commands",

@@ -2,7 +2,9 @@
 """Audit and sync role-owned skills into shell-owned skill directories.
 
 Two registries, layered. The product manifest is the portable one: the roles and skills every
-installation gets. An installation may own a second manifest at ``<instance>/skills/manifest.toml``
+installation gets, read from whichever checkout the caller names, because an upgrade can
+materialize a host from a checkout other than the one running this module. An installation may own
+a second manifest at ``<instance>/skills/manifest.toml``
 naming skills that belong to this host alone, and its ``roles/`` tree sits beside it in the private
 instance repository. A skill is always read from the tree beside the manifest that declared it, so
 the two never have to agree about where sources live, and an installation without an overlay is a
@@ -29,13 +31,22 @@ from pathlib import Path
 from typing import Any
 
 from secretary.onboarding import DEFAULT_INSTANCE
+from triggered_agents.runtime.paths import configured_product_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The manifest of the checkout this module was imported from. It is what the product ships and what
+# tests about the shipped canon read, and it is deliberately *not* the fallback any caller lands on:
+# the registry a host is audited or synced against belongs to the configured product checkout, which
+# is a different path exactly when an alternate checkout is running the command.
 MANIFEST = ROOT / "skills" / "manifest.toml"
 ROLES_ROOT = ROOT / "skills" / "roles"
 # Where an installation keeps its own manifest, relative to the instance directory.
 INSTANCE_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
+# Where a product checkout keeps its manifest, relative to the checkout root. The same spelling as
+# the instance overlay by coincidence, not by contract: the two are named separately so one can
+# move without dragging the other.
+PRODUCT_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
 # Points the registry at another product manifest, and with it at another `roles/` tree beside that
 # file. The delivery check below runs inside the dispatcher tick, so a test needs a registry it can
 # own without writing into the shells of the live installation.
@@ -75,14 +86,36 @@ def _absolute(value: Path | str) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(value))))
 
 
-def manifest_path() -> Path:
+def manifest_path(product_manifest: Path | str | None = None) -> Path:
+    """The product manifest: the one the caller named, the one under test, or the configured one.
+
+    A named manifest wins over the environment because the caller that names one is installing a
+    particular checkout. ``secretary upgrade --product-root`` materializes a host from a checkout
+    that need not be the one running this module, and reading the running module's manifest there
+    would report a host in sync with a registry the upgrade is not installing.
+
+    With neither, the answer is the configured product checkout — ``TA_SECRETARY_REPO``, else
+    ``~/secretary`` — and never the checkout containing this file. A candidate checkout is a normal
+    place to run ``role-skills`` from, so letting the running module decide would audit and deliver
+    whatever the caller's working directory happened to be instead of the product the host is
+    configured with.
+    """
+    if product_manifest is not None:
+        return _absolute(product_manifest)
     raw = os.environ.get(MANIFEST_ENV)
-    return _absolute(raw) if raw else MANIFEST
+    if raw:
+        return _absolute(raw)
+    return product_manifest_path(configured_product_root())
 
 
-def roles_root() -> Path:
+def product_manifest_path(product_root: Path | str) -> Path:
+    """The manifest of a named product checkout, which is not always the running one."""
+    return _absolute(product_root) / PRODUCT_MANIFEST_RELATIVE
+
+
+def roles_root(product_manifest: Path | str | None = None) -> Path:
     """The canonical product skill sources, always beside the manifest that names them."""
-    return manifest_path().parent / "roles"
+    return manifest_path(product_manifest).parent / "roles"
 
 
 def instance_dir(value: Path | str) -> Path:
@@ -95,10 +128,32 @@ def configured_instance_path() -> Path:
     return _absolute(os.environ.get(INSTANCE_ENV) or DEFAULT_INSTANCE)
 
 
-def bin_dir() -> Path:
+def _expand_home(value: Path | str, home: Path | str | None) -> Path:
+    """A manifest path with ``~`` read as the installation's home, not the caller's.
+
+    A manifest writes ``~/shells/codex/skills`` because the product ships no absolute path. Which
+    home that is belongs to the installation being materialized: an upgrade repairing another
+    account's installation, or one running as root, would otherwise deliver every skill under the
+    invoking process's home while the units it renders name the owner's. When no home is named the
+    process's own is the right answer, which is the operator running ``role-skills sync`` by hand.
+    """
+    if home is None:
+        return Path(os.path.expanduser(str(value)))
+    text = str(value)
+    if text == "~":
+        return Path(home)
+    if text.startswith("~/"):
+        return Path(home) / text[2:]
+    # ``~other`` names a different account outright; the caller does not get to redirect that.
+    return Path(os.path.expanduser(text))
+
+
+def bin_dir(home: Path | str | None = None) -> Path:
     """The directory on ``PATH`` that a skill's command is linked into."""
     raw = os.environ.get(BIN_DIR_ENV)
-    return _absolute(raw) if raw else Path.home() / "bin"
+    if raw:
+        return _absolute(raw)
+    return _absolute(Path(home) / "bin") if home is not None else Path.home() / "bin"
 
 
 def instance_manifest_path(instance_path: Path | str | None = None) -> Path:
@@ -182,7 +237,11 @@ def load_manifest(path: Path | None = None) -> dict[str, Any]:
         raise RegistryError(f"{target}: could not be read: {exc}") from None
 
 
-def manifest_sources(instance_path: Path | str | None = None) -> list[ManifestSource]:
+def manifest_sources(
+    instance_path: Path | str | None = None,
+    *,
+    product_manifest: Path | str | None = None,
+) -> list[ManifestSource]:
     """The manifests that make up this installation's registry, product first.
 
     A missing instance manifest is not an error and not a warning: a portable installation simply
@@ -190,7 +249,7 @@ def manifest_sources(instance_path: Path | str | None = None) -> list[ManifestSo
     an installation that meant to own an overlay and has a broken one, and reading past it would
     call a damaged configuration portable.
     """
-    sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path())]
+    sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path(product_manifest))]
     overlay = instance_manifest_path(instance_path)
     if overlay.is_file():
         sources.append(ManifestSource(INSTANCE_ORIGIN, overlay))
@@ -238,14 +297,18 @@ def _within(root: Path, path: Path) -> bool:
     return path_abs == root_abs or root_abs in path_abs.parents
 
 
-def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
+def load_registry(
+    instance_path: Path | str | None = None,
+    *,
+    product_manifest: Path | str | None = None,
+) -> SkillRegistry:
     """Read every manifest and layer them in order.
 
     Roles accumulate: an instance adds skills to a product role rather than replacing the role, so
     an upgrade that ships a new product skill still delivers it. A target is replaced whole by a
     later manifest, because a target is one shell root and merging two of them means nothing.
     """
-    sources = manifest_sources(instance_path)
+    sources = manifest_sources(instance_path, product_manifest=product_manifest)
     roles: dict[str, list[tuple[str, ManifestSource]]] = {}
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = {}
     for source in sources:
@@ -282,11 +345,13 @@ def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
     return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets)
 
 
-def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str]]:
+def find_overlapping_target_roots(
+    registry: SkillRegistry, home: Path | str | None = None
+) -> list[dict[str, str]]:
     """Reject nested roots for one shell: recursive discovery mixes their namespaces."""
     errors: list[dict[str, str]] = []
     items = [
-        (name, target["shell"], Path(target["root"]).expanduser().resolve())
+        (name, target["shell"], _expand_home(target["root"], home).resolve())
         for name, (target, _) in sorted(registry.targets.items())
     ]
     for index, (left_name, left_shell, left_root) in enumerate(items):
@@ -306,7 +371,7 @@ def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str
     return errors
 
 
-def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
+def iter_expected(registry: SkillRegistry, home: Path | str | None = None) -> list[ExpectedSkill]:
     """Every skill the registry expects in a shell, with both ends of the copy checked.
 
     Names are validated when the manifests are read, so containment here is the second lock rather
@@ -315,7 +380,7 @@ def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
     """
     expected: list[ExpectedSkill] = []
     for target_name, (target, source_of_target) in sorted(registry.targets.items()):
-        root = Path(target["root"]).expanduser()
+        root = _expand_home(target["root"], home)
         for role_name in target["roles"]:
             for skill, source in registry.roles.get(role_name, []):
                 item = ExpectedSkill(
@@ -383,7 +448,9 @@ def command_script(role: str, skill: str, source: ManifestSource) -> Path | None
     return script if script.is_file() else None
 
 
-def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
+def iter_expected_commands(
+    registry: SkillRegistry, home: Path | str | None = None
+) -> list[ExpectedCommand]:
     """Every command the registry ships, keyed by the name the operator types.
 
     A command belongs to the skill, not to a shell: however many targets a skill is copied into,
@@ -391,7 +458,7 @@ def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
     same name would want the same link, and that is an operator configuration nothing can satisfy,
     so it is refused here, before an audit reads the filesystem or a sync writes to it.
     """
-    root = bin_dir()
+    root = bin_dir(home)
     by_name: dict[str, ExpectedCommand] = {}
     for role in sorted(registry.roles):
         for skill, source in registry.roles[role]:
@@ -493,9 +560,12 @@ def _write_entry_point(command: ExpectedCommand, state: dict[str, str]) -> None:
         command.source.chmod(wanted)
 
 
-def _named_manifests(instance_path: Path | str | None) -> str:
+def _named_manifests(
+    instance_path: Path | str | None,
+    product_manifest: Path | str | None = None,
+) -> str:
     """Every manifest a refusal was decided from — an overlay can be the file at fault."""
-    product = manifest_path()
+    product = manifest_path(product_manifest)
     overlay = instance_manifest_path(instance_path)
     return f"{product} + {overlay}" if overlay.is_file() else str(product)
 
@@ -558,10 +628,12 @@ def audit(
     target_filter: set[str] | None = None,
     *,
     instance_path: Path | str | None = None,
+    product_manifest: Path | str | None = None,
+    home: Path | str | None = None,
 ) -> dict[str, Any]:
-    registry = load_registry(instance_path)
-    config_errors = find_overlapping_target_roots(registry)
-    expected = iter_expected(registry)
+    registry = load_registry(instance_path, product_manifest=product_manifest)
+    config_errors = find_overlapping_target_roots(registry, home)
+    expected = iter_expected(registry, home)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
     destination_conflicts = find_conflicting_destinations(expected)
@@ -608,7 +680,7 @@ def audit(
     # A filtered audit is about named shell targets; commands do not belong to one.
     entry_points = [] if target_filter else [
         _entry_point_state(command, registry.owned_roots)
-        for command in iter_expected_commands(registry)
+        for command in iter_expected_commands(registry, home)
     ]
     entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
 
@@ -616,7 +688,7 @@ def audit(
     ok = ok and not entry_point_problems and not destination_conflicts
     return {
         "ok": ok,
-        "manifest": str(manifest_path()),
+        "manifest": str(manifest_path(product_manifest)),
         "manifests": registry.describe_sources(),
         "targets": by_target,
         "missing": missing,
@@ -628,10 +700,53 @@ def audit(
     }
 
 
+def unmaterializable(
+    registry: SkillRegistry,
+    home: Path | str | None = None,
+    target_filter: set[str] | None = None,
+) -> list[str]:
+    """Every reason this registry cannot be delivered as written, decided without writing.
+
+    Nothing here reads a destination's contents, so the answer is the same before and after a
+    sync: these are the registry's own faults, not work left to do. A caller that has to refuse
+    before its first write — `secretary upgrade` writes the head snapshot two steps ahead of the
+    skills — asks this, and `sync` asks the same question so the two cannot come to different
+    conclusions about the same manifest.
+    """
+    problems = [
+        f"overlapping skill target roots: {error}"
+        for error in find_overlapping_target_roots(registry, home)
+    ]
+    expected = iter_expected(registry, home)
+    if target_filter:
+        expected = [item for item in expected if item.target in target_filter]
+    problems += [
+        f"two skills claim the skill directory {conflict['dest']}: "
+        f"{conflict['left_skill']} from {conflict['left_manifest']} and "
+        f"{conflict['right_skill']} from {conflict['right_manifest']}"
+        for conflict in find_conflicting_destinations(expected)
+    ]
+    problems += [
+        f"missing canonical skill: {item.source}/SKILL.md (declared by {item.manifest})"
+        for item in expected
+        if not (item.source / "SKILL.md").is_file()
+    ]
+    commands = [] if target_filter else iter_expected_commands(registry, home)
+    problems += [
+        f"command entry point {state['command']} from {state['manifest']} "
+        f"cannot be materialized: {state['reason']}"
+        for state in (_entry_point_state(command, registry.owned_roots) for command in commands)
+        if state["status"] == "conflict"
+    ]
+    return problems
+
+
 def sync(
     target_filter: set[str] | None = None,
     *,
     instance_path: Path | str | None = None,
+    product_manifest: Path | str | None = None,
+    home: Path | str | None = None,
 ) -> dict[str, Any]:
     """Deliver every expected skill and entry point, or refuse before writing anything.
 
@@ -639,38 +754,15 @@ def sync(
     registry that is half applied is worse than one that was not applied at all, because the next
     audit cannot tell the two apart.
     """
-    registry = load_registry(instance_path)
-    config_errors = find_overlapping_target_roots(registry)
-    if config_errors:
-        raise RegistryError(f"overlapping skill target roots: {config_errors}")
-    expected = iter_expected(registry)
+    registry = load_registry(instance_path, product_manifest=product_manifest)
+    problems = unmaterializable(registry, home, target_filter)
+    if problems:
+        raise RegistryError(problems[0])
+    expected = iter_expected(registry, home)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
-
-    conflicts = find_conflicting_destinations(expected)
-    if conflicts:
-        conflict = conflicts[0]
-        raise RegistryError(
-            f"two skills claim the skill directory {conflict['dest']}: "
-            f"{conflict['left_skill']} from {conflict['left_manifest']} and "
-            f"{conflict['right_skill']} from {conflict['right_manifest']}"
-        )
-
-    for item in expected:
-        if not (item.source / "SKILL.md").is_file():
-            raise FileNotFoundError(
-                f"missing canonical skill: {item.source}/SKILL.md "
-                f"(declared by {item.manifest})"
-            )
-
-    commands = [] if target_filter else iter_expected_commands(registry)
+    commands = [] if target_filter else iter_expected_commands(registry, home)
     states = [_entry_point_state(command, registry.owned_roots) for command in commands]
-    for state in states:
-        if state["status"] == "conflict":
-            raise RegistryError(
-                f"command entry point {state['command']} from {state['manifest']} "
-                f"cannot be materialized: {state['reason']}"
-            )
 
     copied: list[dict[str, str]] = []
     for item in expected:
@@ -706,7 +798,12 @@ def sync(
         "ok": True,
         "copied": copied,
         "linked": linked,
-        "after": audit(target_filter, instance_path=instance_path),
+        "after": audit(
+            target_filter,
+            instance_path=instance_path,
+            product_manifest=product_manifest,
+            home=home,
+        ),
     }
 
 
@@ -765,16 +862,18 @@ def parse_targets(value: str | None) -> set[str] | None:
 def run_role_skills(args) -> int:
     targets = parse_targets(args.targets)
     instance = getattr(args, "instance", None)
+    product_root = getattr(args, "product_root", None)
+    product = product_manifest_path(product_root) if product_root else None
     if args.role_skills_command == "audit":
         try:
-            result = audit(targets, instance_path=instance)
+            result = audit(targets, instance_path=instance, product_manifest=product)
         except (OSError, ValueError) as exc:
             print(f"secretary role-skills audit: {exc}")
             return 2
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else render_markdown(result))
         return 1 if args.check and not result["ok"] else 0
     try:
-        result = sync(targets, instance_path=instance)
+        result = sync(targets, instance_path=instance, product_manifest=product)
     except (OSError, ValueError) as exc:
         print(f"secretary role-skills sync: {exc}")
         return 2
@@ -790,6 +889,11 @@ def _add_common_arguments(parser, name: str) -> None:
         default=os.environ.get(INSTANCE_ENV, DEFAULT_INSTANCE),
         help="instance dir or instance.yaml whose skills/manifest.toml is layered over the product "
         f"manifest (default: {INSTANCE_ENV} or {DEFAULT_INSTANCE})",
+    )
+    parser.add_argument(
+        "--product-root",
+        help="product checkout whose skills/manifest.toml is the product layer "
+        f"(default: {MANIFEST_ENV}, else the configured product checkout)",
     )
     if name == "audit":
         parser.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")

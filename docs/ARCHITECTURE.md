@@ -28,6 +28,16 @@ editing the canon in a product working tree neither changes installation behavio
 cost is that a change reaches the installation only through `upgrade`, and the gap is visible in
 `secretary status` under `installation.head_registry`.
 
+No path in the product names a user or a checkout. An installation is named by `--instance` or
+`SECRETARY_INSTANCE`, the checkout to install by `--product-root`, and anything neither of them
+covers hangs off a home: the shipped skill target roots, the shell entry points, the role
+worktrees, the runtime env file. Which home is the one question a materializer has to answer before
+it writes, and the answer is the account that owns the installation — the owner of the instance
+directory, or `--runtime-user`. That is the same account the units are rendered for, so a repair
+run as root materializes the paths those units name rather than filling `/root`. The full order is
+in [Operations](OPERATIONS.md#path-precedence). So a checkout is installable by any account, and one
+that has been pointed at a particular checkout or installation stays pointed there.
+
 `state/` in the instance repository holds the normalised recovery canon: board, runs, memory facts
 and knowledge documents. The data directory holds task audit, dispatcher state, derived
 exports and indexes, search logs, raw dumps, transcripts and artifacts. The SQLite and vector index,

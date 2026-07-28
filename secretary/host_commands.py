@@ -21,7 +21,7 @@ from secretary.host import (
     plan_input_errors,
     strict_manifest as _strict_manifest,
 )
-from secretary.host_apply import resolve_packaged
+from secretary.host_apply import resolve_installed_packaged
 
 
 def run_reconcile_plan(args) -> int:
@@ -29,7 +29,7 @@ def run_reconcile_plan(args) -> int:
     if not report.ok:
         print("secretary reconcile plan: invalid instance config")
         return 2
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
         print("secretary reconcile plan: " + errors[0])
@@ -83,7 +83,7 @@ def run_reconcile_adopt(args) -> int:
     if not report.ok:
         print("secretary reconcile adopt: invalid instance config")
         return 2
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
         print("secretary reconcile adopt: " + errors[0])
@@ -210,7 +210,7 @@ def run_reconcile_apply(args) -> int:
     if not report.ok:
         print("secretary reconcile apply: invalid instance config")
         return 2
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     expected = build_expectations(report.bindings, report.host)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
     collected = source.collect(expected)

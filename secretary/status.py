@@ -18,7 +18,7 @@ from secretary.dispatcher_review import command_terminal_status
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HostError
 from secretary.host import CollectResult, FixtureHostSource, LiveHostSource, build_doctor_expectations
-from secretary.host_apply import resolve_packaged
+from secretary.host_apply import resolve_installed_packaged
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import KanboardClient, TaskError
@@ -30,10 +30,11 @@ STATUS_SCHEMA_VERSION = 1
 def collect_status(report, *, host_fixture: str | None = None, offline: bool = False) -> dict[str, Any]:
     """Return a stable, non-mutating snapshot for one validated instance."""
     data_dir = Path(report.instance["data_dir"]).expanduser()
+    instance_dir = report.instance_path.parent
     production = _read_object(data_dir / "dispatcher" / "production-state.json")
     expected = build_doctor_expectations(
         report.instance, report.bindings,
-        packaged=resolve_packaged(report.instance, instance_path=report.instance_path.parent),
+        packaged=resolve_installed_packaged(report.instance, instance_path=instance_dir),
     )
     if offline:
         collected = CollectResult(expected_to_empty_inventory())

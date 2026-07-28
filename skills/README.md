@@ -28,6 +28,14 @@ skill, add it under `skills/roles/<role>/` and to the manifest. Do not duplicate
 shells. Several target groups for one shell may share a root, but not nested roots: recursive skill
 discovery mixes the namespaces and produces wrong locators.
 
+Target roots are written home-relative (`~/...`) and expand against the home of whoever runs the
+sync, because the product does not know which account installs it. Sources do not move with the
+home: a skill is always read from the `roles/` tree beside the manifest that declared it.
+
+`--product-root <checkout>` reads the manifest of another checkout instead of the one this command
+was installed from. `secretary upgrade --product-root` passes it for you, so an upgrade delivers the
+skills of the version it is installing.
+
 ## The installation overlay
 
 An installation may own skills the product does not ship: a bridge to one operator's accounts, a

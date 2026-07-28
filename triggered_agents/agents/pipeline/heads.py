@@ -81,7 +81,7 @@ def registry_path() -> Path:
 # the health probe is a plain subprocess rather than an Orca terminal. Env-overridable so tests can
 # use a throwaway home.
 CODEX_HOME = os.environ.get(
-    "TA_CODEX_HOME", "/home/dev/.config/orca/codex-runtime-home/home"
+    "TA_CODEX_HOME", str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 )
 
 # Last-resort profile ids, used only when the selected registry routes a role nowhere. Which head a

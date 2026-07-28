@@ -46,16 +46,19 @@ from secretary.host_apply import (
     UnitInstaller,
     apply_host,
     resolve_packaged,
+    resolve_runtime_owner,
 )
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
+    canonical_heads,
     canonical_path,
     materialize_snapshot,
     record_source,
     snapshot_path,
     source_path,
 )
+from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
 # A pull that touches any of these can change what the long-running memory
@@ -95,7 +98,12 @@ class UpgradeContext:
     changed_paths: tuple[str, ...] = ()
     code_changed: bool = False
     unit_changed: bool = False
+    # The account that owns the selected installation and the home its paths hang off. Everything
+    # home-relative an upgrade materializes — skills, command entry points, role worktrees, the
+    # workspaces an automation is registered with — resolves against this home rather than the
+    # invoking process's, so a repair run as root writes what the rendered units then name.
     runtime_user: str | None = None
+    runtime_home: Path | None = None
 
 
 @dataclass
@@ -212,19 +220,74 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     return StepResult("dependencies", "changed", "reinstalled the product into .venv")
 
 
+def _role_skills_manifest(context: UpgradeContext) -> Path:
+    """The skill registry of the checkout being installed, which is not always the running one."""
+    return role_skills.product_manifest_path(context.product_root)
+
+
+def step_registries(context: UpgradeContext) -> StepResult:
+    """Read every registry this upgrade materializes from, before anything is written.
+
+    The steps that follow write in order: the head snapshot, then role worktrees, then skills and
+    their entry points, then the host. Each of them reads operator-written configuration that can
+    be malformed, and finding that out at the third write leaves a host half-moved onto a version
+    it never finished installing. So both registries are parsed here, where a refusal costs
+    nothing, and every way they can fail arrives as one message naming the file to open.
+
+    Parsing is not enough for the skill registry: a manifest whose declared ``SKILL.md`` is absent,
+    whose target roots overlap, or whose entry point collides with a file this registry does not
+    own parses cleanly and is refused by `sync` — after the head snapshot has been written. The
+    whole plan is therefore decided here, against the same manifests and the same home the later
+    steps use, so every one of those refusals lands before the first write.
+    """
+    manifest = _role_skills_manifest(context)
+    try:
+        registry = role_skills.load_registry(context.instance_path, product_manifest=manifest)
+        problems = role_skills.unmaterializable(registry, context.runtime_home)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return StepResult("registries", "failed", f"skill registry: {exc}")
+    if problems:
+        return StepResult(
+            "registries",
+            "failed",
+            f"skill registry: {problems[0]}",
+            {"problems": len(problems)},
+        )
+    try:
+        canonical, _ = canonical_path(context.product_root, context.instance_path)
+        canonical_heads(context.product_root, context.instance_path)
+    except HeadRegistryConfigError as exc:
+        return StepResult("registries", "failed", str(exc))
+    sources = ", ".join(str(source.path) for source in registry.sources)
+    return StepResult("registries", "unchanged", f"{sources} and {canonical} are readable")
+
+
 def step_role_skills(context: UpgradeContext) -> StepResult:
-    before = role_skills.audit()
+    """Materialize the product skills of the checkout being installed, plus this installation's."""
+    manifest = _role_skills_manifest(context)
+    try:
+        before = role_skills.audit(
+            instance_path=context.instance_path,
+            product_manifest=manifest,
+            home=context.runtime_home,
+        )
+    except (OSError, ValueError) as exc:
+        return StepResult("role-skills", "failed", str(exc))
     if before["ok"]:
         return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
-    pending = len(before["missing"]) + len(before["drift"])
+    pending = len(before["missing"]) + len(before["drift"]) + len(before["entry_points"])
     if before["config_errors"] or before["source_missing"]:
         return StepResult("role-skills", "failed", "manifest is not usable: overlapping roots or a missing source skill")
     if context.dry_run:
         return StepResult("role-skills", "changed", f"would sync {pending} skill copies")
     try:
-        after = role_skills.sync()
+        after = role_skills.sync(
+            instance_path=context.instance_path,
+            product_manifest=manifest,
+            home=context.runtime_home,
+        )
     except (OSError, ValueError) as exc:
-        return StepResult("role-skills", "failed", exc.__class__.__name__)
+        return StepResult("role-skills", "failed", str(exc))
     if not after["after"]["ok"]:
         return StepResult("role-skills", "failed", "sync ran but the audit is still red")
     return StepResult("role-skills", "changed", f"synced {pending} skill copies")
@@ -262,9 +325,9 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
     return StepResult("head-registry", "changed", f"{verb} {what}")
 
 
-def desired_role_worktrees(product_root: Path) -> list[Path]:
+def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list[Path]:
     """Every derived role worktree shipped by this product, present or absent."""
-    root = workspaces_root() / "secretary"
+    root = workspaces_root(home) / "secretary"
     agents = product_root / "triggered_agents" / "agents"
     try:
         names = sorted(entry.name for entry in agents.iterdir() if (entry / "automation.toml").is_file())
@@ -273,13 +336,13 @@ def desired_role_worktrees(product_root: Path) -> list[Path]:
     return [root / name for name in names]
 
 
-def role_worktrees(product_root: Path) -> list[Path]:
+def role_worktrees(product_root: Path, home: Path | None = None) -> list[Path]:
     """Compatibility view of the role worktrees which already exist."""
-    return [path for path in desired_role_worktrees(product_root) if (path / ".git").exists()]
+    return [path for path in desired_role_worktrees(product_root, home) if (path / ".git").exists()]
 
 
 def step_worktrees(context: UpgradeContext) -> StepResult:
-    worktrees = desired_role_worktrees(context.product_root)
+    worktrees = desired_role_worktrees(context.product_root, context.runtime_home)
     if not worktrees:
         return StepResult("role-worktrees", "skipped", "the product ships no role worktrees")
     created: list[str] = []
@@ -391,7 +454,7 @@ def _memory_unit_prefix(report: Any) -> str:
 
 def step_automations(context: UpgradeContext) -> StepResult:
     try:
-        specs = load_specs(context.product_root)
+        specs = load_specs(context.product_root, home=context.runtime_home)
         changes, applied = apply_automations(specs, context.automations, dry_run=context.dry_run)
     except AutomationError as exc:
         return StepResult("automations", "failed", str(exc))
@@ -435,7 +498,14 @@ def step_verify(context: UpgradeContext) -> StepResult:
         return StepResult("verify", "failed", f"host is still not reconciled: {result.detail}")
     if result.status == "changed":
         return StepResult("verify", "failed", f"reconcile is not idempotent: {result.detail}")
-    audit = role_skills.audit()
+    try:
+        audit = role_skills.audit(
+            instance_path=context.instance_path,
+            product_manifest=_role_skills_manifest(context),
+            home=context.runtime_home,
+        )
+    except (OSError, ValueError) as exc:
+        return StepResult("verify", "failed", str(exc))
     if not audit["ok"]:
         return StepResult("verify", "failed", "role skills are still out of sync")
     try:
@@ -445,8 +515,13 @@ def step_verify(context: UpgradeContext) -> StepResult:
     return StepResult("verify", "unchanged", "host reconciled and role skills in sync")
 
 
+# `registries` runs directly after the pull and before every step that writes. `dependencies` is
+# one of those: a checkout with a `.venv` and a moved dependency manifest gets `pip install -e`,
+# which mutates the checkout being installed. Rejecting a malformed manifest, overlay or head canon
+# after that has already left a host part-way onto a version it never finished installing.
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
+    step_registries,
     step_dependencies,
     step_head_registry,
     step_worktrees,
@@ -468,8 +543,26 @@ def run_steps(context: UpgradeContext, steps=STEPS) -> UpgradeResult:
     return result
 
 
-def default_product_root() -> Path:
+def running_product_root() -> Path:
+    """The checkout this module was imported from.
+
+    For reading what this process itself ships, which is what `doctor` compares a live host
+    against. Never for deciding what to install: that is `default_product_root`, and the two are
+    different paths exactly when an alternate checkout is running the command.
+    """
     return Path(__file__).resolve().parents[1]
+
+
+def default_product_root() -> Path:
+    """The checkout an install or upgrade materializes when nothing names one.
+
+    The configured one, or ``~/secretary`` — never the checkout the running module happens to sit
+    in. A candidate checkout is a normal place to run ``secretary upgrade`` from, and installing
+    whatever executed the command would make the caller's working directory decide which product
+    version a host ends up on. ``--product-root`` and ``TA_SECRETARY_REPO`` still win, in that
+    order.
+    """
+    return configured_product_root()
 
 
 def run_upgrade(args) -> int:
@@ -480,11 +573,19 @@ def run_upgrade(args) -> int:
             print(f"  {error}")
         return 2
     product_root = Path(args.product_root).expanduser() if args.product_root else default_product_root()
+    # `validate_instance` accepts either a checkout or instance.yaml; the owner is a property of
+    # the checkout. Resolving it here rather than inside the host step is what makes every
+    # home-relative path an upgrade materializes agree with the units it renders.
+    instance_path = report.instance_path.parent
+    try:
+        runtime_user, runtime_home = resolve_runtime_owner(
+            instance_path, getattr(args, "runtime_user", None)
+        )
+    except ValueError as exc:
+        print(f"secretary upgrade: {exc}")
+        return 2
     context = UpgradeContext(
-        # `validate_instance` accepts either a checkout or instance.yaml. Steps
-        # operate on the checkout, whose path is the parent of the canonical
-        # config file returned in the report.
-        instance_path=report.instance_path.parent,
+        instance_path=instance_path,
         product_root=product_root,
         base_branch=args.base_branch,
         dry_run=args.dry_run,
@@ -494,6 +595,8 @@ def run_upgrade(args) -> int:
         host_fixture=Path(args.host_fixture) if args.host_fixture else None,
         pull=not args.no_pull,
         report=report,
+        runtime_user=runtime_user,
+        runtime_home=runtime_home,
     )
     result = run_steps(context)
     if args.json:
@@ -523,7 +626,15 @@ def add_upgrade_command(subparsers) -> None:
     upgrade.add_argument("--dry-run", action="store_true", help="decide every step but write nothing")
     upgrade.add_argument("--no-pull", action="store_true", help="re-materialize without moving the checkout")
     upgrade.add_argument("--base-branch", default="main")
-    upgrade.add_argument("--product-root", help="product checkout to upgrade (defaults to the running one)")
+    upgrade.add_argument(
+        "--product-root",
+        help="product checkout to upgrade (defaults to TA_SECRETARY_REPO, else ~/secretary)",
+    )
+    upgrade.add_argument(
+        "--runtime-user",
+        help="account this installation belongs to, whose home every home-relative path is "
+        "materialized under (default: the owner of the instance checkout)",
+    )
     upgrade.add_argument("--host-fixture", metavar="DIR", help=argparse.SUPPRESS)
     upgrade.add_argument("--json", action="store_true", help="emit the step report as JSON")
     upgrade.set_defaults(handler=run_upgrade)

@@ -9,8 +9,10 @@ import shlex
 import sys
 from pathlib import Path
 
+from triggered_agents.runtime.paths import default_instance_path
+
 RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
-RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
+RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 RUNTIME_ENV = Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
 
 
@@ -32,7 +34,12 @@ NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO"
 # head), and runtime.env is a file inside an installation. Letting its copy of the name win lets a
 # stale or copied line under one instance route a role to another one: a unit rendered for a
 # non-default instance launched heads that came up on ~/secretary-instance (secretary-859 review).
-UNIT_BOUND_ENV = ("SECRETARY_INSTANCE",)
+#
+# The checkout is bound the same way and for the same reason. An upgrade from an alternate product
+# root renders the dispatcher unit against that root; a head it launches has to import the product
+# the installation was moved onto, not whatever ~/secretary still is or what a runtime.env written
+# before the move says.
+UNIT_BOUND_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),

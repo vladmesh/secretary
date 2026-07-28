@@ -152,6 +152,11 @@ from secretary.tasks import (
     TaskWriter,
     durability_dirt,
 )
+from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
+
+# The prompts below are read and run by a head in its own shell, so the checkout fallback stays a
+# shell expression rather than a path this process resolved.
+_PYTHONPATH_PREFIX = pythonpath_prefix()
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -1569,7 +1574,7 @@ class CommandHostRuntime:
             "",
             "Report through the secretary task protocol only:",
             *_body_file_instructions(body_file),
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -1598,8 +1603,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
-            f'PYTHONPATH="${{TA_SECRETARY_REPO:-/home/dev/secretary}}${{PYTHONPATH:+:$PYTHONPATH}}" python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
             "",
         ])
 

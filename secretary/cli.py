@@ -40,7 +40,7 @@ from secretary.host import (
     plan_changes,
 )
 from secretary.host_commands import add_reconcile_subcommands
-from secretary.host_apply import resolve_packaged
+from secretary.host_apply import resolve_installed_packaged
 from secretary.gate import run_gate
 from secretary.knowledge_write import (
     KnowledgeError,
@@ -48,7 +48,7 @@ from secretary.knowledge_write import (
     list_knowledge_documents,
     write_knowledge_document,
 )
-from secretary.memory_journal import verify_memory_journal
+from secretary.memory_journal import PANELMEM_KB, verify_memory_journal
 from secretary.memory_write import (
     MemoryExportPublishError,
     MemoryLockError,
@@ -220,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_memory_command.add_argument("--instance", required=True)
     export_memory_command.add_argument("--data-dir")
-    export_memory_command.add_argument("--source-dir", default="/home/dev/panelmem-kb")
+    export_memory_command.add_argument("--source-dir", default=str(PANELMEM_KB))
     export_memory_command.set_defaults(handler=run_export_memory)
 
     export_runs_command = data_subcommands.add_parser(
@@ -306,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     project_add.set_defaults(handler=run_project_add)
     provision_start = project_subcommands.add_parser("provision-start")
@@ -314,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision_start.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     provision_start.set_defaults(handler=run_project_provision_start)
     provision_apply = project_subcommands.add_parser("provision-apply")
@@ -323,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision_apply.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     provision_apply.set_defaults(handler=run_project_provision_apply)
     gate = project_subcommands.add_parser("gate")
@@ -371,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_import.add_argument("--instance", required=True)
     memory_import.add_argument("--data-dir")
-    memory_import.add_argument("--from", dest="source_dir", default="/home/dev/panelmem-kb")
+    memory_import.add_argument("--from", dest="source_dir", default=str(PANELMEM_KB))
     memory_import.set_defaults(handler=run_memory_import)
 
     memory_verify = memory_subcommands.add_parser(
@@ -846,7 +846,7 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
         return []
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
     prefix = prefix if isinstance(prefix, str) else ""
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     desired = build_plan(report.instance, report.bindings, packaged=packaged)
     managed = load_managed_manifest(data_dir / "host-managed.json")
     changes = plan_changes(desired, collected_host.inventory, managed, prefix)
@@ -1309,7 +1309,7 @@ def print_host_inventory(
 
 def collect_host_inventory(report, args: argparse.Namespace):
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
     collected = source.collect(expected)
     return expected, collected, inventory(expected, collected.inventory)
@@ -1393,9 +1393,11 @@ def print_background_automations(*, inspect: bool) -> None:
         load_specs,
         plan_automations,
     )
-    from secretary.upgrade import default_product_root
+    # The automations this process ships, not the ones a configured checkout would: doctor
+    # reports on the code it is running.
+    from secretary.upgrade import running_product_root
 
-    specs = load_specs(default_product_root())
+    specs = load_specs(running_product_root())
     if not specs:
         return
     print("")

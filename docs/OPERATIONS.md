@@ -881,6 +881,7 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | step | what it does |
 | --- | --- |
 | `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
+| `registries` | read the selected checkout's skill manifest, this installation's optional overlay and the head canon, and decide the whole skill delivery; a registry that cannot be read or cannot be delivered stops the run here, before the first write |
 | `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
 | `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, and the checkout and revision it came from |
 | `role-skills` | `role_skills sync` into the shells' skill directories |
@@ -890,7 +891,84 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | `memory` | restart the memory service if its code, dependencies or unit changed |
 | `verify` | a repeat dry run: the second rollout must be a no-op |
 
-Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--json`.
+Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--runtime-user`,
+`--json`.
+
+### Upgrading from another checkout
+
+`--product-root` names the checkout to install. Every step then reads that checkout and nothing
+else: its `skills/manifest.toml` and `skills/roles/` tree, its `packaging/systemd` templates, its
+`triggered_agents/agents/*/automation.toml` specs, the role worktrees it declares, and its head
+canon when the installation owns none. The checkout that happens to be running the `secretary`
+module has no say, which is what lets one installation be moved onto a candidate version, and what
+lets a second checkout install a host at all.
+
+`secretary role-skills audit|sync --product-root <checkout>` takes the same argument on its own, for
+delivering skills without running a whole upgrade.
+
+Without `--product-root`, an install or upgrade materializes the configured checkout —
+`TA_SECRETARY_REPO`, else `$HOME/secretary` — and not the checkout the command was typed in. A
+candidate checkout is the normal place to run the upgrade from, so the running module deciding
+would make the working directory pick the version a host ends up on. `secretary install` and
+`secretary recover` select the same way and check the result before they use it: a path with no
+product in it is refused by name, rather than surfacing later as a missing file inside a directory
+nobody meant to install from. A first install out of a checkout that is not `~/secretary` therefore
+names it with `--product-root`.
+
+The checkout an upgrade selects is written into the dispatcher unit as `TA_SECRETARY_REPO`, and the
+dispatcher renders it into every head it launches. Orca creates a head's terminal, so it inherits
+nothing from the unit and a runtime.env line cannot take the name back: after an upgrade from a
+candidate checkout, a worker, reviewer or observer imports the product the installation was moved
+onto rather than whatever `$HOME/secretary` still points at.
+
+The `registries` step reads both registries before the first materializing write, which is why it
+runs directly after the pull and ahead of `dependencies`: a `pip install -e` into the checkout's
+`.venv` is already a write into the version being installed. A product manifest or instance overlay
+that is malformed, unreadable, a directory or a dangling link, and a `heads/heads.toml` in any of
+the same states, stops the run there and names the file. So does a manifest that parses and still
+cannot be delivered: a declared skill with no `SKILL.md` beside its manifest, two skills claiming
+one skill directory, overlapping target roots, or a command entry point whose path in `bin` is
+occupied by something this registry does not own. No dependency install, head snapshot, pin, role
+worktree, skill copy, command link or host resource is written on that path, so a bad hand edit
+leaves the installation exactly as it was.
+
+### Path precedence
+
+The product ships no absolute path of its own. Each of these resolves in order, first hit wins:
+
+| what | order |
+| --- | --- |
+| the installation | `--instance` / `SECRETARY_INSTANCE`, else `~/secretary-instance` |
+| the product checkout a head imports | `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the checkout an install or upgrade materializes | `--product-root`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the product skill manifest | `--product-root`, else `SECRETARY_ROLE_SKILLS_MANIFEST`, else the configured checkout's |
+| the checkout a launcher starts a role out of | `TA_RUNTIME_PYTHONPATH`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the packaged units a plan or a doctor run compares against | the checkout named by the command, else the one `heads/source.yaml` recorded, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the account an upgrade materializes for | `--runtime-user`, else the owner of the instance directory |
+| a skill's shell root | the manifest's `root`, expanded against the installation owner's home |
+| a skill's command link | `SECRETARY_BIN_DIR`, else `<owner home>/bin` |
+| a role worktree and an automation workspace | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
+| the role runtime env file | `TA_RUNTIME_ENV_FILE` / `SECRETARY_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
+| the head registry a tick reads | `TA_HEADS_REGISTRY`, else `<instance>/heads/heads.yaml`, else the running checkout's default |
+
+`~` in a shipped manifest and `$HOME` in a shipped entry point are the *installation owner's* home.
+An upgrade resolves that account once, from the owner of the instance directory or from
+`--runtime-user`, and materializes skills, command links, role worktrees and automation workspaces
+under it. It is the same account the units are rendered for, so a repair run as root writes the
+paths those units then name instead of filling `/root`. A skill source is the opposite case: it
+always resolves beside the manifest that declared it, because a source is a file in a checkout
+rather than something the operator owns.
+
+`secretary role-skills sync` run by hand has no installation owner to resolve and uses the calling
+user's home, which is that operator's own installation.
+
+None of these fall back to the checkout the running `secretary` module was imported from. That
+applies to the launchers as well: `scripts/secretary-start.sh`, `scripts/secretary-agent-gate.sh`
+and the role-env wrapper the dispatcher builds all read `TA_RUNTIME_PYTHONPATH` first and the
+configured checkout second, and the packaged services carry both names bound to the checkout the
+upgrade installed. An offline `secretary doctor` compares the host against the units of the
+checkout recorded in `heads/source.yaml`, so it reports the installation rather than the copy of
+the code the operator happened to run it from.
 
 ### The installation's head registry
 

@@ -31,7 +31,7 @@ from secretary import state_repo
 from secretary.state_repo import MEMORY_PATHSPEC, StateRepoError
 
 
-PANELMEM_KB = Path("/home/dev/panelmem-kb")
+PANELMEM_KB = Path.home() / "panelmem-kb"
 MEMORY_IMPORT_MARKER = "Op: import"
 MEMORY_LOCK_NAME = ".write.lock"
 

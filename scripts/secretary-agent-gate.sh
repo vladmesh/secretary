@@ -28,8 +28,13 @@
 # resources red with FileNotFoundError even though the CLIs are available in the normal dev shell.
 set -u
 
-export PATH="/home/dev/.local/bin:/home/dev/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-/home/dev/secretary}${PYTHONPATH:+:$PYTHONPATH}"
+export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+# Which checkout the role runs out of: the launcher's explicit TA_RUNTIME_PYTHONPATH, else the
+# product checkout this installation is configured with, else the home default. An installation
+# materialized from an alternate checkout sets TA_SECRETARY_REPO in the unit it renders, and
+# skipping that name here would start the role out of ~/secretary — a checkout the operator may
+# never have upgraded, or may not have at all.
+export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}${PYTHONPATH:+:$PYTHONPATH}"
 
 agent="${1:?usage: ta-gate.sh <agent> [variant]}"
 variant="${2:-}"

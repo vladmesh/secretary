@@ -1,3 +1,13 @@
+# The portable role-skill registry: the roles and skills every installation gets, delivered into
+# the shell roots below by `secretary role-skills sync`.
+#
+# An installation may own a second manifest at `<instance>/skills/manifest.toml` whose skills sit
+# in the `roles/` tree beside it; those entries are layered over these (secretary/role_skills.py).
+# Anything that only makes sense on one host belongs there, not here.
+#
+# Target roots are written home-relative on purpose: the product does not know which user runs it,
+# and a root is expanded against the home of the installation the sync runs for.
+
 [roles.secretary]
 skills = [
   "open-sprint",
@@ -29,32 +39,32 @@ skills = ["observe-sprint"]
 
 [targets.claude-secretary-global]
 shell = "claude"
-root = "/home/dev/.claude/skills"
+root = "~/.claude/skills"
 roles = ["secretary"]
 
 [targets.codex-orca-secretary]
 shell = "codex"
-root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
+root = "~/.config/orca/codex-runtime-home/home/skills"
 roles = ["secretary"]
 
 [targets.hermes-secretary]
 shell = "hermes"
-root = "/home/dev/.hermes/skills/secretary"
+root = "~/.hermes/skills/secretary"
 roles = ["secretary"]
 
 [targets.claude-secretary-curator]
 shell = "claude"
-root = "/home/dev/orca/workspaces/secretary/curator/.claude/skills"
+root = "~/orca/workspaces/secretary/curator/.claude/skills"
 roles = ["curator"]
 
 [targets.claude-secretary-retro]
 shell = "claude"
-root = "/home/dev/orca/workspaces/secretary/retro/.claude/skills"
+root = "~/orca/workspaces/secretary/retro/.claude/skills"
 roles = ["retro"]
 
 [targets.claude-secretary-steward]
 shell = "claude"
-root = "/home/dev/orca/workspaces/secretary/steward/.claude/skills"
+root = "~/orca/workspaces/secretary/steward/.claude/skills"
 roles = ["steward"]
 
 [targets.claude-secretary-observer]
@@ -62,15 +72,15 @@ shell = "claude"
 # The observer's workspace is created per sprint, so its skill cannot be delivered into a fixed
 # workspace the way curator, retro and steward are. It goes to the shell-wide root instead, which
 # is where a claude observer head will look for it whatever sprint it comes up on.
-root = "/home/dev/.claude/skills"
+root = "~/.claude/skills"
 roles = ["observer"]
 
 [targets.codex-secretary-roles]
 shell = "codex"
-root = "/home/dev/.config/orca/codex-runtime-home/home/skills"
+root = "~/.config/orca/codex-runtime-home/home/skills"
 roles = ["curator", "retro", "steward", "observer"]
 
 [targets.hermes-secretary-roles]
 shell = "hermes"
-root = "/home/dev/.hermes/skills/secretary-roles"
+root = "~/.hermes/skills/secretary-roles"
 roles = ["curator", "retro", "steward"]

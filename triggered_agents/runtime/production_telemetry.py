@@ -39,7 +39,9 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_INSTANCE = Path("/home/dev/secretary-instance")
+from triggered_agents.runtime.paths import default_instance_path
+
+DEFAULT_INSTANCE = default_instance_path()
 
 
 def _instance_from_runtime_env() -> Path | None:
@@ -49,7 +51,7 @@ def _instance_from_runtime_env() -> Path | None:
     same {{SECRETARY_INSTANCE_PATH}} the dispatcher unit is given), and role_env carries that name
     through into the agent process. So on an installation whose instance is not the default one,
     a role that was never handed SECRETARY_INSTANCE still resolves the instance the dispatcher
-    runs against instead of silently reading /home/dev's production-state.json (secretary-833
+    runs against instead of silently reading the home default's production-state.json (secretary-833
     review, round 2). The units also set SECRETARY_INSTANCE outright; this keeps a host whose
     units predate that rendering honest too.
     """

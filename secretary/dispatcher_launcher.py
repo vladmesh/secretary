@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from secretary.role_env import RUNTIME_ENV_FILE_ENV, UNIT_BOUND_ENV, RoleEnvError, runtime_env
+from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 
 # What a launched head has to be told about the installation it belongs to. The env file name
 # first: everything else about the head's runtime comes out of that file.
 LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
 
-CODEX_HOME_DEFAULT = "/home/dev/.config/orca/codex-runtime-home/home"
+CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
@@ -441,7 +442,7 @@ def launch_binding() -> list[str]:
     A head does not start as a child of the dispatcher: Orca creates the terminal, so nothing the
     dispatcher's unit exported is guaranteed to be in the environment `role_env exec` then runs
     in. Without these, a dispatcher rendered for a non-default instance launches heads that read
-    `/home/dev/secretary-instance/runtime.env` and route off that installation's heads. Rendering
+    the home default's `runtime.env` and route off that installation's heads. Rendering
     the names into the command is what binds them; the `UNIT_BOUND_ENV` rule inside `runtime_env`
     then keeps the file from taking the instance back.
 
@@ -457,10 +458,9 @@ def launch_binding() -> list[str]:
 
 
 def wrap_role_shell_command(role: str, command: str) -> str:
-    py_path = "\"${TA_SECRETARY_REPO:-/home/dev/secretary}${PYTHONPATH:+:$PYTHONPATH}\""
     binding = " ".join(launch_binding())
     return (
-        f"{binding} PYTHONPATH={py_path} python3 -m secretary.role_env exec "
+        f"{binding} {pythonpath_prefix(os.environ)} python3 -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
     )
 

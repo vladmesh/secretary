@@ -15,6 +15,7 @@ import secretary.host_commands as host_commands
 from secretary.cli import main
 from secretary.host import (
     CollectResult,
+    SHIPPED_PACKAGING_ROOT,
     Expectations,
     FixtureHostSource,
     HostInventory,
@@ -36,6 +37,9 @@ from tests.orca_fixtures import legacy_orca_runtime
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The units this checkout ships. A plan or a doctor run reads the checkout its host is configured
+# with, so a test about the shipped catalogue has to name it rather than let a home default decide.
+SHIPPED_UNITS = load_packaged_units(SHIPPED_PACKAGING_ROOT, "secretary-")
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 HOST_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "host"
 
@@ -171,7 +175,9 @@ class ExpectationTests(unittest.TestCase):
         )
 
     def test_doctor_runtime_expectations_distinguish_service_and_timer(self):
-        expected = build_doctor_expectations({"host": {"unit_prefix": "secretary-"}}, [])
+        expected = build_doctor_expectations(
+            {"host": {"unit_prefix": "secretary-"}}, [], packaged=SHIPPED_UNITS
+        )
         self.assertEqual(expected.unit_runtime["secretary-memory.service"], (True, True))
         self.assertEqual(expected.unit_runtime["secretary-curator.timer"], (True, True))
         # A oneshot unit fired by its timer has no [Install] section and is only briefly active
@@ -227,7 +233,7 @@ class ExpectationTests(unittest.TestCase):
         self.assertEqual(result["units"].unmanaged_on_host, [])
 
     def test_foreign_shipped_unit_is_outside_desired_doctor_and_reconcile_parity(self):
-        owned = build_plan({"host": {"unit_prefix": "secretary-"}}, [])
+        owned = build_plan({"host": {"unit_prefix": "secretary-"}}, [], packaged=SHIPPED_UNITS)
         memory = next(resource for resource in owned if resource.name == "secretary-memory.service")
         instance = {
             "host": {
@@ -236,8 +242,8 @@ class ExpectationTests(unittest.TestCase):
             }
         }
 
-        desired = build_plan(instance, [])
-        expected = build_doctor_expectations(instance, [])
+        desired = build_plan(instance, [], packaged=SHIPPED_UNITS)
+        expected = build_doctor_expectations(instance, [], packaged=SHIPPED_UNITS)
         diff = inventory(
             expected,
             HostInventory(units={resource.name for resource in desired} | {"secretary-memory.service"}),
@@ -332,7 +338,11 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_relative_direct_config_path_renders_canonical_absolute_layout(self):
         import tempfile
 
-        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp, contextlib.chdir(tmp):
+        # The host under test runs this checkout, and says so the way a real one does: the
+        # rendered units come from the product an installation is configured with, never from
+        # whichever copy of the code is executing the command.
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp, contextlib.chdir(tmp), \
+             unittest.mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(REPO_ROOT)}):
             root = Path(tmp)
             instance = root / "instance"
             instance.mkdir()
@@ -399,7 +409,9 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_plan_keeps_materialized_owner_layout_when_process_user_differs(self):
         import tempfile
 
-        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(os.environ, {"USER": "root"}):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {"USER": "root", "TA_SECRETARY_REPO": str(REPO_ROOT)}
+        ):
             root = Path(tmp)
             instance_path = root / "instance"
             instance_path.mkdir()
@@ -1201,6 +1213,13 @@ class LiveSourceErrorTests(unittest.TestCase):
 
 
 class DoctorHostCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Doctor reports an installation, and an installation runs a checkout. These fixtures are
+        # hosts configured with this one; without the name, doctor would have no units to compare.
+        env = unittest.mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(REPO_ROOT)})
+        env.start()
+        self.addCleanup(env.stop)
+
     def _dispatcher_instance(self, root: Path) -> tuple[Path, Path]:
         instance = root / "instance.yaml"
         data = root / "data"

@@ -161,8 +161,8 @@ class PackagedUnitTests(unittest.TestCase):
             Path("/opt/secretary"), Path("/srv/secretary-instance"), Path("/srv/secretary-data"),
             "operator", Path("/home/operator"),
         )
-        first = load_packaged_units(upgrade.default_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
-        second = load_packaged_units(upgrade.default_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
+        first = load_packaged_units(upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
+        second = load_packaged_units(upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
 
         self.assertEqual([(unit.name, unit.content, unit.digest) for unit in first], [(unit.name, unit.content, unit.digest) for unit in second])
         rendered = b"\n".join(unit.content for unit in first)
@@ -231,7 +231,7 @@ class PackagedUnitTests(unittest.TestCase):
 
     def test_dispatcher_units_carry_the_shipped_file_digest(self):
         packaged = load_packaged_units(
-            upgrade.default_product_root() / "packaging" / "systemd", UNIT_PREFIX
+            upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX
         )
         by_id = {r.logical_id: r for r in build_plan(instance_config(Path("/tmp")), [], packaged=packaged)}
         spec = json.loads(by_id["systemd:dispatcher:production.service"].spec)
@@ -455,7 +455,7 @@ class AutomationSpecTests(unittest.TestCase):
         self.assertNotIn("--workspace", argv)
 
     def test_shipped_specs_skip_the_deterministic_dispatcher(self):
-        specs = {spec.name: spec for spec in load_specs(upgrade.default_product_root())}
+        specs = {spec.name: spec for spec in load_specs(upgrade.running_product_root())}
         self.assertNotIn("pipeline", specs)
         self.assertEqual(specs["steward"].prompt, "/steward")
         self.assertTrue(specs["steward"].workspace.endswith("/secretary/steward"))
@@ -464,7 +464,7 @@ class AutomationSpecTests(unittest.TestCase):
         # The systemd timer is the sole schedule owner on the headless box; the Orca automation
         # itself stays --disabled so a non-headless orca (or a GUI re-enable) cannot double-fire a
         # role alongside its timer. retro used to ship without this and would be created --enabled.
-        specs = {spec.name: spec for spec in load_specs(upgrade.default_product_root())}
+        specs = {spec.name: spec for spec in load_specs(upgrade.running_product_root())}
         for role in ("curator", "retro", "steward"):
             self.assertFalse(specs[role].enabled, f"{role} Orca automation must be disabled")
             self.assertIn("--disabled", create_argv(specs[role]))
@@ -474,7 +474,7 @@ class UpgradeStepTests(unittest.TestCase):
     def context(self, units: FakeUnitInstaller, **overrides) -> upgrade.UpgradeContext:
         base = upgrade.UpgradeContext(
             instance_path=Path("/tmp/instance"),
-            product_root=upgrade.default_product_root(),
+            product_root=upgrade.running_product_root(),
             base_branch="main",
             dry_run=False,
             units=units,
@@ -658,7 +658,10 @@ class UpgradeStepTests(unittest.TestCase):
                 for value in (instance, config):
                     code = upgrade.run_upgrade(SimpleNamespace(
                         instance=str(value),
-                        product_root=None,
+                        # The question here is the instance spelling, so the checkout is named
+                        # rather than defaulted: the default is a configured path or a home, and
+                        # neither has to be a checkout with unit templates in it.
+                        product_root=str(upgrade.running_product_root()),
                         base_branch="main",
                         dry_run=True,
                         no_pull=True,
@@ -682,7 +685,7 @@ class UpgradeStepTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(HeadRegistryConfigError, "is stale"):
-                assert_snapshot_current(instance, upgrade.default_product_root())
+                assert_snapshot_current(instance, upgrade.running_product_root())
 
     def test_the_shipped_registry_runs_every_role_on_either_subscription(self):
         """The portable default has to bring a clean host up with only one account authed.
@@ -690,7 +693,7 @@ class UpgradeStepTests(unittest.TestCase):
         Both directions: an OpenAI-only host runs the role defaults as written, and a Claude-only
         host reaches a green head for every one of them through the fallback chains.
         """
-        canon = canonical_heads(upgrade.default_product_root())
+        canon = canonical_heads(upgrade.running_product_root())
         registry = heads.Registry(canon["resources"], canon["profiles"], canon["role_defaults"])
         roles = ("new_card", "reviewer", "observer", "curator", "retro", "steward")
 
@@ -710,7 +713,7 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_the_shipped_registry_carries_no_installation_account_policy(self):
         """Account policy and model routing are the private canon's, not the product's."""
-        canon = canonical_heads(upgrade.default_product_root())
+        canon = canonical_heads(upgrade.running_product_root())
 
         self.assertEqual(
             [name for name, resource in canon["resources"].items()
@@ -772,6 +775,14 @@ class CommandSurfaceTests(unittest.TestCase):
         (self.root / "data").mkdir()
         self.fixture = self.root / "host"
         self.fixture.mkdir()
+        # A host runs a checkout, and these fixtures run this one. Reconcile and the role-skill
+        # audit read the configured product, so an installation that names none has no units and
+        # no manifest to compare against.
+        env = mock.patch.dict(
+            os.environ, {"TA_SECRETARY_REPO": str(upgrade.running_product_root())}
+        )
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -825,7 +836,7 @@ class CommandSurfaceTests(unittest.TestCase):
     def test_a_unit_is_adopted_only_when_it_matches_the_shipped_file(self):
         unit_dir = self.root / "units"
         unit_dir.mkdir()
-        shipped = upgrade.default_product_root() / "packaging" / "systemd" / "secretary-curator.timer"
+        shipped = upgrade.running_product_root() / "packaging" / "systemd" / "secretary-curator.timer"
         (unit_dir / "secretary-curator.timer").write_bytes(shipped.read_bytes())
         argv = [
             "reconcile", "adopt", "--instance", str(self.instance),
@@ -864,7 +875,7 @@ class HealthUnitNameTests(unittest.TestCase):
         shipped = {
             unit.name
             for unit in load_packaged_units(
-                upgrade.default_product_root() / "packaging" / "systemd", UNIT_PREFIX
+                upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX
             )
         }
         for agent in AGENTS:
@@ -898,7 +909,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
     def test_an_installation_that_owns_a_canon_materializes_from_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = self.instance(Path(tmpdir), self.CANON)
-            product = upgrade.default_product_root()
+            product = upgrade.running_product_root()
 
             path, origin = canonical_path(product, instance)
             heads_data = canonical_heads(product, instance)
@@ -911,7 +922,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
     def test_an_installation_with_no_canon_stays_runnable_on_the_product_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = self.instance(Path(tmpdir))
-            product = upgrade.default_product_root()
+            product = upgrade.running_product_root()
 
             path, origin = canonical_path(product, instance)
 
@@ -920,7 +931,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
             self.assertEqual(canonical_heads(product, instance), canonical_heads(product))
 
     def test_a_present_but_unusable_canon_fails_by_name_instead_of_falling_back(self):
-        product = upgrade.default_product_root()
+        product = upgrade.running_product_root()
         for name, build in (
             ("malformed", lambda root: (root / "heads" / "heads.toml").write_text("nope = [", encoding="utf-8")),
             ("directory", lambda root: (root / "heads" / "heads.toml").mkdir()),
@@ -955,7 +966,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
             (instance / "heads").chmod(0o000)
 
             with self.assertRaises(HeadRegistryConfigError) as caught:
-                canonical_path(upgrade.default_product_root(), instance)
+                canonical_path(upgrade.running_product_root(), instance)
             result = upgrade.step_head_registry(self.context(instance))
 
             self.assertIn(str(owned), str(caught.exception))
@@ -993,7 +1004,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
                 owned = str(instance / "heads" / "heads.toml")
 
                 with self.assertRaises(HeadRegistryConfigError) as caught:
-                    canonical_heads(upgrade.default_product_root(), instance)
+                    canonical_heads(upgrade.running_product_root(), instance)
                 result = upgrade.step_head_registry(self.context(instance))
 
                 self.assertIn(owned, str(caught.exception))
@@ -1053,7 +1064,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
     def context(self, instance: Path) -> upgrade.UpgradeContext:
         return upgrade.UpgradeContext(
             instance_path=instance,
-            product_root=upgrade.default_product_root(),
+            product_root=upgrade.running_product_root(),
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
