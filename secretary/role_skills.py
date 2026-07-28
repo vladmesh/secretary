@@ -1,36 +1,122 @@
 #!/usr/bin/env python3
-"""Audit and sync role-owned skills into shell-owned skill directories."""
+"""Audit and sync role-owned skills into shell-owned skill directories.
+
+Two registries, layered. The product manifest is the portable one: the roles and skills every
+installation gets. An installation may own a second manifest at ``<instance>/skills/manifest.toml``
+naming skills that belong to this host alone, and its ``roles/`` tree sits beside it in the private
+instance repository. A skill is always read from the tree beside the manifest that declared it, so
+the two never have to agree about where sources live, and an installation without an overlay is a
+complete, supported installation.
+
+A skill may also ship one command: an executable ``<skill>.sh`` beside its ``SKILL.md``. Delivering
+the skill links that script into the operator's ``bin`` directory under the skill's own name, so a
+skill that moves between the product and an installation keeps the entry point its prose documents,
+with nobody editing a link by hand.
+"""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from secretary.onboarding import DEFAULT_INSTANCE
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "skills" / "manifest.toml"
 ROLES_ROOT = ROOT / "skills" / "roles"
-# Points the registry at another manifest, and with it at another `roles/` tree beside that file.
-# The delivery check below runs inside the dispatcher tick, so a test needs a registry it can own
-# without writing into the shells of the live installation.
+# Where an installation keeps its own manifest, relative to the instance directory.
+INSTANCE_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
+# Points the registry at another product manifest, and with it at another `roles/` tree beside that
+# file. The delivery check below runs inside the dispatcher tick, so a test needs a registry it can
+# own without writing into the shells of the live installation.
 MANIFEST_ENV = "SECRETARY_ROLE_SKILLS_MANIFEST"
+INSTANCE_ENV = "SECRETARY_INSTANCE"
+# Where a skill's command lands. The default is the operator's own bin directory; a test needs a
+# directory it can own without writing into the PATH of the live installation.
+BIN_DIR_ENV = "SECRETARY_BIN_DIR"
+
+PRODUCT_ORIGIN = "product"
+INSTANCE_ORIGIN = "instance"
+
+# A role and a skill are directory names, and both halves of the registry join them onto a root:
+# onto a `roles/` tree to read a skill and onto a shell root to write one. Anything with a
+# separator or a parent reference in it would move that join somewhere the operator did not name,
+# so a name is one plain path component or the manifest is refused.
+IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+class RegistryError(ValueError):
+    """A manifest that cannot be read or does not have the shape a registry needs.
+
+    Carries the offending file in its message: the operator has two manifests and the only useful
+    error is the one that says which of them to open.
+    """
+
+
+def _absolute(value: Path | str) -> Path:
+    """A path that means the same thing from anywhere.
+
+    Every source here ends up either compared against a link target or written into one, and a
+    symlink resolves its own text against the directory it sits in, not against the working
+    directory of whoever ran the sync. A relative ``--instance`` would otherwise materialize a
+    command pointing at a path below ``bin``. Symlinks in the path itself are left alone: the
+    operator named these directories and the error messages have to name them back.
+    """
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
 
 
 def manifest_path() -> Path:
     raw = os.environ.get(MANIFEST_ENV)
-    return Path(raw).expanduser() if raw else MANIFEST
+    return _absolute(raw) if raw else MANIFEST
 
 
 def roles_root() -> Path:
-    """The canonical skill sources, always beside the manifest that names them."""
+    """The canonical product skill sources, always beside the manifest that names them."""
     return manifest_path().parent / "roles"
+
+
+def instance_dir(value: Path | str) -> Path:
+    """The private repo root. An instance is named by its directory or by its instance.yaml."""
+    path = _absolute(value)
+    return path.parent if path.suffix in (".yaml", ".yml") else path
+
+
+def configured_instance_path() -> Path:
+    return _absolute(os.environ.get(INSTANCE_ENV) or DEFAULT_INSTANCE)
+
+
+def bin_dir() -> Path:
+    """The directory on ``PATH`` that a skill's command is linked into."""
+    raw = os.environ.get(BIN_DIR_ENV)
+    return _absolute(raw) if raw else Path.home() / "bin"
+
+
+def instance_manifest_path(instance_path: Path | str | None = None) -> Path:
+    """Where this installation's own manifest would be, whether or not it exists."""
+    base = instance_path if instance_path is not None else configured_instance_path()
+    return instance_dir(base) / INSTANCE_MANIFEST_RELATIVE
+
+
+@dataclass(frozen=True)
+class ManifestSource:
+    """One manifest file and the ``roles/`` tree that belongs to it."""
+
+    origin: str
+    path: Path
+
+    @property
+    def roles_root(self) -> Path:
+        return self.path.parent / "roles"
 
 
 @dataclass(frozen=True)
@@ -41,6 +127,40 @@ class ExpectedSkill:
     skill: str
     source: Path
     dest: Path
+    origin: str = PRODUCT_ORIGIN
+    manifest: Path = MANIFEST
+
+
+@dataclass(frozen=True)
+class ExpectedCommand:
+    """The one executable a skill ships, and the link that makes it runnable by name."""
+
+    name: str
+    role: str
+    skill: str
+    source: Path
+    dest: Path
+    origin: str
+    manifest: Path
+
+
+@dataclass(frozen=True)
+class SkillRegistry:
+    """The product manifest with an optional instance manifest layered over it."""
+
+    sources: tuple[ManifestSource, ...]
+    # role -> ordered list of (skill name, the source that declared it)
+    roles: dict[str, list[tuple[str, ManifestSource]]] = field(default_factory=dict)
+    # target name -> (target table, the source that declared it)
+    targets: dict[str, tuple[dict[str, Any], ManifestSource]] = field(default_factory=dict)
+
+    def describe_sources(self) -> list[dict[str, str]]:
+        return [{"origin": source.origin, "path": str(source.path)} for source in self.sources]
+
+    @property
+    def owned_roots(self) -> tuple[Path, ...]:
+        """Every ``roles/`` tree this registry reads skills from."""
+        return tuple(source.roles_root for source in self.sources)
 
 
 def _sha256(path: Path) -> str:
@@ -51,17 +171,123 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def load_manifest() -> dict[str, Any]:
-    return tomllib.loads(manifest_path().read_text(encoding="utf-8"))
+def load_manifest(path: Path | None = None) -> dict[str, Any]:
+    """One manifest file, parsed. Defaults to the product manifest."""
+    target = path or manifest_path()
+    try:
+        return tomllib.loads(target.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise RegistryError(f"{target}: not valid TOML: {exc}") from None
+    except (OSError, UnicodeError) as exc:
+        raise RegistryError(f"{target}: could not be read: {exc}") from None
 
 
-def find_overlapping_target_roots(manifest: dict[str, Any]) -> list[dict[str, str]]:
+def manifest_sources(instance_path: Path | str | None = None) -> list[ManifestSource]:
+    """The manifests that make up this installation's registry, product first.
+
+    A missing instance manifest is not an error and not a warning: a portable installation simply
+    has nothing to layer. Something at that path that is not a readable file is the opposite case,
+    an installation that meant to own an overlay and has a broken one, and reading past it would
+    call a damaged configuration portable.
+    """
+    sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path())]
+    overlay = instance_manifest_path(instance_path)
+    if overlay.is_file():
+        sources.append(ManifestSource(INSTANCE_ORIGIN, overlay))
+    elif overlay.is_symlink() or overlay.exists():
+        raise RegistryError(f"{overlay}: exists but is not a readable manifest file")
+    return sources
+
+
+def _table(data: dict[str, Any], key: str, source: ManifestSource) -> dict[str, Any]:
+    value = data.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise RegistryError(f"{source.path}: [{key}] must be a table")
+    return value
+
+
+def _string(table: dict[str, Any], key: str, where: str, source: ManifestSource) -> str:
+    value = table.get(key)
+    if not isinstance(value, str) or not value:
+        raise RegistryError(f"{source.path}: {where}.{key} must be a non-empty string")
+    return value
+
+
+def _string_list(table: dict[str, Any], key: str, where: str, source: ManifestSource) -> list[str]:
+    value = table.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise RegistryError(f"{source.path}: {where}.{key} must be a list of non-empty strings")
+    return value
+
+
+def _identifier(value: str, where: str, source: ManifestSource) -> str:
+    """One path component, or a refusal naming the manifest that has to be edited."""
+    if not IDENTIFIER.fullmatch(value):
+        raise RegistryError(
+            f"{source.path}: {where} must be a single directory name matching "
+            f"{IDENTIFIER.pattern}, got {value!r}"
+        )
+    return value
+
+
+def _within(root: Path, path: Path) -> bool:
+    root_abs = _absolute(root)
+    path_abs = _absolute(path)
+    return path_abs == root_abs or root_abs in path_abs.parents
+
+
+def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
+    """Read every manifest and layer them in order.
+
+    Roles accumulate: an instance adds skills to a product role rather than replacing the role, so
+    an upgrade that ships a new product skill still delivers it. A target is replaced whole by a
+    later manifest, because a target is one shell root and merging two of them means nothing.
+    """
+    sources = manifest_sources(instance_path)
+    roles: dict[str, list[tuple[str, ManifestSource]]] = {}
+    targets: dict[str, tuple[dict[str, Any], ManifestSource]] = {}
+    for source in sources:
+        data = load_manifest(source.path)
+        if not isinstance(data, dict):
+            raise RegistryError(f"{source.path}: manifest must be a table")
+        for role_name, role in _table(data, "roles", source).items():
+            if not isinstance(role, dict):
+                raise RegistryError(f"{source.path}: [roles.{role_name}] must be a table")
+            _identifier(role_name, f"[roles.{role_name}] role name", source)
+            declared = roles.setdefault(role_name, [])
+            seen = {skill for skill, _ in declared}
+            for skill in _string_list(role, "skills", f"roles.{role_name}", source):
+                _identifier(skill, f"roles.{role_name}.skills entry", source)
+                if skill not in seen:
+                    declared.append((skill, source))
+                    seen.add(skill)
+        for target_name, target in _table(data, "targets", source).items():
+            if not isinstance(target, dict):
+                raise RegistryError(f"{source.path}: [targets.{target_name}] must be a table")
+            where = f"targets.{target_name}"
+            _string(target, "shell", where, source)
+            _string(target, "root", where, source)
+            _string_list(target, "roles", where, source)
+            targets[target_name] = (target, source)
+
+    for target_name, (target, source) in sorted(targets.items()):
+        for role_name in target["roles"]:
+            if role_name not in roles:
+                raise RegistryError(
+                    f"{source.path}: targets.{target_name}.roles names the unknown role "
+                    f"{role_name!r}"
+                )
+    return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets)
+
+
+def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str]]:
     """Reject nested roots for one shell: recursive discovery mixes their namespaces."""
-    targets = manifest.get("targets", {})
     errors: list[dict[str, str]] = []
     items = [
         (name, target["shell"], Path(target["root"]).expanduser().resolve())
-        for name, target in sorted(targets.items())
+        for name, (target, _) in sorted(registry.targets.items())
     ]
     for index, (left_name, left_shell, left_root) in enumerate(items):
         for right_name, right_shell, right_root in items[index + 1 :]:
@@ -80,29 +306,207 @@ def find_overlapping_target_roots(manifest: dict[str, Any]) -> list[dict[str, st
     return errors
 
 
-def iter_expected(manifest: dict[str, Any]) -> list[ExpectedSkill]:
-    roles = manifest.get("roles", {})
-    targets = manifest.get("targets", {})
+def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
+    """Every skill the registry expects in a shell, with both ends of the copy checked.
+
+    Names are validated when the manifests are read, so containment here is the second lock rather
+    than the first: whatever a name turns out to be, a skill is read from inside the ``roles/`` tree
+    that declared it and written inside the shell root that asked for it, or the registry is refused.
+    """
     expected: list[ExpectedSkill] = []
-    for target_name, target in sorted(targets.items()):
+    for target_name, (target, source_of_target) in sorted(registry.targets.items()):
         root = Path(target["root"]).expanduser()
         for role_name in target["roles"]:
-            role = roles[role_name]
-            for skill in role["skills"]:
-                expected.append(
-                    ExpectedSkill(
-                        target=target_name,
-                        shell=target["shell"],
-                        role=role_name,
-                        skill=skill,
-                        source=roles_root() / role_name / skill,
-                        dest=root / skill,
-                    )
+            for skill, source in registry.roles.get(role_name, []):
+                item = ExpectedSkill(
+                    target=target_name,
+                    shell=target["shell"],
+                    role=role_name,
+                    skill=skill,
+                    source=source.roles_root / role_name / skill,
+                    dest=root / skill,
+                    origin=source.origin,
+                    manifest=source.path,
                 )
+                if not _within(source.roles_root, item.source):
+                    raise RegistryError(
+                        f"{source.path}: {role_name}/{skill} resolves to {item.source}, outside "
+                        f"{source.roles_root}"
+                    )
+                if not _within(root, item.dest):
+                    raise RegistryError(
+                        f"{source_of_target.path}: targets.{target_name} would write "
+                        f"{item.dest}, outside {root}"
+                    )
+                expected.append(item)
     return expected
 
 
-def skill_delivery(role: str, skill: str, shell: str) -> dict[str, Any]:
+def find_conflicting_destinations(expected: list[ExpectedSkill]) -> list[dict[str, str]]:
+    """Two different sources copied into one directory: the second silently buries the first.
+
+    Skill directories are flat under a shell root, so a product skill and an installation skill of
+    the same name land on the same path. Delivering both is impossible and delivering one of them
+    is not what either manifest asked for, so the pair is reported instead of resolved.
+    """
+    first_by_dest: dict[Path, ExpectedSkill] = {}
+    conflicts: list[dict[str, str]] = []
+    for item in expected:
+        first = first_by_dest.setdefault(item.dest, item)
+        if first is item or first.source == item.source:
+            continue
+        conflicts.append(
+            {
+                "dest": str(item.dest),
+                "shell": item.shell,
+                "left_target": first.target,
+                "left_skill": f"{first.role}/{first.skill}",
+                "left_source": str(first.source),
+                "left_manifest": str(first.manifest),
+                "right_target": item.target,
+                "right_skill": f"{item.role}/{item.skill}",
+                "right_source": str(item.source),
+                "right_manifest": str(item.manifest),
+            }
+        )
+    return conflicts
+
+
+def command_script(role: str, skill: str, source: ManifestSource) -> Path | None:
+    """The one command a skill may ship: ``<skill>.sh`` beside its ``SKILL.md``.
+
+    Discovered from the tree rather than declared in the manifest, so a skill carries its entry
+    point with it when it moves out of the product and into an installation. Nothing has to be
+    added to the private manifest for the command to keep working.
+    """
+    script = source.roles_root / role / skill / f"{skill}.sh"
+    return script if script.is_file() else None
+
+
+def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
+    """Every command the registry ships, keyed by the name the operator types.
+
+    A command belongs to the skill, not to a shell: however many targets a skill is copied into,
+    the link points at the canonical script beside the manifest that declared it. Two skills of the
+    same name would want the same link, and that is an operator configuration nothing can satisfy,
+    so it is refused here, before an audit reads the filesystem or a sync writes to it.
+    """
+    root = bin_dir()
+    by_name: dict[str, ExpectedCommand] = {}
+    for role in sorted(registry.roles):
+        for skill, source in registry.roles[role]:
+            script = command_script(role, skill, source)
+            if script is None:
+                continue
+            command = ExpectedCommand(
+                name=skill,
+                role=role,
+                skill=skill,
+                source=script,
+                dest=root / skill,
+                origin=source.origin,
+                manifest=source.path,
+            )
+            clash = by_name.get(skill)
+            if clash is not None:
+                raise RegistryError(
+                    f"two skills ship the command {command.dest}: {clash.role}/{clash.skill} "
+                    f"from {clash.manifest} and {command.role}/{command.skill} from "
+                    f"{command.manifest}"
+                )
+            by_name[skill] = command
+    return [by_name[name] for name in sorted(by_name)]
+
+
+def _link_target(link: Path) -> Path:
+    """What a symlink points at, as a path that means the same from anywhere."""
+    raw = Path(os.readlink(link))
+    return raw if raw.is_absolute() else _absolute(link.parent / raw)
+
+
+def _entry_point_is_owned(link_target: Path, owned_roots: tuple[Path, ...]) -> bool:
+    """Whether a link we did not write is one of ours to repoint, or somebody else's.
+
+    Ownership is a location this registry reads skills from, not a path that looks like one. A link
+    into a ``roles/`` tree of one of our manifests is an entry point of an older layout of the same
+    registry: a skill that changed role, or one that moved between the product and the installation
+    and left the link behind pointing at the tree it used to live in. That the target no longer
+    exists says nothing either way, so the tree decides and existence is not consulted.
+
+    Everything else stays somebody else's, however much its path resembles a skill source. A
+    dangling link is the case where a suffix match is most tempting and least safe: nothing on disk
+    can contradict the guess, and the command it would take over may be the one that reaches the
+    operator's private browser session.
+    """
+    return any(link_target == root or root in link_target.parents for root in owned_roots)
+
+
+def _entry_point_state(command: ExpectedCommand, owned_roots: tuple[Path, ...]) -> dict[str, str]:
+    """What sync would do with one entry point, decided before anything is written."""
+    base = {
+        "command": command.name,
+        "role": command.role,
+        "skill": command.skill,
+        "source": str(command.source),
+        "dest": str(command.dest),
+        "origin": command.origin,
+        "manifest": str(command.manifest),
+    }
+    if command.dest.is_symlink():
+        link_target = _link_target(command.dest)
+        if link_target == command.source:
+            return base | {"status": "ok", "reason": ""}
+        if _entry_point_is_owned(link_target, owned_roots):
+            return base | {
+                "status": "stale",
+                "reason": f"points at {link_target}, which is no longer where the skill lives",
+            }
+        return base | {
+            "status": "conflict",
+            "reason": f"{command.dest} is a link to {link_target}, which this registry does not own",
+        }
+    if command.dest.exists():
+        return base | {
+            "status": "conflict",
+            "reason": f"{command.dest} is an existing file",
+        }
+    return base | {"status": "missing", "reason": f"{command.dest} does not exist"}
+
+
+def _write_entry_point(command: ExpectedCommand, state: dict[str, str]) -> None:
+    """Point the link at the source and make what it points at executable.
+
+    An entry point that is already right is left exactly as it is: unlinking and relinking it would
+    take the operator's command off PATH for as long as that takes, for no change.
+
+    A symlink has no mode of its own, so the exec bit has to be on the script itself or the
+    materialized command is not a command.
+    """
+    if state["status"] != "ok":
+        command.dest.parent.mkdir(parents=True, exist_ok=True)
+        if state["status"] == "stale":
+            command.dest.unlink()
+        command.dest.symlink_to(command.source)
+    mode = command.source.stat().st_mode
+    wanted = mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if mode != wanted:
+        command.source.chmod(wanted)
+
+
+def _named_manifests(instance_path: Path | str | None) -> str:
+    """Every manifest a refusal was decided from — an overlay can be the file at fault."""
+    product = manifest_path()
+    overlay = instance_manifest_path(instance_path)
+    return f"{product} + {overlay}" if overlay.is_file() else str(product)
+
+
+def skill_delivery(
+    role: str,
+    skill: str,
+    shell: str,
+    *,
+    instance_path: Path | str | None = None,
+) -> dict[str, Any]:
     """Whether one role skill is materialized in one shell, and where it is expected.
 
     A head is launched into a shell, not into this repository: the canonical skill being present
@@ -115,22 +519,27 @@ def skill_delivery(role: str, skill: str, shell: str) -> dict[str, Any]:
         "skill": skill,
         "shell": shell,
         "manifest": str(manifest_path()),
+        "manifests": [],
         "delivered": False,
         "paths": [],
         "reason": "",
     }
     try:
+        registry = load_registry(instance_path)
+        result["manifests"] = registry.describe_sources()
         expected = [
             item
-            for item in iter_expected(load_manifest())
+            for item in iter_expected(registry)
             if item.role == role and item.skill == skill and item.shell == shell
         ]
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
-        result["reason"] = f"skill registry {manifest_path()} could not be read: {exc}"
+        result["reason"] = (
+            f"skill registry {_named_manifests(instance_path)} could not be read: {exc}"
+        )
         return result
     if not expected:
         result["reason"] = (
-            f"no {shell} target in {manifest_path()} carries the {role} role"
+            f"no {shell} target in {_named_manifests(instance_path)} carries the {role} role"
         )
         return result
     result["paths"] = [str(item.dest / "SKILL.md") for item in expected]
@@ -145,12 +554,17 @@ def skill_delivery(role: str, skill: str, shell: str) -> dict[str, Any]:
     return result
 
 
-def audit(target_filter: set[str] | None = None) -> dict[str, Any]:
-    manifest = load_manifest()
-    config_errors = find_overlapping_target_roots(manifest)
-    expected = iter_expected(manifest)
+def audit(
+    target_filter: set[str] | None = None,
+    *,
+    instance_path: Path | str | None = None,
+) -> dict[str, Any]:
+    registry = load_registry(instance_path)
+    config_errors = find_overlapping_target_roots(registry)
+    expected = iter_expected(registry)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
+    destination_conflicts = find_conflicting_destinations(expected)
 
     missing: list[dict[str, str]] = []
     drift: list[dict[str, str]] = []
@@ -166,6 +580,8 @@ def audit(target_filter: set[str] | None = None) -> dict[str, Any]:
             "skill": item.skill,
             "source": str(item.source),
             "dest": str(item.dest),
+            "origin": item.origin,
+            "manifest": str(item.manifest),
         }
         if not source_skill.is_file():
             source_missing.append(base)
@@ -189,31 +605,75 @@ def audit(target_filter: set[str] | None = None) -> dict[str, Any]:
         for item in bucket:
             by_target[item["target"]][bucket_name] = int(by_target[item["target"]][bucket_name]) + 1
 
+    # A filtered audit is about named shell targets; commands do not belong to one.
+    entry_points = [] if target_filter else [
+        _entry_point_state(command, registry.owned_roots)
+        for command in iter_expected_commands(registry)
+    ]
+    entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
+
     ok = not missing and not drift and not source_missing and not config_errors
+    ok = ok and not entry_point_problems and not destination_conflicts
     return {
         "ok": ok,
-        "manifest": str(MANIFEST),
+        "manifest": str(manifest_path()),
+        "manifests": registry.describe_sources(),
         "targets": by_target,
         "missing": missing,
         "drift": drift,
         "source_missing": source_missing,
+        "entry_points": entry_point_problems,
         "config_errors": config_errors,
+        "destination_conflicts": destination_conflicts,
     }
 
 
-def sync(target_filter: set[str] | None = None) -> dict[str, Any]:
-    manifest = load_manifest()
-    config_errors = find_overlapping_target_roots(manifest)
+def sync(
+    target_filter: set[str] | None = None,
+    *,
+    instance_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Deliver every expected skill and entry point, or refuse before writing anything.
+
+    Everything that can be decided from the manifests and the filesystem is decided first: a
+    registry that is half applied is worse than one that was not applied at all, because the next
+    audit cannot tell the two apart.
+    """
+    registry = load_registry(instance_path)
+    config_errors = find_overlapping_target_roots(registry)
     if config_errors:
-        raise ValueError(f"overlapping skill target roots: {config_errors}")
-    expected = iter_expected(manifest)
+        raise RegistryError(f"overlapping skill target roots: {config_errors}")
+    expected = iter_expected(registry)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
 
-    copied: list[dict[str, str]] = []
+    conflicts = find_conflicting_destinations(expected)
+    if conflicts:
+        conflict = conflicts[0]
+        raise RegistryError(
+            f"two skills claim the skill directory {conflict['dest']}: "
+            f"{conflict['left_skill']} from {conflict['left_manifest']} and "
+            f"{conflict['right_skill']} from {conflict['right_manifest']}"
+        )
+
     for item in expected:
         if not (item.source / "SKILL.md").is_file():
-            raise FileNotFoundError(f"missing canonical skill: {item.source}/SKILL.md")
+            raise FileNotFoundError(
+                f"missing canonical skill: {item.source}/SKILL.md "
+                f"(declared by {item.manifest})"
+            )
+
+    commands = [] if target_filter else iter_expected_commands(registry)
+    states = [_entry_point_state(command, registry.owned_roots) for command in commands]
+    for state in states:
+        if state["status"] == "conflict":
+            raise RegistryError(
+                f"command entry point {state['command']} from {state['manifest']} "
+                f"cannot be materialized: {state['reason']}"
+            )
+
+    copied: list[dict[str, str]] = []
+    for item in expected:
         item.dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(item.source, item.dest, dirs_exist_ok=True)
         copied.append(
@@ -223,13 +683,39 @@ def sync(target_filter: set[str] | None = None) -> dict[str, Any]:
                 "role": item.role,
                 "skill": item.skill,
                 "dest": str(item.dest),
+                "origin": item.origin,
             }
         )
-    return {"ok": True, "copied": copied, "after": audit(target_filter)}
+
+    linked: list[dict[str, str]] = []
+    for command, state in zip(commands, states):
+        _write_entry_point(command, state)
+        linked.append(
+            {
+                "command": command.name,
+                "role": command.role,
+                "skill": command.skill,
+                "dest": str(command.dest),
+                "source": str(command.source),
+                "origin": command.origin,
+                "manifest": str(command.manifest),
+                "was": state["status"],
+            }
+        )
+    return {
+        "ok": True,
+        "copied": copied,
+        "linked": linked,
+        "after": audit(target_filter, instance_path=instance_path),
+    }
 
 
 def render_markdown(result: dict[str, Any]) -> str:
     lines = [f"role skills: {'ok' if result['ok'] else 'drift'}", ""]
+    if result.get("manifests"):
+        for source in result["manifests"]:
+            lines.append(f"- manifest ({source['origin']}): {source['path']}")
+        lines.append("")
     for target, stats in sorted(result["targets"].items()):
         lines.append(
             f"- {target} ({stats['shell']}): expected={stats['expected']}, "
@@ -239,7 +725,27 @@ def render_markdown(result: dict[str, Any]) -> str:
         if result[key]:
             lines.extend(["", f"{title}:"])
             for item in result[key]:
-                lines.append(f"- {item['target']} {item['role']}/{item['skill']} -> {item['dest']}")
+                # The operator reading this has two manifests open; the finding has to say which
+                # one to edit, not only which layer it came from.
+                lines.append(
+                    f"- {item['target']} {item['role']}/{item['skill']} "
+                    f"[{item.get('origin', PRODUCT_ORIGIN)} {item.get('manifest', manifest_path())}]"
+                    f" -> {item['dest']}"
+                )
+    if result.get("entry_points"):
+        lines.extend(["", "Command entry points:"])
+        for item in result["entry_points"]:
+            lines.append(
+                f"- {item['command']} [{item['origin']} {item['manifest']}] "
+                f"{item['status']}: {item['reason']}"
+            )
+    if result.get("destination_conflicts"):
+        lines.extend(["", "Destination conflicts:"])
+        for item in result["destination_conflicts"]:
+            lines.append(
+                f"- {item['dest']}: {item['left_skill']} from {item['left_manifest']} "
+                f"and {item['right_skill']} from {item['right_manifest']}"
+            )
     if result["config_errors"]:
         lines.extend(["", "Configuration errors:"])
         for item in result["config_errors"]:
@@ -258,17 +764,35 @@ def parse_targets(value: str | None) -> set[str] | None:
 
 def run_role_skills(args) -> int:
     targets = parse_targets(args.targets)
+    instance = getattr(args, "instance", None)
     if args.role_skills_command == "audit":
-        result = audit(targets)
+        try:
+            result = audit(targets, instance_path=instance)
+        except (OSError, ValueError) as exc:
+            print(f"secretary role-skills audit: {exc}")
+            return 2
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else render_markdown(result))
         return 1 if args.check and not result["ok"] else 0
     try:
-        result = sync(targets)
+        result = sync(targets, instance_path=instance)
     except (OSError, ValueError) as exc:
         print(f"secretary role-skills sync: {exc}")
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else render_markdown(result["after"]))
     return 0
+
+
+def _add_common_arguments(parser, name: str) -> None:
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--targets", help="comma-separated target names from skills/manifest.toml")
+    parser.add_argument(
+        "--instance",
+        default=os.environ.get(INSTANCE_ENV, DEFAULT_INSTANCE),
+        help="instance dir or instance.yaml whose skills/manifest.toml is layered over the product "
+        f"manifest (default: {INSTANCE_ENV} or {DEFAULT_INSTANCE})",
+    )
+    if name == "audit":
+        parser.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")
 
 
 def add_role_skills_subcommands(subparsers) -> None:
@@ -279,10 +803,7 @@ def add_role_skills_subcommands(subparsers) -> None:
     commands = command.add_subparsers(dest="role_skills_command", required=True)
     for name in ("audit", "sync"):
         sub = commands.add_parser(name)
-        sub.add_argument("--json", action="store_true")
-        sub.add_argument("--targets", help="comma-separated target names from skills/manifest.toml")
-        if name == "audit":
-            sub.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")
+        _add_common_arguments(sub, name)
         sub.set_defaults(handler=run_role_skills, check=False)
     command.set_defaults(handler=run_role_skills)
 
@@ -292,10 +813,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="role_skills_command", required=True)
     for name in ("audit", "sync"):
         p = sub.add_parser(name)
-        p.add_argument("--json", action="store_true")
-        p.add_argument("--targets", help="comma-separated target names from skills/manifest.toml")
-        if name == "audit":
-            p.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")
+        _add_common_arguments(p, name)
     args = parser.parse_args(argv)
     args.check = getattr(args, "check", False)
     return run_role_skills(args)

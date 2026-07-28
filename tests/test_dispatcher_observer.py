@@ -58,8 +58,9 @@ def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
 
     The launch gate reads the shell's skill directory, and the shells of the live installation are
     not a fixture: a test that let the tick look at them would pass or fail on whether somebody had
-    run `role-skills sync` on this machine. Returns the observer skill's path in the fake shell,
-    which `delivered=False` leaves absent.
+    run `role-skills sync` on this machine. The empty instance beside it does the same job for the
+    other half of the registry: the overlay of the live installation is not a fixture either.
+    Returns the observer skill's path in the fake shell, which `delivered=False` leaves absent.
     """
     manifest = root / "registry" / "manifest.toml"
     shell_root = root / "registry" / "codex-shell"
@@ -70,6 +71,7 @@ def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
         f'root = "{shell_root}"\nroles = ["observer"]\n',
         encoding="utf-8",
     )
+    (root / "registry" / "instance").mkdir(parents=True, exist_ok=True)
     skill = shell_root / "observe-sprint" / "SKILL.md"
     if delivered:
         skill.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +91,7 @@ class ObserverLifecycleTests(unittest.TestCase):
                 "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
                 "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
                 "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
+                "SECRETARY_INSTANCE": str(self.data_dir / "registry" / "instance"),
             },
         )
         env.start()
@@ -1666,6 +1669,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
                 "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
                 "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
                 "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
+                "SECRETARY_INSTANCE": str(self.data_dir / "registry" / "instance"),
                 "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.data_dir / "workspaces"),
             },
         )
