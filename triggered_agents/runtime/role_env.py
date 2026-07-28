@@ -13,7 +13,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .paths import default_instance_path
+from .paths import PRODUCT_ENV, default_instance_path
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
@@ -30,7 +30,24 @@ def runtime_env_path() -> Path:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_PYTHONPATH = os.environ.get("TA_RUNTIME_PYTHONPATH", str(REPO_ROOT))
+RUNTIME_PYTHONPATH_ENV = "TA_RUNTIME_PYTHONPATH"
+
+
+def runtime_pythonpath() -> str:
+    """The checkout a launched role imports the product from, resolved per call.
+
+    The launcher's explicit ``TA_RUNTIME_PYTHONPATH`` first, then the product checkout this
+    installation is configured with. An installation materialized from an alternate checkout binds
+    ``TA_SECRETARY_REPO`` in the units it renders and in the launch command it writes; falling
+    straight to the checkout that imported this module would start the role out of whatever code
+    happened to be running the dispatcher instead of the version the host was upgraded onto.
+
+    The last resort is this checkout rather than ``~/secretary``: a module that is already imported
+    knows its own tree is importable, and a role started on a host that configured nothing at all
+    should not be sent to a path that may not exist.
+    """
+    configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
+    return configured or str(REPO_ROOT)
 
 BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
@@ -188,7 +205,7 @@ def launch_binding() -> list[str]:
 def wrap_shell_command(role: str, command: str, *, pythonpath: str | None = None,
                        env_file: Path | str | None = None) -> str:
     """Shell command that execs `command` under the role env without putting secret values in argv."""
-    py_path = pythonpath or RUNTIME_PYTHONPATH
+    py_path = pythonpath or runtime_pythonpath()
     parts = [
         *launch_binding(),
         f"PYTHONPATH={shlex.quote(py_path)}",

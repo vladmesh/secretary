@@ -28,6 +28,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import write_text_atomic
+from triggered_agents.runtime.paths import configured_product_root
 from triggered_agents.agents.pipeline.heads import (
     HeadRegistryError,
     load_registry,
@@ -210,6 +211,24 @@ def read_source(instance_path: Path) -> dict[str, Any] | None:
     if not isinstance(loaded, dict):
         raise HeadRegistryConfigError(f"head registry source pin {path} has an unsupported shape")
     return loaded
+
+
+def pinned_product_root(instance_path: Path) -> Path:
+    """Which checkout this installation runs: the recorded pin, else the configured one.
+
+    An installation materialized from an alternate checkout keeps that path in its pin, and it is
+    the only durable record of it: nothing else on the host says which product a read-only command
+    should describe. An unreadable or absent pin is not worth failing a read-only view over, so the
+    answer falls back to what this process is configured with.
+    """
+    try:
+        source = read_source(instance_path)
+    except HeadRegistryConfigError:
+        source = None
+    recorded = source.get("product_root") if isinstance(source, dict) else None
+    if isinstance(recorded, str) and recorded.strip():
+        return Path(recorded).expanduser()
+    return configured_product_root()
 
 
 def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = False) -> bool:

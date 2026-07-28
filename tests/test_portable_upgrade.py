@@ -407,6 +407,44 @@ class PortableInstallationTests(PortableFixture):
         self.assertEqual(registry["canonical_owner"], PRODUCT_ORIGIN)
         self.assertFalse(registry["error"], registry)
 
+    def test_offline_doctor_plans_against_the_units_of_the_installations_own_checkout(self) -> None:
+        """The pin says which checkout this host runs, and the units come from there.
+
+        The running checkout ships a much larger unit catalogue under the same prefix — curator,
+        retro, steward and the rest — so a doctor that read its own `packaging/systemd` would
+        report those as missing on a host that was never installed from it.
+        """
+        self.run_upgrade()
+
+        code, report = self.run_json_cli(
+            ["doctor", "--instance", str(self.instance), "--offline", "--json"]
+        )
+
+        self.assertEqual(code, 0, report)
+        self.assertEqual(
+            sorted(unit["name"] for unit in report["status"]["host"]["units"]),
+            [
+                f"{UNIT_PREFIX}dispatcher-production.service",
+                f"{UNIT_PREFIX}dispatcher-production.timer",
+                f"{UNIT_PREFIX}memory.service",
+            ],
+        )
+        self.assert_hermetic(json.dumps(report))
+
+    def test_offline_doctor_reads_the_pinned_checkout_over_a_configured_one(self) -> None:
+        """A decoy in the environment must not outrank what the installation was installed from."""
+        self.run_upgrade()
+        decoy = self.root / "decoy"
+        (decoy / "packaging" / "systemd").mkdir(parents=True)
+
+        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(decoy)}):
+            code, report = self.run_json_cli(
+                ["doctor", "--instance", str(self.instance), "--offline", "--json"]
+            )
+
+        self.assertEqual(code, 0, report)
+        self.assertTrue(report["status"]["host"]["units"], report["status"]["host"])
+
     def test_the_upgrade_command_installs_the_checkout_it_was_pointed_at(self) -> None:
         """`--product-root` has to reach the steps, or the skills come from the running module."""
         seen: list[upgrade.UpgradeContext] = []
@@ -569,6 +607,41 @@ class ProductRootDefaultTests(PortableFixture):
     def test_with_nothing_configured_the_default_hangs_off_the_running_users_home(self) -> None:
         self.assertEqual(upgrade.default_product_root(), self.invoker_home / "secretary")
         self.assertNotEqual(str(upgrade.default_product_root()), RUNNING_CHECKOUT)
+
+    def test_the_default_role_skill_manifest_is_the_configured_checkouts(self) -> None:
+        """`role-skills` without `--product-root` is the path the reviewer's finding walks.
+
+        The manifest of the module running the command is never the answer: a candidate checkout
+        auditing itself would report the host in sync with a registry it does not run.
+        """
+        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product)}):
+            resolved = role_skills.manifest_path()
+
+        self.assertEqual(resolved, role_skills.product_manifest_path(self.product))
+        self.assertNotEqual(resolved, role_skills.MANIFEST)
+
+    def test_a_named_manifest_and_a_named_root_both_outrank_the_configured_checkout(self) -> None:
+        named = self.root / "named" / "manifest.toml"
+        explicit = self.root / "explicit" / "manifest.toml"
+        env = {"TA_SECRETARY_REPO": str(self.product), role_skills.MANIFEST_ENV: str(named)}
+
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(role_skills.manifest_path(), named)
+            self.assertEqual(role_skills.manifest_path(explicit), explicit)
+
+    def test_an_audit_with_no_named_checkout_reads_the_configured_ones_skills(self) -> None:
+        """End to end through the CLI, which is where the default is actually taken."""
+        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product)}):
+            code, report = self.run_json_cli(
+                ["role-skills", "audit", "--instance", str(self.instance), "--json"]
+            )
+
+        self.assertEqual(code, 0, report)
+        self.assertEqual(
+            [source["path"] for source in report["manifests"]],
+            [str(role_skills.product_manifest_path(self.product))],
+        )
+        self.assertEqual(sorted({item["skill"] for item in report["missing"]}), ["portable-skill"])
 
     def test_an_explicitly_named_checkout_still_wins_over_the_configured_one(self) -> None:
         decoy = self.root / "decoy"

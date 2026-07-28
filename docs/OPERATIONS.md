@@ -941,7 +941,9 @@ The product ships no absolute path of its own. Each of these resolves in order, 
 | the installation | `--instance` / `SECRETARY_INSTANCE`, else `~/secretary-instance` |
 | the product checkout a head imports | `TA_SECRETARY_REPO`, else `$HOME/secretary` |
 | the checkout an install or upgrade materializes | `--product-root`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
-| the product skill manifest | `--product-root`, else `SECRETARY_ROLE_SKILLS_MANIFEST`, else the running checkout's |
+| the product skill manifest | `--product-root`, else `SECRETARY_ROLE_SKILLS_MANIFEST`, else the configured checkout's |
+| the checkout a launcher starts a role out of | `TA_RUNTIME_PYTHONPATH`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the packaged units a plan or a doctor run compares against | the checkout named by the command, else the one `heads/source.yaml` recorded, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
 | the account an upgrade materializes for | `--runtime-user`, else the owner of the instance directory |
 | a skill's shell root | the manifest's `root`, expanded against the installation owner's home |
 | a skill's command link | `SECRETARY_BIN_DIR`, else `<owner home>/bin` |
@@ -959,6 +961,14 @@ rather than something the operator owns.
 
 `secretary role-skills sync` run by hand has no installation owner to resolve and uses the calling
 user's home, which is that operator's own installation.
+
+None of these fall back to the checkout the running `secretary` module was imported from. That
+applies to the launchers as well: `scripts/secretary-start.sh`, `scripts/secretary-agent-gate.sh`
+and the role-env wrapper the dispatcher builds all read `TA_RUNTIME_PYTHONPATH` first and the
+configured checkout second, and the packaged services carry both names bound to the checkout the
+upgrade installed. An offline `secretary doctor` compares the host against the units of the
+checkout recorded in `heads/source.yaml`, so it reports the installation rather than the copy of
+the code the operator happened to run it from.
 
 ### The installation's head registry
 

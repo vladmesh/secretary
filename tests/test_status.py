@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.config import validate
-from secretary.host import CollectResult, HostInventory, build_doctor_expectations
+from secretary.host import CollectResult, HostInventory, build_doctor_expectations, packaging_root
 from secretary.head_registry import materialize_snapshot, product_revision, record_source
 from secretary.host_apply import resolve_packaged
 from secretary.config import validate_instance
@@ -300,12 +301,20 @@ class StatusCliTests(unittest.TestCase):
         # must both carry real, non-null evidence — not the "unprobed" (None, None) an operator
         # cannot distinguish from "we never looked".
         root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as tmp:
+        # The example installation runs this checkout: status compares a host against the units of
+        # the product the installation is configured with, not the module's own directory.
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(root)}):
             fixture = Path(tmp)
             report = validate_instance(root / "examples" / "instance")
             expected = build_doctor_expectations(
                 report.instance, report.bindings,
-                packaged=resolve_packaged(report.instance, instance_path=root / "examples" / "instance"),
+                packaged=resolve_packaged(
+                    report.instance,
+                    packaging_root(root),
+                    product_root=root,
+                    instance_path=root / "examples" / "instance",
+                ),
             )
             oneshot = next(
                 name for name, (need_enabled, need_active) in expected.unit_runtime.items()

@@ -14,7 +14,10 @@
 # and `codex` from ~/.local/bin resolve even when Orca launches this with a bare PATH.
 set -u
 export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}"
+# Same checkout precedence as the automation gate: an explicit TA_RUNTIME_PYTHONPATH, else the
+# product checkout this installation is configured with, else the home default. The interactive
+# secretary must not boot out of a different version than the one the host was upgraded to.
+export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}${PYTHONPATH:+:$PYTHONPATH}"
 
 head="${1:-}"
 exec python3 -m secretary shell ${head:+--head "$head"}

@@ -790,7 +790,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
 
     def unit_env(self, name: str) -> dict[str, str]:
         rendered = host.render_systemd_unit(
-            (host.default_packaging_root() / name).read_bytes(), self.layout
+            (host.SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
         ).decode()
         env = {}
         for line in rendered.splitlines():

@@ -27,9 +27,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from secretary.observer_root import observer_root_repo
+from triggered_agents.runtime.paths import configured_product_root
 
 KINDS = ("projects", "units", "orca repos")
 UNIT_SUFFIXES = (".service", ".timer")
+# The units this checkout ships. Like the role-skill manifest constant, it is what tests about the
+# shipped canon read and never the fallback a host command lands on: the units an installation is
+# planned or doctored against belong to the product checkout it was installed from.
+SHIPPED_PACKAGING_ROOT = Path(__file__).resolve().parents[1] / "packaging" / "systemd"
 
 
 @dataclass(frozen=True)
@@ -70,9 +75,19 @@ class PackagedUnit:
     oneshot: bool
 
 
+def packaging_root(product_root: Path | str) -> Path:
+    """Where a named product checkout keeps its shipped units."""
+    return Path(product_root).expanduser() / "packaging" / "systemd"
+
+
 def default_packaging_root() -> Path:
-    """Where the running product keeps its shipped units."""
-    return Path(__file__).resolve().parents[1] / "packaging" / "systemd"
+    """Where the product this host is configured with keeps its shipped units.
+
+    Not this checkout's own directory: a plan or a doctor run describes an installation, and the
+    units that installation runs come from the checkout it was installed from. Callers that know
+    which checkout that is — upgrade, and doctor through the recorded pin — name it instead.
+    """
+    return packaging_root(configured_product_root())
 
 
 @dataclass(frozen=True)
@@ -91,7 +106,8 @@ class SystemdLayout:
 
 
 def default_systemd_layout() -> SystemdLayout:
-    root = Path(__file__).resolve().parents[1]
+    """The layout of a host nobody named anything for: the configured product, the running home."""
+    root = configured_product_root()
     home = Path.home()
     return SystemdLayout(root, home / "secretary-instance", home / "secretary-data", os.environ.get("USER", "dev"), home)
 

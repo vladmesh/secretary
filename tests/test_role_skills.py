@@ -15,6 +15,7 @@ from unittest import mock
 from secretary.role_skills import (
     BIN_DIR_ENV,
     INSTANCE_ORIGIN,
+    MANIFEST,
     MANIFEST_ENV,
     PRODUCT_ORIGIN,
     RegistryError,
@@ -43,20 +44,24 @@ class CanonicalRegistryTests(unittest.TestCase):
     The instance is an empty directory on purpose. The default instance path is the host's real
     one, and on the machine that develops this product that instance owns an overlay; a test about
     the product canon has to say so or it silently asserts against the developer's installation.
+
+    The manifest is named for the same reason on the product side. Unnamed, the registry resolves
+    to the checkout this host is configured with, which is the right default for delivery and the
+    wrong one here: these tests are about what *this* checkout ships.
     """
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.instance = Path(tmp.name)
-        self.manifest = load_manifest()
-        self.registry = load_registry(self.instance)
+        self.manifest = load_manifest(MANIFEST)
+        self.registry = load_registry(self.instance, product_manifest=MANIFEST)
 
     def test_the_observer_role_owns_its_own_skill(self) -> None:
         self.assertEqual(self.manifest["roles"]["observer"]["skills"], [OBSERVER_SKILL])
 
     def test_the_canonical_observer_skill_is_in_this_repository(self) -> None:
-        source = roles_root() / "observer" / OBSERVER_SKILL / "SKILL.md"
+        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
@@ -76,20 +81,20 @@ class CanonicalRegistryTests(unittest.TestCase):
     def test_the_interactive_secretary_keeps_its_own_sprint_skill(self) -> None:
         """The double loop is deliberate: the observer skill does not replace `run-sprint`."""
         self.assertIn("run-sprint", self.manifest["roles"]["secretary"]["skills"])
-        self.assertTrue((roles_root() / "secretary" / "run-sprint" / "SKILL.md").is_file())
+        self.assertTrue((roles_root(MANIFEST) / "secretary" / "run-sprint" / "SKILL.md").is_file())
 
     def test_the_document_loop_stays_next_to_the_entity_loop(self) -> None:
         """`open-sprint` is added beside `start-sprint`, not instead of it."""
         skills = self.manifest["roles"]["secretary"]["skills"]
 
         self.assertIn("start-sprint", skills)
-        self.assertTrue((roles_root() / "secretary" / "start-sprint" / "SKILL.md").is_file())
+        self.assertTrue((roles_root(MANIFEST) / "secretary" / "start-sprint" / "SKILL.md").is_file())
 
     def test_the_secretary_role_owns_the_sprint_entity_skill(self) -> None:
         self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["secretary"]["skills"])
 
     def test_the_canonical_open_sprint_skill_is_in_this_repository(self) -> None:
-        source = roles_root() / "secretary" / OPEN_SPRINT_SKILL / "SKILL.md"
+        source = roles_root(MANIFEST) / "secretary" / OPEN_SPRINT_SKILL / "SKILL.md"
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
@@ -124,7 +129,7 @@ class CanonicalRegistryTests(unittest.TestCase):
     def test_a_shipped_target_root_expands_into_the_installing_users_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
-            registry = load_registry(self.instance)
+            registry = load_registry(self.instance, product_manifest=MANIFEST)
             destinations = {item.dest for item in iter_expected(registry)}
             commands = {command.dest for command in iter_expected_commands(registry)}
 
@@ -135,16 +140,19 @@ class CanonicalRegistryTests(unittest.TestCase):
         """Only the target moves with the home: a source is a file in a checkout."""
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
-            sources = {item.source for item in iter_expected(load_registry(self.instance))}
+            sources = {
+                item.source
+                for item in iter_expected(load_registry(self.instance, product_manifest=MANIFEST))
+            }
 
         self.assertTrue(sources)
         for source in sources:
             with self.subTest(str(source)):
-                self.assertEqual(source.parent.parent, roles_root())
+                self.assertEqual(source.parent.parent, roles_root(MANIFEST))
 
     def test_the_product_canon_reads_the_same_without_an_instance_directory(self) -> None:
         """A checkout on a machine with no installation at all is still a readable registry."""
-        registry = load_registry(self.instance / "not-installed")
+        registry = load_registry(self.instance / "not-installed", product_manifest=MANIFEST)
 
         self.assertEqual([source.origin for source in registry.sources], [PRODUCT_ORIGIN])
         self.assertEqual(registry.roles.keys(), self.registry.roles.keys())

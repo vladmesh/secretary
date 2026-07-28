@@ -775,6 +775,14 @@ class CommandSurfaceTests(unittest.TestCase):
         (self.root / "data").mkdir()
         self.fixture = self.root / "host"
         self.fixture.mkdir()
+        # A host runs a checkout, and these fixtures run this one. Reconcile and the role-skill
+        # audit read the configured product, so an installation that names none has no units and
+        # no manifest to compare against.
+        env = mock.patch.dict(
+            os.environ, {"TA_SECRETARY_REPO": str(upgrade.running_product_root())}
+        )
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

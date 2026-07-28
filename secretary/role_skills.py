@@ -31,9 +31,14 @@ from pathlib import Path
 from typing import Any
 
 from secretary.onboarding import DEFAULT_INSTANCE
+from triggered_agents.runtime.paths import configured_product_root
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The manifest of the checkout this module was imported from. It is what the product ships and what
+# tests about the shipped canon read, and it is deliberately *not* the fallback any caller lands on:
+# the registry a host is audited or synced against belongs to the configured product checkout, which
+# is a different path exactly when an alternate checkout is running the command.
 MANIFEST = ROOT / "skills" / "manifest.toml"
 ROLES_ROOT = ROOT / "skills" / "roles"
 # Where an installation keeps its own manifest, relative to the instance directory.
@@ -82,17 +87,25 @@ def _absolute(value: Path | str) -> Path:
 
 
 def manifest_path(product_manifest: Path | str | None = None) -> Path:
-    """The product manifest: the one the caller named, the one under test, or this checkout's.
+    """The product manifest: the one the caller named, the one under test, or the configured one.
 
     A named manifest wins over the environment because the caller that names one is installing a
     particular checkout. ``secretary upgrade --product-root`` materializes a host from a checkout
     that need not be the one running this module, and reading the running module's manifest there
     would report a host in sync with a registry the upgrade is not installing.
+
+    With neither, the answer is the configured product checkout — ``TA_SECRETARY_REPO``, else
+    ``~/secretary`` — and never the checkout containing this file. A candidate checkout is a normal
+    place to run ``role-skills`` from, so letting the running module decide would audit and deliver
+    whatever the caller's working directory happened to be instead of the product the host is
+    configured with.
     """
     if product_manifest is not None:
         return _absolute(product_manifest)
     raw = os.environ.get(MANIFEST_ENV)
-    return _absolute(raw) if raw else MANIFEST
+    if raw:
+        return _absolute(raw)
+    return product_manifest_path(configured_product_root())
 
 
 def product_manifest_path(product_root: Path | str) -> Path:
@@ -880,7 +893,7 @@ def _add_common_arguments(parser, name: str) -> None:
     parser.add_argument(
         "--product-root",
         help="product checkout whose skills/manifest.toml is the product layer "
-        f"(default: {MANIFEST_ENV} or the checkout this module runs from)",
+        f"(default: {MANIFEST_ENV}, else the configured product checkout)",
     )
     if name == "audit":
         parser.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")

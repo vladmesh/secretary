@@ -40,7 +40,7 @@ from secretary.host import (
     plan_changes,
 )
 from secretary.host_commands import add_reconcile_subcommands
-from secretary.host_apply import resolve_packaged
+from secretary.host_apply import resolve_installed_packaged
 from secretary.gate import run_gate
 from secretary.knowledge_write import (
     KnowledgeError,
@@ -846,7 +846,7 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
         return []
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
     prefix = prefix if isinstance(prefix, str) else ""
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     desired = build_plan(report.instance, report.bindings, packaged=packaged)
     managed = load_managed_manifest(data_dir / "host-managed.json")
     changes = plan_changes(desired, collected_host.inventory, managed, prefix)
@@ -1309,7 +1309,7 @@ def print_host_inventory(
 
 def collect_host_inventory(report, args: argparse.Namespace):
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
-    packaged = resolve_packaged(report.instance, instance_path=report.instance_path.parent)
+    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
     expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
     collected = source.collect(expected)
     return expected, collected, inventory(expected, collected.inventory)

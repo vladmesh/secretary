@@ -43,7 +43,7 @@ from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
 from secretary import upgrade
 from secretary.head_registry import canonical_heads, materialize_snapshot
-from secretary.host import SystemdLayout, default_packaging_root, render_systemd_unit
+from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from secretary.host_apply import resolve_packaged
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import dispatch, role_env
@@ -586,7 +586,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
     def unit_env(self, name: str) -> dict[str, str]:
         rendered = render_systemd_unit(
-            (default_packaging_root() / name).read_bytes(), self.layout
+            (SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
         ).decode()
         env = {}
         for line in rendered.splitlines():
@@ -604,7 +604,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         """Through `resolve_packaged`, the compile step `reconcile apply` actually installs from."""
         packaged = resolve_packaged(
             {"host": {"unit_prefix": "secretary-"}, "data_dir": str(self.root / "data")},
-            default_packaging_root(),
+            SHIPPED_PACKAGING_ROOT,
             product_root=self.root / "product",
             instance_path=self.instance,
             runtime_user=self.RUNTIME_USER,
@@ -667,16 +667,26 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
                 self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
 
-    def test_the_dispatcher_unit_carries_the_product_root_it_was_rendered_for(self) -> None:
-        """An upgrade from an alternate checkout renders this unit against that checkout.
+    def test_every_background_unit_carries_the_product_root_it_was_rendered_for(self) -> None:
+        """An upgrade from an alternate checkout renders these units against that checkout.
 
-        Nothing else tells a head which product to import: the head's shell resolves
-        ``$HOME/secretary`` when the name is unset, which on an upgraded host is the checkout the
-        installation was moved off.
+        Nothing else tells a launched process which product to import: the gate resolves
+        ``$HOME/secretary`` when neither name is set, which on an upgraded host is the checkout
+        the installation was moved off. Every one of these services launches something further —
+        heads through the dispatcher, task commands and curator memory writes through the deferred
+        product lookup — so the binding has to be on the unit, not only on the dispatcher.
         """
-        env = self.unit_env("secretary-dispatcher-production.service")
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                env = self.unit_env(name)
 
-        self.assertEqual(env["TA_SECRETARY_REPO"], str(self.root / "product"))
+                self.assertEqual(env["TA_SECRETARY_REPO"], str(self.root / "product"))
+                # The gate-launched services also import from it directly; the dispatcher runs the
+                # checkout's own venv entry point and needs no PYTHONPATH of its own.
+                self.assertEqual(
+                    env.get("TA_RUNTIME_PYTHONPATH", str(self.root / "product")),
+                    str(self.root / "product"),
+                )
 
     def test_the_launched_head_command_names_that_checkout_rather_than_a_home(self) -> None:
         with mock.patch.dict(
@@ -710,7 +720,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             runtime_home=self.root / "home",
         )
         rendered = render_systemd_unit(
-            (default_packaging_root() / "secretary-dispatcher-production.service").read_bytes(),
+            (SHIPPED_PACKAGING_ROOT / "secretary-dispatcher-production.service").read_bytes(),
             layout,
         ).decode()
         unit_env = dict(

@@ -41,10 +41,12 @@ from secretary.host import (
     load_packaged_units,
     SystemdLayout,
     manifest_text,
+    packaging_root,
     plan_changes,
     plan_input_errors,
     strict_manifest,
 )
+from secretary.head_registry import pinned_product_root
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -251,6 +253,26 @@ def resolve_packaged(
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     root = packaging_root or default_packaging_root()
     return load_packaged_units(root, prefix if isinstance(prefix, str) else "", layout)
+
+
+def resolve_installed_packaged(
+    instance: dict[str, Any], *, instance_path: Path
+) -> list[PackagedUnit]:
+    """Compile the units of the checkout this installation was installed from.
+
+    Every read-only view of a host — doctor, status, the production findings — describes an
+    installation, so the desired unit content has to come from the checkout the last upgrade
+    recorded rather than from whichever copy of the product is executing the command. Reading the
+    running module's `packaging/systemd` would report a portable installation as drifted against a
+    catalogue it was never installed with.
+    """
+    product_root = pinned_product_root(instance_path)
+    return resolve_packaged(
+        instance,
+        packaging_root(product_root),
+        product_root=product_root,
+        instance_path=instance_path,
+    )
 
 
 def find_orca_executable(runtime_user: str, runtime_home: Path | None = None) -> Path | None:
