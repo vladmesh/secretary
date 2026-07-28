@@ -473,7 +473,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
     def materialize(self, canon: str | None) -> None:
         if canon is not None:
             (self.instance / "heads" / "heads.toml").write_text(canon, encoding="utf-8")
-        materialize_snapshot(self.instance, upgrade.default_product_root())
+        materialize_snapshot(self.instance, upgrade.running_product_root())
 
     def test_the_installations_own_canon_routes_every_role(self) -> None:
         self.materialize(self.CANON)
@@ -491,7 +491,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
 
     def test_an_installation_with_no_canon_runs_the_product_defaults(self) -> None:
         self.materialize(None)
-        product = canonical_heads(upgrade.default_product_root())["role_defaults"]
+        product = canonical_heads(upgrade.running_product_root())["role_defaults"]
         catalog = InstanceCatalog(self.instance)
 
         with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
@@ -573,7 +573,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n",
             encoding="utf-8",
         )
-        materialize_snapshot(self.instance, upgrade.default_product_root())
+        materialize_snapshot(self.instance, upgrade.running_product_root())
         self.layout = SystemdLayout(
             product_root=self.root / "product",
             instance_path=self.instance,
@@ -666,6 +666,74 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 )
 
                 self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
+
+    def test_the_dispatcher_unit_carries_the_product_root_it_was_rendered_for(self) -> None:
+        """An upgrade from an alternate checkout renders this unit against that checkout.
+
+        Nothing else tells a head which product to import: the head's shell resolves
+        ``$HOME/secretary`` when the name is unset, which on an upgraded host is the checkout the
+        installation was moved off.
+        """
+        env = self.unit_env("secretary-dispatcher-production.service")
+
+        self.assertEqual(env["TA_SECRETARY_REPO"], str(self.root / "product"))
+
+    def test_the_launched_head_command_names_that_checkout_rather_than_a_home(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                **self.unit_env("secretary-dispatcher-production.service"),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(self.root / "home"),
+            },
+            clear=True,
+        ):
+            command = wrap_role_shell_command("worker", "true")
+
+        self.assertIn(f"TA_SECRETARY_REPO={self.root / 'product'}", command)
+        self.assertIn(f"PYTHONPATH={self.root / 'product'}", command)
+        self.assertNotIn("$HOME/secretary", command)
+
+    def test_a_dispatcher_launched_head_imports_the_checkout_the_unit_named(self) -> None:
+        """End to end, in a terminal that has no ``TA_SECRETARY_REPO`` of its own.
+
+        The rendered checkout has to be the real one here, because the wrapper runs
+        ``secretary.role_env`` out of it; the layout points at it the way an alternate upgrade
+        would, and the launching shell is given a home where no checkout exists at all.
+        """
+        product = Path(__file__).resolve().parents[1]
+        layout = SystemdLayout(
+            product_root=product,
+            instance_path=self.instance,
+            data_dir=self.root / "data",
+            runtime_user=self.RUNTIME_USER,
+            runtime_home=self.root / "home",
+        )
+        rendered = render_systemd_unit(
+            (default_packaging_root() / "secretary-dispatcher-production.service").read_bytes(),
+            layout,
+        ).decode()
+        unit_env = dict(
+            line[len("Environment="):].split("=", 1)
+            for line in rendered.splitlines()
+            if line.startswith("Environment=")
+        )
+        with mock.patch.dict(
+            os.environ, {**unit_env, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, clear=True
+        ):
+            command = wrap_role_shell_command("worker", "printenv TA_SECRETARY_REPO")
+
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            capture_output=True, text=True, timeout=120,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(self.root / "home"),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(product), result.stderr)
 
     def test_a_dispatcher_launched_head_resolves_the_selected_instance(self) -> None:
         """End to end through the rendered command, the way a head actually starts.

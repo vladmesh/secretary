@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import role_skills, upgrade
+from secretary import installation, role_skills, upgrade
 from secretary.cli import main as cli_main
 from secretary.config import validate_instance
 from secretary.head_registry import (
@@ -544,6 +544,41 @@ class InstallationOwnerTests(PortableFixture):
         return code, output.getvalue()
 
 
+class ProductRootDefaultTests(PortableFixture):
+    """Which checkout install and upgrade materialize when the operator names none.
+
+    A candidate checkout is a normal place to run the command from — that is what upgrading to it
+    looks like before it is installed. If the running module decided, the answer would be the
+    working directory of whoever typed the command rather than anything the host configured.
+    """
+
+    def test_the_configured_checkout_wins_over_the_one_running_the_command(self) -> None:
+        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product)}):
+            self.assertEqual(upgrade.default_product_root(), self.product)
+            self.assertEqual(
+                installation._product_root(SimpleNamespace(product_root=None)),
+                self.product.resolve(),
+            )
+
+    def test_with_nothing_configured_the_default_hangs_off_the_running_users_home(self) -> None:
+        self.assertEqual(upgrade.default_product_root(), self.invoker_home / "secretary")
+        self.assertNotEqual(str(upgrade.default_product_root()), RUNNING_CHECKOUT)
+
+    def test_an_explicitly_named_checkout_still_wins_over_the_configured_one(self) -> None:
+        decoy = self.root / "decoy"
+        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(decoy)}):
+            seen: list[upgrade.UpgradeContext] = []
+            with mock.patch.object(
+                upgrade,
+                "run_steps",
+                side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult(),
+            ):
+                code = self.run_upgrade_command(dry_run=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0].product_root, self.product)
+
+
 class InstallationOwnedLayersTests(PortableFixture):
     """The same alternate checkout, over an installation that owns heads and skills of its own."""
 
@@ -632,14 +667,36 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         self.assert_refused(self.run_upgrade(), overlay)
 
     def test_a_skill_the_named_checkout_does_not_ship_stops_the_delivery(self) -> None:
-        """A manifest can be readable and still name a skill that is not beside it."""
+        """A manifest can be readable and still name a skill that is not beside it.
+
+        Readable is not deliverable, and the difference has to be found in the same step as a
+        syntax error: the head snapshot is written two steps before the skills are.
+        """
         source = self.product / "skills" / "roles" / "secretary" / "portable-skill"
         (source / "SKILL.md").unlink()
+
+        self.assert_refused(self.run_upgrade(), source / "SKILL.md")
+        self.assertFalse((self.home / "shells").exists())
+
+    def test_an_entry_point_the_registry_does_not_own_is_refused_before_the_snapshot(self) -> None:
+        """A command that cannot be linked is a registry fault, not work the sync can do.
+
+        `sync` refuses this one, but by then the snapshot is written. The command bin is also the
+        one part of the plan that lives outside the shells, so nothing earlier would have touched
+        it and noticed.
+        """
+        occupied = self.home / "bin" / "portable-skill"
+        occupied.parent.mkdir(parents=True)
+        occupied.write_text("#!/bin/sh\necho the operator's own\n", encoding="utf-8")
 
         result = self.run_upgrade()
 
         failed = [step for step in result.steps if step.failed]
-        self.assertEqual([step.name for step in failed], ["role-skills"], result.render())
+        self.assertEqual([step.name for step in failed], ["registries"], result.render())
+        self.assertIn(str(occupied), failed[0].detail)
+        self.assertEqual(
+            occupied.read_text(encoding="utf-8"), "#!/bin/sh\necho the operator's own\n"
+        )
         self.assertFalse((self.home / "shells").exists())
 
     def test_a_bad_registry_stops_the_run_before_the_checkout_is_reinstalled(self) -> None:

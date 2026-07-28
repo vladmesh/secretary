@@ -58,6 +58,7 @@ from secretary.head_registry import (
     snapshot_path,
     source_path,
 )
+from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
 # A pull that touches any of these can change what the long-running memory
@@ -232,14 +233,26 @@ def step_registries(context: UpgradeContext) -> StepResult:
     be malformed, and finding that out at the third write leaves a host half-moved onto a version
     it never finished installing. So both registries are parsed here, where a refusal costs
     nothing, and every way they can fail arrives as one message naming the file to open.
+
+    Parsing is not enough for the skill registry: a manifest whose declared ``SKILL.md`` is absent,
+    whose target roots overlap, or whose entry point collides with a file this registry does not
+    own parses cleanly and is refused by `sync` — after the head snapshot has been written. The
+    whole plan is therefore decided here, against the same manifests and the same home the later
+    steps use, so every one of those refusals lands before the first write.
     """
     manifest = _role_skills_manifest(context)
     try:
         registry = role_skills.load_registry(context.instance_path, product_manifest=manifest)
-        role_skills.iter_expected(registry, context.runtime_home)
-        role_skills.iter_expected_commands(registry, context.runtime_home)
+        problems = role_skills.unmaterializable(registry, context.runtime_home)
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
         return StepResult("registries", "failed", f"skill registry: {exc}")
+    if problems:
+        return StepResult(
+            "registries",
+            "failed",
+            f"skill registry: {problems[0]}",
+            {"problems": len(problems)},
+        )
     try:
         canonical, _ = canonical_path(context.product_root, context.instance_path)
         canonical_heads(context.product_root, context.instance_path)
@@ -530,8 +543,26 @@ def run_steps(context: UpgradeContext, steps=STEPS) -> UpgradeResult:
     return result
 
 
-def default_product_root() -> Path:
+def running_product_root() -> Path:
+    """The checkout this module was imported from.
+
+    For reading what this process itself ships, which is what `doctor` compares a live host
+    against. Never for deciding what to install: that is `default_product_root`, and the two are
+    different paths exactly when an alternate checkout is running the command.
+    """
     return Path(__file__).resolve().parents[1]
+
+
+def default_product_root() -> Path:
+    """The checkout an install or upgrade materializes when nothing names one.
+
+    The configured one, or ``~/secretary`` — never the checkout the running module happens to sit
+    in. A candidate checkout is a normal place to run ``secretary upgrade`` from, and installing
+    whatever executed the command would make the caller's working directory decide which product
+    version a host ends up on. ``--product-root`` and ``TA_SECRETARY_REPO`` still win, in that
+    order.
+    """
+    return configured_product_root()
 
 
 def run_upgrade(args) -> int:
@@ -595,7 +626,10 @@ def add_upgrade_command(subparsers) -> None:
     upgrade.add_argument("--dry-run", action="store_true", help="decide every step but write nothing")
     upgrade.add_argument("--no-pull", action="store_true", help="re-materialize without moving the checkout")
     upgrade.add_argument("--base-branch", default="main")
-    upgrade.add_argument("--product-root", help="product checkout to upgrade (defaults to the running one)")
+    upgrade.add_argument(
+        "--product-root",
+        help="product checkout to upgrade (defaults to TA_SECRETARY_REPO, else ~/secretary)",
+    )
     upgrade.add_argument(
         "--runtime-user",
         help="account this installation belongs to, whose home every home-relative path is "

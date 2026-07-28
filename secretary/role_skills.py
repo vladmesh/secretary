@@ -687,6 +687,47 @@ def audit(
     }
 
 
+def unmaterializable(
+    registry: SkillRegistry,
+    home: Path | str | None = None,
+    target_filter: set[str] | None = None,
+) -> list[str]:
+    """Every reason this registry cannot be delivered as written, decided without writing.
+
+    Nothing here reads a destination's contents, so the answer is the same before and after a
+    sync: these are the registry's own faults, not work left to do. A caller that has to refuse
+    before its first write — `secretary upgrade` writes the head snapshot two steps ahead of the
+    skills — asks this, and `sync` asks the same question so the two cannot come to different
+    conclusions about the same manifest.
+    """
+    problems = [
+        f"overlapping skill target roots: {error}"
+        for error in find_overlapping_target_roots(registry, home)
+    ]
+    expected = iter_expected(registry, home)
+    if target_filter:
+        expected = [item for item in expected if item.target in target_filter]
+    problems += [
+        f"two skills claim the skill directory {conflict['dest']}: "
+        f"{conflict['left_skill']} from {conflict['left_manifest']} and "
+        f"{conflict['right_skill']} from {conflict['right_manifest']}"
+        for conflict in find_conflicting_destinations(expected)
+    ]
+    problems += [
+        f"missing canonical skill: {item.source}/SKILL.md (declared by {item.manifest})"
+        for item in expected
+        if not (item.source / "SKILL.md").is_file()
+    ]
+    commands = [] if target_filter else iter_expected_commands(registry, home)
+    problems += [
+        f"command entry point {state['command']} from {state['manifest']} "
+        f"cannot be materialized: {state['reason']}"
+        for state in (_entry_point_state(command, registry.owned_roots) for command in commands)
+        if state["status"] == "conflict"
+    ]
+    return problems
+
+
 def sync(
     target_filter: set[str] | None = None,
     *,
@@ -701,37 +742,14 @@ def sync(
     audit cannot tell the two apart.
     """
     registry = load_registry(instance_path, product_manifest=product_manifest)
-    config_errors = find_overlapping_target_roots(registry, home)
-    if config_errors:
-        raise RegistryError(f"overlapping skill target roots: {config_errors}")
+    problems = unmaterializable(registry, home, target_filter)
+    if problems:
+        raise RegistryError(problems[0])
     expected = iter_expected(registry, home)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
-
-    conflicts = find_conflicting_destinations(expected)
-    if conflicts:
-        conflict = conflicts[0]
-        raise RegistryError(
-            f"two skills claim the skill directory {conflict['dest']}: "
-            f"{conflict['left_skill']} from {conflict['left_manifest']} and "
-            f"{conflict['right_skill']} from {conflict['right_manifest']}"
-        )
-
-    for item in expected:
-        if not (item.source / "SKILL.md").is_file():
-            raise FileNotFoundError(
-                f"missing canonical skill: {item.source}/SKILL.md "
-                f"(declared by {item.manifest})"
-            )
-
     commands = [] if target_filter else iter_expected_commands(registry, home)
     states = [_entry_point_state(command, registry.owned_roots) for command in commands]
-    for state in states:
-        if state["status"] == "conflict":
-            raise RegistryError(
-                f"command entry point {state['command']} from {state['manifest']} "
-                f"cannot be materialized: {state['reason']}"
-            )
 
     copied: list[dict[str, str]] = []
     for item in expected:

@@ -40,6 +40,19 @@ def configured_instance_path(environ: Mapping[str, str] | None = None) -> Path:
     return Path(configured).expanduser() if configured else default_instance_path()
 
 
+def configured_product_root(environ: Mapping[str, str] | None = None) -> Path:
+    """The product checkout this process was pointed at, or the home default.
+
+    Deliberately not the checkout containing the running module. An upgrade run out of a candidate
+    checkout materializes the installation the operator configured, and a repair run out of a
+    rescue copy must not silently install that copy; both are named by ``TA_SECRETARY_REPO`` or by
+    ``--product-root``, which the callers read first.
+    """
+    env = os.environ if environ is None else environ
+    configured = env.get(PRODUCT_ENV)
+    return Path(configured).expanduser() if configured else default_product_root()
+
+
 def instance_dir(path: Path | str) -> Path:
     """The instance directory for a path that may name either the directory or its config file.
 

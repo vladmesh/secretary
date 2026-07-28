@@ -10,11 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from ...runtime.paths import default_instance_path, default_product_root
+from ...runtime.paths import configured_product_root, default_instance_path
 from ...runtime.state import AgentState
 
 DEFAULT_SECRETARY_INSTANCE = default_instance_path()
-DEFAULT_SECRETARY_REPO = default_product_root()
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -174,7 +173,7 @@ def _already_exists_result(
 
 def _secretary_env(secretary_repo: Path | None) -> dict[str, str]:
     env = dict(os.environ)
-    repo = secretary_repo or Path(os.environ.get("TA_SECRETARY_REPO", str(DEFAULT_SECRETARY_REPO)))
+    repo = secretary_repo or configured_product_root()
     paths = [str(repo)]
     if env.get("PYTHONPATH"):
         paths.append(env["PYTHONPATH"])

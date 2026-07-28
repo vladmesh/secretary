@@ -1393,9 +1393,11 @@ def print_background_automations(*, inspect: bool) -> None:
         load_specs,
         plan_automations,
     )
-    from secretary.upgrade import default_product_root
+    # The automations this process ships, not the ones a configured checkout would: doctor
+    # reports on the code it is running.
+    from secretary.upgrade import running_product_root
 
-    specs = load_specs(default_product_root())
+    specs = load_specs(running_product_root())
     if not specs:
         return
     print("")

@@ -42,7 +42,7 @@ NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO"
 # Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
 # file, which is itself a file inside one installation. See secretary/role_env.py for the same
 # rule on the dispatcher-to-head path.
-UNIT_BOUND_ENV = ("SECRETARY_INSTANCE",)
+UNIT_BOUND_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 # What a launched process has to be told about the installation it belongs to.
 LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
 

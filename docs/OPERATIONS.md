@@ -881,7 +881,7 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | step | what it does |
 | --- | --- |
 | `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
-| `registries` | read the selected checkout's skill manifest, this installation's optional overlay and the head canon; a file that cannot be read stops the run here, before the first write |
+| `registries` | read the selected checkout's skill manifest, this installation's optional overlay and the head canon, and decide the whole skill delivery; a registry that cannot be read or cannot be delivered stops the run here, before the first write |
 | `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
 | `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, and the checkout and revision it came from |
 | `role-skills` | `role_skills sync` into the shells' skill directories |
@@ -906,13 +906,27 @@ lets a second checkout install a host at all.
 `secretary role-skills audit|sync --product-root <checkout>` takes the same argument on its own, for
 delivering skills without running a whole upgrade.
 
+Without `--product-root`, an install or upgrade materializes the configured checkout —
+`TA_SECRETARY_REPO`, else `$HOME/secretary` — and not the checkout the command was typed in. A
+candidate checkout is the normal place to run the upgrade from, so the running module deciding
+would make the working directory pick the version a host ends up on.
+
+The checkout an upgrade selects is written into the dispatcher unit as `TA_SECRETARY_REPO`, and the
+dispatcher renders it into every head it launches. Orca creates a head's terminal, so it inherits
+nothing from the unit and a runtime.env line cannot take the name back: after an upgrade from a
+candidate checkout, a worker, reviewer or observer imports the product the installation was moved
+onto rather than whatever `$HOME/secretary` still points at.
+
 The `registries` step reads both registries before the first materializing write, which is why it
 runs directly after the pull and ahead of `dependencies`: a `pip install -e` into the checkout's
 `.venv` is already a write into the version being installed. A product manifest or instance overlay
 that is malformed, unreadable, a directory or a dangling link, and a `heads/heads.toml` in any of
-the same states, stops the run there and names the file. No dependency install, head snapshot, pin,
-role worktree, skill copy, command link or host resource is written on that path, so a bad hand
-edit leaves the installation exactly as it was.
+the same states, stops the run there and names the file. So does a manifest that parses and still
+cannot be delivered: a declared skill with no `SKILL.md` beside its manifest, two skills claiming
+one skill directory, overlapping target roots, or a command entry point whose path in `bin` is
+occupied by something this registry does not own. No dependency install, head snapshot, pin, role
+worktree, skill copy, command link or host resource is written on that path, so a bad hand edit
+leaves the installation exactly as it was.
 
 ### Path precedence
 
@@ -922,7 +936,7 @@ The product ships no absolute path of its own. Each of these resolves in order, 
 | --- | --- |
 | the installation | `--instance` / `SECRETARY_INSTANCE`, else `~/secretary-instance` |
 | the product checkout a head imports | `TA_SECRETARY_REPO`, else `$HOME/secretary` |
-| the checkout an upgrade installs | `--product-root`, else the checkout running the command |
+| the checkout an install or upgrade materializes | `--product-root`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
 | the product skill manifest | `--product-root`, else `SECRETARY_ROLE_SKILLS_MANIFEST`, else the running checkout's |
 | the account an upgrade materializes for | `--runtime-user`, else the owner of the instance directory |
 | a skill's shell root | the manifest's `root`, expanded against the installation owner's home |

@@ -460,7 +460,7 @@ def launch_binding() -> list[str]:
 def wrap_role_shell_command(role: str, command: str) -> str:
     binding = " ".join(launch_binding())
     return (
-        f"{binding} {pythonpath_prefix()} python3 -m secretary.role_env exec "
+        f"{binding} {pythonpath_prefix(os.environ)} python3 -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
     )
 
