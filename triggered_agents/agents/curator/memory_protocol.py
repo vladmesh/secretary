@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from ...runtime.paths import default_instance_path, default_product_root
 from ...runtime.state import AgentState
 
-DEFAULT_SECRETARY_INSTANCE = Path("/home/dev/secretary-instance")
-DEFAULT_SECRETARY_REPO = Path("/home/dev/secretary")
+DEFAULT_SECRETARY_INSTANCE = default_instance_path()
+DEFAULT_SECRETARY_REPO = default_product_root()
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 

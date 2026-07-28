@@ -50,6 +50,7 @@ from secretary.host_apply import (
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
+    canonical_heads,
     canonical_path,
     materialize_snapshot,
     record_source,
@@ -212,19 +213,54 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     return StepResult("dependencies", "changed", "reinstalled the product into .venv")
 
 
+def _role_skills_manifest(context: UpgradeContext) -> Path:
+    """The skill registry of the checkout being installed, which is not always the running one."""
+    return role_skills.product_manifest_path(context.product_root)
+
+
+def step_registries(context: UpgradeContext) -> StepResult:
+    """Read every registry this upgrade materializes from, before anything is written.
+
+    The steps that follow write in order: the head snapshot, then role worktrees, then skills and
+    their entry points, then the host. Each of them reads operator-written configuration that can
+    be malformed, and finding that out at the third write leaves a host half-moved onto a version
+    it never finished installing. So both registries are parsed here, where a refusal costs
+    nothing, and every way they can fail arrives as one message naming the file to open.
+    """
+    manifest = _role_skills_manifest(context)
+    try:
+        registry = role_skills.load_registry(context.instance_path, product_manifest=manifest)
+        role_skills.iter_expected(registry)
+        role_skills.iter_expected_commands(registry)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return StepResult("registries", "failed", f"skill registry: {exc}")
+    try:
+        canonical, _ = canonical_path(context.product_root, context.instance_path)
+        canonical_heads(context.product_root, context.instance_path)
+    except HeadRegistryConfigError as exc:
+        return StepResult("registries", "failed", str(exc))
+    sources = ", ".join(str(source.path) for source in registry.sources)
+    return StepResult("registries", "unchanged", f"{sources} and {canonical} are readable")
+
+
 def step_role_skills(context: UpgradeContext) -> StepResult:
-    before = role_skills.audit()
+    """Materialize the product skills of the checkout being installed, plus this installation's."""
+    manifest = _role_skills_manifest(context)
+    try:
+        before = role_skills.audit(instance_path=context.instance_path, product_manifest=manifest)
+    except (OSError, ValueError) as exc:
+        return StepResult("role-skills", "failed", str(exc))
     if before["ok"]:
         return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
-    pending = len(before["missing"]) + len(before["drift"])
+    pending = len(before["missing"]) + len(before["drift"]) + len(before["entry_points"])
     if before["config_errors"] or before["source_missing"]:
         return StepResult("role-skills", "failed", "manifest is not usable: overlapping roots or a missing source skill")
     if context.dry_run:
         return StepResult("role-skills", "changed", f"would sync {pending} skill copies")
     try:
-        after = role_skills.sync()
+        after = role_skills.sync(instance_path=context.instance_path, product_manifest=manifest)
     except (OSError, ValueError) as exc:
-        return StepResult("role-skills", "failed", exc.__class__.__name__)
+        return StepResult("role-skills", "failed", str(exc))
     if not after["after"]["ok"]:
         return StepResult("role-skills", "failed", "sync ran but the audit is still red")
     return StepResult("role-skills", "changed", f"synced {pending} skill copies")
@@ -435,7 +471,12 @@ def step_verify(context: UpgradeContext) -> StepResult:
         return StepResult("verify", "failed", f"host is still not reconciled: {result.detail}")
     if result.status == "changed":
         return StepResult("verify", "failed", f"reconcile is not idempotent: {result.detail}")
-    audit = role_skills.audit()
+    try:
+        audit = role_skills.audit(
+            instance_path=context.instance_path, product_manifest=_role_skills_manifest(context)
+        )
+    except (OSError, ValueError) as exc:
+        return StepResult("verify", "failed", str(exc))
     if not audit["ok"]:
         return StepResult("verify", "failed", "role skills are still out of sync")
     try:
@@ -448,6 +489,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_dependencies,
+    step_registries,
     step_head_registry,
     step_worktrees,
     step_role_skills,

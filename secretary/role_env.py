@@ -9,8 +9,10 @@ import shlex
 import sys
 from pathlib import Path
 
+from triggered_agents.runtime.paths import default_instance_path
+
 RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
-RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
+RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 RUNTIME_ENV = Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
 
 

@@ -2,7 +2,9 @@
 """Audit and sync role-owned skills into shell-owned skill directories.
 
 Two registries, layered. The product manifest is the portable one: the roles and skills every
-installation gets. An installation may own a second manifest at ``<instance>/skills/manifest.toml``
+installation gets, read from whichever checkout the caller names, because an upgrade can
+materialize a host from a checkout other than the one running this module. An installation may own
+a second manifest at ``<instance>/skills/manifest.toml``
 naming skills that belong to this host alone, and its ``roles/`` tree sits beside it in the private
 instance repository. A skill is always read from the tree beside the manifest that declared it, so
 the two never have to agree about where sources live, and an installation without an overlay is a
@@ -36,6 +38,10 @@ MANIFEST = ROOT / "skills" / "manifest.toml"
 ROLES_ROOT = ROOT / "skills" / "roles"
 # Where an installation keeps its own manifest, relative to the instance directory.
 INSTANCE_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
+# Where a product checkout keeps its manifest, relative to the checkout root. The same spelling as
+# the instance overlay by coincidence, not by contract: the two are named separately so one can
+# move without dragging the other.
+PRODUCT_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
 # Points the registry at another product manifest, and with it at another `roles/` tree beside that
 # file. The delivery check below runs inside the dispatcher tick, so a test needs a registry it can
 # own without writing into the shells of the live installation.
@@ -75,14 +81,28 @@ def _absolute(value: Path | str) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(value))))
 
 
-def manifest_path() -> Path:
+def manifest_path(product_manifest: Path | str | None = None) -> Path:
+    """The product manifest: the one the caller named, the one under test, or this checkout's.
+
+    A named manifest wins over the environment because the caller that names one is installing a
+    particular checkout. ``secretary upgrade --product-root`` materializes a host from a checkout
+    that need not be the one running this module, and reading the running module's manifest there
+    would report a host in sync with a registry the upgrade is not installing.
+    """
+    if product_manifest is not None:
+        return _absolute(product_manifest)
     raw = os.environ.get(MANIFEST_ENV)
     return _absolute(raw) if raw else MANIFEST
 
 
-def roles_root() -> Path:
+def product_manifest_path(product_root: Path | str) -> Path:
+    """The manifest of a named product checkout, which is not always the running one."""
+    return _absolute(product_root) / PRODUCT_MANIFEST_RELATIVE
+
+
+def roles_root(product_manifest: Path | str | None = None) -> Path:
     """The canonical product skill sources, always beside the manifest that names them."""
-    return manifest_path().parent / "roles"
+    return manifest_path(product_manifest).parent / "roles"
 
 
 def instance_dir(value: Path | str) -> Path:
@@ -182,7 +202,11 @@ def load_manifest(path: Path | None = None) -> dict[str, Any]:
         raise RegistryError(f"{target}: could not be read: {exc}") from None
 
 
-def manifest_sources(instance_path: Path | str | None = None) -> list[ManifestSource]:
+def manifest_sources(
+    instance_path: Path | str | None = None,
+    *,
+    product_manifest: Path | str | None = None,
+) -> list[ManifestSource]:
     """The manifests that make up this installation's registry, product first.
 
     A missing instance manifest is not an error and not a warning: a portable installation simply
@@ -190,7 +214,7 @@ def manifest_sources(instance_path: Path | str | None = None) -> list[ManifestSo
     an installation that meant to own an overlay and has a broken one, and reading past it would
     call a damaged configuration portable.
     """
-    sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path())]
+    sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path(product_manifest))]
     overlay = instance_manifest_path(instance_path)
     if overlay.is_file():
         sources.append(ManifestSource(INSTANCE_ORIGIN, overlay))
@@ -238,14 +262,18 @@ def _within(root: Path, path: Path) -> bool:
     return path_abs == root_abs or root_abs in path_abs.parents
 
 
-def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
+def load_registry(
+    instance_path: Path | str | None = None,
+    *,
+    product_manifest: Path | str | None = None,
+) -> SkillRegistry:
     """Read every manifest and layer them in order.
 
     Roles accumulate: an instance adds skills to a product role rather than replacing the role, so
     an upgrade that ships a new product skill still delivers it. A target is replaced whole by a
     later manifest, because a target is one shell root and merging two of them means nothing.
     """
-    sources = manifest_sources(instance_path)
+    sources = manifest_sources(instance_path, product_manifest=product_manifest)
     roles: dict[str, list[tuple[str, ManifestSource]]] = {}
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = {}
     for source in sources:
@@ -493,9 +521,12 @@ def _write_entry_point(command: ExpectedCommand, state: dict[str, str]) -> None:
         command.source.chmod(wanted)
 
 
-def _named_manifests(instance_path: Path | str | None) -> str:
+def _named_manifests(
+    instance_path: Path | str | None,
+    product_manifest: Path | str | None = None,
+) -> str:
     """Every manifest a refusal was decided from — an overlay can be the file at fault."""
-    product = manifest_path()
+    product = manifest_path(product_manifest)
     overlay = instance_manifest_path(instance_path)
     return f"{product} + {overlay}" if overlay.is_file() else str(product)
 
@@ -558,8 +589,9 @@ def audit(
     target_filter: set[str] | None = None,
     *,
     instance_path: Path | str | None = None,
+    product_manifest: Path | str | None = None,
 ) -> dict[str, Any]:
-    registry = load_registry(instance_path)
+    registry = load_registry(instance_path, product_manifest=product_manifest)
     config_errors = find_overlapping_target_roots(registry)
     expected = iter_expected(registry)
     if target_filter:
@@ -616,7 +648,7 @@ def audit(
     ok = ok and not entry_point_problems and not destination_conflicts
     return {
         "ok": ok,
-        "manifest": str(manifest_path()),
+        "manifest": str(manifest_path(product_manifest)),
         "manifests": registry.describe_sources(),
         "targets": by_target,
         "missing": missing,
@@ -632,6 +664,7 @@ def sync(
     target_filter: set[str] | None = None,
     *,
     instance_path: Path | str | None = None,
+    product_manifest: Path | str | None = None,
 ) -> dict[str, Any]:
     """Deliver every expected skill and entry point, or refuse before writing anything.
 
@@ -639,7 +672,7 @@ def sync(
     registry that is half applied is worse than one that was not applied at all, because the next
     audit cannot tell the two apart.
     """
-    registry = load_registry(instance_path)
+    registry = load_registry(instance_path, product_manifest=product_manifest)
     config_errors = find_overlapping_target_roots(registry)
     if config_errors:
         raise RegistryError(f"overlapping skill target roots: {config_errors}")
@@ -706,7 +739,9 @@ def sync(
         "ok": True,
         "copied": copied,
         "linked": linked,
-        "after": audit(target_filter, instance_path=instance_path),
+        "after": audit(
+            target_filter, instance_path=instance_path, product_manifest=product_manifest
+        ),
     }
 
 
@@ -765,16 +800,18 @@ def parse_targets(value: str | None) -> set[str] | None:
 def run_role_skills(args) -> int:
     targets = parse_targets(args.targets)
     instance = getattr(args, "instance", None)
+    product_root = getattr(args, "product_root", None)
+    product = product_manifest_path(product_root) if product_root else None
     if args.role_skills_command == "audit":
         try:
-            result = audit(targets, instance_path=instance)
+            result = audit(targets, instance_path=instance, product_manifest=product)
         except (OSError, ValueError) as exc:
             print(f"secretary role-skills audit: {exc}")
             return 2
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else render_markdown(result))
         return 1 if args.check and not result["ok"] else 0
     try:
-        result = sync(targets, instance_path=instance)
+        result = sync(targets, instance_path=instance, product_manifest=product)
     except (OSError, ValueError) as exc:
         print(f"secretary role-skills sync: {exc}")
         return 2
@@ -790,6 +827,11 @@ def _add_common_arguments(parser, name: str) -> None:
         default=os.environ.get(INSTANCE_ENV, DEFAULT_INSTANCE),
         help="instance dir or instance.yaml whose skills/manifest.toml is layered over the product "
         f"manifest (default: {INSTANCE_ENV} or {DEFAULT_INSTANCE})",
+    )
+    parser.add_argument(
+        "--product-root",
+        help="product checkout whose skills/manifest.toml is the product layer "
+        f"(default: {MANIFEST_ENV} or the checkout this module runs from)",
     )
     if name == "audit":
         parser.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")

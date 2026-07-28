@@ -13,8 +13,10 @@ import shlex
 import sys
 from pathlib import Path
 
+from .paths import default_instance_path
+
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
-RUNTIME_ENV_DEFAULT = "/home/dev/secretary-instance/runtime.env"
+RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 RUNTIME_ENV = Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
 
 
@@ -173,7 +175,7 @@ def launch_binding() -> list[str]:
     The launched process is a terminal Orca creates, not a child of the launcher, so it inherits
     none of the launcher's unit environment. Naming the runtime env file and the instance in the
     command itself is what keeps a role started by a non-default installation from reading
-    ``/home/dev/secretary-instance``. Only names the launcher was actually given are rendered:
+    the home default ``~/secretary-instance``. Only names the launcher was actually given are rendered:
     writing out the fallback would state a choice nobody made.
     """
     return [

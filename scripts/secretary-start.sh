@@ -13,8 +13,8 @@
 # No login shell: export the per-user binary dirs explicitly like the automation gate, so `claude`
 # and `codex` from ~/.local/bin resolve even when Orca launches this with a bare PATH.
 set -u
-export PATH="/home/dev/.local/bin:/home/dev/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-/home/dev/secretary}${PYTHONPATH:+:$PYTHONPATH}"
+export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}"
 
 head="${1:-}"
 exec python3 -m secretary shell ${head:+--head "$head"}

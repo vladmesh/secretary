@@ -22,10 +22,12 @@ from secretary.role_skills import (
     find_overlapping_target_roots,
     instance_manifest_path,
     iter_expected,
+    iter_expected_commands,
     load_manifest,
     load_registry,
     main,
     manifest_sources,
+    product_manifest_path,
     roles_root,
     skill_delivery,
     sync,
@@ -109,6 +111,36 @@ class CanonicalRegistryTests(unittest.TestCase):
         ]
 
         self.assertEqual(missing, [])
+
+    def test_every_shipped_target_root_belongs_to_whoever_installs_it(self) -> None:
+        """The product does not know which user runs it, so no root may name one."""
+        roots = [target["root"] for target, _ in self.registry.targets.values()]
+
+        self.assertTrue(roots)
+        for root in roots:
+            with self.subTest(root):
+                self.assertTrue(root.startswith("~/"), root)
+
+    def test_a_shipped_target_root_expands_into_the_installing_users_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+            registry = load_registry(self.instance)
+            destinations = {item.dest for item in iter_expected(registry)}
+            commands = {command.dest for command in iter_expected_commands(registry)}
+
+        outside = [str(path) for path in destinations | commands if not str(path).startswith(tmp)]
+        self.assertEqual(outside, [])
+
+    def test_a_shipped_skill_source_stays_beside_the_manifest_that_declared_it(self) -> None:
+        """Only the target moves with the home: a source is a file in a checkout."""
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+            sources = {item.source for item in iter_expected(load_registry(self.instance))}
+
+        self.assertTrue(sources)
+        for source in sources:
+            with self.subTest(str(source)):
+                self.assertEqual(source.parent.parent, roles_root())
 
     def test_the_product_canon_reads_the_same_without_an_instance_directory(self) -> None:
         """A checkout on a machine with no installation at all is still a readable registry."""
@@ -331,6 +363,61 @@ class LayeredRegistryTests(OverlayFixture):
 
         self.assertEqual(code, 0)
         self.assertTrue((self.shell_root / "personal" / "SKILL.md").is_file())
+
+
+class AlternateProductManifestTests(OverlayFixture):
+    """A caller installing one checkout while running from another.
+
+    `SECRETARY_ROLE_SKILLS_MANIFEST` still points at the fixture the base class wrote, which stands
+    in for the checkout that runs the process. Everything below names a second one instead.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.other_root = self.root / "other-checkout"
+        self.other = product_manifest_path(self.other_root)
+        self.other.parent.mkdir(parents=True)
+        self.other.write_text(
+            '[roles.secretary]\nskills = ["newer"]\n\n'
+            f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\nroles = ["secretary"]\n',
+            encoding="utf-8",
+        )
+        self.write_skill(self.other.parent / "roles" / "secretary" / "newer", "# newer\n")
+
+    def test_the_named_checkouts_manifest_replaces_the_running_ones(self) -> None:
+        result = audit(instance_path=self.instance, product_manifest=self.other)
+
+        self.assertEqual(result["manifest"], str(self.other))
+        self.assertEqual([item["skill"] for item in result["missing"]], ["newer"])
+
+    def test_sync_delivers_the_named_checkouts_skill_and_not_the_running_ones(self) -> None:
+        result = sync(instance_path=self.instance, product_manifest=self.other)
+
+        self.assertTrue(result["after"]["ok"], result["after"])
+        self.assertTrue((self.shell_root / "newer" / "SKILL.md").is_file())
+        self.assertFalse((self.shell_root / "shipped").exists())
+
+    def test_a_checkout_root_names_the_manifest_inside_it(self) -> None:
+        self.assertEqual(product_manifest_path(self.other_root), self.other)
+
+    def test_an_overlay_still_layers_over_the_named_checkout(self) -> None:
+        self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        self.write_skill(self.personal_skill_dir(), "# personal\n")
+
+        result = sync(instance_path=self.instance, product_manifest=self.other)
+
+        self.assertEqual(
+            [(item["origin"], item["skill"]) for item in result["copied"]],
+            [(PRODUCT_ORIGIN, "newer"), (INSTANCE_ORIGIN, "personal")],
+        )
+
+    def test_a_malformed_manifest_in_the_named_checkout_names_that_file(self) -> None:
+        self.other.write_text("[roles.secretary\n", encoding="utf-8")
+
+        with self.assertRaises(RegistryError) as caught:
+            audit(instance_path=self.instance, product_manifest=self.other)
+
+        self.assertIn(str(self.other), str(caught.exception))
 
 
 class MalformedManifestTests(OverlayFixture):

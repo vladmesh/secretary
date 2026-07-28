@@ -48,7 +48,7 @@ from secretary.knowledge_write import (
     list_knowledge_documents,
     write_knowledge_document,
 )
-from secretary.memory_journal import verify_memory_journal
+from secretary.memory_journal import PANELMEM_KB, verify_memory_journal
 from secretary.memory_write import (
     MemoryExportPublishError,
     MemoryLockError,
@@ -220,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_memory_command.add_argument("--instance", required=True)
     export_memory_command.add_argument("--data-dir")
-    export_memory_command.add_argument("--source-dir", default="/home/dev/panelmem-kb")
+    export_memory_command.add_argument("--source-dir", default=str(PANELMEM_KB))
     export_memory_command.set_defaults(handler=run_export_memory)
 
     export_runs_command = data_subcommands.add_parser(
@@ -306,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     project_add.set_defaults(handler=run_project_add)
     provision_start = project_subcommands.add_parser("provision-start")
@@ -314,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision_start.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     provision_start.set_defaults(handler=run_project_provision_start)
     provision_apply = project_subcommands.add_parser("provision-apply")
@@ -323,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     provision_apply.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help="instance directory (default: SECRETARY_INSTANCE or /home/dev/secretary-instance)",
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     provision_apply.set_defaults(handler=run_project_provision_apply)
     gate = project_subcommands.add_parser("gate")
@@ -371,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_import.add_argument("--instance", required=True)
     memory_import.add_argument("--data-dir")
-    memory_import.add_argument("--from", dest="source_dir", default="/home/dev/panelmem-kb")
+    memory_import.add_argument("--from", dest="source_dir", default=str(PANELMEM_KB))
     memory_import.set_defaults(handler=run_memory_import)
 
     memory_verify = memory_subcommands.add_parser(

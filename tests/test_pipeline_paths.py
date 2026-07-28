@@ -12,8 +12,54 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.agents.pipeline import health, pause, worker
-from secretary import dispatcher_pause
+from triggered_agents.agents.pipeline import health, pause, task_protocol, worker
+from triggered_agents.runtime import paths, role_env as runtime_role_env
+from secretary import dispatcher_pause, role_env as secretary_role_env
+
+
+class PortableDefaultTests(unittest.TestCase):
+    """What install, upgrade, role delivery and runtime startup fall back to with nothing set.
+
+    Every one of these used to be an absolute path under the author's home, which made the product
+    installable for exactly one account on one machine.
+    """
+
+    SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+    def test_the_instance_and_checkout_defaults_follow_the_running_user(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+            self.assertEqual(paths.default_instance_path(), Path(tmp) / "secretary-instance")
+            self.assertEqual(paths.default_product_root(), Path(tmp) / "secretary")
+
+    def test_a_configured_instance_keeps_precedence_over_the_home_default(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"HOME": tmp, "SECRETARY_INSTANCE": "/srv/other"}):
+            self.assertEqual(paths.configured_instance_path(), Path("/srv/other"))
+
+    def test_an_instance_is_named_by_its_directory_or_its_config_file(self):
+        self.assertEqual(paths.instance_dir("/srv/inst/instance.yaml"), Path("/srv/inst"))
+        self.assertEqual(paths.instance_dir("/srv/inst"), Path("/srv/inst"))
+
+    def test_the_runtime_env_file_defaults_under_the_running_users_instance(self):
+        expected = str(paths.default_instance_path() / "runtime.env")
+
+        self.assertEqual(runtime_role_env.RUNTIME_ENV_DEFAULT, expected)
+        self.assertEqual(secretary_role_env.RUNTIME_ENV_DEFAULT, expected)
+
+    def test_the_rendered_worker_prefix_resolves_in_the_head_s_own_shell(self):
+        """The prefix is run by a head in its own shell, so the home has to be that shell's."""
+        prefix = task_protocol.command_prefix()
+
+        self.assertIn("${TA_SECRETARY_REPO:-$HOME/secretary}", prefix)
+        self.assertNotIn("/home/", prefix)
+
+    def test_no_shipped_entry_point_pins_a_particular_home(self):
+        for script in sorted(self.SCRIPTS.glob("*.sh")):
+            with self.subTest(script.name):
+                body = script.read_text(encoding="utf-8")
+                self.assertNotIn("/home/", body)
+                self.assertIn("$HOME/", body)
 
 
 class OpenRouterKeyTests(unittest.TestCase):

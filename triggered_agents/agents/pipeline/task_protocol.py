@@ -5,10 +5,16 @@ import os
 import subprocess
 from pathlib import Path
 
+from ...runtime.paths import PRODUCT_DIRNAME, default_product_root
+
 
 ROLLBACK_ENV = "TA_WORKER_LEGACY_BOARD_WRITES"
 SECRETARY_REPO_ENV = "TA_SECRETARY_REPO"
-DEFAULT_SECRETARY_REPO = Path("/home/dev/secretary")
+DEFAULT_SECRETARY_REPO = default_product_root()
+# The same fallback written as a shell expression: the commands below are rendered into card
+# comments and run by a head in its own shell, so the home has to be the one that head runs as
+# rather than the one this process resolved.
+SECRETARY_REPO_SHELL = f'"${{{SECRETARY_REPO_ENV}:-$HOME/{PRODUCT_DIRNAME}}}${{PYTHONPATH:+:$PYTHONPATH}}"'
 _RUNTIME_CREDENTIALS = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 
 
@@ -42,9 +48,14 @@ def secretary_repo(environ: dict[str, str] | None = None) -> Path:
     return Path(env.get(SECRETARY_REPO_ENV, str(DEFAULT_SECRETARY_REPO))).expanduser()
 
 
+def pythonpath_prefix() -> str:
+    """The PYTHONPATH assignment that makes the provisioned secretary source importable."""
+    return f"PYTHONPATH={SECRETARY_REPO_SHELL}"
+
+
 def command_prefix() -> str:
     """Shell prefix that makes the provisioned secretary source importable to a worker."""
-    return 'PYTHONPATH="${TA_SECRETARY_REPO:-/home/dev/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -m secretary'
+    return f"{pythonpath_prefix()} python3 -m secretary"
 
 
 def preflight(environ: dict[str, str] | None = None) -> tuple[bool, str]:

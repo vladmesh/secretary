@@ -882,6 +882,7 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | --- | --- |
 | `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
 | `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
+| `registries` | read the selected checkout's skill manifest, this installation's optional overlay and the head canon; a file that cannot be read stops the run here, before the first write |
 | `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, and the checkout and revision it came from |
 | `role-skills` | `role_skills sync` into the shells' skill directories |
 | `role-worktrees` | fast-forward the role worktrees onto the base branch |
@@ -891,6 +892,45 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | `verify` | a repeat dry run: the second rollout must be a no-op |
 
 Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--json`.
+
+### Upgrading from another checkout
+
+`--product-root` names the checkout to install. Every step then reads that checkout and nothing
+else: its `skills/manifest.toml` and `skills/roles/` tree, its `packaging/systemd` templates, its
+`triggered_agents/agents/*/automation.toml` specs, the role worktrees it declares, and its head
+canon when the installation owns none. The checkout that happens to be running the `secretary`
+module has no say, which is what lets one installation be moved onto a candidate version, and what
+lets a second checkout install a host at all.
+
+`secretary role-skills audit|sync --product-root <checkout>` takes the same argument on its own, for
+delivering skills without running a whole upgrade.
+
+The `registries` step reads both registries before the first materializing write. A product manifest
+or instance overlay that is malformed, unreadable, a directory or a dangling link, and a
+`heads/heads.toml` in any of the same states, stops the run there and names the file. No head
+snapshot, pin, role worktree, skill copy, command link or host resource is written on that path, so
+a bad hand edit leaves the installation exactly as it was.
+
+### Path precedence
+
+The product ships no absolute path of its own. Each of these resolves in order, first hit wins:
+
+| what | order |
+| --- | --- |
+| the installation | `--instance` / `SECRETARY_INSTANCE`, else `~/secretary-instance` |
+| the product checkout a head imports | `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the checkout an upgrade installs | `--product-root`, else the checkout running the command |
+| the product skill manifest | `--product-root`, else `SECRETARY_ROLE_SKILLS_MANIFEST`, else the running checkout's |
+| a skill's shell root | the manifest's `root`, expanded against the installing user's home |
+| a skill's command link | `SECRETARY_BIN_DIR`, else `~/bin` |
+| the role runtime env file | `TA_RUNTIME_ENV_FILE` / `SECRETARY_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
+| the head registry a tick reads | `TA_HEADS_REGISTRY`, else `<instance>/heads/heads.yaml`, else the running checkout's default |
+
+`~` in a shipped manifest and `$HOME` in a shipped entry point are the *installing* user's home,
+read at the moment the command runs. A skill source is the opposite case: it always resolves beside
+the manifest that declared it, because a source is a file in a checkout rather than something the
+operator owns. Units are rendered for the account that owns the instance directory, not for the
+account running the command, so a repair run as root still writes the installation user's paths.
 
 ### The installation's head registry
 

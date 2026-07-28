@@ -4130,21 +4130,25 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog = object.__new__(InstanceCatalog)
             catalog._heads = canonical_heads(repo)  # type: ignore[attr-defined]
             card = {"routing": {"review_head_override": "claude-default"}}
-            with mock.patch.dict(os.environ, env, clear=True):
-                run = catalog.head_run(  # type: ignore[attr-defined]
-                    card, role="reviewer", workspace=str(workspace)
-                )
-                # What the dispatcher's own environment says, which is the value the wrapper drops.
-                naive = claude_launch_model({"adapter": "claude"}, workspace=str(workspace))
-
             probe = (
                 "python3 -c 'import json,sys;"
                 "from secretary.dispatcher_launcher import claude_launch_model;"
                 'print(json.dumps(claude_launch_model({"adapter": "claude"}, workspace=sys.argv[1])))\' '
                 + shlex.quote(str(workspace))
             )
+            with mock.patch.dict(os.environ, env, clear=True):
+                run = catalog.head_run(  # type: ignore[attr-defined]
+                    card, role="reviewer", workspace=str(workspace)
+                )
+                # What the dispatcher's own environment says, which is the value the wrapper drops.
+                naive = claude_launch_model({"adapter": "claude"}, workspace=str(workspace))
+                # The wrapper binds names out of the launcher's own environment, so it has to be
+                # rendered inside it: rendered outside, a live host's SECRETARY_RUNTIME_ENV_FILE
+                # would reach the launched process and the fixture's runtime.env never would.
+                wrapped = _wrap_role_shell_command("reviewer", probe)
+
             delivered = subprocess.run(
-                ["/bin/sh", "-c", _wrap_role_shell_command("reviewer", probe)],
+                ["/bin/sh", "-c", wrapped],
                 capture_output=True,
                 text=True,
                 env=env,
