@@ -1031,9 +1031,10 @@ python3 -m triggered_agents health
 диспетчера забирает `runtime.env` целиком через `EnvironmentFile`, а до процессов ролей эта
 переменная доходит через allowlist `role_env` (`NONSECRET_ENV`) — она адрес data plane, а не
 секрет. Instance
-берётся из `SECRETARY_INSTANCE`, который юниты стюарда задают вместе с `TA_RUNTIME_ENV_FILE`; если
-переменной нет, читатель берёт каталог самого `TA_RUNTIME_ENV_FILE` (`<instance>/runtime.env` в
-рендере юнита) и только потом `/home/dev/secretary-instance`. На установке с нестандартным instance
+берётся из `SECRETARY_INSTANCE`, который все packaged-юниты фоновых ролей (стюард, deep-sweep,
+куратор, ретро) задают вместе с `TA_RUNTIME_ENV_FILE`; если переменной нет, читатель берёт каталог
+самого `TA_RUNTIME_ENV_FILE` (`<instance>/runtime.env` в рендере юнита) и только потом
+`<HOME>/secretary-instance`. На установке с нестандартным instance
 стюард таким образом читает тот же файл, что пишет диспетчер. `TA_PRODUCTION_STATE` переопределяет
 файл целиком. Нечитаемый instance откатывает читателя на `<HOME>/secretary-data`, и тогда health
 покажет путь, по которому он смотрел.
