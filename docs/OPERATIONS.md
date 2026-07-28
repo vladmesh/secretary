@@ -449,8 +449,9 @@ The next tick launches the head from the same record. The same reason is printed
 `observer` target in `skills/manifest.toml` at all, and when the manifest itself is unreadable.
 
 Both commands read the product manifest plus the optional `<instance>/skills/manifest.toml` of the installation
-named by `--instance` (default `SECRETARY_INSTANCE`). An installation may add its own skills, and command entry
-points for them, without touching the product tree; an installation with no overlay is a supported one. See
+named by `--instance` (default `SECRETARY_INSTANCE`). An installation may add its own skills without touching
+the product tree; an installation with no overlay is a supported one. A skill from either layer may ship one
+executable `<skill>.sh`, which sync links into the operator's bin directory as `<skill>`. See
 `skills/README.md` for that contract.
 
 Liveness is the same pid heartbeat as for worker and reviewer. A freshly launched head has not written its pid

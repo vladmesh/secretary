@@ -58,19 +58,15 @@ registry leaves nothing half delivered.
 
 ## Command entry points
 
-A skill may ship an executable helper that the operator runs by name. The manifest that owns the
-skill declares where it goes:
+A skill may ship one command the operator runs by name: an executable `<skill>.sh` beside its
+`SKILL.md`. `sync` links `~/bin/<skill>` (`SECRETARY_BIN_DIR` overrides the directory) at that
+script and makes the script executable. Nothing declares it in a manifest, so a skill carries its
+command with it when it moves between the product and an installation, and the documented entry
+point survives the move without anyone editing a link.
 
-```toml
-[commands.<name>]
-role = "<role>"
-skill = "<skill>"
-source = "<file inside the skill directory>"
-dest = "~/bin/<name>"
-```
-
-`sync` links `dest` at the helper beside the skill and makes the helper executable. Linking rather
-than copying means the entry point follows the skill's source: it can be repointed after the skill
-moves between repositories, which is the state a stale link from an earlier layout is left in. Sync
-is idempotent, and it refuses — before writing anything — to replace a real file or a link this
-registry does not own. `audit` reports an entry point that is missing, stale or blocked.
+Linking rather than copying is what makes the repair possible: a link left over from a tree the
+skill no longer lives in is repointed at the current source. Sync is idempotent: an entry point that
+is already right is not touched, so the command never disappears from `PATH` mid-sync. It refuses,
+before writing anything, to replace a real file or a link into a tree this registry does not read.
+Two skills of the same name would want the same link; that is refused too, naming both manifests.
+`audit` reports an entry point that is missing, stale or blocked, with the manifest that owns it.

@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.role_skills import (
+    BIN_DIR_ENV,
     INSTANCE_ORIGIN,
     MANIFEST_ENV,
     PRODUCT_ORIGIN,
@@ -327,6 +328,24 @@ class MalformedManifestTests(OverlayFixture):
         self.assert_bounded(code, output, overlay)
         self.assertFalse(self.shell_root.exists(), "sync delivered the product half of a bad registry")
 
+    def test_a_directory_where_the_overlay_belongs_is_not_a_portable_installation(self) -> None:
+        """An installation that meant to own an overlay and has a broken one is not portable."""
+        overlay = self.instance / "skills" / "manifest.toml"
+        overlay.mkdir(parents=True)
+
+        code, output = self.run_command("audit")
+
+        self.assert_bounded(code, output, overlay)
+
+    def test_an_overlay_that_is_a_dangling_link_is_reported_rather_than_skipped(self) -> None:
+        overlay = self.instance / "skills" / "manifest.toml"
+        overlay.parent.mkdir(parents=True)
+        overlay.symlink_to(self.root / "never-checked-out.toml")
+
+        code, output = self.run_command("audit")
+
+        self.assert_bounded(code, output, overlay)
+
     def test_a_malformed_product_manifest_names_the_product_manifest(self) -> None:
         self.write_product("[roles.secretary\n")
 
@@ -336,28 +355,25 @@ class MalformedManifestTests(OverlayFixture):
 
 
 class CommandEntryPointTests(OverlayFixture):
-    """A skill that ships a helper is only usable once the helper is on PATH."""
+    """A skill that ships a command is only usable once that command is on PATH."""
 
     def setUp(self) -> None:
         super().setUp()
         self.bin_dir = self.root / "bin"
-        self.link = self.bin_dir / "personal-tool"
-        self.helper = self.personal_skill_dir() / "personal-tool.sh"
+        self.link = self.bin_dir / "personal"
+        self.helper = self.personal_skill_dir() / "personal.sh"
+        env = mock.patch.dict(os.environ, {BIN_DIR_ENV: str(self.bin_dir)})
+        env.start()
+        self.addCleanup(env.stop)
 
     def install_personal_skill(self, *, with_command: bool = True) -> Path:
         self.write_skill(self.personal_skill_dir(), "# personal\n")
-        self.helper.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-        body = '[roles.secretary]\nskills = ["personal"]\n'
         if with_command:
-            body += (
-                "\n[commands.personal-tool]\n"
-                'role = "secretary"\nskill = "personal"\n'
-                f'source = "personal-tool.sh"\ndest = "{self.link}"\n'
-            )
-        return self.write_overlay(body)
+            self.helper.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        return self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
 
     def test_sync_materializes_an_executable_entry_point(self) -> None:
-        self.install_personal_skill()
+        overlay = self.install_personal_skill()
 
         result = sync(instance_path=self.instance)
 
@@ -365,32 +381,69 @@ class CommandEntryPointTests(OverlayFixture):
         self.assertTrue(os.access(self.link, os.X_OK))
         self.assertTrue(bool(self.helper.stat().st_mode & stat.S_IXUSR))
         self.assertEqual(
-            [(item["command"], item["was"], item["origin"]) for item in result["linked"]],
-            [("personal-tool", "missing", INSTANCE_ORIGIN)],
+            [
+                (item["command"], item["was"], item["origin"], item["manifest"])
+                for item in result["linked"]
+            ],
+            [("personal", "missing", INSTANCE_ORIGIN, str(overlay))],
         )
 
     def test_sync_repairs_a_link_left_behind_by_the_move_out_of_the_product(self) -> None:
-        """The helper moved from the product tree into the installation; the old link dangles."""
+        """The skill moved from the product tree into the installation; the old link dangles."""
         self.install_personal_skill()
         self.bin_dir.mkdir(parents=True, exist_ok=True)
         moved_from = self.root / "old-product" / "skills" / "roles" / "secretary" / "personal"
-        self.link.symlink_to(moved_from / "personal-tool.sh")
+        self.link.symlink_to(moved_from / "personal.sh")
         self.assertFalse(self.link.exists(), "the fixture link is supposed to dangle")
 
+        before = audit(instance_path=self.instance)
         result = sync(instance_path=self.instance)
 
+        self.assertEqual(
+            [(item["command"], item["status"]) for item in before["entry_points"]],
+            [("personal", "stale")],
+        )
         self.assertEqual(self.link.resolve(), self.helper)
         self.assertEqual([item["was"] for item in result["linked"]], ["stale"])
 
-    def test_a_second_sync_changes_nothing(self) -> None:
+    def test_a_link_into_an_older_layout_of_the_same_tree_is_repointed(self) -> None:
+        """A skill that changed role keeps its command: the link still resolves into our tree."""
+        self.install_personal_skill()
+        older = self.instance / "skills" / "roles" / "assistant" / "personal"
+        older.mkdir(parents=True)
+        (older / "personal.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        self.link.symlink_to(older / "personal.sh")
+
+        result = sync(instance_path=self.instance)
+
+        self.assertEqual([item["was"] for item in result["linked"]], ["stale"])
+        self.assertEqual(self.link.resolve(), self.helper)
+
+    def test_a_second_sync_leaves_the_link_untouched(self) -> None:
         self.install_personal_skill()
         sync(instance_path=self.instance)
+        before = self.link.lstat()
 
         result = sync(instance_path=self.instance)
 
         self.assertEqual([item["was"] for item in result["linked"]], ["ok"])
-        self.assertEqual(self.link.resolve(), self.helper)
+        self.assertEqual(self.link.lstat().st_ino, before.st_ino)
+        self.assertEqual(self.link.lstat().st_ctime_ns, before.st_ctime_ns)
         self.assertTrue(result["after"]["ok"], result["after"])
+
+    def test_a_relative_instance_path_still_materializes_a_working_command(self) -> None:
+        """A symlink resolves its own text against `bin`, not against the working directory."""
+        self.install_personal_skill()
+
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.root)
+        sync(instance_path="instance")
+
+        target = Path(os.readlink(self.link))
+        self.assertTrue(target.is_absolute(), target)
+        self.assertTrue(self.link.exists(), f"{self.link} -> {target} dangles")
+        self.assertEqual(self.link.resolve(), self.helper.resolve())
 
     def test_sync_refuses_to_overwrite_a_real_file(self) -> None:
         self.install_personal_skill()
@@ -403,18 +456,23 @@ class CommandEntryPointTests(OverlayFixture):
         self.assertIn(str(self.link), str(caught.exception))
         self.assertEqual(self.link.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
 
-    def test_sync_refuses_a_link_this_registry_does_not_own(self) -> None:
+    def test_sync_refuses_a_foreign_link_that_merely_looks_like_ours(self) -> None:
+        """Somebody else's file under a path with the shape of a skill source is still theirs."""
         self.install_personal_skill()
+        theirs = self.root / "elsewhere" / "roles" / "secretary" / "personal"
+        theirs.mkdir(parents=True)
+        script = theirs / "personal.sh"
+        script.write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
         self.bin_dir.mkdir(parents=True, exist_ok=True)
-        other = self.root / "somebody-elses-tool"
-        other.write_text("#!/bin/sh\n", encoding="utf-8")
-        self.link.symlink_to(other)
+        self.link.symlink_to(script)
 
+        result = audit(instance_path=self.instance)
         with self.assertRaises(RegistryError) as caught:
             sync(instance_path=self.instance)
 
-        self.assertIn(str(other), str(caught.exception))
-        self.assertEqual(self.link.resolve(), other)
+        self.assertEqual([item["status"] for item in result["entry_points"]], ["conflict"])
+        self.assertIn(str(script), str(caught.exception))
+        self.assertEqual(self.link.resolve(), script)
 
     def test_a_conflicting_entry_point_stops_sync_before_any_skill_is_copied(self) -> None:
         self.install_personal_skill()
@@ -426,45 +484,44 @@ class CommandEntryPointTests(OverlayFixture):
 
         self.assertFalse(self.shell_root.exists())
 
+    def test_two_skills_of_one_name_cannot_both_own_the_command(self) -> None:
+        """A registry that wants one link for two scripts is refused before anything is written."""
+        overlay = self.install_personal_skill()
+        self.write_product(
+            '[roles.secretary]\nskills = ["shipped"]\n\n'
+            '[roles.helper]\nskills = ["personal"]\n\n'
+            f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\n'
+            'roles = ["secretary", "helper"]\n'
+        )
+        clashing = self.product.parent / "roles" / "helper" / "personal"
+        self.write_skill(clashing, "# also personal\n")
+        (clashing / "personal.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        with self.assertRaises(RegistryError) as caught:
+            sync(instance_path=self.instance)
+
+        message = str(caught.exception)
+        self.assertIn(str(self.product), message)
+        self.assertIn(str(overlay), message)
+        self.assertIn(str(self.link), message)
+        self.assertFalse(self.shell_root.exists())
+        self.assertFalse(self.bin_dir.exists())
+
     def test_the_audit_reports_an_entry_point_that_was_never_materialized(self) -> None:
         overlay = self.install_personal_skill()
-        sync(instance_path=self.instance)
-        self.link.unlink()
 
         result = audit(instance_path=self.instance)
 
         self.assertFalse(result["ok"])
         self.assertEqual(
-            [(item["command"], item["status"], item["manifest"]) for item in result["entry_points"]],
-            [("personal-tool", "missing", str(overlay))],
+            [
+                (item["command"], item["status"], item["origin"], item["manifest"])
+                for item in result["entry_points"]
+            ],
+            [("personal", "missing", INSTANCE_ORIGIN, str(overlay))],
         )
 
-    def test_a_command_naming_a_skill_no_manifest_declares_is_rejected(self) -> None:
-        self.write_overlay(
-            "[commands.personal-tool]\n"
-            'role = "secretary"\nskill = "absent"\n'
-            f'source = "personal-tool.sh"\ndest = "{self.link}"\n'
-        )
-
-        with self.assertRaises(RegistryError) as caught:
-            audit(instance_path=self.instance)
-
-        self.assertIn("secretary/absent", str(caught.exception))
-
-    def test_a_command_source_may_not_escape_its_skill_directory(self) -> None:
-        overlay = self.write_overlay(
-            '[roles.secretary]\nskills = ["personal"]\n\n'
-            "[commands.personal-tool]\n"
-            'role = "secretary"\nskill = "personal"\n'
-            f'source = "../../../etc/profile"\ndest = "{self.link}"\n'
-        )
-
-        with self.assertRaises(RegistryError) as caught:
-            audit(instance_path=self.instance)
-
-        self.assertIn(str(overlay), str(caught.exception))
-
-    def test_a_registry_with_no_command_has_no_entry_points_to_answer_for(self) -> None:
+    def test_a_skill_that_ships_no_command_has_no_entry_point_to_answer_for(self) -> None:
         self.install_personal_skill(with_command=False)
 
         result = sync(instance_path=self.instance)

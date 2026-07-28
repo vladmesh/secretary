@@ -8,8 +8,10 @@ instance repository. A skill is always read from the tree beside the manifest th
 the two never have to agree about where sources live, and an installation without an overlay is a
 complete, supported installation.
 
-A manifest may also declare command entry points: a skill that ships an executable helper gets a
-link in a directory on ``PATH``, so the operator can run what the skill documents.
+A skill may also ship one command: an executable ``<skill>.sh`` beside its ``SKILL.md``. Delivering
+the skill links that script into the operator's ``bin`` directory under the skill's own name, so a
+skill that moves between the product and an installation keeps the entry point its prose documents,
+with nobody editing a link by hand.
 """
 from __future__ import annotations
 
@@ -38,6 +40,9 @@ INSTANCE_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
 # own without writing into the shells of the live installation.
 MANIFEST_ENV = "SECRETARY_ROLE_SKILLS_MANIFEST"
 INSTANCE_ENV = "SECRETARY_INSTANCE"
+# Where a skill's command lands. The default is the operator's own bin directory; a test needs a
+# directory it can own without writing into the PATH of the live installation.
+BIN_DIR_ENV = "SECRETARY_BIN_DIR"
 
 PRODUCT_ORIGIN = "product"
 INSTANCE_ORIGIN = "instance"
@@ -51,9 +56,21 @@ class RegistryError(ValueError):
     """
 
 
+def _absolute(value: Path | str) -> Path:
+    """A path that means the same thing from anywhere.
+
+    Every source here ends up either compared against a link target or written into one, and a
+    symlink resolves its own text against the directory it sits in, not against the working
+    directory of whoever ran the sync. A relative ``--instance`` would otherwise materialize a
+    command pointing at a path below ``bin``. Symlinks in the path itself are left alone: the
+    operator named these directories and the error messages have to name them back.
+    """
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
+
+
 def manifest_path() -> Path:
     raw = os.environ.get(MANIFEST_ENV)
-    return Path(raw).expanduser() if raw else MANIFEST
+    return _absolute(raw) if raw else MANIFEST
 
 
 def roles_root() -> Path:
@@ -63,12 +80,18 @@ def roles_root() -> Path:
 
 def instance_dir(value: Path | str) -> Path:
     """The private repo root. An instance is named by its directory or by its instance.yaml."""
-    path = Path(value).expanduser()
+    path = _absolute(value)
     return path.parent if path.suffix in (".yaml", ".yml") else path
 
 
 def configured_instance_path() -> Path:
-    return Path(os.environ.get(INSTANCE_ENV) or DEFAULT_INSTANCE).expanduser()
+    return _absolute(os.environ.get(INSTANCE_ENV) or DEFAULT_INSTANCE)
+
+
+def bin_dir() -> Path:
+    """The directory on ``PATH`` that a skill's command is linked into."""
+    raw = os.environ.get(BIN_DIR_ENV)
+    return _absolute(raw) if raw else Path.home() / "bin"
 
 
 def instance_manifest_path(instance_path: Path | str | None = None) -> Path:
@@ -103,7 +126,7 @@ class ExpectedSkill:
 
 @dataclass(frozen=True)
 class ExpectedCommand:
-    """One executable entry point a skill ships, and the link that makes it runnable."""
+    """The one executable a skill ships, and the link that makes it runnable by name."""
 
     name: str
     role: str
@@ -123,17 +146,14 @@ class SkillRegistry:
     roles: dict[str, list[tuple[str, ManifestSource]]] = field(default_factory=dict)
     # target name -> (target table, the source that declared it)
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = field(default_factory=dict)
-    # command name -> (command table, the source that declared it)
-    commands: dict[str, tuple[dict[str, Any], ManifestSource]] = field(default_factory=dict)
 
     def describe_sources(self) -> list[dict[str, str]]:
         return [{"origin": source.origin, "path": str(source.path)} for source in self.sources]
 
-    def declaring_source(self, role: str, skill: str) -> ManifestSource | None:
-        for declared, source in self.roles.get(role, []):
-            if declared == skill:
-                return source
-        return None
+    @property
+    def owned_roots(self) -> tuple[Path, ...]:
+        """Every ``roles/`` tree this registry reads skills from."""
+        return tuple(source.roles_root for source in self.sources)
 
 
 def _sha256(path: Path) -> str:
@@ -159,12 +179,16 @@ def manifest_sources(instance_path: Path | str | None = None) -> list[ManifestSo
     """The manifests that make up this installation's registry, product first.
 
     A missing instance manifest is not an error and not a warning: a portable installation simply
-    has nothing to layer.
+    has nothing to layer. Something at that path that is not a readable file is the opposite case,
+    an installation that meant to own an overlay and has a broken one, and reading past it would
+    call a damaged configuration portable.
     """
     sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path())]
     overlay = instance_manifest_path(instance_path)
     if overlay.is_file():
         sources.append(ManifestSource(INSTANCE_ORIGIN, overlay))
+    elif overlay.is_symlink() or overlay.exists():
+        raise RegistryError(f"{overlay}: exists but is not a readable manifest file")
     return sources
 
 
@@ -191,16 +215,6 @@ def _string_list(table: dict[str, Any], key: str, where: str, source: ManifestSo
     return value
 
 
-def _relative_source(table: dict[str, Any], where: str, source: ManifestSource) -> Path:
-    raw = _string(table, "source", where, source)
-    path = Path(raw)
-    if path.is_absolute() or ".." in path.parts:
-        raise RegistryError(
-            f"{source.path}: {where}.source must be a path inside the skill directory, got {raw!r}"
-        )
-    return path
-
-
 def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
     """Read every manifest and layer them in order.
 
@@ -211,7 +225,6 @@ def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
     sources = manifest_sources(instance_path)
     roles: dict[str, list[tuple[str, ManifestSource]]] = {}
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = {}
-    commands: dict[str, tuple[dict[str, Any], ManifestSource]] = {}
     for source in sources:
         data = load_manifest(source.path)
         if not isinstance(data, dict):
@@ -233,15 +246,6 @@ def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
             _string(target, "root", where, source)
             _string_list(target, "roles", where, source)
             targets[target_name] = (target, source)
-        for command_name, command in _table(data, "commands", source).items():
-            if not isinstance(command, dict):
-                raise RegistryError(f"{source.path}: [commands.{command_name}] must be a table")
-            where = f"commands.{command_name}"
-            _string(command, "role", where, source)
-            _string(command, "skill", where, source)
-            _string(command, "dest", where, source)
-            _relative_source(command, where, source)
-            commands[command_name] = (command, source)
 
     for target_name, (target, source) in sorted(targets.items()):
         for role_name in target["roles"]:
@@ -250,9 +254,7 @@ def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
                     f"{source.path}: targets.{target_name}.roles names the unknown role "
                     f"{role_name!r}"
                 )
-    return SkillRegistry(
-        sources=tuple(sources), roles=roles, targets=targets, commands=commands
-    )
+    return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets)
 
 
 def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str]]:
@@ -300,49 +302,80 @@ def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
     return expected
 
 
-def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
-    """Entry points resolve against the manifest that declared the skill, not the command.
+def command_script(role: str, skill: str, source: ManifestSource) -> Path | None:
+    """The one command a skill may ship: ``<skill>.sh`` beside its ``SKILL.md``.
 
-    An installation may put a command on a product skill; the helper it runs still lives with the
-    skill, so that is where the link has to point.
+    Discovered from the tree rather than declared in the manifest, so a skill carries its entry
+    point with it when it moves out of the product and into an installation. Nothing has to be
+    added to the private manifest for the command to keep working.
     """
-    expected: list[ExpectedCommand] = []
-    for name, (command, source) in sorted(registry.commands.items()):
-        role, skill = command["role"], command["skill"]
-        declaring = registry.declaring_source(role, skill)
-        if declaring is None:
-            raise RegistryError(
-                f"{source.path}: commands.{name} names {role}/{skill}, which no manifest declares"
-            )
-        expected.append(
-            ExpectedCommand(
-                name=name,
+    script = source.roles_root / role / skill / f"{skill}.sh"
+    return script if script.is_file() else None
+
+
+def iter_expected_commands(registry: SkillRegistry) -> list[ExpectedCommand]:
+    """Every command the registry ships, keyed by the name the operator types.
+
+    A command belongs to the skill, not to a shell: however many targets a skill is copied into,
+    the link points at the canonical script beside the manifest that declared it. Two skills of the
+    same name would want the same link, and that is an operator configuration nothing can satisfy,
+    so it is refused here, before an audit reads the filesystem or a sync writes to it.
+    """
+    root = bin_dir()
+    by_name: dict[str, ExpectedCommand] = {}
+    for role in sorted(registry.roles):
+        for skill, source in registry.roles[role]:
+            script = command_script(role, skill, source)
+            if script is None:
+                continue
+            command = ExpectedCommand(
+                name=skill,
                 role=role,
                 skill=skill,
-                source=declaring.roles_root / role / skill / Path(command["source"]),
-                dest=Path(command["dest"]).expanduser(),
+                source=script,
+                dest=root / skill,
                 origin=source.origin,
                 manifest=source.path,
             )
-        )
-    return expected
+            clash = by_name.get(skill)
+            if clash is not None:
+                raise RegistryError(
+                    f"two skills ship the command {command.dest}: {clash.role}/{clash.skill} "
+                    f"from {clash.manifest} and {command.role}/{command.skill} from "
+                    f"{command.manifest}"
+                )
+            by_name[skill] = command
+    return [by_name[name] for name in sorted(by_name)]
 
 
-def _entry_point_is_owned(link_target: Path, command: ExpectedCommand) -> bool:
-    """Whether a link we did not just write is still one of ours, dangling or not.
+def _link_target(link: Path) -> Path:
+    """What a symlink points at, as a path that means the same from anywhere."""
+    raw = Path(os.readlink(link))
+    return raw if raw.is_absolute() else _absolute(link.parent / raw)
 
-    A skill source has a fixed shape below its manifest — ``roles/<role>/<skill>/<file>`` — and the
-    move of a skill from the product tree into an installation only changes what is above that.
-    A link with that shape is a stale entry point to repoint; anything else is somebody else's file.
+
+def _entry_point_is_owned(
+    link_target: Path, command: ExpectedCommand, owned_roots: tuple[Path, ...]
+) -> bool:
+    """Whether a link we did not write is one of ours to repoint, or somebody else's file.
+
+    Two cases are ours. A link into a ``roles/`` tree this registry reads is an entry point of an
+    older layout of the same registry. A dangling link with the shape a skill source has,
+    ``roles/<role>/<skill>/<skill>.sh``, is what the move of a skill out of a tree that is gone
+    leaves behind; it resolves to nothing, so repointing it destroys nothing.
+
+    A link to a file that exists outside those trees is not ours whatever its path looks like.
     """
-    tail = (command.role, command.skill, *Path(command.source.name).parts)
-    parts = link_target.parts
-    if len(parts) < len(tail) + 1:
+    if any(link_target == root or root in link_target.parents for root in owned_roots):
+        return True
+    if link_target.exists():
         return False
-    return tuple(parts[-len(tail) :]) == tail and parts[-len(tail) - 1] == "roles"
+    tail = ("roles", command.role, command.skill, command.source.name)
+    parts = link_target.parts
+    return len(parts) > len(tail) and tuple(parts[-len(tail) :]) == tail
 
 
-def _entry_point_state(command: ExpectedCommand) -> dict[str, str]:
+def _entry_point_state(command: ExpectedCommand, owned_roots: tuple[Path, ...]) -> dict[str, str]:
     """What sync would do with one entry point, decided before anything is written."""
     base = {
         "command": command.name,
@@ -353,16 +386,11 @@ def _entry_point_state(command: ExpectedCommand) -> dict[str, str]:
         "origin": command.origin,
         "manifest": str(command.manifest),
     }
-    if not command.source.is_file():
-        return base | {
-            "status": "source_missing",
-            "reason": f"{command.source} does not exist",
-        }
     if command.dest.is_symlink():
-        link_target = Path(os.readlink(command.dest))
+        link_target = _link_target(command.dest)
         if link_target == command.source:
             return base | {"status": "ok", "reason": ""}
-        if _entry_point_is_owned(link_target, command):
+        if _entry_point_is_owned(link_target, command, owned_roots):
             return base | {
                 "status": "stale",
                 "reason": f"points at {link_target}, which is no longer where the skill lives",
@@ -382,13 +410,17 @@ def _entry_point_state(command: ExpectedCommand) -> dict[str, str]:
 def _write_entry_point(command: ExpectedCommand, state: dict[str, str]) -> None:
     """Point the link at the source and make what it points at executable.
 
-    A symlink has no mode of its own, so the exec bit has to be on the helper itself or the
+    An entry point that is already right is left exactly as it is: unlinking and relinking it would
+    take the operator's command off PATH for as long as that takes, for no change.
+
+    A symlink has no mode of its own, so the exec bit has to be on the script itself or the
     materialized command is not a command.
     """
-    command.dest.parent.mkdir(parents=True, exist_ok=True)
-    if state["status"] in ("stale", "ok"):
-        command.dest.unlink()
-    command.dest.symlink_to(command.source)
+    if state["status"] != "ok":
+        command.dest.parent.mkdir(parents=True, exist_ok=True)
+        if state["status"] == "stale":
+            command.dest.unlink()
+        command.dest.symlink_to(command.source)
     mode = command.source.stat().st_mode
     wanted = mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
     if mode != wanted:
@@ -506,11 +538,12 @@ def audit(
         for item in bucket:
             by_target[item["target"]][bucket_name] = int(by_target[item["target"]][bucket_name]) + 1
 
-    entry_points = [_entry_point_state(command) for command in iter_expected_commands(registry)]
     # A filtered audit is about named shell targets; commands do not belong to one.
-    entry_point_problems = [] if target_filter else [
-        item for item in entry_points if item["status"] != "ok"
+    entry_points = [] if target_filter else [
+        _entry_point_state(command, registry.owned_roots)
+        for command in iter_expected_commands(registry)
     ]
+    entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
 
     ok = not missing and not drift and not source_missing and not config_errors
     ok = ok and not entry_point_problems
@@ -554,11 +587,11 @@ def sync(
             )
 
     commands = [] if target_filter else iter_expected_commands(registry)
-    states = [_entry_point_state(command) for command in commands]
+    states = [_entry_point_state(command, registry.owned_roots) for command in commands]
     for state in states:
-        if state["status"] in ("conflict", "source_missing"):
+        if state["status"] == "conflict":
             raise RegistryError(
-                f"command entry point {state['command']} declared by {state['manifest']} "
+                f"command entry point {state['command']} from {state['manifest']} "
                 f"cannot be materialized: {state['reason']}"
             )
 
@@ -588,6 +621,7 @@ def sync(
                 "dest": str(command.dest),
                 "source": str(command.source),
                 "origin": command.origin,
+                "manifest": str(command.manifest),
                 "was": state["status"],
             }
         )
