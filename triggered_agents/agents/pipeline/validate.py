@@ -57,7 +57,8 @@ import time
 from collections.abc import Callable
 
 from . import (
-    health, merge_recovery, model, naming, ops, review_spawn, reviewer, validate_review, worker,
+    health, heads, merge_recovery, model, naming, ops, review_spawn, reviewer, validate_review,
+    worker,
 )
 from .state import STATE
 
@@ -612,7 +613,7 @@ def _review_id(card: dict) -> str:
 
 def _card_review_head(card: dict) -> str:
     """Reviewer profile selected for this card, falling back to the global default."""
-    return card.get("review_head") or worker.REVIEWER_HEAD
+    return card.get("review_head") or heads.reviewer_head()
 
 
 def _no_review(card: dict) -> bool:
@@ -773,7 +774,7 @@ def _review_watchdog(ref: str, rec: dict, records: dict, watchdog_seconds: int,
     status = worker.terminal_status(rec.get("review_handle", ""), ws,
                                     rec.get("review_terminal_kind"))
     if status.get("known") and not status.get("live"):
-        dead_head = rec.get("review_head") or worker.REVIEWER_HEAD
+        dead_head = rec.get("review_head") or heads.reviewer_head()
         dead_resource = health.resource_of(dead_head)
         if dead_resource and statuses.get(dead_resource) == health.RED:
             # The head died while its own resource is red (a usage limit kills the CLI right at
@@ -794,7 +795,7 @@ def _review_watchdog(ref: str, rec: dict, records: dict, watchdog_seconds: int,
     if last and last > rec.get("review_activity", 0):
         rec["review_activity"] = last
         changed = True
-    review_head = rec.get("review_head") or worker.REVIEWER_HEAD
+    review_head = rec.get("review_head") or heads.reviewer_head()
     resource = health.resource_of(review_head)
     if resource and statuses.get(resource) == health.RED:
         rec["review_activity"] = time.time()

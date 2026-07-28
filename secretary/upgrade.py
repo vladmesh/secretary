@@ -50,6 +50,7 @@ from secretary.host_apply import (
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
+    canonical_path,
     materialize_snapshot,
     record_source,
     snapshot_path,
@@ -230,13 +231,16 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
 
 
 def step_head_registry(context: UpgradeContext) -> StepResult:
-    """Keep the private installation snapshot derived from the product registry.
+    """Keep the installation snapshot derived from whichever registry is this host's canon.
 
-    The pin next to it records which checkout and revision the snapshot came from. Since the live
-    tick reads the snapshot alone, that pin is the only place the canon source is written down.
+    That is the installation's own ``heads/heads.toml`` when it owns one, else the product's
+    portable default. The pin next to the snapshot records which of the two won, plus the checkout
+    and revision. Since the live tick reads the snapshot alone, that pin is the only place the
+    canon source is written down.
     """
     target = snapshot_path(context.instance_path)
     try:
+        canonical, _ = canonical_path(context.product_root, context.instance_path)
         changed = materialize_snapshot(
             context.instance_path,
             context.product_root,
@@ -250,7 +254,7 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
     except HeadRegistryConfigError as exc:
         return StepResult("head-registry", "failed", str(exc))
     if not changed and not repinned:
-        return StepResult("head-registry", "unchanged", f"{target} matches product canon")
+        return StepResult("head-registry", "unchanged", f"{target} matches {canonical}")
     verb = "would regenerate" if context.dry_run else "regenerated"
     what = target if changed else source_path(context.instance_path)
     if changed and repinned:

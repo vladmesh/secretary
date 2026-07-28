@@ -550,7 +550,9 @@ def run_status(args: argparse.Namespace) -> int:
     if canon["error"]:
         print(f"head registry: {canon['error']}")
     else:
-        print(f"head registry: {canon['product_root']} @ {canon['revision']}")
+        owner = canon["canonical_owner"] or "unknown"
+        print(f"head registry: {canon['canonical']} ({owner}-owned), "
+              f"built from {canon['product_root']} @ {canon['revision']}")
     observers = snapshot["dispatcher"]["observers"]
     live = sum(1 for observer in observers if observer["alive"])
     print(f"sprint observers: {live} live of {len(observers)}")

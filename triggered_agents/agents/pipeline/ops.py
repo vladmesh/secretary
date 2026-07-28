@@ -135,14 +135,14 @@ def _effective_review_head(meta: dict) -> str:
     review_head = meta.get(model.META_REVIEW_HEAD) or ""
     if review_head == model.NO_REVIEW_HEAD:
         return model.NO_REVIEW_HEAD
-    return review_head or worker.REVIEWER_HEAD
+    return review_head or heads.reviewer_head()
 
 
 _HEAD_TAG_PREFIXES = ("worker:", "model:", "effort:", "reviewer:")
 
 
 def _requested_head(meta: dict) -> str:
-    return meta.get(model.META_HEAD) or heads.DEFAULT_PROFILE
+    return meta.get(model.META_HEAD) or heads.default_head()
 
 
 def _resolved_head(meta: dict) -> str:
@@ -312,7 +312,7 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     heads.toml (checked before anything is written); omitted, the card gets heads.DEFAULT_PROFILE
     at bring-up. `review_head`, when given, must name a profile, except the reserved PO-only
     value `none`, which disables Validate layer 3 for this card. Omitted means Validate uses
-    worker.REVIEWER_HEAD. `base_branch`, when given, overrides the project's manifest base_branch
+    heads.reviewer_head(). `base_branch`, when given, overrides the project's manifest base_branch
     for this card only (worker.resolve_base_branch); omitted, bring-up falls back to the manifest
     lookup exactly as before this field existed.
 
@@ -403,7 +403,7 @@ def update_card(role: str, reference: str, slug: str | None = None,
     as create_card (slug SLUG_RE, head/review_head against heads.toml, blocked_by pointing at an
     existing card), all checked before anything is written so a rejected update leaves metadata
     untouched. `base_branch=""` clears the override back to the manifest default;
-    `review_head=""` clears the reviewer override back to worker.REVIEWER_HEAD;
+    `review_head=""` clears the reviewer override back to heads.reviewer_head();
     `review_head="none"` explicitly disables only Validate layer 3 for this card."""
     if role != "po":
         raise model.GuardError(f"role {role!r} may not update card metadata (po only)")
@@ -596,7 +596,7 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
         head = meta.get(model.META_HEAD)
         if head:
             _check_head(head)
-        selected_head = resolved_head or head or heads.DEFAULT_PROFILE
+        selected_head = resolved_head or head or heads.default_head()
         _check_head(selected_head)
         review_head = meta.get(model.META_REVIEW_HEAD)
         if review_head:

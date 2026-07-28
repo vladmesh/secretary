@@ -53,10 +53,11 @@ TUI_DELIVERY_RETRIES = prompt_delivery.TUI_DELIVERY_RETRIES
 TUI_DELIVERY_CHECK_DELAY_S = prompt_delivery.TUI_DELIVERY_CHECK_DELAY_S
 TUI_DELIVERY_TIMEOUT_S = prompt_delivery.TUI_DELIVERY_TIMEOUT_S
 TUI_DELIVERY_RESEND_GRACE_S = prompt_delivery.TUI_DELIVERY_RESEND_GRACE_S
-# Head profile for the layer-3 reviewer. A plain config knob (not a per-card choice): the reviewer
-# is independent of the worker, so the card's `head` field is not reused here — this names a
-# profile in heads.toml, same registry every worker head resolves against.
-REVIEWER_HEAD = os.environ.get("TA_REVIEWER_HEAD", "codex-reviewer")
+# Head profile for the layer-3 reviewer, read through `heads.reviewer_head()`: the selected
+# registry's `role_defaults.reviewer`, or `TA_REVIEWER_HEAD` for a one-tick override. Not a
+# per-card choice — the reviewer is independent of the worker, so the card's `head` field is not
+# reused here.
+reviewer_head = heads.reviewer_head
 
 
 class WorkspaceError(RuntimeError):
@@ -533,12 +534,12 @@ def _worker_prompt() -> str:
 
 
 def _launch_spec(head: str | None, workspace: str) -> heads.LaunchSpec:
-    return heads.render_launch(head or heads.DEFAULT_PROFILE, role="worker", prompt=_worker_prompt(),
+    return heads.render_launch(head or heads.default_head(), role="worker", prompt=_worker_prompt(),
                                workspace=workspace)
 
 
 def terminal_kind(head: str | None) -> str | None:
-    return heads.terminal_kind(head or heads.DEFAULT_PROFILE)
+    return heads.terminal_kind(head or heads.default_head())
 
 
 def ensure_trust(workspace: str) -> None:
@@ -684,12 +685,12 @@ def _reviewer_prompt() -> str:
 
 
 def _reviewer_launch_spec(head: str | None = None, workspace: str | None = None) -> heads.LaunchSpec:
-    return heads.render_launch(head or REVIEWER_HEAD, role="reviewer", prompt=_reviewer_prompt(),
+    return heads.render_launch(head or heads.reviewer_head(), role="reviewer", prompt=_reviewer_prompt(),
                                workspace=workspace)
 
 
 def reviewer_terminal_kind(head: str | None = None) -> str | None:
-    return heads.terminal_kind(head or REVIEWER_HEAD)
+    return heads.terminal_kind(head or heads.reviewer_head())
 
 
 def spawn_reviewer(project: str, worker_id: str, base_branch: str, review_md: str, title: str,
@@ -700,7 +701,7 @@ def spawn_reviewer(project: str, worker_id: str, base_branch: str, review_md: st
     reviewer never touches the worker's own branch), the REVIEW.md prompt, then the head. No
     provisioning — the reviewer only reads code and drives gh/board-CLI, so it needs no app deps.
     Returns (workspace, terminal handle). `title` seeds the tab's display name (see launch_worker).
-    `review_head` is the reviewer profile chosen for this card; omitted means REVIEWER_HEAD.
+    `review_head` is the reviewer profile chosen for this card; omitted means the registry's `role_defaults.reviewer`.
 
     `head_sha`, given only for a contrib card (validate._spawn_reviewer), pins the reviewer's
     worktree to the exact sha the worker's report claimed rather than the branch's live tip — see

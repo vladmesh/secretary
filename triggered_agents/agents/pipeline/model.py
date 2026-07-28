@@ -61,7 +61,7 @@ TASK_TYPES = ("code", "research")
 #                so a later reclaim keeps using it instead of bouncing back to the original.
 #   resolved_head worker profile id actually selected at claim time after health fallback. Empty
 #                means "not currently claimed", so board UI/list fall back to `head` or default.
-#   review_head  reviewer head profile id for Validate layer 3; empty -> worker.REVIEWER_HEAD;
+#   review_head  reviewer head profile id for Validate layer 3; empty -> heads.reviewer_head();
 #                "none" -> PO explicitly disabled layer 3 for this card only.
 #   resolved_review_head reviewer profile id actually selected when Validate layer 3 spawns after
 #                health fallback. Empty means no active/current reviewer profile.

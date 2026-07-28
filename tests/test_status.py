@@ -447,6 +447,40 @@ class HeadRegistrySourceTests(unittest.TestCase):
         self.assertEqual(registry["product_root"], str(product_root))
         self.assertEqual(registry["revision"], product_revision(product_root))
         self.assertTrue(registry["snapshot"].endswith("heads/heads.yaml"))
+        self.assertEqual(registry["canonical_owner"], "product")
+        self.assertEqual(
+            registry["canonical"],
+            str(product_root / "triggered_agents" / "agents" / "pipeline" / "heads.toml"),
+        )
+
+    def test_status_credits_the_installation_for_a_registry_it_owns(self):
+        """The product revision alone would name the wrong file for an installation-owned canon."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = self._instance(root)
+            (root / "heads").mkdir()
+            (root / "heads" / "heads.toml").write_text(
+                "[resources.own]\naccount = \"own\"\n"
+                "[profiles.own-head]\nresource = \"own\"\nadapter = \"claude\"\n"
+                "[role_defaults]\nnew_card = \"own-head\"\n",
+                encoding="utf-8",
+            )
+            product_root = Path(__file__).resolve().parents[1]
+            materialize_snapshot(root, product_root)
+            record_source(root, product_root)
+            report = validate_instance(instance)
+
+            snapshot = collect_status(report, offline=True)
+            # The snapshot is still what status validates, and it is the one that canon produced.
+            materialized = (root / "heads" / "heads.yaml").read_text(encoding="utf-8")
+            canonical = str(root / "heads" / "heads.toml")
+
+        registry = snapshot["installation"]["head_registry"]
+        self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        self.assertIsNone(registry["error"])
+        self.assertEqual(registry["canonical_owner"], "instance")
+        self.assertEqual(registry["canonical"], canonical)
+        self.assertIn("own-head", materialized)
 
     def test_status_names_an_installation_with_no_recorded_source(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -27,8 +27,9 @@ expected gap, not a desync.
 The canon, the normalised minimum needed to resume work:
 
 - instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`.
-  `heads/` includes the generated `heads.yaml` snapshot and the `source.yaml` pin recording the
-  checkout and revision it was made from; after a restore the pin shows which product version the
+  `heads/` includes this installation's own `heads.toml` canon when it has one, the generated
+  `heads.yaml` snapshot, and the `source.yaml` pin recording which canon, checkout and revision it
+  was made from; after a restore the pin shows which product version the
   installation was running, and bringing the snapshot up to a new checkout is `secretary upgrade`'s
   job;
 - board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`,
