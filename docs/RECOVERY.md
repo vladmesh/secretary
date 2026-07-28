@@ -32,6 +32,9 @@ recovery checkpoint. Между коммитами live-состояние оп�
 Канон, нормализованный минимум для восстановления работы:
 
 - instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`;
+  `heads/` включает сгенерированный снапшот `heads.yaml` и пин `source.yaml` — чекаут и ревизию, из
+  которых он сделан; после восстановления пин показывает, с какой версией продукта установка
+  работала, а привести снапшот к новому чекауту заново — задача `secretary upgrade`;
 - board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`, `state/board/events.ndjson`,
   `state/board/export.json`;
 - run/audit: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
