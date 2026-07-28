@@ -498,6 +498,37 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
         self.assertEqual(self.record().state, "claimed")  # type: ignore[union-attr]
 
+    def test_a_done_report_after_interrupted_red_delivery_is_not_sent_again(self) -> None:
+        """The worker may finish before recovery checkpoints its already-delivered prompt."""
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.state_dies_after("resume_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.report_done("worker-done-after-red-delivery")
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "gate-red-reused-worker")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+
+    def test_an_unnamed_worker_is_swept_by_workspace_before_replacement(self) -> None:
+        record = DispatcherRecord(
+            worker="worker", workspace=str(self.data_dir / "workspace"), handle="", head="codex",
+            review_head="codex-reviewer", attempt_id="attempt", comment_baseline=0,
+            review_baseline=0, state="claimed", claimed_at=0.0,
+        )
+
+        outcome = self.runtime._stop_worker_confirmed(
+            record, REF, step="gate", attempt_id="attempt"
+        )
+
+        self.assertIsNone(outcome)
+        self.assertIn("stop_workspace", self.host.calls)
+
     def test_a_red_delivery_recovery_keeps_the_phase_it_persisted(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.tick()
@@ -1538,7 +1569,7 @@ class HostLaunchContourTests(unittest.TestCase):
             if command[2] == "send":
                 task_at_delivery.append((self.data_dir / "TASK.md").read_text())
             if command[2] == "read":
-                return {"terminal": {"tail": ["Thinking"]}}
+                return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"]}}
             return {}
 
         with mock.patch.object(self.host, "_run_json", run_json):
@@ -1586,7 +1617,7 @@ class HostLaunchContourTests(unittest.TestCase):
             if command[2] == "send":
                 sent = True
             if command[2] == "read":
-                return {"terminal": {"tail": ["Thinking"] if sent else [""]}}
+                return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"] if sent else [""]}}
             return {}
 
         with mock.patch.object(self.host, "_run_json", run_json):

@@ -21,7 +21,13 @@ TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S"
 TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
 TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_WORKING_RE = re.compile(r"\b(?:working|thinking|esc to interrupt|ctrl-c to interrupt)\b", re.IGNORECASE)
+_CODEX_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
+# Claude's composer has no Codex `›` marker. Its active turn is a dedicated status line, so a
+# transcript word such as "working" or "thinking" is not enough to say a new turn started.
+_CLAUDE_TURN_RE = re.compile(
+    r"(?im)^\s*[✻✽✢✶]\s+(?:thinking|working)(?:…|\.\.\.)?\s+"
+    r"\((?:esc|ctrl-c) to interrupt\)\s*$"
+)
 
 
 class TuiDeliveryError(RuntimeError):
@@ -329,5 +335,6 @@ def _prompt_still_in_codex_composer(screen: str, prompt: str) -> bool:
 
 def _screen_started_turn(screen: str) -> bool:
     marker = screen.rfind("\u203a")
-    status_area = screen[:marker] if marker >= 0 else screen
-    return bool(_WORKING_RE.search(status_area))
+    if marker >= 0:
+        return bool(_CODEX_WORKING_RE.search(screen[:marker]))
+    return bool(_CLAUDE_TURN_RE.search(screen))

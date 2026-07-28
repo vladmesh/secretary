@@ -5860,8 +5860,9 @@ class PidHeartbeatTests(unittest.TestCase):
     def test_heartbeat_writes_the_shells_own_pid_then_execs_the_head(self) -> None:
         wrapped = with_pid_heartbeat("codex exec --dangerously-bypass-approvals-and-sandbox", "/tmp/x.pid")
 
-        self.assertTrue(wrapped.startswith("setsid sh -c "))
+        self.assertTrue(wrapped.startswith('echo "$$" > '))
         self.assertIn('echo "$$" > /tmp/x.pid; exec env codex exec', wrapped)
+        self.assertNotIn("setsid", wrapped)
 
     def test_heartbeat_survives_a_leading_environment_assignment(self) -> None:
         """secretary-751 review: catalog commands from `head_launch` start with `NAME=value`, which

@@ -1161,9 +1161,10 @@ class CommandHostRuntime:
         except (OSError, ValueError):
             return
         try:
-            # Heartbeat-wrapped launches create their own session, so this reaches helpers as
-            # well as the provider process.  Old launches and focused tests can share our group;
-            # do not turn those compatibility paths into a signal to the dispatcher itself.
+            # The terminal gives an interactive head its own foreground process group, so this
+            # reaches helpers as well as the provider process without detaching the head from its
+            # controlling terminal. Old launches and focused tests can share our group; do not
+            # turn those compatibility paths into a signal to the dispatcher itself.
             group = os.getpgid(pid)
             if group != os.getpgrp():
                 os.killpg(group, signal_number)
@@ -2388,16 +2389,14 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any] | None:
         """Stop this card's worker head before a replacement opens, or answer with the refusal."""
-        if not record.handle and not record.worker_pid_file:
-            # A reviewer path already confirmed this worker stopped and forgot its identity. There
-            # is no live head left to name here; asking stop_head to prove an absent head would
-            # turn that established fact into a permanent rework failure.
-            record.worker_retained_at = 0.0
-            record.worker_resume_phase = ""
-            record.worker_resume_delivery = ""
-            return None
         try:
-            self.host.stop_head(record, "worker")
+            if record.handle or record.worker_pid_file:
+                self.host.stop_head(record, "worker")
+            else:
+                # A preempted head can lose its own identity with a dispatcher crash while the
+                # workspace is still known. Sweep that workspace before opening a replacement;
+                # an unnamed writer is ambiguity, never evidence that nothing is running.
+                self.host.stop_workspace(record)
         except HostError as exc:
             return _head_stop_unconfirmed(
                 step=step,
@@ -2600,6 +2599,17 @@ class DispatcherRuntime:
             return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
         if record.state == "worker_resuming":
+            if marker in {"report:done", "report:blocked"}:
+                # A report after the resume phase opened proves the continuation reached the
+                # retained conversation. Do not rewrite TASK.md or replay the prompt over a
+                # completed turn after recovering from a crash before its delivery checkpoint.
+                record.worker_resume_delivery = "confirmed"
+                records[ref] = record
+                self.save_records(payload, records)
+                return self._finish_retained_worker_resume(
+                    task, record, records, payload, attempt_id,
+                    phase=record.worker_resume_phase or "gate",
+                )
             try:
                 self.host.resume_worker(task, record)
             except HostError as exc:
