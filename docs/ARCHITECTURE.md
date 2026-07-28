@@ -205,6 +205,13 @@ of the record. The Pipeline board holds executable work: cards, specs, states. C
 `memory_search`. Knowledge (`state/knowledge`) holds the long reasoning and context the conclusion
 came from: brainstorms, decision logs, incident write-ups.
 
+A document is scoped by who it belongs to. Sections directly under `state/knowledge` hold the
+installation's own reasoning: its decisions, its incidents, its runbooks. A connected project keeps
+its documents under `state/knowledge/projects/<project id>/<section>/`, where the project id is the
+one in `projects/`. The split matters because a connected repository is not the place for the
+reasoning behind its own development: a product repository carries contracts and code, while the
+history of why the work was scoped that way is recoverable state of the installation that drove it.
+
 Knowledge is not indexed, does not appear in `memory_search` and is never loaded into a head's context
 wholesale. A document is read on purpose when the history of a question is needed. The format is free:
 ordinary tracked markdown, no frontmatter or metadata required. Writes go through
