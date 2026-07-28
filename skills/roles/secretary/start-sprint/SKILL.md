@@ -135,7 +135,7 @@ Write the sprint status pointer through the knowledge writer:
 ```markdown
 # Sprint Status
 
-**Active:** [<title>](YYYY-MM-DD-<slug>.md)
+**Active:** `<title>` (`YYYY-MM-DD-<slug>.md`)
 **State:** ready
 **Updated:** <RFC3339>
 **Current card:** none
