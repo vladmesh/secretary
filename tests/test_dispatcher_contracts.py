@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import pwd
 import tempfile
 import textwrap
 import unittest
@@ -521,6 +522,10 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         "secretary-steward-deep-sweep.service",
     )
 
+    # The layout resolves a home directory through `pwd`, so the account has to exist wherever
+    # the suite runs. The invoking account is the one guaranteed to.
+    RUNTIME_USER = pwd.getpwuid(os.getuid()).pw_name
+
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -543,7 +548,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             product_root=self.root / "product",
             instance_path=self.instance,
             data_dir=self.root / "data",
-            runtime_user="dev",
+            runtime_user=self.RUNTIME_USER,
             runtime_home=self.root / "home",
         )
         heads._load_registry.cache_clear()
@@ -572,7 +577,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             default_packaging_root(),
             product_root=self.root / "product",
             instance_path=self.instance,
-            runtime_user="dev",
+            runtime_user=self.RUNTIME_USER,
             orca_executable=Path("/usr/local/bin/orca"),
         )
         compiled = {unit.name: unit.content for unit in packaged}
