@@ -45,19 +45,28 @@ REGISTRY_ENV = "TA_HEADS_REGISTRY"
 
 
 def installed_registry_path() -> Path | None:
-    """The configured installation's own snapshot, or None when there is no installation here."""
+    """The configured installation's own snapshot, or None when there is no installation here.
+
+    Whether that snapshot exists is deliberately not asked. Selecting an installation is the
+    operator's decision about which generation this process runs off; a missing, unreadable or
+    dangling snapshot under it is a broken installation, and the load below then fails by that
+    path. Answering "no installation" instead would route a selected non-default instance off a
+    mutable product checkout, which is the one thing the snapshot exists to prevent.
+    """
     configured = os.environ.get(INSTANCE_ENV)
     if not configured:
         return None
     base = Path(configured).expanduser()
     if base.name == "instance.yaml":
         base = base.parent
-    snapshot = base / INSTANCE_SNAPSHOT_RELATIVE
-    return snapshot if snapshot.is_file() else None
+    return base / INSTANCE_SNAPSHOT_RELATIVE
 
 
 def registry_path() -> Path:
     """The registry this process reads: the installation's own snapshot, else the product default.
+
+    The product default is for a checkout with no installation selected at all, not for a selected
+    installation whose snapshot is unusable.
 
     Resolved per call rather than at import, so pointing a process at another installation through
     ``SECRETARY_INSTANCE`` moves the registry without reloading the module.
@@ -361,36 +370,73 @@ def profile_info(profile_id: str, registry: Registry | None = None) -> dict:
     }
 
 
+def _named(value: object, what: str) -> str:
+    """A registry field that has to be a plain name before anything can be looked up by it.
+
+    Checked before the membership tests below rather than left to them: a list where a name
+    belongs is unhashable, so `value not in table` would raise TypeError past every caller that
+    only knows how to handle HeadRegistryError.
+    """
+    if not isinstance(value, str):
+        raise HeadRegistryError(f"{what} must be a name, got {type(value).__name__}")
+    return value
+
+
 def validate_registry(resources: dict, profiles: dict) -> None:
     """Structural check every consumer of the registry shares: the product canon at load time and
-    the installation snapshot the dispatcher runs off."""
+    the installation snapshot the dispatcher runs off.
+
+    Shapes are checked alongside names. A registry is hand-written TOML or a snapshot generated
+    from one, so an entry can be any type its author typed; every malformed one has to come back
+    as a HeadRegistryError here rather than as an AttributeError or a TypeError somewhere down in
+    a consumer that assumed a mapping.
+    """
+    if not isinstance(resources, dict):
+        raise HeadRegistryError(f"[resources] must be a table, got {type(resources).__name__}")
+    if not isinstance(profiles, dict):
+        raise HeadRegistryError(f"[profiles] must be a table, got {type(profiles).__name__}")
+    for rid, res in resources.items():
+        if not isinstance(res, dict):
+            raise HeadRegistryError(f"resource {rid!r} must be a table, got {type(res).__name__}")
     for pid, prof in profiles.items():
-        resource = prof.get("resource")
+        if not isinstance(prof, dict):
+            raise HeadRegistryError(f"profile {pid!r} must be a table, got {type(prof).__name__}")
+        resource = _named(prof.get("resource"), f"profile {pid!r} resource")
         if resource not in resources:
             raise HeadRegistryError(f"profile {pid!r} references unknown resource {resource!r}")
-        adapter = prof.get("adapter")
+        adapter = _named(prof.get("adapter"), f"profile {pid!r} adapter")
         if adapter not in ADAPTERS:
             raise HeadRegistryError(f"profile {pid!r} has unknown adapter {adapter!r} "
                                     f"(known: {', '.join(sorted(ADAPTERS))})")
         if adapter == "codex":
-            effort = prof.get("effort", "default")
+            effort = _named(prof.get("effort", "default"), f"profile {pid!r} effort")
             if effort not in CODEX_EFFORTS:
                 known = ", ".join(sorted(CODEX_EFFORTS))
                 raise HeadRegistryError(f"profile {pid!r} has unknown codex effort {effort!r} "
                                         f"(known: {known})")
-            mode = prof.get("codex_mode", "exec")
+            mode = _named(prof.get("codex_mode", "exec"), f"profile {pid!r} codex launch mode")
             if mode not in CODEX_LAUNCH_MODES:
                 known = ", ".join(sorted(CODEX_LAUNCH_MODES))
                 raise HeadRegistryError(f"profile {pid!r} has unknown codex launch mode {mode!r} "
                                         f"(known: {known})")
-        for fb in prof.get("fallback") or []:
+        fallback = prof.get("fallback") or []
+        if not isinstance(fallback, list):
+            raise HeadRegistryError(f"profile {pid!r} fallback must be a list, got "
+                                    f"{type(fallback).__name__}")
+        for fb in fallback:
+            fb = _named(fb, f"profile {pid!r} fallback entry")
             if fb not in profiles:
                 raise HeadRegistryError(f"profile {pid!r} fallback references unknown profile {fb!r}")
 
 
 def validate_role_defaults(role_defaults: dict, profiles: dict) -> None:
     """A role routed to a head nobody defined is a routing hole, not a stale line to ignore."""
+    if not isinstance(role_defaults, dict):
+        raise HeadRegistryError(
+            f"[role_defaults] must be a table, got {type(role_defaults).__name__}"
+        )
     for role, head in role_defaults.items():
+        head = _named(head, f"role {role!r} head")
         if head not in profiles:
             raise HeadRegistryError(f"role {role!r} routes to unknown head {head!r} "
                                     f"(known: {', '.join(sorted(profiles)) or '(none)'})")

@@ -505,6 +505,33 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(heads.registry_path(), heads.HEADS_TOML)
 
+    def test_a_selected_installation_without_a_usable_snapshot_fails_by_its_path(self) -> None:
+        """The product default is for no installation at all, not for a broken one.
+
+        Falling back here would route a packaged role off whichever checkout the process happens
+        to run from — the mutable file the snapshot exists to keep out of a live tick — and would
+        abandon the instance the operator selected without saying so.
+        """
+        for name, build in (
+            ("missing", lambda snapshot: None),
+            ("directory", lambda snapshot: snapshot.mkdir()),
+            ("dangling", lambda snapshot: snapshot.symlink_to(snapshot.parent / "gone.yaml")),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                instance = Path(tmp)
+                (instance / "heads").mkdir()
+                (instance / "heads" / "heads.toml").write_text(self.CANON, encoding="utf-8")
+                snapshot = instance / "heads" / "heads.yaml"
+                build(snapshot)
+
+                with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}):
+                    heads._load_registry.cache_clear()
+                    self.assertEqual(heads.registry_path(), snapshot)
+                    with self.assertRaises(heads.HeadRegistryError) as caught:
+                        heads.load_registry()
+
+                self.assertIn(str(snapshot), str(caught.exception))
+
 
 class PackagedRoleUnitInstanceTests(unittest.TestCase):
     """Every packaged role process resolves the instance its unit was rendered for.

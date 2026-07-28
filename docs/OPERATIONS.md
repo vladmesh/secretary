@@ -918,9 +918,12 @@ head the curator, retro and steward launch on. Each background role's `automatio
 as a last resort for a registry that routes that role nowhere. The packaged unit of every one of those roles exports
 `SECRETARY_INSTANCE`, so each process resolves the same installation's snapshot rather than the host's default one.
 
-A broken snapshot still stops the tick and names the reason: a missing table, an unknown resource or adapter on a
-profile, or a role in `role_defaults` pointing at a head that does not exist. The dispatcher answers `invalid_heads`
-with the text of the check; the fix is `secretary upgrade`.
+A broken snapshot still stops the tick and names the reason: a missing table, an entry of the wrong shape, an unknown
+resource or adapter on a profile, or a role in `role_defaults` pointing at a head that does not exist. A process handed
+`SECRETARY_INSTANCE` whose snapshot is missing, unreadable, a directory or a dangling link fails by that snapshot path
+too — the shipped registry is the fallback for a checkout with no installation selected, not for a selected installation
+that has none of its own. The dispatcher answers `invalid_heads` with the text of the check; the fix is
+`secretary upgrade`.
 
 ### Ownership and fail-closed behaviour
 

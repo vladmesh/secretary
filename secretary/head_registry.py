@@ -31,6 +31,7 @@ from triggered_agents.agents.pipeline.heads import (
     HeadRegistryError,
     load_registry,
     validate_registry,
+    validate_role_defaults,
 )
 
 
@@ -60,7 +61,13 @@ class HeadRegistryConfigError(RuntimeError):
 
 
 def _validated_registry(data: dict[str, Any], origin: Path) -> dict[str, Any]:
-    """The three registry tables, checked the same way wherever they came from."""
+    """The three registry tables, checked the same way wherever they came from.
+
+    The shared validators check the nested shapes too, and every failure they raise is turned into
+    one bounded error naming ``origin``. Nothing malformed may leave this function as a raw
+    AttributeError or TypeError: an upgrade step and `secretary status` both report on what they
+    find at a path, so a broken registry has to arrive as a message about that path.
+    """
     tables: dict[str, Any] = {}
     for key in ("resources", "profiles", "role_defaults"):
         value = data.get(key)
@@ -69,13 +76,9 @@ def _validated_registry(data: dict[str, Any], origin: Path) -> dict[str, Any]:
         tables[key] = value
     try:
         validate_registry(tables["resources"], tables["profiles"])
+        validate_role_defaults(tables["role_defaults"], tables["profiles"])
     except HeadRegistryError as exc:
         raise HeadRegistryConfigError(f"head registry {origin} is invalid: {exc}") from None
-    for role, head in tables["role_defaults"].items():
-        if head not in tables["profiles"]:
-            raise HeadRegistryConfigError(
-                f"head registry {origin} routes role {role!r} to unknown head {head!r}"
-            )
     return tables
 
 

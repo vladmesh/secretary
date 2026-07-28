@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
+from secretary import status, upgrade
 from triggered_agents.agents.pipeline import health, heads
 from secretary.automations import (
     AutomationSpec,
@@ -39,6 +39,7 @@ from secretary.head_registry import (
     assert_snapshot_current,
     canonical_heads,
     canonical_path,
+    installed_heads,
     load_snapshot,
     product_revision,
     read_source,
@@ -938,6 +939,64 @@ class InstanceHeadCanonTests(unittest.TestCase):
                     canonical_heads(product, instance)
 
                 self.assertIn(str(instance / "heads" / "heads.toml"), str(caught.exception))
+
+    def test_a_canon_with_a_malformed_entry_fails_the_upgrade_step_by_name(self):
+        """Not just unparseable files: a parsed canon whose entries are the wrong shape.
+
+        The entries are hand-written, so any of them can be a list where a table or a name
+        belongs. Every one of those has to come back as the bounded config error naming the file
+        — the upgrade step handles that error and nothing else, so a raw AttributeError or
+        TypeError would escape the step instead of failing it.
+        """
+        broken = {
+            "list profile": "[resources.local-sub]\naccount = \"local\"\n"
+                            "profiles = { local-head = [] }\n",
+            "list resource": "resources = { local-sub = [] }\n"
+                             "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\n"
+                             "[role_defaults]\nnew_card = \"local-head\"\n",
+            "list role default": "[resources.local-sub]\naccount = \"local\"\n"
+                                 "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\n"
+                                 "[role_defaults]\nnew_card = []\n",
+            "list fallback entry": "[resources.local-sub]\naccount = \"local\"\n"
+                                   "[profiles.local-head]\nresource = \"local-sub\"\n"
+                                   "adapter = \"claude\"\nfallback = [[]]\n"
+                                   "[role_defaults]\nnew_card = \"local-head\"\n",
+            "list adapter": "[resources.local-sub]\naccount = \"local\"\n"
+                            "[profiles.local-head]\nresource = \"local-sub\"\nadapter = []\n"
+                            "[role_defaults]\nnew_card = \"local-head\"\n",
+        }
+        for name, canon in broken.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                instance = self.instance(Path(tmpdir), canon)
+                owned = str(instance / "heads" / "heads.toml")
+
+                with self.assertRaises(HeadRegistryConfigError) as caught:
+                    canonical_heads(upgrade.default_product_root(), instance)
+                result = upgrade.step_head_registry(self.context(instance))
+
+                self.assertIn(owned, str(caught.exception))
+                self.assertEqual(result.status, "failed")
+                self.assertIn(owned, result.detail)
+                self.assertFalse(snapshot_path(instance).exists())
+
+    def test_status_reports_a_malformed_installed_snapshot_instead_of_crashing(self):
+        """`secretary status` validates the snapshot on its own, so it meets the same shapes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = self.instance(Path(tmpdir))
+            snapshot_path(instance).write_text(
+                "resources:\n  local-sub:\n    account: local\n"
+                "profiles:\n  local-head: []\n"
+                "role_defaults:\n  new_card: local-head\n",
+                encoding="utf-8",
+            )
+
+            snapshot = str(snapshot_path(instance))
+            with self.assertRaises(HeadRegistryConfigError) as caught:
+                installed_heads(instance)
+            record = status._head_registry(instance)
+
+            self.assertIn(snapshot, str(caught.exception))
+            self.assertIn(snapshot, record["error"])
 
     def test_the_snapshot_and_pin_name_the_canon_that_actually_won(self):
         for name, canon, origin in (("instance", self.CANON, INSTANCE_ORIGIN),
