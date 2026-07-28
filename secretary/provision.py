@@ -12,7 +12,8 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import IDENTITY_FIELDS, normalize_contract, scan_repo
+from secretary.contract_migrations import normalize_contract
+from secretary.onboarding import IDENTITY_FIELDS, scan_repo
 
 ENVIRONMENT_SUMMARIES = {
     "dependency-missing": "required dependency is missing",

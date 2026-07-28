@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 from jsonschema import Draft202012Validator
 
+from secretary.contract_migrations import migrate_contract_dir
 from secretary.sprints import budget_thresholds
 from secretary.tasks import TaskError
 
@@ -199,6 +200,13 @@ def validate_instance(path: Path) -> InstanceReport:
 
     Read/parse failures are surfaced as SchemaError entries rather than raised,
     so callers can print one clean summary instead of a stack trace.
+
+    Contract drafts are migrated through `secretary.contract_migrations` before
+    they are validated, and the result is written back atomically. Validation is
+    what every tick runs, so a merge that drops a section from the contract
+    schema is repaired by the same read that would otherwise fail on it. Under
+    `contract_migrations.suspended()` the verdict is the same and nothing is
+    written, which is what `--dry-run` runs under.
     """
     instance_file = _resolve_instance(path)
     instance_dir = instance_file.parent
@@ -237,8 +245,14 @@ def validate_instance(path: Path) -> InstanceReport:
 
     projects = _validate_dir(instance_dir / "projects", "project-binding", errors)
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
+    drafts_dir = instance_dir / "adapter-drafts"
+    migrated, migration_failures = migrate_contract_dir(drafts_dir)
+    for failed_path, detail in migration_failures:
+        errors.append(
+            SchemaError(failed_path.name, "<file>", f"cannot rewrite migrated contract: {detail}")
+        )
     adapter_drafts = _validate_dir(
-        instance_dir / "adapter-drafts", "onboarding-contract", errors
+        drafts_dir, "onboarding-contract", errors, overrides=migrated
     )
     bindings = _load_bindings(instance_dir / "projects")
 
@@ -310,13 +324,25 @@ def _load_bindings(directory: Path) -> list[dict[str, Any]]:
     return bindings
 
 
-def _validate_dir(directory: Path, schema_name: str, errors: list[SchemaError]) -> int:
-    """Validate every *.yaml file in ``directory``. Returns the count seen."""
+def _validate_dir(
+    directory: Path,
+    schema_name: str,
+    errors: list[SchemaError],
+    overrides: dict[Path, Any] | None = None,
+) -> int:
+    """Validate every *.yaml file in ``directory``. Returns the count seen.
+
+    ``overrides`` carries documents a migration already normalized, so a file the
+    caller could not write back is still judged by the shape it was migrated to.
+    """
     if not directory.is_dir():
         return 0
     count = 0
     for config_file in sorted(directory.glob("*.yaml")):
         count += 1
+        if overrides and config_file in overrides:
+            errors += validate(overrides[config_file], schema_name, config_file.name)
+            continue
         try:
             data = load_config(config_file)
         except ConfigError as exc:

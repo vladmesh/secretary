@@ -12,11 +12,15 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_and_remove_atomic, publish_pair_atomic
 from secretary.config import ConfigError, load_config, validate
+from secretary.contract_migrations import (  # re-exported: one registry of legacy shapes
+    MUTABLE_BINDING_FIELDS,
+    normalize_contract,
+    project_lock_path,
+)
 
 
 DEFAULT_INSTANCE = "/home/dev/secretary-instance"
 IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
-MUTABLE_BINDING_FIELDS = ("plane", "policy")
 REQUIRED_DECISIONS = [
     "setup.commands",
     "smoke.command",
@@ -164,7 +168,7 @@ def _project_id(name: str) -> str:
 
 
 def _project_lock_path(instance_dir: Path, project_id: str) -> Path:
-    return instance_dir / ".locks" / f"{project_id}.lock"
+    return project_lock_path(instance_dir, project_id)
 
 
 def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any]:
@@ -174,22 +178,6 @@ def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any
         "adapter": project_id,
         "default_branch": default_branch,
     }
-
-
-def normalize_contract(document: dict[str, Any]) -> None:
-    """Drop the legacy sections an older writer left in a contract on disk.
-
-    Two of them: the mutable binding fields copied into ``identity``, and the
-    ``compatibility_manifest`` block that declared a dispatcher consumer the
-    pipeline never had. Only these known keys are migrated; any other unexpected
-    key stays in place so schema validation still rejects a corrupt contract.
-    """
-    document.pop("compatibility_manifest", None)
-    identity = document.get("identity")
-    if not isinstance(identity, dict):
-        return
-    for field in MUTABLE_BINDING_FIELDS:
-        identity.pop(field, None)
 
 
 def _binding_conflict(
