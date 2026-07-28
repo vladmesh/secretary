@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -46,6 +47,12 @@ BIN_DIR_ENV = "SECRETARY_BIN_DIR"
 
 PRODUCT_ORIGIN = "product"
 INSTANCE_ORIGIN = "instance"
+
+# A role and a skill are directory names, and both halves of the registry join them onto a root:
+# onto a `roles/` tree to read a skill and onto a shell root to write one. Anything with a
+# separator or a parent reference in it would move that join somewhere the operator did not name,
+# so a name is one plain path component or the manifest is refused.
+IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class RegistryError(ValueError):
@@ -215,6 +222,22 @@ def _string_list(table: dict[str, Any], key: str, where: str, source: ManifestSo
     return value
 
 
+def _identifier(value: str, where: str, source: ManifestSource) -> str:
+    """One path component, or a refusal naming the manifest that has to be edited."""
+    if not IDENTIFIER.fullmatch(value):
+        raise RegistryError(
+            f"{source.path}: {where} must be a single directory name matching "
+            f"{IDENTIFIER.pattern}, got {value!r}"
+        )
+    return value
+
+
+def _within(root: Path, path: Path) -> bool:
+    root_abs = _absolute(root)
+    path_abs = _absolute(path)
+    return path_abs == root_abs or root_abs in path_abs.parents
+
+
 def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
     """Read every manifest and layer them in order.
 
@@ -232,9 +255,11 @@ def load_registry(instance_path: Path | str | None = None) -> SkillRegistry:
         for role_name, role in _table(data, "roles", source).items():
             if not isinstance(role, dict):
                 raise RegistryError(f"{source.path}: [roles.{role_name}] must be a table")
+            _identifier(role_name, f"[roles.{role_name}] role name", source)
             declared = roles.setdefault(role_name, [])
             seen = {skill for skill, _ in declared}
             for skill in _string_list(role, "skills", f"roles.{role_name}", source):
+                _identifier(skill, f"roles.{role_name}.skills entry", source)
                 if skill not in seen:
                     declared.append((skill, source))
                     seen.add(skill)
@@ -282,24 +307,69 @@ def find_overlapping_target_roots(registry: SkillRegistry) -> list[dict[str, str
 
 
 def iter_expected(registry: SkillRegistry) -> list[ExpectedSkill]:
+    """Every skill the registry expects in a shell, with both ends of the copy checked.
+
+    Names are validated when the manifests are read, so containment here is the second lock rather
+    than the first: whatever a name turns out to be, a skill is read from inside the ``roles/`` tree
+    that declared it and written inside the shell root that asked for it, or the registry is refused.
+    """
     expected: list[ExpectedSkill] = []
-    for target_name, (target, _) in sorted(registry.targets.items()):
+    for target_name, (target, source_of_target) in sorted(registry.targets.items()):
         root = Path(target["root"]).expanduser()
         for role_name in target["roles"]:
             for skill, source in registry.roles.get(role_name, []):
-                expected.append(
-                    ExpectedSkill(
-                        target=target_name,
-                        shell=target["shell"],
-                        role=role_name,
-                        skill=skill,
-                        source=source.roles_root / role_name / skill,
-                        dest=root / skill,
-                        origin=source.origin,
-                        manifest=source.path,
-                    )
+                item = ExpectedSkill(
+                    target=target_name,
+                    shell=target["shell"],
+                    role=role_name,
+                    skill=skill,
+                    source=source.roles_root / role_name / skill,
+                    dest=root / skill,
+                    origin=source.origin,
+                    manifest=source.path,
                 )
+                if not _within(source.roles_root, item.source):
+                    raise RegistryError(
+                        f"{source.path}: {role_name}/{skill} resolves to {item.source}, outside "
+                        f"{source.roles_root}"
+                    )
+                if not _within(root, item.dest):
+                    raise RegistryError(
+                        f"{source_of_target.path}: targets.{target_name} would write "
+                        f"{item.dest}, outside {root}"
+                    )
+                expected.append(item)
     return expected
+
+
+def find_conflicting_destinations(expected: list[ExpectedSkill]) -> list[dict[str, str]]:
+    """Two different sources copied into one directory: the second silently buries the first.
+
+    Skill directories are flat under a shell root, so a product skill and an installation skill of
+    the same name land on the same path. Delivering both is impossible and delivering one of them
+    is not what either manifest asked for, so the pair is reported instead of resolved.
+    """
+    first_by_dest: dict[Path, ExpectedSkill] = {}
+    conflicts: list[dict[str, str]] = []
+    for item in expected:
+        first = first_by_dest.setdefault(item.dest, item)
+        if first is item or first.source == item.source:
+            continue
+        conflicts.append(
+            {
+                "dest": str(item.dest),
+                "shell": item.shell,
+                "left_target": first.target,
+                "left_skill": f"{first.role}/{first.skill}",
+                "left_source": str(first.source),
+                "left_manifest": str(first.manifest),
+                "right_target": item.target,
+                "right_skill": f"{item.role}/{item.skill}",
+                "right_source": str(item.source),
+                "right_manifest": str(item.manifest),
+            }
+        )
+    return conflicts
 
 
 def command_script(role: str, skill: str, source: ManifestSource) -> Path | None:
@@ -498,6 +568,7 @@ def audit(
     expected = iter_expected(registry)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
+    destination_conflicts = find_conflicting_destinations(expected)
 
     missing: list[dict[str, str]] = []
     drift: list[dict[str, str]] = []
@@ -546,7 +617,7 @@ def audit(
     entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
 
     ok = not missing and not drift and not source_missing and not config_errors
-    ok = ok and not entry_point_problems
+    ok = ok and not entry_point_problems and not destination_conflicts
     return {
         "ok": ok,
         "manifest": str(manifest_path()),
@@ -557,6 +628,7 @@ def audit(
         "source_missing": source_missing,
         "entry_points": entry_point_problems,
         "config_errors": config_errors,
+        "destination_conflicts": destination_conflicts,
     }
 
 
@@ -578,6 +650,15 @@ def sync(
     expected = iter_expected(registry)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
+
+    conflicts = find_conflicting_destinations(expected)
+    if conflicts:
+        conflict = conflicts[0]
+        raise RegistryError(
+            f"two skills claim the skill directory {conflict['dest']}: "
+            f"{conflict['left_skill']} from {conflict['left_manifest']} and "
+            f"{conflict['right_skill']} from {conflict['right_manifest']}"
+        )
 
     for item in expected:
         if not (item.source / "SKILL.md").is_file():
@@ -657,6 +738,13 @@ def render_markdown(result: dict[str, Any]) -> str:
         for item in result["entry_points"]:
             lines.append(
                 f"- {item['command']} [{item['origin']}] {item['status']}: {item['reason']}"
+            )
+    if result.get("destination_conflicts"):
+        lines.extend(["", "Destination conflicts:"])
+        for item in result["destination_conflicts"]:
+            lines.append(
+                f"- {item['dest']}: {item['left_skill']} from {item['left_manifest']} "
+                f"and {item['right_skill']} from {item['right_manifest']}"
             )
     if result["config_errors"]:
         lines.extend(["", "Configuration errors:"])

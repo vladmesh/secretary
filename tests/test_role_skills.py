@@ -254,6 +254,45 @@ class LayeredRegistryTests(OverlayFixture):
         self.assertEqual(registry.targets["t"][0]["root"], str(other))
         self.assertEqual(registry.targets["t"][1].origin, INSTANCE_ORIGIN)
 
+    def write_clashing_overlay(self) -> Path:
+        """An installation skill of the product skill's name, in a role the same shell carries."""
+        overlay = self.write_overlay(
+            '[roles.observer]\nskills = ["shipped"]\n\n'
+            f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\n'
+            'roles = ["secretary", "observer"]\n'
+        )
+        self.write_skill(
+            self.instance / "skills" / "roles" / "observer" / "shipped", "# not the product one\n"
+        )
+        return overlay
+
+    def test_two_skills_of_one_name_cannot_claim_one_skill_directory(self) -> None:
+        """Skill directories are flat, so copying both would bury one without saying so."""
+        overlay = self.write_clashing_overlay()
+
+        with self.assertRaises(RegistryError) as caught:
+            sync(instance_path=self.instance)
+
+        message = str(caught.exception)
+        self.assertIn(str(self.shell_root / "shipped"), message)
+        self.assertIn(str(self.product), message)
+        self.assertIn(str(overlay), message)
+        self.assertFalse(self.shell_root.exists(), "sync delivered half of a refused registry")
+
+    def test_the_audit_reports_a_claimed_skill_directory_rather_than_a_drift(self) -> None:
+        overlay = self.write_clashing_overlay()
+
+        result = audit(instance_path=self.instance)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            [
+                (item["dest"], item["left_manifest"], item["right_manifest"])
+                for item in result["destination_conflicts"]
+            ],
+            [(str(self.shell_root / "shipped"), str(self.product), str(overlay))],
+        )
+
     def test_the_overlay_is_found_from_instance_yaml_just_as_from_the_directory(self) -> None:
         """`--instance` takes either the private repo or the config file inside it."""
         self.assertEqual(
@@ -345,6 +384,30 @@ class MalformedManifestTests(OverlayFixture):
         code, output = self.run_command("audit")
 
         self.assert_bounded(code, output, overlay)
+
+    def test_a_skill_name_that_is_a_path_cannot_leave_the_shell_root(self) -> None:
+        """A name is joined onto a shell root, so a name with a separator moves the write."""
+        overlay = self.write_overlay('[roles.secretary]\nskills = ["../escaped"]\n')
+        self.write_skill(
+            self.instance / "skills" / "roles" / "secretary" / "escaped", "# escaped\n"
+        )
+        self.shell_root.mkdir(parents=True)
+
+        code, output = self.run_command("sync")
+
+        self.assert_bounded(code, output, overlay)
+        self.assertIn("../escaped", output)
+        self.assertFalse((self.root / "escaped").exists(), "sync wrote outside the shell root")
+        self.assertEqual(list(self.shell_root.iterdir()), [])
+
+    def test_a_role_name_that_is_a_path_cannot_leave_the_roles_tree(self) -> None:
+        """A quoted role key is still a directory name, and reading is joined the same way."""
+        overlay = self.write_overlay('[roles."../outside"]\nskills = ["personal"]\n')
+
+        code, output = self.run_command("audit")
+
+        self.assert_bounded(code, output, overlay)
+        self.assertIn("../outside", output)
 
     def test_a_malformed_product_manifest_names_the_product_manifest(self) -> None:
         self.write_product("[roles.secretary\n")
@@ -487,11 +550,15 @@ class CommandEntryPointTests(OverlayFixture):
     def test_two_skills_of_one_name_cannot_both_own_the_command(self) -> None:
         """A registry that wants one link for two scripts is refused before anything is written."""
         overlay = self.install_personal_skill()
+        # Separate shell roots: the two skills fit side by side on disk, and the one thing they
+        # cannot both have is the single link named after them.
         self.write_product(
             '[roles.secretary]\nskills = ["shipped"]\n\n'
             '[roles.helper]\nskills = ["personal"]\n\n'
             f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\n'
-            'roles = ["secretary", "helper"]\n'
+            'roles = ["secretary"]\n\n'
+            f'[targets.u]\nshell = "codex"\nroot = "{self.root / "helper-shell"}"\n'
+            'roles = ["helper"]\n'
         )
         clashing = self.product.parent / "roles" / "helper" / "personal"
         self.write_skill(clashing, "# also personal\n")

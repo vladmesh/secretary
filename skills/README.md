@@ -52,6 +52,16 @@ Every skill is read from the `roles/` tree beside the manifest that declared it,
 repositories never have to agree about where sources live. The audit tags each finding with its
 origin (`product` or `instance`) and the manifest that owns it.
 
+A role name and a skill name are directory names: one path component each, matching
+`[A-Za-z0-9][A-Za-z0-9._-]*`. Both halves of the registry join them onto a root, one to read a skill
+and one to write it, so a name carrying a separator would move the write somewhere nobody named. A
+name outside that shape is refused rather than interpreted.
+
+Skill directories are flat under a shell root, so a product skill and an installation skill of the
+same name would claim the same directory. That pair is refused before any copy, naming both
+manifests: burying one of them is not what either manifest asked for. Rename the installation skill,
+or give it a target of its own.
+
 A manifest that is not TOML, or that has a key of the wrong shape, fails the audit and the sync with
 one line naming the file to open. Sync decides everything it can before it writes, so a rejected
 registry leaves nothing half delivered.
