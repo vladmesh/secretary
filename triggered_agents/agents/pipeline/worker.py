@@ -131,8 +131,8 @@ def _git_ok(cwd: str | Path, args: list[str], timeout: float = ORCA_TIMEOUT_S) -
 
 
 def project_root(project: str) -> Path:
-    """Корень репо проекта: ~/projects/<name>, иначе ~/<name> (там живут secretary,
-    secretary-instance и прочая инфраструктура секретаря)."""
+    """Root of a project checkout: `~/projects/<name>`, otherwise `~/<name>` (where the product
+    and instance repositories and the rest of the appliance infrastructure live)."""
     p = PROJECTS_DIR / project
     if p.is_dir():
         return p
@@ -150,12 +150,12 @@ def prune_worktrees(project: str) -> None:
 
 
 def _load_manifest(project: str) -> dict:
-    """workspace.toml лукап цепочкой: сначала в самом репо проекта (project_root), иначе
-    центральный манифест <MANIFEST_DIR>/<project>.toml для контриб-проектов, которые не коммитят
-    workspace.toml в свой репо (agent-kanban-232). MANIFEST_DIR настраивается через TA_MANIFEST_DIR
-    и по умолчанию не задан (старый дефолт ушёл вместе с decommissioned-репо), тогда
-    работает только локальный лукап. Ни там, ни там — пустой манифест, вызывающий откатывается на
-    дефолты (base_branch main, не contrib; это read_base_branch/is_contrib, не провижининг)."""
+    """Chained `workspace.toml` lookup: the project checkout itself (project_root) first, then a
+    central manifest `<MANIFEST_DIR>/<project>.toml` for contrib projects that do not commit a
+    `workspace.toml` into their own repository. MANIFEST_DIR comes from `TA_MANIFEST_DIR` and is
+    unset by default, in which case only the local lookup runs. Absent in both places, the manifest
+    is empty and the caller falls back to defaults (base branch `main`, not contrib; that is
+    read_base_branch/is_contrib, not provisioning)."""
     local = project_root(project) / "workspace.toml"
     if local.is_file():
         return tomllib.loads(local.read_text(encoding="utf-8"))
@@ -525,9 +525,10 @@ def rename_terminal(handle: str, title: str) -> bool:
 
 def _worker_prompt() -> str:
     return (
-        "Ты — воркер task-пайплайна. Твоя задача целиком в TASK.md в корне воркспейса — прочти "
-        "его первым и следуй ему. Роль на доске — worker (BOARD_ROLE уже выставлен): карточку сам "
-        f"не двигаешь, {task_protocol.launch_instruction()}. TASK.md в репо не коммить."
+        "You are a worker of the task pipeline. Your task is entirely in TASK.md at the root of "
+        "the workspace: read it first and follow it. Your board role is worker (BOARD_ROLE is "
+        f"already set): you do not move the card yourself, {task_protocol.launch_instruction()}. "
+        "Do not commit TASK.md into the repository."
     )
 
 
@@ -541,8 +542,8 @@ def terminal_kind(head: str | None) -> str | None:
 
 
 def ensure_trust(workspace: str) -> None:
-    """Проставить folder trust Claude Code для свежего worktree. Без этого голова виснет на
-    интерактивном вопросе «доверяешь ли папке» (та же логика — worktree provisioning у агентов)."""
+    """Set the CLI's folder trust for a fresh worktree. Without it the head hangs on the
+    interactive "do you trust this folder" question."""
     try:
         claude_env.ensure_trust(CLAUDE_JSON, workspace)
     except claude_env.ClaudeConfigError as e:
@@ -550,9 +551,9 @@ def ensure_trust(workspace: str) -> None:
 
 
 def ensure_theme() -> None:
-    """Проставить тему в ~/.claude.json — иначе свежая голова виснет на первом онбординге
-    («выбери стиль текста»), тот же класс бага, что и folder trust, но ключ глобальный, а не
-    per-workspace."""
+    """Set the theme in the CLI config — otherwise a fresh head hangs on first-run onboarding
+    ("choose a text style"), the same class of problem as folder trust, but the key is global rather
+    than per-workspace."""
     try:
         claude_env.ensure_theme(CLAUDE_JSON)
     except claude_env.ClaudeConfigError as e:
@@ -674,10 +675,11 @@ def launch_worker(workspace: str, head: str | None, worker_id: str, title: str) 
 
 def _reviewer_prompt() -> str:
     return (
-        "Ты — независимая голова-ревьюер task-пайплайна (слой 3 валидации). Твоя работа целиком в "
-        "REVIEW.md в корне воркспейса — прочти его первым и следуй ему. Роль на доске — reviewer "
-        "(BOARD_ROLE уже выставлен): прав на код нет, не коммить и не пушь; артефакты — один "
-        "вердикт-коммент и, при необходимости, карточки-идеи через board-CLI."
+        "You are the independent reviewer head of the task pipeline (validation layer 3). Your "
+        "work is entirely in REVIEW.md at the root of the workspace: read it first and follow it. "
+        "Your board role is reviewer (BOARD_ROLE is already set): you have no write access to the "
+        "code, do not commit and do not push; your artifacts are one verdict comment and, if "
+        "needed, idea cards through the board CLI."
     )
 
 

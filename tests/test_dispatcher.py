@@ -82,7 +82,7 @@ class FakeKanboard:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.columns = [
-            {"id": 1, "title": "Идеи"},
+            {"id": 1, "title": "Ideas"},
             {"id": 2, "title": "Ready"},
             {"id": 3, "title": "In progress"},
             {"id": 4, "title": "Validate"},
@@ -1961,7 +1961,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             actor="worker",
             reference="secretary-510-pilot",
             kind="done",
-            body="PR: https://github.com/vladmesh/secretary/pull/1",
+            body="PR: https://github.com/example-org/secretary/pull/1",
             request_id="worker-done",
         )
         advanced = self.runtime.tick(self.selector)
@@ -2551,7 +2551,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "gate-red-rework")
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(task["state"], "in_progress")
-        self.assertIn("Механический гейт валидации красный", task["comments"][-1]["body"])
+        self.assertIn("The mechanical validation gate is red", task["comments"][-1]["body"])
         self.assertEqual(self.host.reviews, [])
         # worker prepared once at claim, once on the gate-red relaunch
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
@@ -2567,7 +2567,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         first = self.runtime.tick(self.selector)
         self.assertEqual(first["action"], "gate-red-rework")
-        self.assertNotIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
         record = self.runtime.state.load()["records"]["secretary-510-pilot"]
         self.host.commit = "newc0ffee1234567"
@@ -2583,7 +2583,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_repeated_github_gate_red_for_the_same_reason_survives_a_new_sha(self) -> None:
         """secretary-766 review: a GitHub gate's rendered detail always carries the head SHA,
@@ -2592,18 +2592,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.start_pilot()
         self.host.gate_results = [
             GateResult(
-                "red", "CI red: job «tests» failed on `pipeline/x` @ `aaa111`", "AssertionError: boom",
+                "red", 'CI red: job "tests" failed on `pipeline/x` @ `aaa111`', "AssertionError: boom",
                 fingerprint="ci-boom",
             ),
             GateResult(
-                "red", "CI red: job «tests» failed on `pipeline/x` @ `bbb222`", "AssertionError: boom",
+                "red", 'CI red: job "tests" failed on `pipeline/x` @ `bbb222`', "AssertionError: boom",
                 fingerprint="ci-boom",
             ),
         ]
         self._run_worker_to_validate()
         first = self.runtime.tick(self.selector)
         self.assertEqual(first["action"], "gate-red-rework")
-        self.assertNotIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
         record = self.runtime.state.load()["records"]["secretary-510-pilot"]
         self.host.commit = "newc0ffee1234567"
@@ -2619,7 +2619,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_gate_red_with_a_different_local_error_is_not_marked_as_a_repeat(self) -> None:
         """secretary-766 review: two distinct local-gate failures must not be conflated into a
@@ -2647,7 +2647,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertNotIn("Повторный возврат", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_done_at_a_gate_rejected_sha_is_returned_for_rework(self) -> None:
         self.start_pilot()
@@ -2663,7 +2663,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["action"], "stale-done-rework")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
-        self.assertIn("уже был отклонён", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("was already rejected", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
         record = self.runtime.state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(record["rejected_sha"], self.host.commit)
         self.assertEqual(record["rejected_done_reports"], 1)
@@ -2724,7 +2724,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
-        self.assertIn("дважды отчитался", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("reported done twice", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_gate_red_scrubs_secrets_in_bounce_comment(self) -> None:
         self.start_pilot()
@@ -3447,7 +3447,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.completed, [], "a verdict for another code state must not merge")
         self.assertEqual(self.host.torn_down, [])
-        self.assertIn("другому состоянию кода", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("a different state of the code", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_green_verdict_for_a_descendant_checkout_is_not_merged_by_default(self) -> None:
         """A descendant can contain new commits after review; only the instance publish recovery
@@ -4596,16 +4596,16 @@ class DispatcherLauncherTests(unittest.TestCase):
                     {
                         "marker": "dispatcher",
                         "body": (
-                            "[dispatcher]\nМеханический гейт валидации красный: CI red: job «tests», "
-                            "шаг «pytest» failed on `pipeline/secretary-510-pilot` @ `abc123`. Карточка "
-                            "возвращена в In progress на доработку.\nХвост:\n```\nAssertionError: boom\n```"
+                            '[dispatcher]\nThe mechanical validation gate is red: CI red: job "tests", '
+                            'step "pytest" failed on `pipeline/secretary-510-pilot` @ `abc123`. The card '
+                            'is back in In progress for rework.\nTail:\n```\nAssertionError: boom\n```'
                         ),
                     },
                 ],
             }
             doc = host._worker_task_doc(gated, "main", "a", 1)
         self.assertIn("Mechanical gate failure", doc)
-        self.assertIn("job «tests», шаг «pytest»", doc)
+        self.assertIn('job "tests", step "pytest"', doc)
         self.assertIn("AssertionError: boom", doc)
 
     def test_review_verdict_request_id_is_distinct_per_round(self) -> None:
@@ -5297,12 +5297,12 @@ class GithubGateHost(CommandHostRuntime):
             return subprocess.CompletedProcess(args, code, out, "")
 
         if args[1:3] == ["repo", "view"]:
-            return done("vladmesh/sample\n")
+            return done("example-org/sample\n")
         if args[1:3] == ["pr", "list"]:
             return done("42\n" if self._pr_open else "\n")
         if args[1:3] == ["pr", "create"]:
             self._pr_open = True
-            return done("https://github.com/vladmesh/sample/pull/42\n")
+            return done("https://github.com/example-org/sample/pull/42\n")
         if args[1:3] == ["run", "view"]:
             if self._run_log_error:
                 return done("", code=1)
@@ -5476,13 +5476,13 @@ class DispatcherGateTests(unittest.TestCase):
                 pr_open=True,
                 check_runs=[{
                     "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
                 }],
                 run_log=run_log,
             )
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
-        self.assertIn("шаг «Run pytest»", result.summary)
+        self.assertIn('step "Run pytest"', result.summary)
         self.assertIn("AssertionError: expected 2, got 3", result.log)
         self.assertNotIn("one or more jobs failed", result.log)
 
@@ -5502,7 +5502,7 @@ class DispatcherGateTests(unittest.TestCase):
                 pr_open=True,
                 check_runs=[{
                     "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
                 }],
                 run_log=run_log,
             )
@@ -5521,13 +5521,13 @@ class DispatcherGateTests(unittest.TestCase):
                 pr_open=True,
                 check_runs=[{
                     "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
                 }],
                 run_log=run_log,
             )
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
-        self.assertIn("инфраструктурный отказ подготовки", result.summary)
+        self.assertIn("infrastructure setup failure", result.summary)
 
     def test_github_gate_red_reports_unavailable_log_when_not_an_actions_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5540,7 +5540,7 @@ class DispatcherGateTests(unittest.TestCase):
             )
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
-        self.assertIn("лог недоступен", result.log)
+        self.assertIn("log unavailable", result.log)
 
     def test_github_gate_red_reports_unavailable_log_when_gh_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5550,13 +5550,13 @@ class DispatcherGateTests(unittest.TestCase):
                 pr_open=True,
                 check_runs=[{
                     "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
                 }],
                 run_log_error=True,
             )
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
-        self.assertIn("лог недоступен", result.log)
+        self.assertIn("log unavailable", result.log)
 
     def test_github_gate_pending_while_pr_ci_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5572,7 +5572,7 @@ class DispatcherGateTests(unittest.TestCase):
         return {"validation": {"ci": "github", "required_checks": list(names)}}
 
     def test_github_gate_green_when_required_check_passes_next_to_a_failed_optional(self) -> None:
-        """secretary-841: the declared set is the whole truth. An `optional-suite` failing on the
+        """The declared set is the whole truth. An `optional-suite` failing on the
         same sha is not the project's gate and must not bounce the card."""
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
@@ -5599,7 +5599,7 @@ class DispatcherGateTests(unittest.TestCase):
                 check_runs=[
                     {
                         "status": "COMPLETED", "conclusion": "FAILURE", "name": "test",
-                        "details_url": "https://github.com/vladmesh/sample/actions/runs/999",
+                        "details_url": "https://github.com/example-org/sample/actions/runs/999",
                     },
                     {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "optional-suite"},
                 ],
@@ -5625,7 +5625,7 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "pending")
 
     def test_github_gate_pending_while_a_required_check_is_missing(self) -> None:
-        """A required name nothing posted for this sha is «CI не стартовал», not green: the
+        """A required name nothing posted for this sha is "CI did not start", not green: the
         pending watchdog escalates it if it never arrives."""
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")

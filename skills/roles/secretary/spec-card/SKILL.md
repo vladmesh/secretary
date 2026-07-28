@@ -1,107 +1,109 @@
 ---
 name: spec-card
-description: Оформить договорённость с vladmesh (или идею агента) как карточку-спеку на доске Pipeline — роль PO в task-пайплайне. Триггеры — «заведи карточку», «в пайплайн», «спека готова», «да, погнали» после брейншторма задачи, любое явное согласие vladmesh делать конкретную задачу.
+description: Turn an agreement with the owner (or an agent's idea) into a spec card on the Pipeline board — the PO role in the task pipeline. Triggers are "file a card", "into the pipeline", "the spec is ready", "yes, go ahead" after brainstorming a task, and any explicit approval to do a specific task.
 ---
 
-# Spec-card — спека → карточка
+# Spec-card — spec to card
 
-Ты пишешь спеки задач на доску Pipeline (Kanboard) — единственный источник правды для
-исполняемых задач. Диспетчер потом сам поднимает воркспейс и голову-воркера по карточке;
-спеки должно хватать свежей сессии без контекста этого диалога.
+You write task specs onto the Pipeline board, the single source of truth for executable work. The
+dispatcher then brings up the workspace and the worker head from the card, so the spec has to be enough
+for a fresh session with none of this conversation's context.
 
-Актуальный task protocol — `/home/dev/secretary/docs/PROTOCOLS.md`.
+The current task protocol is `docs/PROTOCOLS.md` in the product repository.
 
-## Шаблон спеки
+## Spec template
 
-Пиши markdown ровно по этой структуре, во временный файл:
+Write markdown in exactly this structure, into a temporary file:
 
 ```markdown
-## Цель
+## Goal
 
-<Абзац: что должно получиться и зачем. Без «как» — реализацию решает воркер.>
+<A paragraph: what should exist and why. No "how" — the worker decides the implementation.>
 
-## Контекст
+## Context
 
-- <путь к файлу/директории, который стоит прочитать>
-- <ссылка на доку>
-- memory_search: "<запрос>" — <что должно найтись>
+- <path to a file or directory worth reading>
+- <link to a document>
+- memory_search: "<query>" — <what it should find>
 
 ## Acceptance criteria
 
-- <проверяемый критерий 1>
-- <проверяемый критерий 2>
+- <checkable criterion 1>
+- <checkable criterion 2>
 
 ## Out of scope
 
-- <что сознательно не делаем в этой карточке>
+- <what this card deliberately does not do>
 ```
 
-Контекст — только указатели (пути, доки, запросы для `memory_search`), не копипаста
-содержимого: скопированное протухнет к моменту, когда воркспейс поднимется. Acceptance
-criteria — то, что воркер потом отмечает done/not done в отчёте с пояснением, как проверял,
-так что формулируй проверяемо, не «сделать нормально».
+Context holds pointers only (paths, documents, `memory_search` queries), not pasted content: anything
+copied will be stale by the time the workspace comes up. Acceptance criteria are what the worker later
+marks done or not done in its report, with an explanation of how it checked, so phrase them checkably,
+not as "do it properly".
 
-Служебное — **не в текст спеки**, а в поля вызова `create`: `--type` (code|research),
-`--project`, `--blocked-by`, `--head` (профиль из `heads.toml`), `--review-head`, `--slug`.
+Operational details do **not** go into the spec text but into the fields of the `create` call: `--type`
+(code|research), `--project`, `--blocked-by`, `--head` (a profile from the head registry),
+`--review-head`, `--slug`.
 
-## Review-head
+## Review head
 
-По умолчанию `--review-head` не передаётся: Validate возьмёт глобальный reviewer-профиль и после
-механических слоёв запустит LLM-review слоя 3. Если vladmesh явно берёт риск отсутствия
-независимой LLM-вычитки для конкретной карточки, PO может передать `--review-head none`. Это
-отключает только слой 3. PR/branch integrity, GitHub CI или явный no-CI в манифесте, stand/e2e и
-прочие механические проверки остаются обязательными.
+By default `--review-head` is not passed: Validate takes the global reviewer profile and, after the
+mechanical layers, runs the LLM review layer. If the owner explicitly accepts the risk of no independent
+LLM read for a specific card, the PO may pass `--review-head none`. That disables only the LLM layer.
+Branch integrity, CI (or an explicit no-CI declaration in the manifest), the end-to-end stand and the
+other mechanical checks stay mandatory.
 
-`none` годится для мелкой, низкорисковой или уже вручную вычитанной карточки. Не используй его как
-ответ на красный CI, зависший check, stand failure, закрытый PR или временно недоступного reviewer:
-такие состояния должны остаться красными или Blocked, а не превращаться в green. Снять режим можно
-PO-обновлением `--review-head ""`, либо поставить конкретный reviewer-профиль.
+`none` is fine for a small, low-risk card, or one that has already been read by hand. Do not use it as an
+answer to a red CI run, a hung check, a stand failure, a closed pull request or a temporarily unavailable
+reviewer: those states must stay red or Blocked rather than turning green. The mode is cleared by a PO
+update with `--review-head ""`, or by setting a concrete reviewer profile.
 
-## Слаг
+## Slug
 
-`--slug` передавай ВСЕГДА — он идёт в имя воркспейса воркера (`<reference>-<slug>`) и заголовок
-вкладки терминала, чтобы в Orca GUI по имени было видно, что делает голова. Генерируй его сам из
-сути задачи: 2-4 слова латиницей через дефис, `[a-z0-9-]{1,30}`, без родового префикса проекта
-(он уже есть в `reference`). Пример: задача «teardown воркспейса на Done» → `--slug
-teardown-done-workspaces`. Не проходит `create` — не тот слаг, а не отсутствие слага: карточка
-без него не падает (пайплайн подставит фоллбэк из заголовка), но так GUI неинформативен, поэтому
-всегда передавай свой.
+ALWAYS pass `--slug`. It goes into the worker's workspace name (`<reference>-<slug>`) and the terminal tab
+title, so the session-manager UI shows what the head is doing. Generate it yourself from the substance of
+the task: 2 to 4 lowercase words joined by hyphens, `[a-z0-9-]{1,30}`, with no generic project prefix (the
+reference already carries that). Example: a task about tearing down workspaces on Done →
+`--slug teardown-done-workspaces`. If `create` refuses, the slug is wrong, not missing: a card without one
+does not fail (the pipeline substitutes a fallback from the title), but the UI is then uninformative, so
+always pass your own.
 
-## Высота
+## Size
 
-Полстраницы-страница. Не влезает — режь на цепочку карточек через `blocked_by`: создай
-предшественника, возьми его `reference` из JSON-ответа `create`, укажи в `--blocked-by`
-следующей карточки.
+Half a page to a page. If it does not fit, cut it into a chain of cards through `blocked_by`: create the
+predecessor, take its reference from the JSON response of `create`, and pass it in `--blocked-by` on the
+next card.
 
-## Радиус спеки
+## Spec radius
 
-Acceptance criteria не должны требовать правок за пределами репо проекта карточки: воркер
-пушит только в свой проект. Кросс-репозиторные части сделай как PO до или параллельно карточке
-и дай на них указатель в Контексте либо вынеси в отдельную карточку нужного проекта через
-`blocked_by`.
+Acceptance criteria must not require changes outside the card project's repository: a worker pushes only
+to its own project. Do the cross-repository parts yourself as PO, before or alongside the card, and give a
+pointer to them in Context, or split them into a separate card in the right project through `blocked_by`.
 
-## Гейт по источнику
+## Gate by source
 
-- Задача родилась в диалоге с vladmesh и он согласился («да, погнали» и любой явный
-  аппрув без отдельного клика) → создавай сразу в `Ready` (`--column Ready`).
-- Идея от агента (ретро, находка ресёча, предложение воркера) → только колонка `Идеи`
-  (дефолт `create`). В `Ready` сам не переводи — это делает человек или отдельный диалог.
+- The task came out of a conversation with the owner and they agreed ("yes, go ahead", or any explicit
+  approval) → create it directly in `Ready` (`--column Ready`).
+- The idea came from an agent (a retro finding, a research result, a worker's suggestion) → the `Ideas`
+  column only (the `create` default). Do not promote it to `Ready` yourself; a person or a separate
+  conversation does that.
 
-## Конкуренция
+## Concurrency
 
-Код-задачи одного проекта строго последовательны — диспетчер не даст claim второй код-карточке,
-пока первая не Done. Guard это уже держит на claim, но если новая задача явно зависит от
-результата другой (а не просто конкурирует за проект) — всё равно ставь `--blocked-by`.
+Code tasks in one project are strictly sequential: the dispatcher will not let a second code card be
+claimed while the first is not Done. The guard already holds that at claim time, but if a new task
+explicitly depends on another's result (rather than merely competing for the project), still set
+`--blocked-by`.
 
-## Инвокация
+## Invocation
 
 ```bash
 spec=$(mktemp)
 cat > "$spec" <<'EOF'
-## Цель
+## Goal
 ...
 
-## Контекст
+## Context
 ...
 
 ## Acceptance criteria
@@ -112,40 +114,40 @@ cat > "$spec" <<'EOF'
 EOF
 
 pipeline --role po create \
-  --project personal_site --type code --title "Короткий заголовок" \
-  --column Ready --head claude-sonnet --slug "korotkiy-slug" --description-file "$spec"
+  --project example-project --type code --title "Short title" \
+  --column Ready --head claude-sonnet --slug "short-slug" --description-file "$spec"
 ```
 
-Для идеи (колонка `Идеи`) просто не передавай `--column`. Спеку всегда через
-`--description-file` — не инлайнить markdown в аргумент.
+For an idea (the `Ideas` column) simply do not pass `--column`. Always pass the spec through
+`--description-file`; do not inline markdown into an argument.
 
-Если нужен per-card no-review:
+If you need per-card no-review:
 
 ```bash
 pipeline --role po create \
-  --project personal_site --type code --title "Короткий заголовок" \
+  --project example-project --type code --title "Short title" \
   --column Ready --head claude-sonnet --review-head none \
-  --slug "korotkiy-slug" --description-file "$spec"
+  --slug "short-slug" --description-file "$spec"
 ```
 
-Одобрить ранее заведённую идею или вернуть поправленную Blocked-карточку в работу
-(оба перехода — PO'шные):
+To approve a previously filed idea, or to return a corrected Blocked card to work (both are PO
+transitions):
 
 ```bash
-pipeline --role po ready --ref personal_site-42
+pipeline --role po ready --ref example-project-42
 ```
 
-Проверить карточку:
+To inspect a card:
 
 ```bash
-pipeline show --ref personal_site-42
+pipeline show --ref example-project-42
 ```
 
-## После создания
+## After creating it
 
-Сообщи vladmesh `reference` карточки и колонку, в которую она легла.
+Tell the owner the card's reference and the column it landed in.
 
 ## Reference
 
-Не указывай `--ref` — сгенерится `<project>-<id>` из ответа `create`. Свой `--ref` ставь,
-только если он нужен заранее (например, чтобы сослаться на карточку до того, как она создана).
+Do not pass `--ref`: it is generated as `<project>-<id>` from the `create` response. Set your own `--ref`
+only when you need it in advance, for example to reference a card before it exists.

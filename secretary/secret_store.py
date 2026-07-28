@@ -1,6 +1,6 @@
 """Recoverable secret store: envelope format, installation key, open catalog.
 
-Contract: the sprint document "Восстановимое хранилище секретов". The store lives
+Contract: docs/RECOVERY.md, "Secrets" — a recoverable secret store. The store lives
 in the private instance repo, so it rides the same recovery chain as the board,
 the runs and the knowledge plane:
 

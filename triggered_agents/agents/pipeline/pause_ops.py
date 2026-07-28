@@ -102,7 +102,8 @@ def relaunch_worker_after_resume(ref: str, card: dict, rec: dict, refresh_worker
     try:
         ops.add_comment(
             "dispatcher", ref,
-            f"терминал остановлен паузой, перезапущен. Воркспейс {workspace}, причина: {reason}.")
+            f"the terminal was stopped by the pause and restarted. Workspace {workspace}, "
+            f"reason: {reason}.")
         STATE.log_run("relaunch-after-resume", reference=ref, result="relaunched",
                       reason=reason, workspace=workspace, handle=handle)
     except Exception as e:  # noqa: BLE001 — head is already live and recorded; a failed courtesy
@@ -206,9 +207,9 @@ def resume_hard(state: dict, records: dict, by_ref: dict, refresh_worker_task) -
                 skipped.append(f"{ref}:worker")
                 ops.add_comment(
                     "dispatcher", ref,
-                    "терминал остановлен паузой, перезапуск при resume не удался. "
-                    "Карточка остаётся In progress под обычным watchdog; следующий tick "
-                    f"увидит пустой handle и применит retry policy. Ошибка: "
+                    "the terminal was stopped by the pause and the restart on resume failed. "
+                    "The card stays In progress under the ordinary watchdog; the next tick "
+                    f"will see an empty handle and apply the retry policy. Error: "
                     f"{worker.scrub_secrets(str(e))}.")
                 STATE.log_run("relaunch-after-resume", reference=ref, result="failed",
                               reason="pipeline resume", level="warn",

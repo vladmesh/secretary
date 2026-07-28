@@ -28,7 +28,14 @@ from secretary.config import ConfigError, load_config, validate_instance
 from secretary import state_repo
 from secretary.data import init_layout
 from secretary._fsutil import file_lock, write_text_atomic
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import (
+    _STATE_BY_COLUMN,
+    KanboardClient,
+    TaskAudit,
+    TaskError,
+    TaskReader,
+    TaskWriter,
+)
 
 
 @dataclass(frozen=True)
@@ -559,7 +566,9 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def _state_for_column(column: str) -> str | None:
-    return {"Идеи": "ideas", "Ready": "ready", "In progress": "in_progress", "Validate": "validate", "Blocked": "blocked", "Done": "done"}.get(column)
+    # A backup taken before the column titles were translated carries the former first-column
+    # title (secretary.tasks.LEGACY_IDEAS_COLUMN); it restores into the same state.
+    return _STATE_BY_COLUMN.get(column)
 
 
 def _update_restore_state(data_dir: Path, **changes: Any) -> None:

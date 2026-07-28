@@ -1,228 +1,229 @@
 ---
 name: run-sprint
-description: "Автономно исполнить единственный активный продуктовый спринт Secretary до достижения его Goal и Definition of Done: выбирать следующий наиболее влиятельный шаг, самостоятельно проводить исследования, создавать по одной свежей карточке, следить за pipeline и CI, читать выводы worker/reviewer, добавлять только допустимые hotfix, выполнять итоговую live-валидацию и закрывать sprint-документ. Использовать только при явном вызове `$run-sprint` или прямой просьбе исполнить активный спринт целиком."
+description: "Autonomously execute the single active product sprint until its goal and Definition of Done are reached: pick the next most impactful step, do research yourself, create one fresh card at a time, watch the pipeline and CI, read worker and reviewer conclusions, add only permitted hotfixes, run the final live validation and close the sprint document. Use only on an explicit `$run-sprint` call or a direct request to execute the active sprint end to end."
 ---
 
 # Run Sprint
 
-Доведи активный спринт до цели. Не заканчивай работу на создании карточки, открытом PR, ожидающем
-CI или промежуточном отчёте.
+Take the active sprint to its goal. Do not end the work on a created card, an open pull request, a
+pending CI run or an interim report.
 
-## Неизменяемые правила
+## Fixed rules
 
-- Одновременно исполняется одна содержательная карточка спринта.
-- Новая карточка создаётся только после полного разбора предыдущей.
-- Existing Ideas не переводятся в Ready. Создавай свежую карточку из текущего понимания.
-- Goal, Definition of Done, Out of Scope и Stop Conditions не меняются автономно.
-- Research выполняй сам. Не создавай research-карточку и не запускай reviewer, кроме редкого
-  случая, когда нужен отдельный долговечный артефакт в конкретном репозитории.
-- Red review и штатный rework не являются падением карточки.
-- Не переустанавливай, не вайпай и не восстанавливай активную систему.
-- Не выполняй действие, способное оборвать текущую сессию Secretary, Orca/server/shell или канал
-  управления.
-- Не форс-пушь и не переписывай опубликованную историю.
+- Exactly one substantive sprint card executes at a time.
+- A new card is created only after the previous one has been fully analysed.
+- Existing Ideas are not promoted to Ready. Create a fresh card from current understanding.
+- Goal, Definition of Done, out of scope and stop conditions are not changed autonomously.
+- Do research yourself. Do not create a research card and do not launch a reviewer for it, except in the
+  rare case where a separate durable artifact is needed in a specific repository.
+- A red review and ordinary rework are not a failure of the card.
+- Do not reinstall, wipe or restore the live system.
+- Do not take an action that could cut off the current session, the session manager, the shell or the
+  control channel.
+- Do not force-push and do not rewrite published history.
 
-## 1. Восстановить состояние
+## 1. Recover state
 
-1. Вызвать `memory_search` с `caller=secretary` по цели и текущему шагу.
-2. Прочитать `secretary-instance/state/knowledge/sprints/STATUS.md` и указанный sprint-документ.
-3. Если активного спринта нет, остановиться и предложить `$start-sprint`.
-4. Прочитать live board, task audit, dispatcher status, затронутые checkout и PR.
-5. Если STATUS отстал от board, восстановить состояние из durable документов и live-системы,
-   записать reconciliation в Execution Log.
-6. Если уже есть активная карточка спринта, продолжить наблюдение за ней. Не создавать вторую.
+1. Call `memory_search` with `caller=secretary` for the goal and the current step.
+2. Read the sprint status pointer and the sprint document it names in the instance repository's knowledge
+   directory.
+3. If there is no active sprint, stop and suggest `$start-sprint`.
+4. Read the live board, task audit, dispatcher status, the affected checkouts and pull requests.
+5. If the status pointer is behind the board, recover state from the durable documents and the live system,
+   and record the reconciliation in the execution log.
+6. If the sprint already has an active card, keep watching it. Do not create a second one.
 
-После каждого значимого перехода обновлять sprint-документ и STATUS через
-`secretary knowledge write`: выбор шага, созданная карточка, Blocked, Done, hotfix, decision gate,
-validation, closure. Записи должны позволять новой сессии продолжить без транскрипта.
+After every significant transition, update the sprint document and the status pointer through
+`secretary knowledge write`: the chosen step, a created card, Blocked, Done, a hotfix, a decision gate,
+validation, closure. The records must let a new session continue without a transcript.
 
-## 2. Проверить достижение цели
+## 2. Check whether the goal is reached
 
-Перед каждой новой карточкой проверить Definition of Done против текущих `main` и live-системы.
-Не создавать работу, если цель уже достигнута. Если доказательств недостаточно, следующий шаг
-может быть самостоятельной проверкой Secretary.
+Before each new card, check the Definition of Done against the current default branches and the live
+system. Do not create work if the goal is already reached. If the evidence is insufficient, the next step
+can be a check you run yourself.
 
-Scope Hints не являются checklist. Путь к цели можно менять, удалять и перестраивать.
+Scope hints are not a checklist. The path to the goal can be changed, dropped and rebuilt.
 
-## 3. Выбрать следующий шаг
+## 3. Choose the next step
 
-Использовать первое подходящее правило:
+Use the first rule that applies:
 
-1. Проверка или исследование, способное опровергнуть план либо снять архитектурную
-   неопределённость.
-2. Блокер нескольких вероятных последующих изменений.
-3. Общий фундамент, уменьшающий стоимость остальной работы.
-4. Обязательный hotfix.
-5. Наибольший прямой вклад в незакрытые пункты Definition of Done.
-6. Допустимый локальный quick-fix.
-7. Остальной минимальный вертикальный инкремент.
+1. A check or investigation that could disprove the plan or remove architectural uncertainty.
+2. A blocker of several likely subsequent changes.
+3. Shared groundwork that lowers the cost of the remaining work.
+4. A mandatory hotfix.
+5. The largest direct contribution to unclosed Definition of Done items.
+6. An acceptable local quick fix.
+7. Any other minimal vertical increment.
 
-Не используй фиктивный числовой score. В Execution Log записать:
+Do not use a fabricated numeric score. Record in the execution log:
 
-- почему выбран этот шаг;
-- какие альтернативы рассматривались;
-- почему они отложены;
-- ожидаемую информацию или вклад в цель.
+- why this step was chosen;
+- which alternatives were considered;
+- why they were deferred;
+- the information or contribution to the goal you expect.
 
-Если шаг исследовательский, выполнить его самому, записать выводы и вернуться к выбору. Не
-материализовать его карточкой.
+If the step is research, do it yourself, record the conclusions and return to choosing. Do not materialise
+it as a card.
 
-## 4. Создать одну карточку
+## 4. Create one card
 
-Спека должна быть свежей, самодостаточной и ограниченной одним репозиторием. Использовать task
-protocol и структуру `spec-card`: Goal, Context pointers, проверяемые Acceptance criteria, Out of
-scope. Карточка всегда новая и сразу Ready.
+The spec must be fresh, self-sufficient and limited to one repository. Use the task protocol and the
+`spec-card` structure: Goal, Context pointers, checkable Acceptance criteria, Out of scope. The card is
+always new and goes straight to Ready.
 
-Выбрать worker по сложности и характеру задачи. Reviewer по возможности другой семьи:
+Pick the worker by the difficulty and nature of the task. Where possible the reviewer comes from another
+family:
 
 - Anthropic worker → OpenAI reviewer;
 - OpenAI worker → Anthropic reviewer.
 
-Если другая семья временно недоступна, сначала подождать или выбрать другой её профиль. Если это
-надолго блокирует спринт, разрешён независимый reviewer той же семьи с другим профилем; записать
-исключение. `review-head none` не использовать автоматически, кроме полностью механического
-тривиального изменения.
+If the other family is temporarily unavailable, wait first or pick another of its profiles. If that blocks
+the sprint for long, an independent reviewer from the same family on a different profile is allowed; record
+the exception. Do not use `review-head none` automatically, except for a fully mechanical trivial change.
 
-Записать ref, репозиторий, головы и связь с целью в sprint-документ. В STATUS установить
-`state: running` и current card.
+Record the ref, repository, heads and the link to the goal in the sprint document. Set the status pointer to
+running with the current card.
 
-## 5. Наблюдать карточку до terminal outcome
+## 5. Watch the card to a terminal outcome
 
-Использовать recurring wait/monitoring. Проверять board state, task audit, dispatcher health, PR и
-CI. Не завершать turn, пока карточка в Ready/In progress/Validate, проверки queued/running или PR
-ещё не дошёл до terminal result.
+Use recurring waiting and monitoring. Check board state, task audit, dispatcher health, the pull request and
+CI. Do not end the turn while the card is in Ready, In progress or Validate, while checks are queued or
+running, or before the pull request reaches a terminal result.
 
-Не вмешиваться в штатные red/rework-циклы. Вмешательство допустимо, если работа наблюдаемо ушла
-против sprint contract:
+Do not interfere with ordinary red and rework cycles. Intervention is acceptable when the work has
+observably gone against the sprint contract:
 
-1. Указать конкретно, какой Definition of Done игнорируется или какой Out of Scope нарушен.
-2. Оставить комментарий.
-3. Перевести карточку в Ideas, сохранив branch/workspace.
-4. Подтвердить остановку worker/reviewer и снятие dispatcher record.
-5. Обновить спеку в неактивном состоянии.
-6. Вернуть исправленную карточку в Ready как новую попытку либо создать новую карточку, если
-   нарезка неверна.
-7. Записать preempt в Execution Log.
+1. Name the specific Definition of Done item being ignored or the out-of-scope boundary being crossed.
+2. Leave a comment.
+3. Move the card to Ideas, keeping the branch and workspace.
+4. Confirm that worker and reviewer are stopped and the dispatcher record is dropped.
+5. Update the spec while the card is inactive.
+6. Return the corrected card to Ready as a new attempt, or create a new card if the cut was wrong.
+7. Record the preempt in the execution log.
 
-Не preempt необычную, но совместимую реализацию.
+Do not preempt an unusual but compatible implementation.
 
-## 6. Разобрать результат
+## 6. Analyse the result
 
-После Done прочитать не только заголовок:
+After Done, read more than the headline:
 
-- worker reports и комментарии;
-- все review verdicts и замечания, включая незакрывающие;
-- PR, итоговый diff, CI и merge result;
-- новые ограничения, ложные предпосылки и deferred findings;
-- live-состояние после self-deploy, если применимо.
+- worker reports and comments;
+- every review verdict and remark, including non-blocking ones;
+- the pull request, the final diff, CI and the merge result;
+- new constraints, false premises and deferred findings;
+- the live state after a self-deploy, where applicable.
 
-Зафиксировать короткий вывод в Execution Log. Затем снова проверить Definition of Done и выбрать
-следующий шаг. Карточка не обязана закрывать заранее названный пункт: важен фактический вклад в
-цель.
+Record a short conclusion in the execution log. Then check the Definition of Done again and choose the next
+step. A card does not have to close an item named in advance: what matters is the actual contribution to
+the goal.
 
-## 7. Обрабатывать Blocked
+## 7. Handle Blocked
 
-Определить класс причины:
+Identify the class of cause:
 
-- дефект реализации: вернуть в поддержанный rework/retry;
-- плохая спека или неверная нарезка: preempt, переписать или создать свежую карточку;
-- pipeline/runtime bug: применить hotfix policy;
-- доступ: записать точную нехватку и остановиться;
-- продуктовый decision gate: записать варианты и остановиться;
-- доказанная недостижимость цели: записать evidence и остановиться.
+- an implementation defect: return to a supported rework or retry;
+- a bad spec or a wrong cut: preempt, rewrite, or create a fresh card;
+- a pipeline or runtime bug: apply the hotfix policy;
+- access: record exactly what is missing and stop;
+- a product decision gate: record the options and stop;
+- a proven impossibility of the goal: record the evidence and stop.
 
-Green health сам не возвращает Blocked-карточку в работу. Сделать явный переход после разбора.
+Green health does not by itself return a Blocked card to work. Make the transition explicitly, after the
+analysis.
 
-## 8. Допускать hotfix узко
+## 8. Keep hotfixes narrow
 
-Обязательный hotfix входит в спринт, если проблема:
+A mandatory hotfix belongs in the sprint if the problem:
 
-- блокирует следующий ход;
-- делает результат или validation недостоверными;
-- угрожает потерей работы/данных;
-- ломает pipeline так, что автономное продолжение невозможно;
-- мешает проверить Definition of Done.
+- blocks the next move;
+- makes the result or the validation untrustworthy;
+- threatens loss of work or data;
+- breaks the pipeline so that autonomous continuation is impossible;
+- prevents checking the Definition of Done.
 
-Quick-fix также допустим, только когда проблема подтверждена, локальна, не меняет продуктовый
-контракт, не требует архитектурной развилки, проверяется существующим или одним небольшим тестом и
-с высокой уверенностью не откроет цепочку других проблем.
+A quick fix is also acceptable only when the problem is confirmed and local, does not change a product
+contract, needs no architectural decision, is checked by an existing test or one small new one, and is
+highly unlikely to open a chain of further problems.
 
-Если дефект относится к текущей карточке и тому же коду, исправить в её rework. Отдельный
-pipeline-баг оформить отдельной hotfix-карточкой и выполнить первым. Остальные находки записать в
-Deferred/Ideas без расширения спринта.
+If the defect belongs to the current card and the same code, fix it in that card's rework. A separate
+pipeline bug becomes its own hotfix card and is executed first. Record other findings as deferred or as
+Ideas without widening the sprint.
 
-## 9. Ремонтировать недоступный dispatcher
+## 9. Repair an unavailable dispatcher
 
-Если dispatcher способен исполнять карточки, ремонт идёт обычной hotfix-карточкой. Если dispatcher
-не способен выполнить собственную карточку:
+If the dispatcher can still execute cards, repair goes through an ordinary hotfix card. If the dispatcher
+cannot execute its own card:
 
-1. Подтвердить отказ и проверить, не достаточно ли поддержанного reconcile/resume/restart.
-2. Проверить активные worktree, ветки и затронутые файлы на конфликт.
-3. Создать отдельную ветку от актуального remote main. Не править main напрямую.
-4. Secretary выполняет минимальный repair сам.
-5. По возможности вызвать reviewer другой семьи: через pipeline или напрямую в отдельной сессии.
-   Если независимый reviewer недоступен, провести явный self-review и все механические gates,
-   записать исключение.
-6. Исправить замечания, дождаться CI и влить обычным PR без force/rewrite.
-7. Восстановить dispatcher, проверить его canary-карточкой и вернуться к исходному шагу.
+1. Confirm the failure and check whether a supported reconcile, resume or restart is enough.
+2. Check active worktrees, branches and affected files for conflicts.
+3. Create a separate branch from the current remote default branch. Do not edit it directly.
+4. Perform the minimal repair yourself.
+5. Where possible, call in a reviewer from another family, through the pipeline or directly in a separate
+   session. If no independent reviewer is available, do an explicit self-review plus every mechanical gate,
+   and record the exception.
+6. Address the remarks, wait for CI and merge through an ordinary pull request, without force or rewriting.
+7. Restore the dispatcher, verify it with a canary card and return to the original step.
 
-Весь repair является отдельным Hotfix в sprint-документе.
+The whole repair is recorded as a separate hotfix in the sprint document.
 
-## 10. Сохранять себя
+## 10. Preserve yourself
 
-Разрешены pull/fast-forward кода, обычный upgrade и restart leaf-сервиса, если он не держит
-текущую голову или канал управления.
+Pulling or fast-forwarding code, an ordinary upgrade, and restarting a leaf service are allowed, as long as
+the service does not hold the current head or the control channel.
 
-Перед stop/restart определить process/session dependencies текущего Secretary. Если действие может
-оборвать Secretary, Orca/server/shell или требует wipe/reinstall/destructive recovery:
+Before a stop or restart, determine the process and session dependencies of the current session. If the
+action could cut off your session, the session manager or the shell, or if it requires a wipe, reinstall or
+destructive recovery:
 
-1. Не выполнять его.
-2. Записать внешний runbook и точный post-check.
-3. Поставить STATUS в `waiting-external-action`.
-4. Остановиться. Продолжение выполняется новой сессией после внешнего действия.
+1. Do not perform it.
+2. Record an external runbook and the exact post-check.
+3. Set the status pointer to waiting for an external action.
+4. Stop. A new session continues after the external action.
 
-Изолированный disposable target допустим, если он не меняет активную установку, её instance remote,
-systemd и данные.
+An isolated disposable target is acceptable as long as it does not change the live installation, its
+instance remote, systemd or data.
 
-## 11. Провести итоговую validation
+## 11. Run the final validation
 
-Validation выполняет сам Secretary, не отдельная карточка. Выбрать минимально достаточную реальную
-проверку:
+Validation is run by you, not by a separate card. Choose the minimal sufficient real check:
 
-- pipeline: создать canary-карточку и провести её новым путём;
-- memory: выполнить штатный write/read/search/supersede lifecycle на тестовом факте;
-- projects: создать временный проект и пройти add/provision/gate/smoke;
-- host/runtime: проверить status, doctor, ownership и реальное поведение;
-- install/recovery: использовать только изолированный disposable target либо остановиться для
-  внешней проверки живой установки.
+- pipeline: create a canary card and take it through the new path;
+- memory: run the ordinary write, read, search and supersede lifecycle on a test fact;
+- projects: create a temporary project and go through add, provision, gate and smoke;
+- host and runtime: check status, doctor, ownership and real behaviour;
+- install and recovery: use only an isolated disposable target, or stop for an external check of the live
+  installation.
 
-Если validation красная, добавить hotfix или следующий продуктовый шаг и продолжить цикл. Не
-ослаблять Definition of Done.
+If validation is red, add a hotfix or the next product step and continue the loop. Do not weaken the
+Definition of Done.
 
-## 12. Закрыть спринт
+## 12. Close the sprint
 
-После green validation:
+After a green validation:
 
-1. Перечитать Ideas, затронутые спринтом.
-2. Архивировать поглощённые и протухшие с объяснением.
-3. Актуализировать всё ещё полезные Ideas, но не переводить их в Ready.
-4. Остальной backlog не трогать.
-5. Заполнить Decisions, Deferred и Results: достигнутая цель, validation evidence, карточки,
-   hotfixes, важные выводы.
-6. Поставить sprint frontmatter `status: closed`.
-7. Обновить STATUS: `Active: none`, `State: closed`, ссылка на последний спринт.
-8. Проверить knowledge write, task audit, чистоту checkout и отсутствие активных карточек спринта.
+1. Re-read the Ideas the sprint touched.
+2. Archive the ones it absorbed and the ones that went stale, with an explanation.
+3. Refresh the Ideas that are still useful, but do not promote them to Ready.
+4. Leave the rest of the backlog alone.
+5. Fill in decisions, deferred items and results: the goal reached, validation evidence, cards, hotfixes,
+   important conclusions.
+6. Set the sprint frontmatter status to closed.
+7. Update the status pointer: no active sprint, state closed, with a link to the last sprint.
+8. Check the knowledge write, the task audit, that the checkouts are clean, and that the sprint has no
+   active cards.
 
-Не начинать следующий спринт автоматически.
+Do not start the next sprint automatically.
 
-## Разрешённые остановки
+## Permitted stops
 
-Остановиться можно только если:
+You may stop only if:
 
-- цель доказанно недостижима;
-- требуется верхнеуровневое решение из Stop Conditions;
-- не хватает доступа;
-- требуется внешнее self-terminating действие.
+- the goal is provably unreachable;
+- a high-level decision from the stop conditions is required;
+- access is missing;
+- an external self-terminating action is required.
 
-Во всех случаях сначала сохранить durable state: evidence, точный вопрос или runbook, текущие refs
-и безопасный следующий шаг. Не выдавать промежуточную остановку за завершённый спринт.
+In every case, save durable state first: evidence, the exact question or runbook, the current refs and a safe
+next step. Do not present an intermediate stop as a finished sprint.

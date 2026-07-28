@@ -67,8 +67,8 @@ def tail(since=None, until=None, slack_s: int = 120) -> list[dict]:
 def render_markdown(entries) -> str:
     """Compact tail for the judge: one line per search with hit count."""
     if not entries:
-        return "# search-log: нет записей в окне батча.\n"
-    lines = ["# Хвост search-log за окно батча", ""]
+        return "# search log: no records in the batch window.\n"
+    lines = ["# Search-log tail for the batch window", ""]
     for e in entries:
         hits = e.get("hits") or []
         lines.append(f"- `{e.get('ts', '?')}` k={e.get('k', '?')} hits={len(hits)}: {e.get('query', '')}")

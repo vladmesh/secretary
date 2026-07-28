@@ -18,8 +18,8 @@ trail, so ops.move_card requires a non-empty justification comment in the same c
 run it; every other role stays exactly as guarded as before.
 
 steward can also move any active card straight to Blocked (2026-07-04 design grill, memory:
-"стюард присмотр пайплайн дизайн") — the one escalation path its whole mandate rests on ("не
-решается своими силами -> Blocked с разбором и жди человека", no numeric caps). This is a manual
+design decision) — the one escalation path its whole mandate rests on ("if you cannot resolve it
+yourself, move it to Blocked with an analysis and wait for a human", no numeric caps). This is a manual
 break-glass action a human would otherwise have to do by hand through the Kanboard UI when the
 dispatcher itself is the thing that broke (a claimed In-progress/Validate card's watchdog never
 fires if the tick that would run it is dead). The dispatcher's own In progress/Validate -> Blocked
@@ -42,14 +42,14 @@ import os
 # Env override exists so the e2e can drive a throwaway board without touching the real one.
 BOARD_NAME = os.environ.get("TA_PIPELINE_BOARD", "Pipeline")
 
-COLUMNS = ["Идеи", "Ready", "In progress", "Validate", "Blocked", "Done"]
+COLUMNS = ["Ideas", "Ready", "In progress", "Validate", "Blocked", "Done"]
 
 ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 
-# Два типа по одному признаку — меняет ли карточка код: code генерит PR (и участвует
-# в per-project claim-гейте), research отдаёт только отчёт. Тип debug убран (решение
-# vladmesh 2026-07-11): он производил PR как code, но не считался гейтом — две
-# PR-карточки одного проекта могли ехать параллельно.
+# Two types along one axis: does the card change code. A code card produces a PR (and takes part in
+# the per-project claim gate); a research card only produces a report. A third "debug" type was
+# removed: it produced a PR like a code card but did not count towards the gate, so two PR cards of
+# one project could run in parallel.
 TASK_TYPES = ("code", "research")
 
 # Metadata keys (flat str->str dict on the Kanboard card):
@@ -106,7 +106,7 @@ IN_PROGRESS = "In progress"
 # Steward's manual escalation moves. ops.move_card requires a non-empty reason for these, but the
 # dispatcher keeps its own automatic In progress/Validate -> Blocked moves reasonless.
 STEWARD_ESCALATIONS = {
-    ("Идеи", "Blocked"),
+    ("Ideas", "Blocked"),
     ("Ready", "Blocked"),
     ("In progress", "Blocked"),
     ("Validate", "Blocked"),
@@ -115,7 +115,7 @@ STEWARD_ESCALATIONS = {
 # Allowed (from, to) column moves per role, for the generic `move` command. Claim owns the
 # only entry into In progress and is not listed here (see module docstring).
 TRANSITIONS: dict[str, set[tuple[str, str]]] = {
-    "po": {("Идеи", "Ready"), ("Blocked", "Ready")},
+    "po": {("Ideas", "Ready"), ("Blocked", "Ready")},
     "dispatcher": {
         ("In progress", "Validate"),
         ("In progress", "Blocked"),
@@ -126,10 +126,10 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
     },
     "worker": set(),
     # The layer-3 reviewer never moves cards (the dispatcher acts on its verdict, like it does on
-    # a worker report). Its only artifacts are the verdict comment and Идеи cards.
+    # a worker report). Its only artifacts are the verdict comment and Ideas cards.
     "reviewer": set(),
     # retro (the daily fail-pattern scan) never moves a card either, same reasoning as reviewer:
-    # its only board write is an Идеи card (ops.retro_idea) for a proposal, never Ready or beyond.
+    # its only board write is an Ideas card (ops.retro_idea) for a proposal, never Ready or beyond.
     "retro": set(),
     # steward gets every po transition plus one override: Blocked -> Done, a legal replacement for
     # the raw-API Blocked->Done edits seen on agent-kanban-232/235 and triggered-agents-230. That
@@ -139,7 +139,7 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
     # hatch, see module docstring). Done is deliberately absent as a source, there is nothing
     # left to escalate on a finished card.
     "steward": {
-        ("Идеи", "Ready"), ("Blocked", "Ready"), ("Blocked", "Done"),
+        ("Ideas", "Ready"), ("Blocked", "Ready"), ("Blocked", "Done"),
         ("In progress", "Done"),
     } | STEWARD_ESCALATIONS,
 }
@@ -176,12 +176,12 @@ MARKER_STAND_RED = "validate:stand-red"
 # The layer-3 reviewer's verdict (Validate layer 3: an independent LLM head, not the worker, reads
 # the whole repo + PR and posts one verdict). green = all layers clear, the card waits for a human
 # merge. red = at least one blocker in any lens; the dispatcher returns the card to In progress
-# with a nudge, up to a cap of returns (then Blocked до vladmesh).
+# with a nudge, up to a cap of returns (then Blocked for a human).
 MARKER_REVIEW_GREEN = "review:green"
 MARKER_REVIEW_RED = "review:red"
 # Posted once when a stand-project card's green review triggers the dispatcher's own squash merge
-# (all three gates — CI, stand-green, review:green — cleared, per vladmesh's 2026-07-02 decision
-# that a live-stand e2e run is enough assurance to drop the human from the merge for those projects).
+# (all three gates — CI, stand-green, review:green — cleared, on the decision that a live-stand
+# end-to-end run is enough assurance to drop the human from the merge for those projects).
 MARKER_AUTOMERGE = "validate:automerge"
 # The dispatcher's own note when a red verdict sends a card back for rework. Deliberately NOT a
 # review:* marker: the invariant "only the reviewer posts a verdict" must not hinge on baseline

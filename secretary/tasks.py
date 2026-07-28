@@ -75,8 +75,14 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
+# Installations created before the board titles were translated carry the former first-column
+# title.  Reads keep accepting it so an existing board stays usable until bootstrap/upgrade runs
+# ensure_pipeline_board, which renames the column in place.  Spelled as escapes to keep the
+# tracked tree ASCII.
+LEGACY_IDEAS_COLUMN = "\u0418\u0434\u0435\u0438"  # "Ideas" in the pre-translation board schema
 _STATE_BY_COLUMN = {
-    "Идеи": "ideas",
+    "Ideas": "ideas",
+    LEGACY_IDEAS_COLUMN: "ideas",
     "Ready": "ready",
     "In progress": "in_progress",
     "Validate": "validate",

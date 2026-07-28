@@ -177,7 +177,7 @@ def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
     ):
         backup = create_backup(source_instance, backup_kind=kind)
 
-    # The pull to vladmesh's machine is the only artefact that leaves the host.
+    # The pull to the operator's own machine is the only artefact that leaves the host.
     offsite = root / "offsite"
     offsite.mkdir(exist_ok=True)
     archive = offsite / backup.archive.name

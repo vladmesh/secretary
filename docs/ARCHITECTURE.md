@@ -1,44 +1,39 @@
-# Архитектура secretary
+# Architecture
 
-`secretary` является субстратом для нескольких взаимозаменяемых agent heads. Он владеет task и
-memory protocols, dispatcher lifecycle, installation contracts и восстановлением. Нативные CLI
-провайдеров выполняют работу поверх этого контура.
+`secretary` is a substrate for several interchangeable agent heads. It owns the task and memory
+protocols, the dispatcher lifecycle, installation contracts and recovery. The providers' native CLIs
+do the actual work on top of that.
 
-На текущей production-установке dispatcher, memory daemon и фоновые роли работают из `secretary`.
-Legacy runtime repositories и units удалены.
-
-## Граница хранилищ
+## Storage boundary
 
 ```text
-secretary                 продукт: CLI, runtime, схемы, тесты, generic skills
-secretary-instance        приватные config и переносимый recovery checkpoint одной установки
-secretary-data            локальный mutable/derived runtime data plane
+product repository     CLI, runtime, schemas, tests, generic skills
+instance repository    one private repository per installation: config + portable checkpoint
+data directory         local mutable and derived runtime data plane
 ```
 
-Product repository не хранит bindings реальных проектов, credentials, карточки или host-local
-state. Instance содержит persona, project bindings, adapters, policies и head profiles.
-Восстановимое хранилище секретов (`secrets/` в приватном репозитории) держит каталог метаданных и
-sealed values в git рядом с board и memory; единственное, что репо никогда не содержит — сырой
-installation key и recovery phrase, см. [Recovery](RECOVERY.md), раздел «Секреты». Host
-`runtime.env` остаётся отдельным файлом с правами `0600`, gitignored и вне checkpoint или archive
-payload; его значения могут быть заведены в хранилище, и тогда файл становится materialized копией.
-Структурированный реестр проектов живёт только в `projects/` того же репозитория.
+The product repository holds no real project bindings, credentials, cards or host-local state. The
+instance repository holds persona, project bindings, adapters, policies and head profiles. Its
+`secrets/` directory keeps a metadata catalog and sealed values in Git next to board and memory; the
+only things it never contains are the raw installation key and the recovery phrase, see
+[Recovery](RECOVERY.md#secrets). The host `runtime.env` is a separate `0600` file, gitignored and
+outside any checkpoint or archive payload; its values may be registered in the store, in which case
+the file becomes a materialised copy.
 
-Канон конфигурации продукта попадает в установку одним способом: `secretary upgrade` генерирует
-`heads/heads.yaml` из `triggered_agents/agents/pipeline/heads.toml` и рядом пишет `heads/source.yaml`
-с чекаутом и ревизией, из которых снапшот сделан. Живой тик читает только снапшот, поэтому правка
-канона в рабочем дереве продукта не меняет поведение установки и не останавливает её; цена в том, что
-изменение доезжает до установки только через `upgrade`, и разрыв виден в `secretary status`
-(`installation.head_registry`).
+Product configuration reaches an installation one way: `secretary upgrade` generates
+`heads/heads.yaml` from the product's head registry and writes `heads/source.yaml` next to it,
+recording the checkout and revision it was taken from. A live tick reads only the snapshot, so
+editing the canon in a product working tree neither changes installation behaviour nor stops it. The
+cost is that a change reaches the installation only through `upgrade`, and the gap is visible in
+`secretary status` under `installation.head_registry`.
 
-`state/` приватного репозитория хранит нормализованный recovery-канон: board, runs, memory facts и
-knowledge-документы.
-`secretary-data` остаётся локальным рабочим data plane для task audit, dispatcher state, derived
-exports/index, search log, raw dumps, transcripts и artifacts. SQLite/vector index, worktrees,
-терминалы и generated host resources считаются производными и в checkpoint не входят.
+`state/` in the instance repository holds the normalised recovery canon: board, runs, memory facts
+and knowledge documents. The data directory holds task audit, dispatcher state, derived
+exports and indexes, search logs, raw dumps, transcripts and artifacts. The SQLite and vector index,
+worktrees, terminals and generated host resources are derived and stay out of the checkpoint.
 
-Git-backed recovery checkpoint описан в [Recovery](RECOVERY.md). Ручной cold archive остаётся
-необязательным инструментом для сырья и совместимости, но не участвует в recovery readiness.
+The Git-backed checkpoint is described in [Recovery](RECOVERY.md). A manual cold archive remains an
+optional tool for raw material and compatibility, and takes no part in recovery readiness.
 
 ## Runtime flow
 
@@ -46,233 +41,192 @@ Git-backed recovery checkpoint описан в [Recovery](RECOVERY.md). Ручн
 operator / automation
           │
           ▼
-  secretary task and sprint protocol ────────> Kanboard
+  secretary task and sprint protocol ────────> board backend
           │                            ▲
           ▼                            │
- production dispatcher ──> head adapter ──> Orca session ──> native agent CLI
+ production dispatcher ──> head adapter ──> session ──> native agent CLI
           │
           └──── run/audit state ──────┘
 
 agent heads ── memory_search ──> MCP/index <── facts journal <── curator
 ```
 
-Kanboard является текущим live store для карточек и спринтов. Карточки живут на board `Pipeline`;
-каждый спринт является отдельной Kanboard-задачей на product board `Secretary sprints`. Оба набора
-уходят в checkpoint и возвращаются из него отдельными наборами (см.
-[Recovery](RECOVERY.md#состав-checkpoint)), поэтому live store остаётся оперативным, а не
-единственным местом, где живёт контракт спринта. Все
-поддержанные записи проходят через `secretary task` или `secretary sprint`, которые применяют role
-guards, transitions и append-only audit. Dispatcher
-разрешает routing, создаёт worker/reviewer lifecycle и сверяет board, workspace, report и review
-state перед переходами.
+Kanboard is the current live store for cards and sprints. Cards live on the `Pipeline` board; each
+sprint is a separate task on a `Secretary sprints` board. Both sets go into and come back from the
+checkpoint as separate sets (see [Recovery](RECOVERY.md#what-the-checkpoint-contains)), so the live
+store stays operational rather than being the only place a sprint contract exists. Every supported
+write goes through `secretary task` or `secretary sprint`, which apply role guards, transitions and
+append-only audit. The dispatcher resolves routing, drives the worker and reviewer lifecycle, and
+checks board, workspace, report and review state before each transition.
 
-Бюджет спринта не является самоотчётом наблюдателя. Production dispatcher читает durable audit
-связанных с `sprint_ref` карточек и записывает один budget event на идентификатор исходного события.
-Пороги приходят из `instance.yaml` с подстановкой дефолтов до валидации; hard limit меняет сущность
-на `stopped` и создаёт отдельный durable `budget_hard_stopped` event с причиной. Observer reconcile
-читает только открытые спринты, поэтому такая остановка снимает живую голову и не даёт поднять новую,
-не затрагивая уже клеймленные карточки. Resume хранится в metadata спринта как структурированная
-запись, а её свежесть выводится сравнением с audit карточек, не с terminal history.
-Внешний `secretary status --json` читает эти же сущности и live board: строки
-`installation.sprints.items` несут статус, причину остановки по hard limit, budget, свежесть resume
-и состояние наблюдателя; ошибка чтения board остаётся явной в `installation.sprints.error`.
+Sprint budget is not the observer's self-report. The dispatcher reads the durable audit of the cards
+linked to a sprint and writes one budget event per source-event identity. Thresholds come from
+instance configuration, with defaults substituted before validation; the hard limit moves the entity
+to `stopped` and emits a separate durable `budget_hard_stopped` event carrying the reason. Observer
+reconciliation reads only open sprints, so such a stop takes down the live head and prevents a new
+one without touching cards that are already claimed. The resume entry lives in sprint metadata as a
+structured record, and its freshness is derived by comparing it against card audit, not against
+terminal history. `secretary status --json` reads the same entities and the live board.
 
-Orca является текущим session manager и live terminal UI. Одна карточка занимает один worktree:
-воркер получает свой терминал, ревьюер запускается отдельной split-панелью в том же worktree, и оба
-handle хранятся в dispatcher state порознь. Split, а не второй `terminal create`, потому что на
-headless-серве созданный терминал приходит фоновой поверхностью и в уже открытом на клиенте
-worktree не материализуется. На старте ревью голова воркера гасится, а её коммит запоминается:
-merge-gate не принимает green-вердикт, если checkout с тех пор уехал. Launch и cleanup ещё зависят
-от конкретного API Orca; целевой session protocol остаётся roadmap milestone. Head-specific render и
-delivery локализованы в adapters, но текущий public contract ещё не является стабильным plugin API.
+Orca is the current session manager and live terminal UI. One card occupies one worktree: the worker
+gets its own terminal, the reviewer starts as a separate split pane in the same worktree, and both
+handles are kept apart in dispatcher state. A split rather than a second terminal, because on a
+headless server a freshly created terminal arrives as a background surface and does not materialise
+in a worktree the client already has open. When review starts, the worker's head is stopped and its
+commit is recorded: the merge gate will not accept a green verdict if the checkout moved since.
+Launch and cleanup still depend on Orca's specific API; a target session protocol is a roadmap
+milestone. Head-specific rendering and delivery are confined to adapters, but that contract is not
+yet a stable plugin API.
 
-Перед запуском головы диспетчер отвечает за неё на first-run вопросы её CLI, иначе интерактивная
-голова садится на диалог вместо работы: idle не наступает, промпт не доставляется, bring-up уходит в
-`deferred`. У `claude` это `hasTrustDialogAccepted` и тема в его конфиге, у `codex` — запись
-`projects."<путь>".trust_level = "trusted"` в `config.toml` того `CODEX_HOME`, с которым запускается
-голова. Codex спрашивает про корень git-репозитория, из которого вырезан каталог запуска, а не про
-сам каталог, поэтому доверие пишется и на воркспейс, и на корень его репозитория; аргументы
-`-c projects...` в командной строке этот вопрос не закрывают. Файл установки при этом не
-переписывается заново: недостающие записи дописываются, чужие остаются как есть, а путь, который
-кто-то держит на другом уровне доверия, останавливает bring-up с видимой причиной вместо тихой
-перезаписи. Codex-доверие выписывается только под роль наблюдателя: воркспейсы воркера и ревьюера —
-ворктри уже доверенных рантайму репозиториев проекта, диалога они не видят, и их запуск не трогает
-общий на весь хост `config.toml`.
+Before launching a head the dispatcher answers its CLI's first-run questions on its behalf.
+Otherwise an interactive head sits in a dialog instead of working: it never goes idle, the prompt is
+never delivered, and bring-up ends up deferred. The dispatcher appends only the missing entries,
+leaves foreign ones alone, and stops bring-up with a visible reason when a path is held at a
+different trust level rather than silently overwriting it.
 
-## Голова-наблюдатель спринта
+## The sprint observer head
 
-Открытый спринт получает собственную голову-наблюдателя. Это не интерактивная сессия секретаря и не
-воркер: наблюдатель никогда не клеймит карточки, не появляется в записях карточек и не занимает
-per-project claim-гейт. Карточки спринта клеймятся и исполняются dispatcher'ом независимо от него.
+An open sprint gets its own observer head. It is neither an interactive session nor a worker: an
+observer never claims cards, never appears in card records and never occupies the per-project claim
+gate. The sprint's cards are claimed and executed by the dispatcher independently of it.
 
-Жизненный цикл ведёт тот же production-тик, что и карточки, отдельным проходом реконсиляции против
-board `Secretary sprints`:
+The same production tick that drives cards runs a separate reconciliation pass against the sprints
+board:
 
-- открытый спринт без живой головы — поднять;
-- открытый спринт с живой головой — ничего не делать (на спринт приходится ровно одна голова);
-- закрытый или исчезнувший спринт — остановить голову и снять запись;
-- недоступный board спринтов — не трогать ничего: неотвеченный board не является закрытым спринтом.
+- open sprint with no live head: launch one;
+- open sprint with a live head: do nothing, exactly one head per sprint;
+- closed or vanished sprint: stop the head and drop the record;
+- unreachable sprints board: touch nothing, an unanswered board is not a closed sprint.
 
-Остановка, которую хост отверг, остановкой не считается. Запись остаётся с хэндлом в состоянии
-`stop-pending`, событие `observer_stopped` не пишется, и тик повторяет остановку, пока терминал
-действительно не закрыт. Снять запись раньше значило бы оставить живую голову, на которую ничто не
-указывает. По той же причине переподъём после мёртвого pid откладывается, если старый терминал
-закрыть не удалось: две головы на спринт хуже, чем ни одной.
+A stop the host rejected does not count as a stop. The record keeps its handle in a `stop-pending`
+state, no stop event is written, and the tick retries until the terminal is really closed. Dropping
+the record earlier would leave a live head that nothing points at. For the same reason a relaunch
+after a dead pid is deferred if the old terminal could not be closed: two heads on one sprint is
+worse than none.
 
-Неудачный запуск, у которого терминал уже подняли (TUI-голова, которой не удалось доставить
-стартовый промпт, и её терминал не закрылся), тоже не означает спринт без головы. Хост возвращает
-хэндл вместе с ошибкой, запись держит его с пометкой `abandoned_handle`, и следующий тик сначала
-закрывает этот терминал и только потом поднимает замену. Живой pid за таким хэндлом головой спринта
-не считается: та голова своей сущности спринта так и не получила.
+The head profile comes from the `role_defaults.observer` key of the installation's `heads/heads.yaml`
+snapshot. The profile is interactive, because an observer is one continuous session for the whole
+sprint: a one-shot launch would exit after the first turn and the tick would read that as a dead
+head. The same resource-readiness gate that runs before claiming a card runs before launch; an
+unavailable resource means a deferred launch, and the next tick tries again.
 
-Голова берётся из ключа `role_defaults.observer` снапшота установки `heads/heads.yaml`, а не из
-профиля воркера и не из чекаута продукта: живой тик читает реестр только из установки, куда его
-кладёт `secretary upgrade`. Профиль интерактивный (`codex_mode = "tui"`), потому
-что наблюдатель — одна непрерывная сессия на весь спринт: one-shot запуск вышел бы после первого же
-хода, и тик читал бы это как мёртвую голову. Перед запуском работает тот же гейт готовности
-ресурса, что и перед claim карточки: недоступный ресурс означает отложенный запуск, спринт остаётся
-в записи с причиной, следующий тик пробует снова.
+The head is launched through the ordinary head-command renderer and the role environment wrapper, so
+an observer gets exactly the environment a dispatcher-launched role is entitled to (board credentials
+and the instance and product-root pointers), not the whole `runtime.env`. It has its own workspace
+and its own terminal handle.
 
-Запуск идёт через существующий рендер команды головы и `role_env exec --role observer`: наблюдатель
-получает ровно то окружение, что положено dispatcher-launched роли (board credentials и
-`SECRETARY_INSTANCE`/`TA_SECRETARY_REPO`), а не весь `runtime.env`. У него собственный воркспейс
-(`<workspaces root>/observers/<ref>`) и собственный хэндл терминала.
+That workspace is registered with the session manager like a worker's: a terminal is only handed out
+for a registered workspace selector, and a directory the session manager does not know about is not a
+selector. The observer gets no project checkout: its workspace is cut from a separate empty
+repository without a remote, which the dispatcher creates on first use. That repository is a managed
+resource of the installation, derived from the data directory when the production dispatcher
+component is enabled. Reconciliation neither creates nor deletes this lazy resource, and `doctor`
+accepts its registration only at that path; before the first observer, its absence is normal.
 
-Воркспейс регистрируется в Orca так же, как воркерский, — через `orca worktree create`: терминал
-выдаётся только по селектору воркспейса, а каталог, о котором Orca не знает, селектором не является.
-Чекаута проекта наблюдатель при этом не получает: воркспейсы режутся из отдельного пустого репозитория
-без remote (`<data_dir>/dispatcher/observer-root/observers`), который диспетчер создаёт при первом
-запуске и регистрирует через `orca repo add`. Это managed Orca resource установки: его путь выводится
-из `data_dir`, когда включён компонент `dispatcher-production`. Reconcile не создаёт и не удаляет
-этот lazy-ресурс, а doctor принимает регистрацию только по этому пути; до первого наблюдателя её
-отсутствие нормально. Коммитить в проект из такого воркспейса нечего и некуда.
-Этот же корень получает codex-доверие при запуске головы: воркспейс наблюдателя — ворктри чужого для
-codex репозитория, и без записи на корень наблюдатель встаёт на вопросе о доверии.
-Путь остаётся арифметикой над reference: Orca кладёт ворктри в `<workspaces root>/<каталог
-репозитория>/<имя>`, поэтому каталог репозитория наблюдателей называется так же, как подкаталог
-воркспейсов. Если Orca всё же положила воркспейс не туда, куда указывает уже записанное намерение
-запуска, bring-up падает с видимой причиной, а не оставляет голову, на которую ничто не указывает.
+Stopping goes through the workspace: stopping terminals by worktree kills all of the observer's panes
+at once, after which the worktree registration is removed. A closed sprint leaves neither terminal nor
+workspace behind. The launch prompt is rendered from the live sprint entity at launch time: reference,
+goal, Definition of Done text, repositories, status, current card, budget state and the path to the
+role skill.
 
-Остановка идёт через воркспейс: `orca terminal stop --worktree` глушит все панели наблюдателя разом
-(его собственную, панель усыновлённой головы с умершим хэндлом и шелл, который Orca открывает рядом с
-новым ворктри), после чего `orca worktree rm` снимает регистрацию. Закрытый спринт не оставляет в Orca
-ни терминала наблюдателя, ни воркспейса за ним. Промпт `SPRINT.md` рендерится
-из живой сущности спринта в момент запуска: reference, цель, текст DoD, репозитории, статус,
-текущая карточка, состояние бюджета и путь к ролевому скиллу.
+### The observer role and its skill
 
-### Роль наблюдателя и её скилл
+What an observer does while running a sprint is defined by the `observer` role in the role-skill
+registry (`skills/manifest.toml`) and its `observe-sprint` skill. The canon lives in this repository
+and is delivered to shells by the same `secretary role-skills sync` as every other role skill. Since
+the observer profile comes from the head registry, the skill must be delivered to that profile's
+shell; repointing `role_defaults.observer` at a profile on another shell also requires a delivery
+target for that shell.
 
-Чем наблюдатель руководствуется, ведя спринт, — отдельная роль `observer` в реестре ролевых скиллов
-(`skills/manifest.toml`) со своим скиллом `observe-sprint`. Канон лежит в этом репозитории
-(`skills/roles/observer/observe-sprint/SKILL.md`) и доставляется в шеллы тем же `secretary
-role-skills sync`, что и остальные ролевые скиллы. Профиль наблюдателя из канона голов —
-codex-овый, поэтому скилл доставляется в codex-шелл; репойнт `role_defaults.observer` на профиль
-другого шелла требует и цели доставки для этого шелла.
+The skill is self-sufficient for a fresh head with no transcript: recovering state from the sprint
+entity and the live board, checking the Definition of Done against current `main` before each new
+card, how to pick the next step, doing its own research instead of filing a research card, exactly
+one fresh card at a time, a reviewer from a different family than the worker, watching a card to a
+terminal state, reading reports and verdicts, the classes of Blocked, the narrow conditions for a
+hotfix, behaviour at budget thresholds, the limits of the role, and a closing checklist. Writing a
+resume entry after every significant transition is a requirement of the skill.
 
-Скилл самодостаточен для свежей головы без транскрипта: восстановление состояния из сущности
-спринта и живой доски, проверка DoD против текущего `main` и живой системы перед каждой новой
-карточкой, приоритет выбора следующего шага, самостоятельное исследование вместо research-карточки,
-ровно одна свежая карточка за раз, ревьюер другой семьи, чем воркер, наблюдение до терминального
-состояния, разбор отчётов и всех вердиктов, классы Blocked, узкие условия хотфикса, поведение по
-порогам бюджета, границы роли и чеклист закрытия. Resume-запись после каждого значимого перехода —
-требование скилла, пишется она `secretary sprint resume --role observer`.
+The launch prompt references that file by path and does not repeat its instructions: two texts about
+one job drift apart, and the head follows the stale one.
 
-Промпт запуска на этот файл ссылается по пути и инструкций не повторяет: два текста про одну работу
-расходятся, и голова следует протухшему. Скилл интерактивного секретаря `run-sprint` остаётся на
-месте: двойной контур (интерактивный секретарь и голова-наблюдатель) объявлен сознательно и сводится
-отдельным шагом спринта.
+A head is never launched blind. Before preparing an observer, the tick checks that the role skill is
+present in the shell of the head being launched. If it is missing, the registry is unreadable, or that
+shell has no `observer` target at all, the launch is deferred with a reason naming the missing file.
+The reason lands in the observer record and is visible in the external summary. A head without
+instructions would improvise a sprint from a single entity, which is worse than a sprint waiting for
+the next tick.
 
-Голова не поднимается вслепую. Перед `prepare_observer` тик проверяет, что скилл роли лежит в
-шелле поднимаемой головы (шелл — адаптер её профиля из того же реестра голов). Не лежит, реестр
-скиллов нечитаем или для этого шелла вовсе нет цели с ролью `observer` — запуск откладывается
-(`observer-launch-deferred`) с причиной, называющей отсутствующий файл; причина попадает в запись
-наблюдателя и видна во внешней сводке. Голова без инструкций импровизировала бы спринт из одной
-сущности, что хуже спринта, ждущего следующего тика.
+Liveness uses the same pid heartbeat as worker and reviewer. A dead pid causes a relaunch on the next
+tick; a launch counter in the record and a distinct audit event type separate a relaunch from a first
+launch. All lifecycle events go to the same durable audit log keyed by the sprint reference and are
+deduplicated by request id. The record's generation is part of that id, so a sprint reappearing on
+the board starts a fresh cycle of events instead of being deduplicated against the previous one.
 
-Живость определяется тем же pid-heartbeat, что и у воркера с ревьюером. Мёртвый pid даёт переподъём
-на следующем тике; счётчик запусков в записи и отдельный тип события в audit-логе отличают
-переподъём от первого запуска. Все события жизненного цикла (`observer_launched`,
-`observer_relaunched`, `observer_stopped`, `observer_launch_deferred`) пишутся в тот же durable
-audit-лог с reference спринта и дедуплицируются по `request_id`. В `request_id` входит поколение
-записи, так что повторное появление того же спринта на доске даёт новый цикл событий, а не
-дедуплицированный повтор предыдущего.
+Ordering matches card writes: the event is staged first, then the host is called, and only then is
+the event committed. Storage that fails at staging cancels the action itself, because an unrecordable
+action is worse than a deferred one. Storage that fails at commit is not surfaced: the effect already
+happened, the record is saved anyway, the event stays pending and is repaired by
+`secretary task reconcile-audit`, and the tick outcome reports a pending audit. Otherwise a live
+terminal would have no record and the next tick would launch a second head onto the same sprint.
 
-Порядок здесь тот же, что у записи карточки: событие сначала кладётся в pending, потом дёргается
-хост, и только после этого коммитится в лог. Хранилище, отказавшее на pending, отменяет само
-действие — голова не поднимается и терминал не закрывается, потому что незаписываемое действие хуже
-отложенного. Хранилище, отказавшее на коммите, наружу не пробивается: эффект уже случился, запись
-наблюдателя всё равно сохраняется, событие остаётся в pending и дописывается ремонтом
-(`secretary task reconcile-audit`), а в outcome тика стоит `audit: pending`. Иначе живой терминал остался
-бы без записи и следующий тик поднял бы вторую голову на тот же спринт.
+The record itself is persisted the same way and for the same reason. The launch intent — sprint,
+record generation, head profile, attempt number, workspace and the future head's pid file — is
+written to production state and flushed to disk before the host call, not at the end of the tick.
+Unwritable state means the head is not launched at all: a data-plane failure costs the sprint a tick,
+not a second head. A tick that dies between the host call and its own end leaves the intent on disk,
+and the next tick resolves it from the pid file: a live pid is adopted as this sprint's head, a pid
+file that has not appeared yet within the usual startup window is not treated as death, and anything
+else closes the workspace's terminals and launches again.
 
-Сама запись фиксируется так же и по той же причине. Намерение запуска — спринт, поколение записи,
-профиль головы, номер попытки, воркспейс и pid-файл будущей головы — пишется в production-state и
-сбрасывается на диск до вызова `prepare_observer`, а не вместе с остальным тиком в его конце.
-Незаписываемый state означает, что голова не поднимается вовсе: отказ data plane стоит спринту
-тика, а не второй головы. Тик, умерший между вызовом хоста и собственным концом, оставляет
-намерение на диске, и следующий тик разбирает его по pid-файлу: живой pid усыновляется как голова
-этого спринта (`observer-adopted`, хэндл терминала умер вместе с тем тиком, поэтому остановка идёт
-по воркспейсу — он принадлежит только этому наблюдателю; список терминалов, который Orca не отдала,
-пустым не считается, иначе живая голова осталась бы без записи). Ещё не записанный pid — не смерть:
-пока не истекло то же окно ожидания, что даётся любой свежей голове, намерение остаётся как есть
-(`observer-launch-pending`), без остановки и без второго запуска. Иначе тик закрывает терминалы воркспейса и
-поднимает голову заново: попытка, чьё событие уже в логе, считается исчерпанной и даёт переподъём со
-своей строкой в аудите, а попытка, оставшаяся в pending, повторяется тем же номером — хост так и не
-ответил, наблюдать было нечего.
-
-`freeze` останавливает головы наблюдателей вместе со всеми остальными и пишет причину в запись;
-`resume` снимает пометку, и голова возвращается на следующем тике через ту же реконсиляцию.
-Отвергнутая хостом остановка при freeze уходит в предупреждение ответа и в состояние
-`pause-stop-pending`; реконсиляция под freeze не работает, поэтому такую остановку повторяет сам
-замороженный тик, а если голова дожила до `resume` — ближайший тик просто видит её живой.
-`drain` живую голову не трогает и новых не поднимает, но спринт, открывшийся во время `drain`,
-всё равно получает отложенную запись с профилем головы и причиной: открытый спринт обязан быть
-виден снаружи, а `resume` затем поднимает голову из этой же записи.
+Pause behaviour: a freeze stops observer heads along with everything else and records the reason;
+resume clears the mark and the head returns on the next tick through the same reconciliation. A
+drain leaves a live head alone and launches no new ones, but a sprint opened during a drain still
+gets a deferred record with its head profile and reason, because an open sprint must be visible from
+outside.
 
 ## Memory plane
 
-Facts лежат как markdown records в `secretary-instance/state/memory/facts`. Куратор является
-writer-ролью и пишет через `secretary memory propose/commit/supersede`; протокол коммитит только
-`state/memory` под общим instance-repo writer lock. Другие головы читают через MCP. `export.ndjson`
-и SQLite/vector index в `secretary-data/memory/` восстанавливаются из канона. Только один index
-writer может публиковать производное состояние одновременно.
+Facts are markdown records under `state/memory/facts` in the instance repository. The curator is the
+writer role and writes through `secretary memory propose/commit/supersede`; the protocol commits only
+`state/memory` under the shared instance-repository writer lock. Other heads read through MCP. The
+NDJSON export and the SQLite/vector index in the data directory are rebuilt from the canon. Only one
+index writer may publish derived state at a time.
 
-Embedding model загружается локально. В production-проверке startup достигал примерно 1.9 GiB RSS;
-отдельный target с 1.9 GiB общей RAM не смог выполнить live rebuild. Точный поддерживаемый minimum
-ещё должен быть определён clean-host тестами.
+The embedding model is loaded locally and is the appliance's main memory consumer; see
+[Operations](OPERATIONS.md#system-requirements) for what has and has not been established about the
+supported minimum.
 
-## Плоскости знания
+## Knowledge planes
 
-Знание разложено на три плоскости, и вопрос «куда это писать» решается по длине и назначению
-записи. Pipeline board хранит исполняемую работу: карточки, спеки, статусы. Curated memory
-(`state/memory/facts`) хранит короткий актуальный вывод, который голова должна получить в контекст
-через `memory_search`. Knowledge (`state/knowledge`) хранит длинное рассуждение и контекст, из
-которого вывод получился: брейнштормы, журналы решений, разборы инцидентов.
+Knowledge is split across three planes, and "where does this go" is decided by the length and purpose
+of the record. The Pipeline board holds executable work: cards, specs, states. Curated memory
+(`state/memory/facts`) holds the short current conclusion a head should receive in context through
+`memory_search`. Knowledge (`state/knowledge`) holds the long reasoning and context the conclusion
+came from: brainstorms, decision logs, incident write-ups.
 
-Knowledge не индексируется, не попадает в `memory_search` и целиком в контекст голов не грузится.
-Документ читают адресно, когда нужна история вопроса. Формат свободный: это обычный tracked
-markdown, никакого frontmatter или метаданных писатель не требует. Пишут через
-`secretary knowledge write`; писатель владеет только `state/knowledge`, берёт общий instance-repo
-writer lock и проверяет документ на секреты, поэтому ручной `git commit` в knowledge не нужен и
-гонки с тиковым писателем не создаёт.
+Knowledge is not indexed, does not appear in `memory_search` and is never loaded into a head's context
+wholesale. A document is read on purpose when the history of a question is needed. The format is free:
+ordinary tracked markdown, no frontmatter or metadata required. Writes go through
+`secretary knowledge write`; that writer owns only `state/knowledge`, takes the shared
+instance-repository writer lock and scans the document for secrets, so no manual `git commit` is
+needed and it does not race the tick writer.
 
-## Ownership и безопасность
+## Ownership and security
 
-- Текущий security profile предполагает одного доверенного владельца VPS. Агенты ещё не изолированы
-  как недоверенные tenants.
-- `doctor` читает config, data и host inventory, но не меняет host.
-- `reconcile plan` строит desired state. Имя или prefix не дают ownership без managed manifest или
-  secretary-owned marker.
-- Ленивая Orca-регистрация корня наблюдателей принадлежит installation config, но не reconcile:
-  диспетчер создаёт её по первому наблюдателю. Совпавшее display name по чужому пути не становится
-  ownership и остаётся finding `unmanaged_on_host`.
-- Секреты, заведённые в хранилище (`secretary-instance/secrets/`), попадают в instance git как
-  зашифрованные envelope и уезжают с checkpoint; сырой installation key и recovery phrase — нет
-  (см. [Recovery](RECOVERY.md), раздел «Секреты»). Host `runtime.env` вне хранилища, facts, exports
-  и diagnostics секретов не несут.
-- Task audit и pending writes fail-closed: незавершённая board mutation блокирует согласованный
-  export и recovery checkpoint.
+- The current security profile assumes one trusted owner of the host. Agents are not isolated as
+  untrusted tenants.
+- `doctor` reads config, data and host inventory, but never changes the host.
+- `reconcile plan` computes desired state. A matching name or prefix confers no ownership without a
+  managed manifest or a product-written marker.
+- The lazy session-manager registration of the observer root belongs to installation config but not to
+  reconciliation: the dispatcher creates it on the first observer. A matching display name at a
+  different path does not become ownership and stays an unmanaged-on-host finding.
+- Secrets registered in the store reach instance Git as encrypted envelopes and travel with the
+  checkpoint; the raw installation key and the recovery phrase do not (see
+  [Recovery](RECOVERY.md#secrets)). The host `runtime.env` is outside the store, and facts, exports and
+  diagnostics carry no secrets.
+- Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
+  export and the recovery checkpoint.
 
-Командные контракты находятся в [Protocols](PROTOCOLS.md), действующие runbooks в
-[Operations](OPERATIONS.md), продуктовая цель в [Vision](VISION.md). Исполняемая очередь работы
-находится только на Pipeline board.
+Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
+product goal in [Vision](VISION.md).

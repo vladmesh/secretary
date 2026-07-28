@@ -1,7 +1,7 @@
 """Deterministic anomaly signals — what the steward's precheck gate and `/steward` skill both
 read before anything judges.
 
-Five signal kinds (2026-07-04 design grill, memory id 83 — "стюард присмотр пайплайн дизайн"):
+Five signal kinds:
 new Blocked card, an unhealthy production dispatcher tick since the steward's watermark, a card
 sitting in an active column past STALE_HOURS, a resource health flip, a worker/reviewer workspace
 on disk with no in-flight card record. Any one is enough for precheck to spawn the head; finding
@@ -32,7 +32,7 @@ from ..pipeline import ops as pipeline_ops
 
 STATE = AgentState("steward")
 
-# Columns where a long dwell is itself worth a look. "Идеи" (backlog, not yet triaged into Ready)
+# Columns where a long dwell is itself worth a look. "Ideas" (backlog, not yet triaged into Ready)
 # and "Done" (terminal) are excluded — sitting there indefinitely is the expected shape, not an
 # anomaly.
 STALE_COLUMNS = ("Ready", "In progress", "Validate", "Blocked")
@@ -404,29 +404,29 @@ def has_signal(batch: dict) -> bool:
 def render_markdown(batch: dict) -> str:
     s = batch["signals"]
     if not has_signal(batch):
-        return "steward: нет сигналов с прошлого watermark.\n"
-    lines = ["# steward: сигналы аномалий", ""]
+        return "steward: no signals since the previous watermark.\n"
+    lines = ["# steward: anomaly signals", ""]
     if s["new_blocked"]:
-        lines.append(f"## Новые Blocked ({len(s['new_blocked'])})")
+        lines.append(f"## New Blocked ({len(s['new_blocked'])})")
         lines += [f"- {ref}" for ref in s["new_blocked"]]
         lines.append("")
     if s["pipeline_ticks"]:
-        lines.append(f"## Инциденты тиков production dispatcher ({len(s['pipeline_ticks'])})")
+        lines.append(f"## Tick incidents of the production dispatcher ({len(s['pipeline_ticks'])})")
         lines += [f"- {rec.get('ts', '?')} [{rec.get('event', '?')}] "
                   f"{json.dumps(rec, ensure_ascii=False)}" for rec in s["pipeline_ticks"]]
         lines.append("")
     if s["stale"]:
-        lines.append(f"## Застряло в колонке дольше {STALE_HOURS:g}ч ({len(s['stale'])})")
+        lines.append(f"## Stuck in a column longer than {STALE_HOURS:g}h ({len(s['stale'])})")
         for hit in s["stale"]:
             since = datetime.fromtimestamp(hit["since"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            lines.append(f"- {hit['reference']} в {hit['column']!r} с {since}")
+            lines.append(f"- {hit['reference']} in {hit['column']!r} since {since}")
         lines.append("")
     if s["resource_flip"]:
-        lines.append(f"## Флип здоровья ресурса ({len(s['resource_flip'])})")
+        lines.append(f"## Resource health flip ({len(s['resource_flip'])})")
         lines += [f"- {r}: -> {status}" for r, status in s["resource_flip"].items()]
         lines.append("")
     if s["new_orphan_workspaces"]:
-        lines.append(f"## Воркспейс без карточки в полёте ({len(s['new_orphan_workspaces'])})")
+        lines.append(f"## Workspace with no card in flight ({len(s['new_orphan_workspaces'])})")
         lines += [f"- {p}" for p in s["new_orphan_workspaces"]]
         lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"

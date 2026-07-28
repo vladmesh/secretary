@@ -18,7 +18,14 @@ from secretary.routing_journal import (
     head_run_from_profile,
     routing_payload,
 )
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import (
+    LEGACY_IDEAS_COLUMN,
+    KanboardClient,
+    TaskAudit,
+    TaskError,
+    TaskReader,
+    TaskWriter,
+)
 
 
 class FakeKanboard:
@@ -47,7 +54,7 @@ class FakeKanboard:
         if method == "getProjectByName":
             return {"id": 7}
         if method == "getColumns":
-            return [{"id": 1, "title": "Идеи"}, {"id": 2, "title": "Ready"}]
+            return [{"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"}]
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
@@ -99,6 +106,19 @@ class TaskReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "not found") as raised:
             self.reader.show("missing")
         self.assertEqual(raised.exception.code, "not_found")
+
+    def test_reads_a_board_whose_first_column_is_not_migrated_yet(self) -> None:
+        # An installation that predates the column translation keeps its cards readable until
+        # ensure_pipeline_board renames the column.
+        columns = [{"id": 1, "title": LEGACY_IDEAS_COLUMN}, {"id": 2, "title": "Ready"}]
+        with mock.patch.object(
+            self.client, "call",
+            side_effect=lambda method, **params: columns if method == "getColumns"
+            else FakeKanboard.call(self.client, method, **params),
+        ):
+            result = self.reader.list(states={"ideas"})
+
+        self.assertEqual([task["ref"] for task in result], ["old-1"])
 
     def test_unknown_column_is_backend_error(self) -> None:
         self.client.tasks[0]["column_id"] = 999
@@ -217,7 +237,7 @@ class WriteKanboard(FakeKanboard):
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
             return [
-                {"id": 1, "title": "Идеи"}, {"id": 2, "title": "Ready"},
+                {"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"},
                 {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
                 {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
             ]

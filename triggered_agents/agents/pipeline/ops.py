@@ -264,15 +264,15 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
     """Guard for a worker's own `create` (triggered-agents-261): a card landing straight in Ready
     is only legal as a continuation of the worker's own approved chain — `own_ref` (the card
     reference this worker is running as) itself, or one of its blocked_by predecessors,
-    transitively. `--column Идеи` stays ungated (same as reviewer_idea/retro_idea): an
-    unapproved idea from a worker still only ever reaches Идеи, never Ready, so it needs no
+    transitively. `--column Ideas` stays ungated (same as reviewer_idea/retro_idea): an
+    unapproved idea from a worker still only ever reaches Ideas, never Ready, so it needs no
     project/chain check here."""
     if column != "Ready":
         return
     if not blocked_by:
         raise model.GuardError(
             "worker create into Ready needs --blocked-by pointing at its own chain "
-            "(use --column Идеи for an unrelated idea)"
+            "(use --column Ideas for an unrelated idea)"
         )
     if not own_ref:
         raise model.GuardError(
@@ -294,15 +294,15 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
 
 
 def create_card(project: str, task_type: str, title: str, description: str = "",
-                ref: str | None = None, column: str = "Идеи",
+                ref: str | None = None, column: str = "Ideas",
                 blocked_by: str | None = None, head: str | None = None,
                 slug: str | None = None, base_branch: str | None = None,
                 review_head: str | None = None, role: str | None = None,
                 own_ref: str | None = None) -> dict:
-    """PO/steward/worker: create a spec card in Идеи or Ready, keyed by reference, with metadata.
+    """PO/steward/worker: create a spec card in Ideas or Ready, keyed by reference, with metadata.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
-    (triggered-agents-261); an Идеи card from a worker is otherwise ungated, matching the
+    (triggered-agents-261); an Ideas card from a worker is otherwise ungated, matching the
     general agent-idea policy (reviewer_idea/retro_idea). `own_ref` is the worker's own card
     reference, required (and only meaningful) for that Ready path.
 
@@ -317,15 +317,15 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     lookup exactly as before this field existed.
 
     `role="steward"` scrubs title/description the same way add_comment does for steward — the
-    escalation/idea path SKILL.md sends steward through (create in Идеи/Ready, then move to
+    escalation/idea path SKILL.md sends steward through (create in Ideas/Ready, then move to
     Blocked) is exactly where a quoted transcript/journalctl/env line could carry a raw secret
     (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller
     (po, reviewer_idea — which scrubs itself before calling here) passes no role and stays
     verbatim, unchanged from before."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
-    if column not in ("Идеи", "Ready"):
-        raise model.GuardError(f"cards are created only in 'Идеи' or 'Ready', not {column!r}")
+    if column not in ("Ideas", "Ready"):
+        raise model.GuardError(f"cards are created only in 'Ideas' or 'Ready', not {column!r}")
     if slug is not None and not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
     if head:
@@ -698,25 +698,25 @@ def verdict(reference: str, kind: str, body: str = "") -> dict:
 def reviewer_idea(project: str, title: str, description: str = "", task_type: str = "code",
                   ref: str | None = None, head: str | None = None,
                   slug: str | None = None) -> dict:
-    """Reviewer-only: file an out-of-scope finding as an Идеи card (the reviewer's single
+    """Reviewer-only: file an out-of-scope finding as an Ideas card (the reviewer's single
     code-creation exception). Title and description are scrubbed for the same reason as a verdict."""
     return create_card(project=project, task_type=task_type,
                        title=worker.scrub_secrets(title),
                        description=worker.scrub_secrets(description),
-                       ref=ref, column="Идеи", head=head, slug=slug)
+                       ref=ref, column="Ideas", head=head, slug=slug)
 
 
 def retro_idea(project: str, title: str, description: str = "", task_type: str = "code",
                ref: str | None = None, head: str | None = None,
                slug: str | None = None) -> dict:
-    """Retro-only: file a fail-pattern proposal as an Идеи card — retro's only board write,
+    """Retro-only: file a fail-pattern proposal as an Ideas card — retro's only board write,
     same shape as reviewer_idea (never Ready, title/description scrubbed). Retro quotes redacted
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
     return create_card(project=project, task_type=task_type,
                        title=worker.scrub_secrets(title),
                        description=worker.scrub_secrets(description),
-                       ref=ref, column="Идеи", head=head, slug=slug)
+                       ref=ref, column="Ideas", head=head, slug=slug)
 
 
 def feedback(reference: str, body: str) -> dict:

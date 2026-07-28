@@ -1,6 +1,6 @@
 interface:
   display_name: "Run Sprint"
-  short_description: "Автономно довести активный спринт до цели"
-  default_prompt: "Используй $run-sprint, чтобы автономно довести активный спринт до цели."
+  short_description: "Autonomously take the active sprint to its goal"
+  default_prompt: "Use $run-sprint to autonomously take the active sprint to its goal."
 policy:
   allow_implicit_invocation: false

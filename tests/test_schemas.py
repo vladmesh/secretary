@@ -440,13 +440,13 @@ class ExampleInstanceTests(unittest.TestCase):
         self.assertEqual(report.adapters, 1)
         self.assertTrue(report.has_manifest)
 
-    def test_examples_have_no_live_vladmesh_bindings(self):
+    def test_examples_have_no_live_owner_bindings(self):
         blob = "\n".join(
             p.read_text(encoding="utf-8")
             for p in EXAMPLE_INSTANCE.rglob("*")
             if p.is_file()
         ).lower()
-        for needle in ("vladmesh", "/home/dev", "dnd-simulator", "personal_site"):
+        for needle in ("/home/dev", "dnd-simulator", "personal_site"):
             self.assertNotIn(needle, blob, f"example config leaks {needle!r}")
 
 

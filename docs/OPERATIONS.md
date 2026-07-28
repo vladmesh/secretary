@@ -1,10 +1,10 @@
-# Эксплуатация
+# Operations
 
-Документ описывает поведение продукта. Состояние конкретной установки — кто владеет юнитами,
-какие компоненты подняты, свежий ли checkpoint — читается из `secretary status` и
-`secretary doctor`, а не из этого файла.
+This document describes product behaviour. The state of a particular installation — who owns which
+units, which components are up, whether the checkpoint is fresh — is read from `secretary status` and
+`secretary doctor`, not from this file.
 
-## Установка и проверка кода
+## Install and check the code
 
 ```bash
 python3 -m pip install .
@@ -12,90 +12,55 @@ python3 -m pip install '.[memory]'
 python3 -m unittest
 ```
 
-Первый вариант ставит CLI, второй добавляет memory runtime. Bundled package transport Kanboard/Orca
-остаётся decision gate первого milestone; готовый runtime применяется через `secretary install` /
-`secretary recover` по [Recovery](RECOVERY.md).
+The first form installs the CLI, the second adds the memory runtime. Bundled package transport for the
+board and session-manager runtimes is still an open question for the first milestone; an existing
+runtime is applied through `secretary install` / `secretary recover`, see [Recovery](RECOVERY.md).
 
-Для текущей сводки установки использовать `secretary status --instance <dir>`. Его `--json`
-даёт стабильный снимок services/timers, активных попыток, checkpoint, памяти и ресурсов хоста,
-без записи состояния. `doctor` отвечает на другой вопрос: какие инварианты нарушены. Он остаётся
-строгой проверкой и его `--json` возвращает структурированный список findings. Для изменения
-хоста по-прежнему нужен `reconcile plan` и отдельное подтверждённое применение.
+`secretary status --instance <dir>` gives the current summary of an installation. Its `--json` form is a
+stable snapshot of services and timers, active attempts, checkpoint, memory and host resources, and
+writes no state. `doctor` answers a different question: which invariants are broken. It stays a strict
+check and its `--json` form returns a structured list of findings. Changing the host still requires
+`reconcile plan` and a separate confirmed apply.
 
 ## Runtime secrets
 
-Секреты установки живут в восстановимом хранилище (`secretary secret init/set/import`, каталог
-`secrets/` приватного репозитория) и материализуются оттуда в env-файлы. `runtime.env` рядом с
-`instance.yaml` может быть одной из таких целей: тогда канон значений лежит в хранилище, а файл
-является materialized копией. Переведена ли конкретная установка на materialization, показывает
-`secretary status --json`, секция `secret_store`, поле `materialize`; продукт делает это не сам,
-шаг выполняет оператор командой `secret import`. Сам файл в любом случае `0600`, в `.gitignore`
-приватного репозитория и не входит в checkpoint или archive payload. `secretary shell` получает
-весь файл для trusted operator-сессии, dispatcher-launched worker/reviewer получают только
-allowlisted board credentials и non-secret runtime switches через `secretary.role_env`.
-Хранилище не обещает worker isolation:
-у него нет своего broker или grants, и installation key открывает все секреты сразу, теми же
-правами, что и раньше читали `runtime.env` (см. [Recovery](RECOVERY.md), раздел «Секреты»).
+Installation secrets live in a recoverable store (`secretary secret init/set/import`, the `secrets/`
+directory of the private repository) and are materialised from there into env files. The `runtime.env`
+next to `instance.yaml` can be one such target: the canonical values then live in the store and the file
+is a materialised copy. Whether a given installation has been moved to materialisation is shown by
+`secretary status --json` under `secret_store.materialize`; the product does not do this on its own, the
+operator runs `secret import`. Either way the file is `0600`, is gitignored in the private repository,
+and is part of no checkpoint or archive payload. `secretary shell` receives the whole file for a trusted
+operator session; dispatcher-launched workers and reviewers receive only allowlisted board credentials
+and non-secret runtime switches through the role-environment wrapper.
 
-`secretary status --json` показывает состояние хранилища секцией `secret_store` (инициализировано,
-число секретов, время последнего изменения каталога, пригодность installation key, сводка целей
-материализации), без единого значения. `doctor` даёт finding на рассинхрон каталога и values, на
-отсутствующий или непригодный ключ при непустом каталоге и на права ключа шире `0600`.
+The store does not promise worker isolation: it has no broker and no grants, and the installation key
+opens every secret at once, with the same rights that previously read `runtime.env` (see
+[Recovery](RECOVERY.md#secrets)).
 
-Instance config не содержит secret materialization inputs. `reconcile` строит host plan из
-bindings/config и не расшифровывает secret store.
+`doctor` raises a finding when catalog and values diverge, when the key is missing or unusable while the
+catalog is non-empty, and when the key's permissions are wider than `0600`.
 
-### Контракт тест-дублей диспетчера
-
-`tests/test_dispatcher_contracts.py` держит `FakeHost`/`FakeCatalog`/`FakeKanboard` в контракте с
-`CommandHostRuntime`/`InstanceCatalog`/`KanboardClient`. Набор методов, которые дёргает
-`DispatcherRuntime`, вычисляется из исходников (AST), а не ведётся руками, поэтому новый вызов у
-реального host автоматически становится требованием к фейку. Формы возвратов сверяются прогоном
-реального host в `mode="noop"`.
-
-Вне unit-покрытия остаётся всё, что требует живого стека: сам shell-out в `orca`, `gh` и `git`
-внутри `CommandHostRuntime._run*`, отказы Kanboard-транспорта (`TaskError`) в середине board-move
-и реальная нумерация позиций карточек. Эти швы проверяет оператор на живом стенде.
+Instance config holds no secret materialisation inputs. `reconcile` builds the host plan from bindings
+and config and never decrypts the store.
 
 ## System requirements
 
-Memory runtime загружает локальную embedding model. На production cutover startup занимал около
-шести минут и достигал примерно 1.9 GiB RSS. Отдельный target с 1.9 GiB общей RAM не смог завершить
-live rebuild. Поддерживаемый minimum ещё не установлен; не считать 2 GiB profile доказанным.
+The memory runtime loads a local embedding model and is the installation's dominant memory consumer; an
+index rebuild is its peak. No supported minimum is declared. Size the host from the resource figures
+`secretary status --json` reports for your own installation rather than from a nominal profile.
 
-Memory model cache lives at `DATA_DIR/memory/fastembed-cache`, never in `/tmp`. The memory unit
-passes this path directly to fastembed, so it survives `systemd-tmpfiles-clean`. `host.memory_threads`
-sets the ONNX Runtime inference limit; its default is `1`, because this host has three cores and a
-single semantic search otherwise expands across all of them while the dispatcher still ticks every
-minute. `secretary doctor --instance INSTANCE` prints the cache path and warns when `data_dir` puts
-it below `/tmp` or `/var/tmp`.
+The memory model cache lives at `DATA_DIR/memory/fastembed-cache`, never in `/tmp`. The memory unit passes
+this path directly to fastembed, so the cache survives temporary-file cleanup. `host.memory_threads` sets
+the ONNX Runtime inference limit; the default is `1`, so that a single semantic search does not expand
+across every core while the dispatcher still ticks every minute. `secretary doctor --instance INSTANCE`
+prints the cache path and warns when `data_dir` places it under a temporary directory.
 
-To move a live cache without downloading the 2.1 GB model again, stop the service and copy
-`/tmp/fastembed_cache` into `DATA_DIR/memory/fastembed-cache`. If a previous restore created
-`DATA_DIR/memory/.fastembed-cache`, merge it into that same destination before deleting it. Then
-run `secretary reconcile apply --instance INSTANCE` and start `secretary-memory.service`. Verify
-the cache path with `secretary doctor --instance INSTANCE` before removing either old cache. The
-service must remain stopped during the copy so fastembed cannot create a partial second cache.
-Treat this migration as a required deployment step before the first restart with this release.
-
-Orca runtime принадлежит хосту. Secretary не создаёт `secretary-orca.service` и не запускает
-`orca serve`: scheduler units имеют только `After=orca-server.service`, без `Wants=` на runtime,
-поэтому минутный dispatcher tick не может его перезапустить. `packaging/systemd` не содержит
-`secretary-orca.*`, и `reconcile`/`resolve_packaged` больше не проверяют наличие Orca-исполняемого
-файла: тот check был мёртвым (никакой packaged unit никогда не имел `component == "orca"`) и удалён
-в secretary-756.
-
-`secretary doctor` показывает `orca-server.service` как external, not managed by Secretary, и
-отличает отсутствующий сервис от неактивного. На реальном systemd (проверено на 255)
-`systemctl is-enabled`/`is-active` для никогда не установленного unit'а не падают и не молчат —
-они выходят с ненулевым кодом и печатают в stdout `not-found`/`inactive`. Поэтому `status --json`
-видит `host.external_runtime.enabled == "not-found"` как обычное (не-null) значение, а
-человекочитаемый `doctor` печатает это состояние как `Orca runtime: absent (external, not managed
-by Secretary)`, а не сырой токен `not-found`.
-
-При миграции старый `secretary-orca.service` и его временный drop-in нужно удалить через обычный
-systemd change после того, как `orca-server.service` подтверждён active; сам `orca-server.service`
-не останавливать и не перезапускать.
+The session-manager runtime belongs to the host. Secretary neither ships a unit for it nor starts it:
+scheduler units only order themselves after it, without a dependency that could restart it, so a
+minute-by-minute dispatcher tick cannot bounce the host runtime. `secretary doctor` reports that service
+as external and not managed by Secretary, and distinguishes a service that is absent from one that is
+merely inactive.
 
 ## Data plane
 
@@ -106,1103 +71,897 @@ python3 -m secretary data raw-kanboard-dump --instance INSTANCE \
   [--container cp-kanboard] [--source-path /var/www/app/data]
 ```
 
-`data init` создаёт локальный layout и manifest. Канон memory facts находится в
-`INSTANCE/state/memory/facts`; в data dir остаются его derived export/index. `data export` пишет
-нормализованные board, memory, run и transcript exports; без `--copy-transcripts` сохраняется только
-transcript inventory. `raw-kanboard-dump` создаёт timestamped raw dump через `docker cp`, не пишет
-в live container и не использует Kanboard API.
+`data init` creates the local layout and manifest. The canon for memory facts is
+`INSTANCE/state/memory/facts`; the data directory keeps its derived export and index. `data export`
+writes normalised board, memory, run and transcript exports; without `--copy-transcripts` only a
+transcript inventory is kept. `raw-kanboard-dump` creates a timestamped raw dump by copying out of the
+container; it writes nothing to the live container and does not use the board API.
 
 ## Checkpoint writer
 
-Каждый production-тик под `tick_lock` в конце регенерирует board и runs exports, проверяет
-снапшот и коммитит `state/board` и `state/runs` в приватный репозиторий инстанса
-(контракт — `docs/RECOVERY.md`). Стейджится только этот pathspec, ручные правки конфига
-коммит не затрагивает. Гейт fail-closed: pending task audit, расхождение счётчиков
-`export.json` с числом строк или найденный секрет блокируют коммит, причина уходит в
-`checkpoint` в state диспетчера, следующий тик ретраит. Без изменений `state/` коммита нет.
+At the end of every production tick, under the tick lock, the writer regenerates the board and runs
+exports, validates the snapshot and commits `state/board` and `state/runs` into the private instance
+repository (the contract is in [Recovery](RECOVERY.md)). Only that pathspec is staged, so manual config
+edits are untouched by the commit. The gate is fail-closed: pending task audit, a mismatch between the
+counters in `export.json` and the line counts, or a detected secret blocks the commit, the reason goes
+into the dispatcher's checkpoint state, and the next tick retries. With no change to `state/` there is no
+commit.
 
-Board регенерируется одним `pipeline export`: доска целиком за один вызов, метаданные и
-комментарии всех карточек — одним batched JSON-RPC запросом. Экспорт на 200 карточек занимает
-около секунды, так что тик остаётся 60-секундным.
+The board is regenerated by a single export call: the whole board in one call, with the metadata and
+comments of all cards in one batched JSON-RPC request. Board size therefore costs the tick one round trip
+rather than one per card, which is what keeps the regeneration inside the tick's 60-second budget.
 
-Memory writer независимо коммитит `state/memory` при `propose/commit/supersede`. Его pathspec не
-пересекается с tick-writer, а общий instance-repo lock сериализует оба writer'а и publish reviewed
-изменений instance repo.
+The memory writer commits `state/memory` independently on `propose`/`commit`/`supersede`. Its pathspec
+does not overlap the tick writer's, and the shared instance-repository lock serialises both writers along
+with the publishing of reviewed instance-repo changes.
 
 ## Status and doctor
 
-`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe
-to poll: it reports managed services and timers, projects and configured heads, active dispatcher
-attempts, their workspace, watchdog pane/progress/respawn state, sprint observer heads, pause state, checkpoint freshness,
-memory index state and host disk, memory and load. A live invocation uses the dispatcher's own pane
-probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
+`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe to poll:
+it reports managed services and timers, projects and configured heads, active dispatcher attempts, their
+workspace, watchdog pane, progress and respawn state, sprint observer heads, pause state, checkpoint
+freshness, memory index state, and host disk, memory and load. A live invocation uses the dispatcher's own
+pane probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
 
-`secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and
-returns structured findings with a non-zero exit status for a broken or unavailable host. Use
-`status` to answer what is running now, and `doctor` to decide what needs repair. The default
-human-readable `doctor` output remains available for incident work.
+`secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and returns
+structured findings with a non-zero exit status for a broken or unavailable host. Use `status` to answer
+what is running now, and `doctor` to decide what needs repair. The default human-readable `doctor` output
+remains available for incident work.
 
-Когда включён `host.components.dispatcher-production`, Orca repo
-`<data_dir>/dispatcher/observer-root/observers` принадлежит установке. Он появляется лениво при
-первом запуске наблюдателя, поэтому fresh installation не получает finding на его отсутствие.
-После создания doctor сопоставляет регистрацию с этим путём и считает совпавшее имя по другому пути
-чужой регистрацией. `reconcile plan` и `reconcile apply` этот repo не создают, не удаляют и не
-записывают в managed manifest.
+When the production dispatcher component is enabled, the observer-root repository under the data directory
+belongs to the installation. It appears lazily on the first observer launch, so a fresh installation gets
+no finding for its absence. Once created, `doctor` matches the registration against that path and treats a
+matching name at a different path as a foreign registration. `reconcile plan` and `reconcile apply` neither
+create it, delete it, nor write it into the managed manifest.
 
 ## Record reconciliation and controlled divergences
 
-Каждый production tick, до того как продвигать активные карточки, сверяет свои записи
-(`production-state.json` `records`) с реальным состоянием доски. `_advance_active` смотрит только
-на карточки, которые доска сейчас называет `in_progress`/`validate`: запись про карточку, которую
-PO увёл из цикла напрямую (в `ideas`, `ready`, `blocked`, `done`, или удалил вовсе), этому циклу
-никогда не попадётся на глаза. Реконсиляция закрывает именно этот разрыв: она отдельно проходит по
-всем записям, чьей карточки нет среди активных, спрашивает у доски её текущее состояние и, если
-карточка действительно вне цикла, убирает запись. Тик сообщает об этом действием
-`{"step": "production-reconcile", "action": "record-removed", "ref": ..., "card_state": ...}`.
-Реконсиляция трогает только bookkeeping: workspace и terminal, которые вела запись, не
-останавливаются и не удаляются — они принадлежат PO ровно так же, как принадлежала карточка, и
-разбираться с ними (или воскрешать карточку обратно) остаётся его решением. Если запрос к доске
-временно недоступен, запись не трогается до следующего тика: реконсиляция не рискует принять сбой
-бэкенда за уход карточки из цикла.
+Before advancing active cards, every production tick reconciles its own records against the real state of
+the board. Advancing only looks at cards the board currently calls in-progress or validate, so a record
+for a card the PO moved out of the cycle directly would never be seen by that path. Reconciliation closes
+that gap: it walks every record whose card is not among the active ones, asks the board for that card's
+current state and, if the card really is out of the cycle, drops the record. The tick reports this as a
+`record-removed` action with the reference and the card state.
 
-Список активных карточек, по которому реконсиляция решает, чья запись — кандидат на удаление, это
-снимок, снятый в начале тика (`in_progress`/`validate` на момент `list()`). Между этим снимком и
-собственным обращением реконсиляции к доске PO может успеть вернуть карточку обратно в цикл: снимок
-не входит в него, а карточка уже снова активна. Поэтому отсутствие в снимке — это только повод
-посмотреть, а не основание удалять: непосредственно перед удалением записи (или закрытием привязанной
-к ней divergence) реконсиляция ещё раз спрашивает у доски текущее состояние именно этой карточки и
-пропускает её, если оно оказалось `in_progress`/`validate`.
+Reconciliation touches bookkeeping only. The workspace and terminal the record was driving are not stopped
+or deleted: they belong to the PO exactly as the card did, and dealing with them (or reviving the card)
+stays the PO's decision. If the board is temporarily unavailable, the record is left alone until the next
+tick: reconciliation does not risk mistaking a backend failure for a card leaving the cycle.
 
-Controlled divergence — сигнал о расхождении между тем, что диспетчер ожидал от доски, и тем, что
-она вернула (`active_claim_mismatch`, `claim_live_mismatch` и подобные), записанный в
-`controlled_divergences` через `dispatcher_state.record_divergence`. Жизненный цикл:
+The list of active cards it works from is a snapshot taken at the start of the tick. Between that snapshot
+and reconciliation's own board call, the PO may have put the card back into the cycle. So absence from the
+snapshot is a reason to look, not grounds to delete: immediately before removing a record (or closing the
+divergence attached to it), reconciliation asks the board for that specific card's state again and skips it
+if it is active.
 
-- **Открытие.** Divergence создаётся с `"status": "open"` в момент обнаружения расхождения, вместе
-  с `expected`/`actual`/`details` — тем, что нужно для разбора.
-- **Наблюдение.** Пока карточка divergence остаётся в активном цикле (`in_progress`/`validate`),
-  запись остаётся открытой: `status --json` и `doctor --json` показывают её в
-  `dispatcher.divergences.open`, `doctor` поднимает finding `unresolved controlled divergence`
-  (виден и в `--offline`, потому что читается прямо из снапшота состояния, без похода на хост).
-- **Закрытие.** Тот же проход реконсиляции, что убирает осиротевшие записи, закрывает и
-  divergence: как только её карточка больше не входит в активный цикл — неважно, в каком
-  состоянии она оказалась, — divergence получает `"status": "closed"`, `closed_at` и
-  `closed_reason`. Divergence, привязанная к terminal/non-active карточке, поэтому не остаётся
-  открытой бесконечно: secretary-716 (запись и divergence, пережившие уход карточки в Ideas на
-  шесть дней) была ровно этим отсутствием закрывающего правила.
+A controlled divergence is a recorded signal that the board returned something other than what the
+dispatcher expected — a claim mismatch and similar. Its lifecycle:
 
-`status --json`/`doctor --json` дают явную, не-null картину: `dispatcher.divergences` —
-`open_count`, `total_count` и список открытых с `pilot_ref`/`reason`/`opened_at`;
-`dispatcher.reconciliation` — `records_tracked`, `last_tick_finished_at` (штампуется каждым тиком
-независимо от версии диспетчера — не доказательство того, что реконсиляция вообще существует в
-установленном коде) и `last_reconciled_at` (штампуется только самим проходом реконсиляции; `null`,
-пока хост не протикал хотя бы раз на коде с реконсиляцией — честное "неизвестно" вместо заимствования
-чужого поля как доказательства).
+- **Open.** Created when the mismatch is detected, together with the expected value, the actual value and
+  the details needed to investigate.
+- **Observed.** While the divergence's card stays in the active cycle the record stays open: `status --json`
+  and `doctor --json` list it, and `doctor` raises an unresolved-controlled-divergence finding. The finding
+  is visible in `--offline` too, because it is read straight from the state snapshot without contacting the
+  host.
+- **Closed.** The same reconciliation pass that removes orphaned records closes divergences: as soon as the
+  card is no longer in the active cycle, whatever state it ended up in, the divergence gets a closed status,
+  a close time and a reason. A divergence attached to a terminal card therefore does not stay open forever.
 
-Отдельно от парности unit-ownership (`host.units`, `doctor` missing/unmanaged-on-host):
-`host.external_runtime` — состояние `orca-server.service`, хостового рантайма, которым Secretary не
-владеет, но от которого зависит планировщик (`{"name", "enabled", "active"}`, не-null при доступном
-хосте). Одноразовые (`Type=oneshot`) unit'ы, запускаемые своим таймером (например,
-`secretary-dispatcher-production.service`), не имеют `[Install]`-секции и активны только вокруг
-самого запуска — от них не требуется ни `enabled`, ни `active`, но их состояние всё равно
-опрашивается и попадает в `host.units`, а не остаётся `null` как для unit'а, который никогда не
-проверяли.
+`status --json` and `doctor --json` give an explicit, non-null picture: `dispatcher.divergences` carries the
+open count, the total count and the list of open ones with reference, reason and open time.
+`dispatcher.reconciliation` carries the number of tracked records, the time the last tick finished (stamped
+by every tick, so it does not prove reconciliation exists in the installed code) and the time of the last
+reconciliation pass (stamped only by that pass; `null` until the host has ticked at least once on code that
+has it — an honest "unknown" rather than borrowing another field as evidence).
 
-## Подключение проекта: gate и восстановление устаревшего входа
+Separately from unit-ownership parity, `host.external_runtime` reports the state of the host session-manager
+service that Secretary does not own but the scheduler depends on. Oneshot units started by their own timer
+have no install section and are active only around their run: neither enabled nor active is required of
+them, but their state is still queried and reported rather than left null.
 
-Контракт стадий описан в [Протоколах](PROTOCOLS.md#подключение-проекта). Здесь порядок действий
-оператора: как отличить устаревший вход от невалидного, как штатно обновить disabled draft и как
-проверить результат. Все примеры даны на `service-template`, который прошёл этот путь живьём.
+## Connecting a project: gate and stale-input recovery
 
-### Identity и mutable-поля binding
+The stage contract is in [Protocols](PROTOCOLS.md#connecting-a-project). What follows is the operator's
+order of work: how to tell a stale input from an invalid one, how to refresh a disabled draft, and how to
+verify the result.
 
-Identity проекта это ровно четыре поля: `id`, `repo`, `adapter`, `default_branch`. Их задаёт
-`project add`, и дальше их дословно повторяют draft (`adapter-drafts/<id>.yaml`), задача provision
-(`provision-runs/<id>/<run_id>/task.yaml`) и `result.json` gate-прогона. Схемы этих трёх артефактов
-требуют все четыре поля и запрещают любое пятое, поэтому identity не может разъехаться между
-стадиями.
+### Identity and mutable binding fields
 
-Результат provision (`result.yaml`) из этого ряда выпадает намеренно: его схема
-(`secretary/schemas/provision-result.schema.json`) разрешает в `identity` только `id` и `adapter`,
-`repo` и `default_branch` там запрещены. `provision.py:_validate_result` сверяет ровно эту пару с
-draft и отклоняет результат как `result_foreign` при любом расхождении. Provision-агенту не нужны
-путь и ветка в ответе, поэтому доказательством полной identity служат draft, task и gate-result, а
-`result.yaml` подтверждает только `id` и `adapter`.
+A project's identity is exactly four fields: `id`, `repo`, `adapter`, `default_branch`. `project add` sets
+them, and the draft, the provision task and the gate run's `result.json` repeat them verbatim. The schemas
+of all three require all four fields and forbid a fifth, so identity cannot drift between stages.
 
-Маршрутизация в identity не входит. `plane` и `policy.code_concurrency` это mutable-поля binding
-(`projects/<id>.yaml`): их читает provision-задача как constraints, но ни gate, ни contract их не
-фиксируют. Повторный `project add` переносит их из существующего binding в переписанный, так что
-обновление draft маршрутизацию не сбрасывает. Draft старого писателя, у которого `plane` или
-`policy` попали внутрь `identity`, стадии молча нормализуют (поля выбрасываются из identity),
-остальные лишние ключи остаются и валят валидацию.
+The provision result is deliberately the exception: its schema allows only `id` and `adapter` inside
+`identity`, and forbids `repo` and `default_branch`. Provisioning compares exactly that pair against the
+draft and rejects a mismatch as a foreign result. The provision agent does not need the path and branch in
+its answer, so full identity is evidenced by the draft, the task and the gate result, while the provision
+result confirms only `id` and `adapter`.
 
-### stale.input или невалидная схема
+Routing is not part of identity. `plane` and `policy.code_concurrency` are mutable binding fields: the
+provision task reads them as constraints, but neither the gate nor the contract pins them. A repeat
+`project add` carries them from the existing binding into the rewritten one, so refreshing a draft does not
+reset routing.
 
-Обе причины останавливают одни и те же команды, но проверяются они не одновременно: сначала
-валидность, потом свежесть.
+### Stale input or an invalid schema
 
-Невалидный по схеме вход HEAD не упоминает и выигрывает первым. `project add` валидирует
-существующий draft до того, как перечитает и перезапишет записанный в нём scanner HEAD
-(`secretary/onboarding.py:91-114`), поэтому draft, сломанный по схеме, отвечает `draft.invalid`
-независимо от того, ушёл ли репозиторий вперёд. `provision-*` и `gate` на таком входе отвечают
-`draft_invalid` и ничего не публикуют. В `errors` стоит путь схемы (например `identity`), а не пара
-ревизий.
+Both reasons stop the same commands, but they are not checked at the same time: validity first, freshness
+second.
 
-Выведенный отказавшим `project add` объект с `draft.findings` это диагностика, а не запись на диск:
-все ошибочные возвраты в `secretary/onboarding.py:91-128` стоят раньше публикации, так что артефакты
-инстанса остаются нетронутыми. Чинить по этому выводу нужно источник, названный в `errors`, а не
-ждать, что повторный вызов подхватит записанный finding.
+A schema-invalid input wins first and never mentions HEAD. `project add` validates an existing draft before
+it re-reads and rewrites the scanner HEAD recorded in it, so a draft broken against its schema answers
+`draft.invalid` whether or not the repository moved on. `provision-*` and `gate` answer `draft_invalid` on
+such an input and publish nothing. The errors name a schema path, not a pair of revisions.
 
-`stale.input` проверяется только после того, как draft и binding прошли валидацию. Он означает, что
-в `repo` на `default_branch` появился коммит после записи draft. `provision-start` и
-`provision-apply` отвечают `status: stale_input` и печатают пару
-`expected_scanner_head`/`actual_scanner_head`. Gate публикует `result.json` со `status: stale` и
-findings `[{"code": "stale.input", ...}]`.
+The object with findings that a failed `project add` prints is diagnostics, not a disk write: every error
+return happens before publication, so instance artifacts are untouched. Fix the source named in the errors;
+do not expect a repeat call to pick up a recorded finding.
 
-Отдельный статус `conflict` gate отдаёт на другие рассинхроны входа: provision не в `drafted`,
-канонический адаптер нечитаем или невалиден, enabled binding без совпадающего passed-результата.
+Stale input is checked only after the draft and binding have validated. It means a commit appeared in the
+repository on the default branch after the draft was written. `provision-start` and `provision-apply` answer
+with a stale status and print the expected and actual scanner heads. The gate publishes a result with a
+stale status and a `stale.input` finding.
 
-Когда схемная ошибка исключена, ревизии разводит одно сравнение:
+The gate reports a separate conflict status for other input desyncs: provisioning not in a drafted state, a
+canonical adapter that is unreadable or invalid, or an enabled binding with no matching passed result.
+
+Once a schema error is ruled out, one comparison separates the revisions: read the scanner head recorded in
+`adapter-drafts/<id>.yaml` and compare it against the tip of the project's default branch. If the revisions
+differ, the input is stale and the recovery below fixes it. If they match and the command still refuses, the
+artifact named in the error is at fault; recovery will not help, and loosening the guard, the schema or the
+policy to get past it is not an option.
+
+A run whose five checks are all `not-run` is not a universal sign of staleness. That happens only when the
+gate on a fresh disabled draft saw HEAD move before it built its worktree. A stale result published after
+the run had started keeps whatever checks completed. Both of those reach disk. A stale result on an enabled
+binding, by contrast, exists only in the command output and rewrites no result file.
+
+### Refreshing a disabled draft
+
+Staleness is an expected status, not a breakage. Instance files are not edited by hand: each stage rewrites
+its own artifacts.
 
 ```bash
-INSTANCE=/home/dev/secretary-instance
-python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['scanner']['repo']['head'])" \
-  "$INSTANCE/adapter-drafts/service-template.yaml"
-git -C /home/dev/projects/service-template rev-parse --verify refs/heads/main
+python3 -m secretary project add PROJECT_PATH --instance "$INSTANCE"
+python3 -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
+# the provision agent writes result.yaml next to task.yaml, taking run_id and scanner head from the task
+python3 -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
+python3 -m secretary project gate PROJECT_ID --instance "$INSTANCE"
 ```
 
-Ревизии разошлись, значит вход устарел и лечится восстановлением ниже. Ревизии совпали, а команда
-всё равно отказывает, значит виноват артефакт, который назвала ошибка; восстановление тут не
-поможет, и ослаблять guard, схему или policy ради прохода нельзя. Если же ошибка `draft.invalid`
-стоит вместе с разошедшимися ревизиями, восстановление всё равно не пройдёт: пока схемная ошибка
-жива, `project add` не дойдёт до перезаписи HEAD.
+Expected statuses for a clean run: `project add` prints a contract artifact with an ok scanner status and a
+pending provision status; `provision-start` answers `task_ready` with the path to `task.yaml`;
+`provision-apply` answers `drafted` with the binding still disabled; `gate` answers `passed`. Exit code 0
+belongs to a successful stage only; any refusal exits 1.
 
-Пятёрка checks в `not-run` не универсальный признак stale. Все пять остаются `not-run`, только когда
-gate на свежем disabled draft увидел смену HEAD до сборки worktree (`secretary/gate.py:135-136`) —
-это случай образца `gate-46b8aecb1d8b380eb456`. Stale, опубликованный уже после прогона (draft или
-канонический адаптер сменились по ходу, `gate.py:179-187`), сохраняет те checks, которые успели
-пройти. Оба этих stale попадают на диск. Stale на enabled binding, наоборот, живёт только в выводе
-команды и файл результата не переписывает, см. ниже.
+What each stage does:
 
-### Штатное восстановление disabled draft
+- `project add` rescans the repository. If HEAD changed, provisioning and gate state in the draft reset to
+  pending and the stale canonical adapter is deleted in the same atomic transition, so an old run id and an
+  old adapter cannot ride along on a new input. Uncommitted changes in the project reach nothing: the
+  scanner reads only the recorded revision and notes the tree's cleanliness, and the gate works on its own
+  temporary worktree.
+- `provision-start` is idempotent: `task.yaml` for the same run id is not rewritten a second time. The run
+  id is a digest of identity and the scanner head, so a new head yields a new run.
+- `provision-apply` reads `--result PATH` or the default result path for the run, publishes the canonical
+  adapter and keeps the binding disabled. A result carrying a foreign run id or a foreign scanner head is
+  rejected.
+- `project gate` builds a temporary worktree at the recorded head, runs setup, smoke and validation, and is
+  the only stage that sets the binding to enabled.
 
-Устаревание это ожидаемый статус, а не поломка. Файлы инстанса руками не правятся: каждая стадия
-переписывает свои артефакты сама.
+`project add` on an enabled binding refuses with an "existing binding is enabled" error. That is not a
+reason to edit YAML: run `project gate` on the live binding first. It will clear the enable itself if the
+input is stale and return the project to the disabled state the recovery works from.
+
+### Verifying the result
+
+Read the three artifacts:
 
 ```bash
-INSTANCE=/home/dev/secretary-instance
-python3 -m secretary project add /home/dev/projects/service-template --instance "$INSTANCE"
-python3 -m secretary project provision-start service-template --instance "$INSTANCE"
-# provision-агент кладёт result.yaml рядом с task.yaml, run_id и scanner_head берёт из задачи
-python3 -m secretary project provision-apply service-template --instance "$INSTANCE"
-python3 -m secretary project gate service-template --instance "$INSTANCE"
+cat "$INSTANCE/gate-runs/<project>/<run-id>/result.json"
+cat "$INSTANCE/projects/<project>.yaml"
+cat "$INSTANCE/adapter-drafts/<project>.yaml"
 ```
 
-Ожидаемые статусы для чистого прогона: `project add` печатает contract-артефакт со `scanner.status:
-ok` и `provision.status: pending`; `provision-start` отвечает `task_ready` и путём task.yaml;
-`provision-apply` отвечает `drafted` с `binding_enabled: false`; `gate` отвечает `status: passed`.
-Код возврата 0 только у успешной стадии, у любого отказа он 1.
+A passed result carries an empty findings list, the four identity fields, the input revisions (scanner head
+and provision run id), the adapter digest, and five passed checks: `clean_worktree`, `setup`, `smoke`,
+`validation`, `artifact_policy`. The binding holds the same identity, `enabled: true` and the mutable fields
+that survived the refresh. The draft holds a gate block with a passed status and the same five checks.
 
-Что делает каждая стадия:
+Verify by reading those three files. `project gate` is not a read-only check: on an enabled binding two of
+its three outcomes change state.
 
-- `project add` пересканирует репозиторий. Если HEAD изменился, provision и gate в draft сбрасываются
-  в `pending`, а устаревший `adapters/<id>.yaml` удаляется тем же атомарным переходом, поэтому старый
-  run_id и старый адаптер на новый вход не переезжают. Некоммитнутые правки в проект не попадают
-  никуда: scanner читает только записанную ревизию и отмечает состояние дерева в
-  `scanner.repo.worktree_clean`, а gate работает на своём временном worktree.
-- `provision-start` идемпотентен: task.yaml для того же run_id второй раз не переписывается. Сам
-  run_id это дайджест identity и scanner HEAD, так что новый head даёт новый run.
-- `provision-apply` читает `--result PATH` или дефолтный
-  `provision-runs/<id>/<run_id>/result.yaml`, публикует канонический `adapters/<id>.yaml` и держит
-  binding disabled. Результат с чужим run_id или чужим scanner HEAD отклоняется.
-- `project gate` собирает временный worktree на записанный head, гоняет setup, smoke и validation,
-  и только он переводит binding в `enabled: true`.
+- The live HEAD matches the recorded one and the canonical adapter still digests the same: the gate finds
+  the published passed result for that pair and returns it with exit code 0, changing nothing.
+- The live HEAD moved on: the gate clears the enable and prints a stale result with exit code 1.
+- HEAD is the same but the adapter was rewritten and its digest no longer matches: the gate looks up the
+  previous passed result by scanner head and provision run id and, finding it, clears the enable the same
+  way.
 
-`project add` на enabled binding отказывает с `existing binding is enabled`. Это не повод править
-yaml: сначала `project gate` на живом binding, он сам снимет enable, если вход устарел, и вернёт
-проект в disabled-состояние, из которого работает восстановление.
+Both clearings leave the gate-run result file alone. The atomic publish rewrites only the binding (to
+disabled) and the draft, whose gate block becomes failed with a `stale.input` finding and five `not-run`
+checks. The stale object that is printed is assembled in memory, so on a rewritten adapter the printed
+copy still shows five passed checks.
 
-### Проверка результата
+Hence the discrepancy to keep in mind while investigating: an older passed result sits on disk while the
+command just answered stale. The durable traces of the clearing are the disabled binding and the failed
+gate block in the draft. A result file describes its own run, not the current state of the project, and its
+checks are not evidence of freshness. When state must not be touched, restrict yourself to reading the
+result, the binding and the draft.
 
-```bash
-INSTANCE=/home/dev/secretary-instance
-cat "$INSTANCE/gate-runs/service-template/gate-7c5aaea4bf399373c132/result.json"
-cat "$INSTANCE/projects/service-template.yaml"
-cat "$INSTANCE/adapter-drafts/service-template.yaml"
-```
+### What this lifecycle does not prove
 
-Живой эталон, `gate-7c5aaea4bf399373c132`:
+The onboarding gate does not check a project's forge configuration. Declaring GitHub CI in the adapter only
+means the gate runs no local validation command: without an explicit validation command it runs a default
+`git diff --check HEAD` on the temporary worktree. A passed validation says the diff is clean, not that
+branch protection is configured.
 
-| поле | значение |
-| --- | --- |
-| `status` | `passed`, `findings` пустой |
-| `identity` | `service-template`, `/home/dev/projects/service-template`, `service-template`, `main` |
-| `input_revision.scanner_head` | `15bd61d4e360a23e5bc61129f5092d3e35aa587e` |
-| `input_revision.provision_run_id` | `provision-service-template-791a7ae3a1f40951` |
-| `adapter_digest` | `sha256:24dde6a61c69a63d611a57e444b2e4e8c7d7510169d88cf481ae9a7d72c06eb6` |
-| `checks` | `clean_worktree`, `setup`, `smoke`, `validation`, `artifact_policy`, все пять `passed` |
+The set of required checks is declared by the adapter's `validation.required_checks` field, which is the
+source of truth for the mechanical gate rather than forge branch protection. The mechanical gate reads it
+like this:
 
-Binding `projects/service-template.yaml` держит те же четыре поля identity, `enabled: true` и
-пережившие обновление mutable-поля `plane: project` и `policy.code_concurrency: 1`. Draft
-`adapter-drafts/service-template.yaml` держит блок `gate` со `status: passed` и пятью checks.
+- the list is set: only those names colour the card. A name is matched against the name of an Actions
+  check-run or the context of a legacy commit status. A required check that has not appeared on the SHA, or
+  has not finished, leaves the card pending, where the pending watchdog picks it up; a failed required check
+  makes it red and names the check; all required checks successful make it green.
+- the list is not set: every check on the SHA goes into the rollup, and any failure makes it red.
 
-Предыдущий прогон того же проекта, `gate-46b8aecb1d8b380eb456`, остаётся на диске со `status: stale`,
-findings `stale.input` и пятью `not-run`. Это образец только для своего случая: свежий прогон на
-disabled draft, оборвавшийся на сверке HEAD до сборки worktree.
+Anything outside the list is optional to the gate: a failed or hanging unrelated check-run on the same SHA
+does not change the result.
 
-Проверять состояние следует этими тремя чтениями. `project gate` для проверки не годится: на enabled
-binding он в двух из трёх исходов меняет состояние.
+The gate proves nothing about a dispatcher run either, since it publishes no files for one.
 
-- Живой HEAD совпал с записанным и канонический адаптер дал прежний дайджест — gate находит
-  опубликованный passed-результат по этой паре и отдаёт его с кодом 0, ничего не трогая.
-- Живой HEAD ушёл вперёд — gate снимает enable и печатает `stale` с кодом 1.
-- HEAD тот же, но адаптер переписан, и его дайджест не совпал — gate ищет прошлый passed-результат
-  по паре scanner HEAD и provision run_id и, найдя его, делает ровно то же снятие enable
-  (`secretary/gate.py:62-95`).
+## Starting a sprint
 
-Оба снятия идут через `_disable_stale_enabled`, и он не трогает
-`gate-runs/<id>/<run_id>/result.json`. Атомарная публикация переписывает только binding (`enabled:
-false`) и draft, чей блок `gate` получает `status: failed`, findings `stale.input` и пять `not-run`.
-Печатаемый `stale` собирается в памяти: на ушедшем вперёд HEAD это голый объект из `status` и
-`findings`, а на переписанном адаптере копия прошлого passed с подменёнными `status` и `findings`,
-поэтому в выводе все пять checks остаются `passed`.
+A person starts a sprint through an interactive secretary session; the sprint itself is born as an entity on
+the sprints board, not as a document. The preparation is defined by the secretary role skill `open-sprint`,
+which is delivered to shells by the ordinary `secretary role-skills sync`. It sits in both the Claude and
+the Codex target of the secretary role, so behaviour does not depend on which secretary was opened.
 
-Отсюда расхождение, которое надо держать в голове при разборе: на диске лежит прежний `passed`
-result, а команда только что ответила `stale`. Долговечные следы снятия это disabled binding и блок
-`gate` в draft со `status: "failed"` и finding `stale.input`. Файл результата рассказывает про свой
-прогон, а не про текущее состояние проекта, и судить о свежести по его checks нельзя.
+The skill walks the secretary through preparation: live context (open and closed sprints, deferred items
+from their resume entries and comments, roadmap, Ideas in the affected repositories), a check that no other
+open sprint is holding the repositories needed, an interview on unresolved product forks, and a Definition of
+Done phrased as checkable items. Choosing the goal stays with the person and is not delegated.
 
-То есть один и тот же «проверочный» вызов может отозвать рабочий binding, ничего не дописав в
-gate-runs. Когда трогать состояние нельзя, ограничивайтесь чтением `result.json`, binding и draft.
-
-### Чего этот lifecycle не доказывает
-
-Onboarding-gate не проверяет GitHub-конфигурацию проекта. `validation.ci: github` в адаптере значит
-только, что gate не гоняет локальную команду валидации: без явного `validation.command` он выполняет
-дефолтный `git diff --check HEAD` на временном worktree. Passed `validation` говорит про чистый diff,
-а не про branch protection на стороне GitHub.
-
-Набор обязательных checks задаёт сам адаптер полем `validation.required_checks` — источник истины
-для механического gate, а не GitHub branch protection. Механический gate читает его так:
-
-- список задан — красит карточку только по этим именам. Имя сопоставляется с `name` Actions
-  check-run или `context` легаси commit status. Требуемый check, который не появился на sha или ещё
-  не завершился, оставляет карточку в pending (дальше её добирает pending-watchdog); упавший
-  требуемый check даёт red с его именем; все требуемые successful дают green.
-- список не задан — прежнее поведение: в rollup идут все checks на sha, и любой упавший даёт red.
-
-Всё, что вне списка, для gate необязательно: упавший или висящий посторонний check-run на том же sha
-результат не меняет. Проверить это можно dispatch-only workflow `optional-suite`, который по ручному
-`workflow_dispatch` кладёт заведомо падающий check с этим именем; на PR и push он не запускается и
-job `test` в workflow `ci` не трогает.
-
-Про dispatcher прогон тоже ничего не доказывает: gate не публикует для него никаких файлов. Легаси
-lookup воркера ищет `workspace.toml` в самом репозитории проекта, а центральный `<project>.toml`
-только при заданном `TA_MANIFEST_DIR`. Эта переменная в live-инстансе и packaged runtime не задана,
-и связать её с onboarding это отдельное решение, а не следствие пройденного gate.
-
-### Остатки compatibility-manifests в инстансе
-
-В инстансе, который проходил gate на прежних версиях, может лежать каталог `compatibility-manifests`
-с файлами `<project>.toml` и `<project>.targets.json`. Это derived-вывод, который никто не читал:
-воркер берёт центральный manifest только из `TA_MANIFEST_DIR`, а она нигде не задана. Активной
-конфигурацией dispatcher эти файлы не были, и `<project>.targets.json` не является доказательством
-пройденного gate: доказательство это `gate-runs/<id>/<run_id>/result.json` со `status: passed` плюс
-enabled binding.
-
-Убирать их безопасно и ничем не связано с состоянием проекта. Ни одна команда секретаря их не читает
-и не пишет, так что снятие enable, повторный gate и восстановление после удаления работают одинаково:
-
-```bash
-INSTANCE=/home/dev/secretary-instance
-git -C "$INSTANCE" rm -r compatibility-manifests
-git -C "$INSTANCE" commit -m "Drop derived compatibility manifests"
-```
-
-Если каталог не отслеживается, достаточно обычного `rm -r`. Заново gate его не создаст.
-
-Тот же прежний вывод мог оставить в `adapter-drafts/<project>.yaml` блок `compatibility_manifest` с
-`consumer: legacy-dispatcher`. Чистить его руками не надо и `project gate` ради него гонять не надо:
-любое чтение конфигурации инстанса (тик диспетчера, `doctor`, `status`, `upgrade`) сначала прогоняет
-драфты через миграцию и атомарно кладёт результат на диск, и только потом валидирует. Реестр
-устаревших форм один — `secretary/contract_migrations.py`; поля, которых в нём нет, миграция не
-трогает, и неизвестное поле в драфте по-прежнему останавливает тик с именем файла.
-
-`--dry-run` (`doctor`, `upgrade`) даёт тот же вердикт, но на диск не пишет: миграция применяется
-только в памяти. Команды без `--dry-run` пишут, даже те, что host не меняют: `reconcile plan`
-нормализует драфт так же, как тик. Это свойство выбранного пути, а не оплошность: конфигурацию
-чинит тот, кто её читает.
-
-## Рождение спринта
-
-Спринт заводит человек через интерактивного секретаря; сам спринт при этом рождается как сущность
-на board `Secretary sprints`, а не как документ. Подготовку задаёт ролевой скилл секретаря
-`open-sprint` (канон — `skills/roles/secretary/open-sprint/SKILL.md`, в шеллы едет обычным
-`secretary role-skills sync`). Он лежит и в claude-, и в codex-цели роли секретаря, поэтому
-поведение не зависит от того, какого секретаря открыли.
-
-Скилл ведёт секретаря по подготовке: живой контекст (открытые и закрытые спринты, deferred из их
-resume-записей и комментариев, roadmap, Ideas затронутых репозиториев), проверка, что нужные
-репозитории не удерживает другой открытый спринт, гриллинг по нерешённым продуктовым развилкам и
-формулировка Definition of Done проверяемыми пунктами. Выбор цели остаётся за человеком и не
-делегируется.
-
-Сущность создаётся продуктовой командой; роль `po`:
+The entity is created by the product command, as the `po` role:
 
 ```bash
 python3 -m secretary sprint create --role po --actor <actor> \
-  --goal "<одно предложение>" --dod-file /tmp/dod.md \
-  --repository secretary --repository secretary-instance
+  --goal "<one sentence>" --dod-file DOD.md \
+  --repository <repo> [--repository <repo>]
 python3 -m secretary sprint show --ref sprint:<ID>
 python3 -m secretary sprint status --ref sprint:<ID>
 ```
 
-Дальше спринт руками не ведут: голову-наблюдателя поднимает production tick (см. ниже), общение с
-идущим спринтом идёт записями к сущности (`secretary sprint comment`), а статус читается из данных
-(`secretary sprint status`, `secretary task list --sprint`). `STATUS.md` для этого контура не
-пишется: состояние спринта лежит там же, где карточки.
+After that the sprint is not driven by hand: the production tick launches the observer head (see below),
+communication with a running sprint goes through entries on the entity (`secretary sprint comment`), and
+status is read from data (`secretary sprint status`, `secretary task list --sprint`).
 
-Сущность спринта входит в checkpoint отдельным набором (`state/board/sprints.ndjson`) и
-восстанавливается вместе с карточками: после recovery спринт возвращается со всеми полями и
-записями, заводить его заново не нужно. Контракт — [Recovery](RECOVERY.md#состав-checkpoint).
+The sprint entity goes into the checkpoint as its own set and is restored along with the cards: after a
+recovery the sprint comes back with every field and entry, and does not need to be recreated. The contract is
+in [Recovery](RECOVERY.md#what-the-checkpoint-contains).
 
-Разделение хранилищ: цель, текст Definition of Done, репозитории, статус, бюджет, текущая карточка
-и resume — поля сущности; документ в `secretary-instance/state/knowledge/` держит только «почему»
-(контекст момента, выбор цели, отвергнутые альтернативы) и указатель `sprint:<ID>`. Поля сущности
-документ не дублирует.
+Storage split: the goal, Definition of Done text, repositories, status, budget, current card and resume are
+fields of the entity; a knowledge document holds only the "why" (the context of the moment, the choice of
+goal, the alternatives rejected) plus a pointer to the sprint reference. The document does not duplicate the
+entity's fields.
 
-Старый контур остаётся рядом и не переписан: скиллы `start-sprint` и `run-sprint` ведут спринт как
-документ в `state/knowledge/sprints/` с указателем `STATUS.md` и исполнением интерактивным
-секретарём. Сам Secretary до отдельного инкремента ведётся им, поэтому двойной контур сейчас
-сознательный. Один спринт живёт ровно в одном контуре.
+The `start-sprint` and `run-sprint` skills run a sprint the older way, as a knowledge document with a status
+pointer, executed by the interactive secretary. Both loops exist deliberately; one sprint lives in exactly
+one of them.
 
-## Головы-наблюдатели спринтов
+## Sprint observer heads
 
-Тот же production tick, тем же проходом реконсиляции, держит по одной голове-наблюдателю на каждый
-открытый спринт с board `Secretary sprints`. Наблюдатель не участвует в claim карточек: он не
-занимает project slot, не появляется в `records` и на очередь Ready не влияет.
+The same production tick, in the same reconciliation pass, keeps one observer head per open sprint on the
+sprints board. An observer takes no part in claiming cards: it occupies no project slot, appears in no card
+record and does not affect the Ready queue.
 
-Пока sprint открыт, его repositories принадлежат этой голове как единственному product writer:
-observer создаёт только связанные с ним карточки и ведёт их изменениями на доске. Dispatcher
-сохраняет штатный цикл уже связанных карточек. Если оператору нужно вмешаться, PO передаёт
-`--sprint-override` и непустой `--sprint-override-reason-file` в `secretary task create`, `move`
-или `edit`; причина остаётся в durable audit. Отказ `sprint_write_forbidden` называет sprint и
-предлагает записать изменение к его сущности. `sprint_guard_unavailable` означает, что live sprint
-board не удалось проверить, поэтому запись намеренно не прошла.
+While a sprint is open, its repositories belong to that head as the only product writer: the observer creates
+only cards linked to it and drives them through board changes. The dispatcher keeps the normal cycle of cards
+that are already linked. If an operator needs to intervene, the PO passes `--sprint-override` and a non-empty
+`--sprint-override-reason-file` to `secretary task create`, `move` or `edit`; the reason stays in the durable
+audit. A `sprint_write_forbidden` refusal names the sprint and suggests recording the change on its entity.
+`sprint_guard_unavailable` means the live sprints board could not be checked, so the write was deliberately
+refused.
 
-Перед запуском production tick сверяет budget audit связанных карточек. При
-`sprint_budget.signal` в prompt наблюдателя попадает отметка о достигнутом пороге, а скилл роли
-велит на ней пересмотреть вектор и записать пересмотр resume-записью. При
-`sprint_budget.hard` sprint становится `stopped`: head штатно останавливается, новые связанные Ready
-карточки пропускаются, а активные карточки остаются в обычном цикле. Оператор проверяет это через
-`secretary status --json`: `installation.sprints.items` показывает статус, причину hard-остановки,
-разбивку бюджета, resume freshness и состояние наблюдателя каждого спринта. Недоступность board видна в
-`installation.sprints.error`. Детали одного спринта доступны через `secretary sprint status --ref
-sprint:ID`. Переход в stopped остаётся в audit как `budget_hard_stopped` с причиной
-`budget_hard_limit`. Продолжить остановленный sprint может только `secretary sprint reopen --role po`.
+Before launching, the production tick checks the budget audit of the linked cards. At the signal threshold the
+observer's prompt carries a note that the threshold was reached, and the role skill tells it to reconsider the
+plan and record that in a resume entry. At the hard threshold the sprint becomes `stopped`: the head is stopped
+normally, newly linked Ready cards are skipped, and active cards stay in the ordinary cycle. The operator
+checks this through `secretary status --json`, where `installation.sprints.items` shows each sprint's status,
+the reason for a hard stop, its budget breakdown, resume freshness and observer state. An unreachable board
+shows up in `installation.sprints.error`. Details of one sprint are available through
+`secretary sprint status --ref sprint:ID`. Only `secretary sprint reopen --role po` can continue a stopped
+sprint.
 
-Решение тика на спринт видно в `actions` под `{"step": "observer-reconcile"}`:
+The tick's decision per sprint is visible in its actions under an `observer-reconcile` step:
 
-- `observer-launched` — открытый спринт без записи получил голову;
-- `observer-live` — голова жива, тик ничего не делал;
-- `observer-relaunched` — pid головы мёртв, поднята новая (в записи растёт `launches`);
-- `observer-stopped` — спринт закрыт или исчез с доски, голова остановлена, запись снята;
-- `observer-stop-failed` — хост отверг остановку, голова считается живой: запись остаётся в
-  состоянии `stop-pending` вместе с хэндлом, `observer_stopped` не пишется, следующий тик повторяет
-  остановку. Сюда же попадает случай, когда останавливать надо по воркспейсу (хэндла нет), а Orca
-  не отдала список терминалов: нечитаемая инвентаризация не считается пустой, иначе живая голова
-  осталась бы без записи. Если спринт за это время снова открыли, тик просто видит голову живой;
-- `observer-launch-deferred` — запуск отложен (ресурс головы не готов, ролевой скилл не доставлен в
-  шелл этой головы, bring-up не удался или
-  старый терминал не закрылся перед переподъёмом); спринт остаётся в записи с причиной, следующий
-  тик пробует снова. Если bring-up упал уже после создания терминала и закрыть его не удалось,
-  запись сохраняет хэндл с флагом `abandoned_handle`: тик не считает такую голову живой, сначала
-  повторяет закрытие терминала и только затем поднимает замену;
-- `observer-adopted` — на диске нашлось намерение запуска, которое пережило свой тик, и pid
-  указанной в нём головы жив: голова принимается как голова этого спринта, счётчик запусков
-  доводится до номера её попытки, а второй голову никто не поднимает. Хэндл терминала умер вместе с
-  тем тиком, поэтому в `status` у такой записи `handle_known: false`, а остановка идёт по воркспейсу
-  наблюдателя;
-- `observer-launch-pending` — намерение запуска ещё внутри своего окна ожидания pid: голова могла
-  просто не успеть записать pid-файл, поэтому тик её не трогает (ни остановки, ни второго
-  `prepare_observer`) и разбирается на следующем проходе;
-- `observer-launch-skipped` — идёт `drain`, новых голов не поднимаем. Запись при этом всё равно
-  заводится (состояние `deferred`, причина `pipeline is draining`, профиль головы проставлен),
-  чтобы открытый спринт был виден снаружи; ни гейт готовности, ни хост при этом не дёргаются, а
-  после `resume` ближайший тик поднимает голову из той же записи;
-- `sprint-board-unavailable` — доску спринтов не удалось прочитать; ни одна живая голова при этом
-  не останавливается.
+- `observer-launched` — an open sprint with no record got a head;
+- `observer-live` — the head is alive, the tick did nothing;
+- `observer-relaunched` — the head's pid is dead, a new one was launched;
+- `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
+- `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in
+  `stop-pending` with its handle, no stop event is written, and the next tick retries. This also covers the
+  case where the stop has to go by workspace and the session manager did not return a terminal list: an
+  unreadable inventory is not an empty one, otherwise a live head would be left with no record;
+- `observer-launch-deferred` — the launch was deferred (the head's resource is not ready, the role skill is
+  not delivered to that head's shell, bring-up failed, or an old terminal could not be closed first); the
+  sprint stays in the record with the reason and the next tick tries again. If bring-up failed after the
+  terminal was created and the terminal could not be closed, the record keeps the handle flagged as
+  abandoned: the tick does not treat such a head as alive, retries closing the terminal first and only then
+  launches a replacement;
+- `observer-adopted` — a launch intent that outlived its tick was found on disk and the pid it names is
+  alive: that head is accepted as this sprint's head and no second one is launched. Its terminal handle died
+  with that tick, so the record reports no known handle and the stop goes by the observer's workspace;
+- `observer-launch-pending` — the launch intent is still inside its pid-wait window: the head may simply not
+  have written its pid file yet, so the tick leaves it alone and resolves it on the next pass;
+- `observer-launch-skipped` — a drain is in progress and no new heads are launched. A record is created anyway
+  (deferred, with the reason and the head profile) so the open sprint is visible from outside; neither the
+  readiness gate nor the host is called, and after a `resume` the next tick launches the head from that same
+  record;
+- `sprint-board-unavailable` — the sprints board could not be read, and no live head is stopped.
 
-Профиль головы берётся из `role_defaults.observer` (`heads/heads.yaml`, генерится
-`secretary upgrade` из `triggered_agents/agents/pipeline/heads.toml`). Перед запуском отрабатывает
-тот же гейт готовности ресурса, что и перед claim карточки, с теми же вердиктами (см. «Готовность
-голов»). Голова запускается через `role_env exec --role observer` в собственном воркспейсе
-`<workspaces root>/observers/<ref>` с собственным терминалом; промпт `SPRINT.md` рендерится из живой
-сущности спринта в момент запуска и ссылается на ролевой скилл по пути.
+The head profile comes from `role_defaults.observer` in the installation's `heads/heads.yaml`, generated by
+`secretary upgrade`. The same resource-readiness gate that runs before claiming a card runs first, with the
+same verdicts (see [Head readiness](#head-readiness)). The head is launched through the role-environment
+wrapper in its own workspace with its own terminal; the prompt is rendered from the live sprint entity at
+launch and references the role skill by path.
 
-Воркспейс наблюдателя — зарегистрированный в Orca ворктри, а не просто каталог: без регистрации
-`orca terminal create` отвечает `selector_not_found` и запуск уходит в `observer-launch-deferred`.
-Режется он не из репозитория проекта, а из отдельного пустого репозитория
-`<data_dir>/dispatcher/observer-root/observers`, который диспетчер заводит сам при первом запуске
-(`git init` + `orca repo add`); в списке `orca repo list` он виден как `observers`. Ничего настраивать
-руками не нужно, и удалять его не надо: он переиспользуется всеми спринтами. Каталог по пути
-воркспейса, о котором Orca не знает (остаток от запуска, не дошедшего до Orca), диспетчер удаляет и
-создаёт воркспейс заново — в нём лежит только `SPRINT.md`, который следующий запуск всё равно
-перезаписывает.
+An observer's workspace is a registered worktree, not just a directory: without registration the session
+manager refuses to create a terminal and the launch becomes `observer-launch-deferred`. It is cut not from a
+project repository but from a separate empty repository under the data directory, which the dispatcher creates
+itself on first launch and reuses for every sprint. Nothing has to be configured by hand and it must not be
+deleted. A directory left at the workspace path that the session manager does not know about is removed and
+the workspace recreated; it holds only the rendered prompt, which the next launch rewrites anyway.
 
-Доверие codex к этому воркспейсу диспетчер выставляет сам: перед запуском он дописывает
-`[projects."<путь>"] trust_level = "trusted"` в `config.toml` того `CODEX_HOME`, с которым запускается
-голова, — и на воркспейс, и на корень репозитория наблюдателей, потому что спрашивает codex именно
-про корень. Руками этот файл править не нужно. Если оператор держит один из этих путей на другом
-уровне доверия, запуск уходит в `observer-launch-deferred` с причиной, называющей файл и путь:
-решение снимается правкой этой записи, а не повторным тиком.
+Stopping a head kills the workspace's terminals and removes the worktree registration, so after a sprint closes
+neither the observer's terminal nor its worktree is left behind. If the worktree is already unregistered, the
+stop counts as done: that is what makes retrying an unfinished stop terminate.
 
-Остановка головы глушит терминалы воркспейса (`orca terminal stop --worktree`) и снимает регистрацию
-(`orca worktree rm --force`), поэтому после закрытия спринта ни терминала, ни ворктри наблюдателя в
-Orca не остаётся. Если ворктри уже не зарегистрирован, остановка считается выполненной: это то, что
-делает повтор незавершённой остановки конечным.
+A bring-up that failed after the worktree was created leaves a registration with no head. The record remembers
+that separately from process liveness, so closing the sprint still removes the worktree instead of abandoning
+it. A refusal at that step is an ordinary failed stop: the record stays in `stop-pending` and the next tick
+returns to it.
 
-Bring-up, упавший уже после создания ворктри (например, на `terminal create`), оставляет
-регистрацию без головы. Запись это помнит отдельно от живости процесса, поэтому закрытие спринта
-всё равно снимает ворктри, а не бросает его в Orca; отказ Orca на этом шаге — обычная неудавшаяся
-остановка, запись остаётся в `stop-pending` и следующий тик возвращается к ней.
+### The observer role skill
 
-### Ролевой скилл наблюдателя
+What an observer does inside its session is defined by the `observer` role's `observe-sprint` skill. The canon
+lives in the product, reaches shells through the ordinary `secretary role-skills sync` (the `role-skills` step
+of `secretary upgrade`) and is checked by `secretary role-skills audit --check`.
 
-Что наблюдатель делает внутри сессии, задаёт скилл роли `observer` — `observe-sprint`. Канон лежит
-в продукте (`skills/roles/observer/observe-sprint/SKILL.md`), в шеллы попадает обычным
-`secretary role-skills sync` (шаг `role-skills` в `secretary upgrade`) и проверяется тем же
-`secretary role-skills audit --check`.
-
-Перед запуском тик проверяет, что скилл лежит в шелле поднимаемой головы. Если нет, голова не
-поднимается: тик отдаёт `observer-launch-deferred` с причиной вида
+Before launching, the tick checks that the skill is present in the shell of the head being launched. If it is
+not, the head is not launched: the tick reports `observer-launch-deferred` with a reason of the form
 
 ```
 observer role skill is not available to this head: observer/observe-sprint is not in the codex
 skill directory (<root>/observe-sprint/SKILL.md); run `secretary role-skills sync`
 ```
 
-Причина лежит в `deferred_reason` записи наблюдателя, поэтому видна в `secretary status --json`
-(`.dispatcher.observers`), `secretary sprint status --ref sprint:ID` (`.observer`) и
-`secretary dispatcher production-observe`. Лечится доставкой скилла:
+The reason is stored in the observer record's deferred reason, so it is visible in `secretary status --json`,
+`secretary sprint status --ref sprint:ID` and `secretary dispatcher production-observe`. The fix is to deliver
+the skill:
 
 ```bash
 secretary role-skills audit --check
 secretary role-skills sync
 ```
 
-Следующий тик поднимает голову из той же записи. Та же причина печатается, когда для шелла головы
-в `skills/manifest.toml` вовсе нет цели с ролью `observer` (например, `role_defaults.observer`
-переставили на профиль другого шелла) и когда сам манифест нечитаем.
+The next tick launches the head from the same record. The same reason is printed when the head's shell has no
+`observer` target in `skills/manifest.toml` at all, and when the manifest itself is unreadable.
 
-Живость — тот же pid-heartbeat, что у воркера и ревьюера
-(`$SECRETARY_DISPATCHER_BODY_DIR/secretary-observer-pid-<ref>.pid`, по умолчанию под `/tmp`).
-Свежезапущенная голова ещё не успела записать pid, поэтому нечитаемый pid-файл считается живым в
-течение окна `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` (по умолчанию 180 секунд) и мёртвым после.
-Автоматического ремонта зависшей (в отличие от мёртвой) головы нет: такой случай разбирает оператор.
+Liveness is the same pid heartbeat as for worker and reviewer. A freshly launched head has not written its pid
+yet, so an unreadable pid file counts as alive for the duration of the initial-output window and dead
+afterwards. There is no automatic repair for a hung (as opposed to dead) head; that case is for the operator.
 
-События жизненного цикла (`observer_launched`, `observer_relaunched`, `observer_stopped`,
-`observer_launch_deferred`) лежат в общем durable audit-логе (`board/events.ndjson`) с reference
-спринта; повтор с тем же `request_id` второго события не создаёт. `request_id` строится из reference,
-поколения записи (`generation`) и счётчика запусков, поэтому спринт, вернувшийся на доску после снятия
-записи, пишет свои события заново, а не растворяется в дедупликации первого цикла.
+Lifecycle events go to the shared durable audit log keyed by the sprint reference; a repeat with the same
+request id creates no second event. The request id is built from the reference, the record generation and the
+launch counter, so a sprint that returns to the board after its record was dropped writes its events afresh
+instead of dissolving into the deduplication of the first cycle.
 
-Событие стейджится в `board/pending-audit/` до вызова хоста и коммитится после него. Если audit-лог
-не пишется, видно это так:
+An event is staged before the host call and committed after it. Failures are visible as follows:
 
-- `observer-launch-deferred` с причиной `observer lifecycle event could not be staged` или
-  `observer-stop-failed` с упоминанием staging — хранилище отказало до действия, голову не поднимали
-  и терминал не закрывали, следующий тик пробует снова;
-- любой outcome с полем `audit: pending` (статус `degraded`) — действие выполнено и записано в
-  `production-state.json`, но событие осталось в pending. Дописывает его ремонт:
+- `observer-launch-deferred` with a staging reason, or `observer-stop-failed` mentioning staging — storage
+  failed before the action, no head was launched and no terminal closed; the next tick retries;
+- any outcome with a pending audit field (a degraded status) — the action happened and was recorded in
+  production state, but the event stayed pending. Repair appends it:
 
 ```bash
 secretary task verify-audit --instance INSTANCE     # .pending
 secretary task reconcile-audit --instance INSTANCE  # repaired/unresolved
 ```
 
-Запись наблюдателя фиксируется на диске тем же порядком, что и событие. Намерение запуска (спринт,
-поколение, профиль головы, номер попытки, воркспейс и pid-файл будущей головы, состояние
-`launching`) пишется в `production-state.json` до вызова хоста, а не в конце тика. Отсюда два
-наблюдаемых случая:
+The observer record is persisted in the same order and for the same reason. The launch intent (sprint,
+generation, head profile, attempt number, workspace and the future head's pid file) is written to production
+state before the host call, not at the end of the tick. That gives two observable cases:
 
-- `observer-launch-deferred` с причиной `observer launch intent could not be persisted` — state не
-  пишется, головы никто не поднимал; чинить надо диск или права на `dispatcher/production-state.json`,
-  следующий тик пробует снова;
-- запись в состоянии `launching` с непустым `pending_launch` — тик умер, не успев записать исход
-  запуска. Разбирает это ближайший тик сам, по pid-файлу из той же записи. Живой pid даёт
-  `observer-adopted`. Pid-файла ещё нет, а окно `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` не
-  истекло — `observer-launch-pending`: намерение остаётся как есть, голову никто не закрывает.
-  После истечения окна (и при мёртвом pid) тик закрывает терминалы воркспейса, и попытка
-  считается исчерпанной, если её событие уже лежит в логе (голова поднималась и умерла — идёт
-  `observer-relaunched` со своей строкой в аудите), и просто повторяется тем же номером, если
-  событие так и осталось в pending (хост ответить не успел, поднимать было нечего). Руками тут
-  делать нечего.
+- `observer-launch-deferred` with an intent-not-persisted reason — state is not writable and no head was
+  launched; fix the disk or the permissions on the production state file, and the next tick retries;
+- a record in a launching state with a non-empty pending launch — the tick died before recording the launch
+  outcome. The next tick resolves this from the pid file in the same record: a live pid gives
+  `observer-adopted`; no pid file yet inside the initial-output window gives `observer-launch-pending` and the
+  intent is left alone; after the window, or with a dead pid, the tick closes the workspace's terminals. The
+  attempt counts as spent if its event is already in the log (giving `observer-relaunched` with its own audit
+  line), and simply repeats under the same number if the event stayed pending, since the host never answered.
+  There is nothing to do by hand.
 
-Успешный запуск, чей state-write не прошёл, отдаёт outcome со статусом `degraded` и полем
-`state: pending`: голова поднята, намерение на диске, следующий тик её усыновит.
+A successful launch whose state write failed returns a degraded outcome with a pending state field: the head is
+up, the intent is on disk, and the next tick adopts it.
 
-### Намерение запуска worker и reviewer
+### Worker and reviewer launch intent
 
-Тот же контур у голов карточки, на всех путях запуска: первый claim, доработка после red-review и
-красного гейта, доработка после повторного done на отклонённом SHA, respawn сторожевого таймера и
-relaunch на resume. Намерение (роль, действие, профиль головы, attempt и раунд, воркспейс и
-pid-файл будущей головы) лежит в записи карточки полем `launch_intent` и пишется до вызова хоста.
-Раунд в намерении — это раунд поднимаемой головы: доработка резервирует следующий ещё до вызова
-хоста, поэтому принятая после сбоя голова продолжает доработку, а не раунд, закрытый red-ревью или
-гейтом. Наблюдаемых случаев тоже два:
+Card heads use the same loop, on every launch path: first claim, rework after a red review or a red gate,
+rework after a repeat `done` on a rejected SHA, a watchdog respawn, and a relaunch on resume. The intent (role,
+action, head profile, attempt and round, workspace and the future head's pid file) is a field of the card record
+and is written before the host call. The round in the intent is the round of the head being launched: rework
+reserves the next round before the host call, so a head accepted after a failure continues the rework rather
+than the round a red review or gate already closed. Two observable cases again:
 
-- `worker-launch-intent-unwritable` / `review-launch-intent-unwritable` со статусом `degraded` —
-  state не пишется, головы никто не поднимал, карточка остаётся как была; чинить диск или права,
-  следующий тик пробует снова;
-- непустой `launch_intent` в записи — тик умер, не успев записать исход запуска. Ближайший тик
-  разбирает это первым делом, по pid-файлу из самого намерения: живой pid даёт
-  `worker-launch-adopted` / `review-launch-adopted` (голова принята, второй не будет), отсутствие
-  pid-файла внутри окна `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — `worker-launch-pending` /
-  `review-launch-pending` (голова ещё поднимается, её никто не трогает), мёртвый pid или истёкшее
-  окно — намерение снимается, остатки в воркспейсе закрываются, и обычный путь поднимает голову
-  заново, уже в зарезервированном намерением раунде: раунд, закрытый red-ревью или гейтом, не
-  возвращается оттого, что его доработка не дожила до записи. Руками тут делать нечего.
+- a worker or review launch-intent-unwritable outcome, status degraded — state is not writable, no head was
+  launched and the card is unchanged; fix the disk or permissions and the next tick retries;
+- a non-empty launch intent in the record — the tick died before recording the outcome. The next tick resolves
+  it first, from the pid file in the intent itself: a live pid gives a launch-adopted outcome (the head is
+  accepted, there will be no second one), a missing pid file inside the initial-output window gives a
+  launch-pending outcome (the head is still coming up and nobody touches it), and a dead pid or an expired
+  window drops the intent, closes what is left in the workspace, and lets the ordinary path launch a head
+  again into the round the intent reserved.
 
-Третий случай — запуск, упавший уже после создания терминала: доставка промпта не прошла, а пане
-не закрылась, или reviewer поднялся, но воркер-голову не удалось погасить. Хост отдаёт такой исход
-отдельным `HeadLaunchAborted`, тик — `worker-launch-aborted` / `review-launch-aborted` со статусом
-`degraded`. Карточка не уходит в Blocked и запись не удаляется: живая голова осталась бы без
-единственного указателя на себя. Намерение остаётся на диске вместе с handle из ошибки, и его
-разбирает ближайший тик тем же способом, что и любое другое.
+A third case is a launch that failed after the terminal was created: prompt delivery failed but the pane did
+not close, or the reviewer came up but the worker head could not be stopped. The host returns that as a
+distinct aborted outcome and the tick reports a launch-aborted action, status degraded. The card does not go to
+Blocked and the record is not deleted: a live head would be left with no pointer to it. The intent stays on disk
+together with the handle from the error, and the next tick resolves it like any other.
 
-Всё, что тик делает с уже поднятой головой — читает leafId её панели, пишет routing-событие,
-сохраняет запись, — идёт при живом намерении: сбой на этих шагах не значит «головы нет», и отдаётся
-он тоже как `*-launch-aborted`. В намерении к этому моменту лежит конфигурация запуска, поэтому
-принятая голова попадает в routing-журнал раунда своим профилем, а не тем, что в реестре сейчас.
-Журнал, отказавший на этой записи, даёт `worker-launch-adopt-deferred` / `review-launch-adopt-deferred`
-(`degraded`): голова остаётся принятой, намерение — на диске, а следующий тик дописывает журнал.
+Everything the tick does with an already-launched head — reading its pane id, writing the routing event, saving
+the record — happens while the intent is live, so a failure at those steps does not mean "there is no head" and
+is reported the same aborted way. By then the intent holds the launch configuration, so an adopted head reaches
+the routing journal with its own profile rather than whatever the registry holds now. A journal that fails at
+that write gives an adopt-deferred outcome (degraded): the head stays adopted, the intent stays on disk, and the
+next tick appends the journal entry.
 
-У принятой таким образом головы обычно нет handle: тик, поднявший её, не дожил до записи. Живость
-такой головы читается по pid-heartbeat, и в статусе терминала она отдаётся как `reason: pid`. По
-нему же она и гасится — перед стартом ревью, при respawn, на red-ревью и на freeze — поэтому
-pid-файл роли хранится в записи полями `worker_pid_file` / `review_pid_file`.
+A head adopted that way usually has no handle, because the tick that launched it did not survive to record one.
+Its liveness is read from the pid heartbeat and reported as such in terminal status. It is also stopped that way
+— before review starts, on respawn, on a red review and on freeze — which is why the role's pid file is kept in
+the record.
 
-Остановка, которую хост не подтвердил, — не остановка: тик отдаёт `worker-stop-unconfirmed` /
-`review-stop-unconfirmed` (`degraded`) и не поднимает замену, пока предыдущая голова не подтверждена
-мёртвой. То же на реконсиляции продакшн-тика: карточка, ушедшая из активного цикла с неразобранным
-намерением, сначала гасит его голову и только потом теряет запись, а неподтверждённая остановка
-даёт `launch-intent-stop-unconfirmed` и запись остаётся до следующего тика. Так же разбирается
-расхождение claim: если карточку успел заклеймить кто-то другой, тик сначала гасит голову
-неразобранного намерения и только после подтверждённой остановки уводит карточку в Blocked и
-удаляет запись, а неподтверждённая остановка даёт тот же `launch-intent-stop-unconfirmed` и ничего
-не трогает. `pause --mode freeze`
-идёт тем же порядком: неразобранное намерение гасится по своему воркспейсу и pid до того, как
-голова считается остановленной, поэтому карточка попадает в `stopped_worker` / `stopped_reviewer`
-только после подтверждённой остановки, а иначе намерение остаётся на диске и resume ничего рядом с
-живой головой не поднимает. Смотреть тут стоит на
-Orca: голова жива, `orca terminal stop` по воркспейсу карточки отказывает или процесс головы не
-уходит по сигналу.
+A stop the host did not confirm is not a stop: the tick reports a stop-unconfirmed outcome (degraded) and does
+not launch a replacement until the previous head is confirmed dead. The same holds during reconciliation: a card
+leaving the active cycle with an unresolved intent first has that head stopped and only then loses its record. A
+claim mismatch is handled the same way: if someone else claimed the card, the tick first stops the unresolved
+intent's head and only after a confirmed stop moves the card to Blocked and deletes the record. A freeze follows
+the same order, so a card reaches the stopped-worker or stopped-reviewer list only after a confirmed stop;
+otherwise the intent stays on disk and `resume` launches nothing next to a live head. When this happens, look at
+the session manager: the head is alive and either the stop is refused or the head's process does not exit on
+signal.
 
-Состояние снаружи, без чтения транскрипта:
+State from outside, without reading a transcript:
 
 ```bash
-secretary status --json --instance INSTANCE           # .dispatcher.observers
-secretary dispatcher production-observe --instance INSTANCE   # .observers
-secretary pause-status --instance INSTANCE            # .observers, .stopped_observer
+secretary status --json --instance INSTANCE                    # .dispatcher.observers
+secretary dispatcher production-observe --instance INSTANCE    # .observers
+secretary pause-status --instance INSTANCE                     # .observers, .stopped_observer
 ```
 
-Строка наблюдателя отдаёт спринт, профиль головы, состояние (`running` / `launching` / `deferred` /
-`stop-pending` / `pause-stop-pending` / `stopped-by-pause` / `pending`), живость pid (`alive`,
-`pid_known`), число запусков, воркспейс, флаги `handle_known` и `abandoned_handle`, время и вид
-последнего действия и причину отложенного запуска.
+An observer row carries the sprint, the head profile, the state (`running`, `launching`, `deferred`,
+`stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness, the launch count, the
+workspace, the handle-known and abandoned-handle flags, the time and kind of the last action, and the reason for
+a deferred launch.
 
 ## Checkpoint push
 
-Push идёт на том же тике, но по своему окну: раз в 30 минут, только fast-forward, без
-force-push. Перед пушем `ls-remote` сверяет тип remote: если тип уже равен локальному HEAD,
-пуш не нужен; если он предок HEAD, идёт `git push origin HEAD:refs/heads/<branch>`. Git-вызовы
-неинтерактивные (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`) и с 60-секундным таймаутом, чтобы
-недоступный remote или запрос пароля не держали тик.
+The push runs on the same tick but in its own window: every 30 minutes, fast-forward only, never a force push.
+Before pushing, a remote listing compares the remote tip against the local HEAD: if it already equals HEAD, no
+push is needed; if it is an ancestor of HEAD, the push runs. Git calls are non-interactive and time-limited so
+an unreachable remote or a password prompt cannot hold the tick.
 
-Сбой пуша fail-closed на checkpoint, но не на работе: диспетчер продолжает двигать карточки,
-локальные коммиты идут, причина и растущий lag видны, следующее окно ретраит.
+A push failure is fail-closed on the checkpoint but not on the work: the dispatcher keeps moving cards, local
+commits continue, the reason and the growing lag are visible, and the next window retries.
 
-`remote diverged` — на remote есть коммиты, которых нет локально. Пуш останавливается, алярм
-висит в `status` и `doctor`, автоматика ничего не переписывает. Если причина была в interleaving
-green publish и checkpoint, следующий dispatcher tick сам сведёт локальный instance checkout, а
-checkpoint pusher сразу перепроверит diverged-состояние и погасит алярм fast-forward-only. Ручной
-разбор нужен, когда remote содержит историю, которой нет ни в reviewed branch, ни в локальном
-checkpoint checkout:
+`remote diverged` means the remote holds commits that are not local. The push stops, the alarm stays in `status`
+and `doctor`, and no automation rewrites anything. If the cause was interleaving between a green publish and the
+checkpoint, the next dispatcher tick reconciles the local instance checkout on its own and the pusher re-checks
+the diverged state and clears the alarm fast-forward only. Manual work is needed when the remote holds history
+that is in neither the reviewed branch nor the local checkpoint checkout:
 
 ```bash
 git -C INSTANCE fetch origin
-git -C INSTANCE merge --no-edit FETCH_HEAD   # или rebase, по ситуации
+git -C INSTANCE merge --no-edit FETCH_HEAD   # or rebase, as appropriate
 ```
 
-После того как remote стал предком локального HEAD, следующий тик пушит сам и алярм гаснет.
+Once the remote is an ancestor of the local HEAD, the next tick pushes on its own and the alarm clears.
 
-Freshness видна в `dispatcher production-observe` (поле `checkpoint`) и в `doctor` блоком
-`checkpoint freshness`: последний коммит, последний успешный push, lag в коммитах и минутах,
-причина блокировки гейта, состояние `remote diverged`. Lag в минутах — возраст самого старого
-непушнутого коммита, то есть реальная величина потери при потере машины. `doctor` поднимает
-finding на `remote diverged`, на заблокированный гейт и на lag больше 60 минут (два пропущенных
-окна).
+Freshness is visible in `dispatcher production-observe` under `checkpoint` and in `doctor` under checkpoint
+freshness: last commit, last successful push, lag in commits and minutes, the reason the gate is blocked, and
+the diverged state. The lag in minutes is the age of the oldest unpushed commit, that is, the real size of the
+loss if the machine dies. `doctor` raises a finding on divergence, on a blocked gate, and on a lag above 60
+minutes (two missed windows).
 
-## Восстановление
+## Recovery
 
-Единственный recovery contract — Git-backed checkpoint из [Recovery](RECOVERY.md). Живое
-восстановление идёт из приватного репозитория инстанса, без обязательного S3 transport.
+The only recovery contract is the Git-backed checkpoint in [Recovery](RECOVERY.md). A live restore comes from the
+private instance repository, with no mandatory object-store transport.
 
 ```bash
-secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
-secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev \
+secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
+secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
   --recovery-phrase-file PHRASE_FILE
 ```
 
-Обе команды открывают хранилище секретов (если оно инициализировано в этом instance-репо) раньше,
-чем читают `runtime.env`: с recovery phrase (`--recovery-phrase-file`, `--recovery-phrase-stdin`
-или интерактивный prompt на TTY, если ключа ещё нет на диске) installation key пересобирается и
-материализует `runtime.env` и другие цели из каталога, включая Kanboard credentials, если они
-заведены в хранилище. Только если хранилища в этом instance-репо нет вовсе, `runtime.env` остаётся
-ручным файлом оператора, как описано в [Recovery](RECOVERY.md). Без фразы recover не отказывает:
-он восстанавливает всё, что не требует credentials, и печатает отчёт locked/missing по секретам,
-которые остались недоступны.
+Both commands open the secret store, if this instance repository has one, before reading `runtime.env`: with the
+recovery phrase (`--recovery-phrase-file`, `--recovery-phrase-stdin`, or an interactive prompt on a TTY when the
+key is not yet on disk) the installation key is rebuilt and materialises `runtime.env` and the other targets from
+the catalog, including board credentials if they are in the store. Only if this instance repository has no store
+at all does `runtime.env` remain a manual operator file, as described in [Recovery](RECOVERY.md). Without the
+phrase, `recover` does not refuse: it restores everything that needs no credentials and prints a locked/missing
+report for the secrets that stayed unavailable.
 
-Первая команда клонирует remote и останавливается до появления host-only credentials, если
-хранилище их не материализовало. Вторая единым идемпотентным flow материализует checkpoint,
-восстанавливает board — и карточки Pipeline, и сущности спринтов с их полями, бюджетом, resume и
-записями, — пересобирает memory index, role worktrees и host resources, затем проверяет
-status. `restore-board` печатает обе величины (`cards`, `sprints`), а расхождение любой из двух
-parity-сверок оставляет recovery незавершённым и видно в `doctor`.
+The first command clones the remote and stops short of host-only credentials if the store did not materialise
+them. The second, in one idempotent flow, materialises the checkpoint, restores the board — both Pipeline cards
+and sprint entities with their fields, budget, resume and entries — rebuilds the memory index, role worktrees and
+host resources, and then checks status. `restore-board` prints both counts, and a mismatch in either parity check
+leaves recovery unfinished and visible in `doctor`.
 
-Низкоуровневые `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` и
-`restore-reconcile` остаются диагностическими примитивами, а не основным runbook.
+The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
+commands remain diagnostic primitives, not the main runbook.
 
-## Опциональный cold archive
+## Optional cold archive
 
-`backup create`/`backup verify` остаются ручным инструментом на случай выгрузки сырья, не
-recovery-контрактом. Автоматического таймера, offsite-переноса и doctor-гейта у него больше нет.
+`backup create` and `backup verify` are a manual tool for dumping raw material, not a recovery contract. There is
+no timer, no offsite transfer and no `doctor` gate for them.
 
 ```bash
 python3 -m secretary backup create --instance INSTANCE --kind both
 python3 -m secretary backup verify ARCHIVE.tar [--strict]
 ```
 
-`create` пишет обычный tar в `backups/` (`core`, `full`, `both`), без шифрования. `verify`
-возвращает `0` при успехе, `1` для findings или strict warnings, `2` для недоступного archive.
-Восстановление из такого архива по-прежнему доступно через `secretary restore ARCHIVE.tar` для
-совместимости. Архив не является recovery contract и не влияет на `doctor` или readiness.
+`create` writes a plain tar into `backups/` (`core`, `full` or `both`), unencrypted. `verify` returns `0` on
+success, `1` for findings or strict warnings, and `2` for an unreadable archive. Restoring from such an archive is
+still available through `secretary restore ARCHIVE.tar` for compatibility. The archive is not a recovery contract
+and does not affect `doctor` or readiness.
 
-## Авто-мёрж зелёных карточек
+## Auto-merging green cards
 
-Когда ревьюер ставит `review:green`, production dispatcher сам доводит карточку до `done`, без
-ручного мёржа:
+When a reviewer records a green verdict, the production dispatcher takes the card to done without a manual merge:
 
-1. Push worker-ветки в `origin/main` fast-forward-only (`git push origin BRANCH:main`). Если main
-   разошёлся, push отклоняется — dispatcher не форсит и не подчищает конфликт сам.
-2. Fast-forward локального чекаута соответствующего проекта на новый `origin/main`. Для проекта
-   `secretary` это self-deploy: production dispatcher мёржит и сразу подтягивает изменения в
-   собственный checkout, из которого работает.
-3. Teardown воркспейса: dispatcher останавливает терминалы worktree (worker, ревьюер и их
-   дочерние процессы) и удаляет worktree через `orca worktree rm`.
+1. Push the worker branch to the default branch, fast-forward only. If the default branch diverged, the push is
+   rejected; the dispatcher neither forces nor resolves the conflict itself.
+2. Fast-forward the project's local checkout onto the new default-branch tip. For the product's own repository
+   this is a self-deploy: the dispatcher merges and immediately pulls the change into the checkout it runs from.
+3. Tear down the workspace: stop the worktree's terminals (worker, reviewer and their child processes) and remove
+   the worktree.
 
-Для private instance repo publish идёт под тем же writer lock, что и checkpoint. Dispatcher
-публикует только reviewed branch и локально известную checkpoint-историю: remote tip должен быть
-предком worker-ветки или локального instance checkout. Чужая remote-история остаётся ручным
-runbook case, без авто-мёржа в green-карточку. После успешного publish dispatcher мёржит
-`origin/main` в локальный checkout instance repo. Поэтому checkpoint-коммит, появившийся между
-preflight и publish, сохраняется обычным merge-коммитом вместе с feature commit. Если тик упал
-после remote publish, но до локального merge, следующий тик повторяет Done-путь идемпотентно:
-push видит уже опубликованный результат, локальный checkout догоняется merge-коммитом, и карточка
-завершается без ручного вмешательства.
+For the private instance repository, publishing happens under the same writer lock as the checkpoint. The
+dispatcher publishes only the reviewed branch and locally known checkpoint history: the remote tip must be an
+ancestor of the worker branch or of the local instance checkout. Foreign remote history stays a manual runbook
+case, with no auto-merge into a green card. After a successful publish the dispatcher merges the remote default
+branch into the local instance checkout, so a checkpoint commit that appeared between preflight and publish is
+preserved by an ordinary merge commit alongside the feature commit. If the tick died after the remote publish but
+before the local merge, the next tick repeats the done path idempotently.
 
-Teardown выполняется только на этом Done-пути. При `review:red` (rework) воркспейс и его ветка
-остаются нетронутыми, чтобы worker мог продолжить в том же worktree.
+Teardown happens only on this done path. On a red review the workspace and its branch are left untouched so the
+worker can continue in the same worktree.
 
-Kill-switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` отключает push и fast-forward шаги (`Host.complete_green`)
-целиком — карточка всё равно уходит в `done`, но branch остаётся неслитым и требует ручного мёржа.
-Дефолт — `on` (авто-мёрж включён).
+Kill switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` disables the push and fast-forward steps entirely. The card
+still reaches done, but the branch stays unmerged and needs a manual merge. The default is on.
 
-## Пауза пайплайна
+## Pausing the pipeline
 
-Аварийная остановка — одна команда продуктового CLI, два режима:
+An emergency stop is one product CLI command with two modes:
 
 ```bash
-python3 -m secretary pause drain  --instance INSTANCE --reason "почему"
-python3 -m secretary pause freeze --instance INSTANCE --reason "почему"
+python3 -m secretary pause drain  --instance INSTANCE --reason "why"
+python3 -m secretary pause freeze --instance INSTANCE --reason "why"
 python3 -m secretary resume       --instance INSTANCE
 python3 -m secretary pause-status --instance INSTANCE
 ```
 
-`drain` — тик перестаёт клеймить Ready, но карточки, которые уже в работе, доезжают свой цикл:
-воркер дописывает, ревьюер судит, зелёный PR мержится. Берётся, когда нужно остановить приток, не
-обрывая работу.
+`drain` stops the tick from claiming Ready cards, but cards already in flight finish their cycle: the worker
+finishes writing, the reviewer judges, a green branch merges. Use it to stop the inflow without cutting work off.
 
-`freeze` — то же плюс живые головы воркера, ревьюера и наблюдателей спринтов останавливаются, и тик
-после этого не продвигает ничего. Воркспейсы, worktree и незакоммиченная работа не трогаются:
-останавливаются только терминалы. Берётся, когда хост нужно освободить прямо сейчас (бэкап,
-перезагрузка, разбор аварии).
+`freeze` does that and also stops live worker, reviewer and sprint-observer heads, after which the tick advances
+nothing. Workspaces, worktrees and uncommitted work are untouched: only terminals are stopped. Use it when the
+host has to be freed right now (a backup, a reboot, an incident).
 
-`resume` снимает паузу, поднимает остановленные freeze'ом головы воркеров и ревьюеров в тех же
-воркспейсах и выдаёт вотчдогам ожиданий свежее окно, чтобы длинная пауза не прочиталась потом как
-молчание головы. Карточка, чья голова успела отчитаться во время freeze, head'а не получает: её
-двигает ближайший тик по уже записанному отчёту. Наблюдателей `resume` сам не поднимает: он снимает
-с них пометку паузы (`observers_resumed` в ответе), и ближайший тик поднимает их обычной
-реконсиляцией. При `drain` живую голову наблюдателя не трогает никто, и новых не поднимают; спринт,
-открытый во время `drain`, получает отложенную запись с причиной и виден во всех сводках.
+`resume` lifts the pause, brings the frozen worker and reviewer heads back up in the same workspaces, and gives
+the waiting watchdogs a fresh window so a long pause is not later read as a silent head. A card whose head managed
+to report during the freeze gets no head: the next tick moves it on the report already recorded. `resume` does not
+launch observers itself; it clears their pause mark and the next tick brings them up through ordinary
+reconciliation. Under `drain` nobody touches a live observer and no new ones are launched; a sprint opened during a
+drain gets a deferred record with its reason and is visible in every summary.
 
-Если хост отверг остановку наблюдателя при `freeze`, ответ `pause` отдаёт это отдельным
-предупреждением со списком спринтов, а запись остаётся в состоянии `pause-stop-pending` с хэндлом.
-Реконсиляция под freeze не работает, поэтому остановку повторяет сам замороженный тик: результат
-виден в `observer_stops` его ответа, и каждая строка там несёт свой `status`. Если хост отказал
-снова, тик уходит в `degraded` — с ненулевым кодом возврата юнита и красной строкой health, потому
-что заморозка сидит на голове, которую не смогла погасить. Голова, дожившая до `resume`, повторно не поднимается —
-ближайший тик видит её живой (`observer-live`).
+If the host refused to stop an observer during a `freeze`, the `pause` response carries that as a separate warning
+listing the sprints, and the record stays in `pause-stop-pending` with its handle. Reconciliation does not run
+under a freeze, so the frozen tick itself retries the stop and reports the result per sprint. If the host refuses
+again, the tick goes degraded — a non-zero unit exit and a red health line — because the freeze is sitting on a
+head it could not stop. A head that survived until `resume` is not launched again; the next tick simply sees it
+alive.
 
-Смена режима на весу запрещена: сначала `resume`, потом пауза в другом режиме. Повторная пауза в
-том же режиме — no-op.
+Switching mode in flight is forbidden: `resume` first, then pause in the other mode. A repeat pause in the same
+mode is a no-op.
 
-Флаг лежит в живом data plane, рядом с состоянием того диспетчера, который реально работает:
-`<data_dir>/dispatcher/pause.json`. Оттуда его читает каждый прогон продуктового тика. Фоновые
-роли (steward/curator/retro) по-прежнему читают легаси-флаг в воркспейсе пайплайна, поэтому пауза
-дополнительно пишет туда зеркало, а `resume` его убирает — но только если зеркало поставила сама
-пауза. Чужой легаси-флаг не перезаписывается и не удаляется.
+The flag lives in the live data plane, next to the state of the dispatcher that is actually running:
+`<data_dir>/dispatcher/pause.json`. Every product tick reads it from there. Background roles still read a legacy
+flag in the pipeline workspace, so the pause additionally writes a mirror there and `resume` removes it — but only
+if the pause put it there. A foreign legacy flag is neither overwritten nor deleted.
 
-Легаси-вход `triggered_agents pipeline pause|resume` больше не пауза: он писал флаг, которого
-продуктовый диспетчер не читает. Команда отказывает и называет `secretary pause`.
+### Pause or breakage
 
-### Пауза или авария
+`pause-status` shows the product dispatcher's state: the mode, who set it and when, the path to the flag file, and
+a line per card describing its heads:
 
-`pause-status` показывает состояние продуктового диспетчера: режим, кто и когда поставил, путь к
-файлу флага, и построчно по карточкам — что с их головами:
+- `running` — the head is alive;
+- `stopped-by-pause` — the pause stopped the head, the workspace is intact, `resume` will bring it back;
+- `not-running` — there is no head and the pause did not stop it: either a card nothing has reached yet, or a real
+  break to be investigated as one (see [Waiting watchdogs](#waiting-watchdogs)).
 
-- `running` — голова живая;
-- `stopped-by-pause` — голову остановила пауза, воркспейс на месте, `resume` поднимет её обратно;
-- `not-running` — головы нет и пауза её не останавливала: это либо карточка, до которой ещё не
-  дошли, либо настоящий обрыв, и разбирать его надо как обрыв (см. «Вотчдоги ожиданий»).
+A tick during a freeze answers `skipped` with the reason and a snapshot of the pause, rather than staying silent,
+so "nothing is moving" in the log is always distinguishable from a stalled dispatcher. The health probe answers ok
+with the same snapshot during a freeze.
 
-Тик во время freeze отвечает `skipped` с причиной `pipeline is frozen by pause` и снимком паузы, а
-не молчанием, так что «ничего не двигается» в логе всегда отличимо от вставшего диспетчера. Health
-probe (`production-tick --probe`) во время freeze тоже отвечает `ok` с этим снимком.
+A frozen tick still writes and pushes the checkpoint: a freeze stops cards from advancing, not durability.
+Otherwise a long pause would be a hole in the snapshot history and a growing push lag exactly where a recovery
+would be needed. Such a tick's response carries its checkpoint and push fields even though it has no actions at
+all.
 
-Замороженный тик по-прежнему пишет и пушит checkpoint: freeze останавливает продвижение карточек, а
-не durability, иначе долгая пауза оказалась бы дырой в истории снимков и растущим push-лагом ровно
-там, где восстановление и понадобится. В ответе такого тика есть `checkpoint` и `checkpoint_push`,
-хотя `actions` пустых нет вообще.
+### A freeze that lifts itself
 
-### Freeze, который снимается сам
+A freeze set by an automation has a TTL. If the pause actor is on the configured allowlist, then after the
+configured number of seconds (45 minutes by default) the next tick calls `resume` itself, the same way an operator
+would, bringing heads back up with fresh watchdog windows. Without that, a `secretary backup create` killed before
+its cleanup would leave the dispatcher frozen forever. A freeze from a person (any other actor) never expires: the
+maintenance window is lifted by whoever opened it. Setting the TTL to zero disables auto-resume entirely.
 
-Freeze от автоматики живёт по TTL. Если `actor` паузы входит в
-`TA_HARD_PAUSE_AUTO_RESUME_ACTORS` (по умолчанию `pipeline,secretary-backup,secretary,steward,
-curator,retro`), то через `TA_HARD_PAUSE_AUTO_RESUME_TTL_S` секунд (по умолчанию 2700) ближайший
-тик сам вызовет `resume` — тем же путём, что оператор, с подъёмом голов и свежими окнами вотчдогов.
-Без этого `secretary backup create`, убитый до своего `finally`, оставлял бы диспетчер замороженным
-навсегда. Freeze от человека (любой другой actor) не истекает никогда: окно обслуживания снимает тот,
-кто его поставил. `TA_HARD_PAUSE_AUTO_RESUME_TTL_S=0` выключает авто-resume совсем.
+`pause-status` answers in its `auto_resume` field whether the pause will lift itself: `fresh` (it will, the TTL has
+not expired), `manual-or-unknown-actor` (it will not, a person is holding it), `disabled` (auto-resume is off). The
+response of a tick that lifted a pause by TTL carries the pause's age and the lists of heads it brought back, so a
+TTL lift is confused with neither a manual resume nor a break.
 
-`pause-status` в поле `auto_resume` отвечает, снимется ли пауза сама: `fresh` (снимется, TTL ещё не
-вышел), `manual-or-unknown-actor` (не снимется, держит человек), `disabled` (авто-resume выключен).
-В ответе тика, который снял паузу по TTL, лежит `auto_resume` с `resumed: true`, возрастом паузы и
-списками поднятых голов, так что снятие по TTL не путается ни с ручным resume, ни с обрывом.
+## Waiting watchdogs
 
-## Вотчдоги ожиданий
+The dispatcher waits for a head at two points: waiting for the worker report (card in progress) and waiting for the
+review verdict (card in validate). On every waiting tick it compares the stored handle and pane id of the active
+attempt against the session manager's terminal list. The session manager may hand a new handle to the same pane, so
+the pane id is the stable token for both worker and reviewer. A missing or disconnected pane immediately triggers
+the same path as a stall: one respawn in the same workspace, then Blocked with a signal to the operator. An answer
+that the runtime is unavailable does not count as a dead head: the tick reports that and leaves the card alone
+rather than acting on an inventory error. Such a tick proves no progress either, so the ordinary waiting ceiling
+keeps running as a fallback and starts the usual respawn/Blocked path when it expires.
 
-Диспетчер ждёт голову в двух точках: `waiting-worker-report` (карточка в In progress) и
-`waiting-review-verdict` (карточка в Validate). Раньше оба ожидания повторялись каждый тик без
-ограничения, и голова, умершая до отчёта, оставляла карточку висеть (secretary-637, secretary-649).
+A present pane is not sufficient on its own. The inventory carries a last-output timestamp, and the dispatcher
+tracks it for the stored pane specifically, not for the whole workspace. If the output does not move before the
+ceiling, the same watchdog fires. That catches a login screen and any other live but idle head, while output from an
+unrelated shell in the same worktree does not mask the problem. The terminal title and a running status are
+deliberately not used: a head rewrites its own title, and a running status can stick after a silent exit.
 
-Теперь на каждом тике ожидания диспетчер сверяет сохранённые handle и `leafId` активной попытки с
-`orca terminal list`. Orca может выдать другой handle тому же pane, поэтому leafId остаётся
-стабильным токеном и для воркера, и для ревьюера. Отсутствующий или disconnected pane сразу запускает тот
-же путь, что и stall: один respawn в том же воркспейсе, затем Blocked с сигналом оператору.
-Ответ о недоступном runtime не считается смертью головы: тик возвращает
-`worker-runtime-unavailable` или `review-runtime-unavailable` и не трогает карточку только из-за
-ошибки инвентаря. Такой тик не доказывает прогресс, поэтому обычный потолок ожидания продолжает
-работать как fallback и по его истечении запускает обычный respawn/Blocked путь.
+A third case: the pane stays connected, but the session manager keeps its own interactive workspace shell in it even
+after the head's process has exited, since that shell types the head command line by line and does not close with
+it. Returning to the shell prompt updates the last-output timestamp once, so by the first two signals such a head
+reads as "there was output, then silence" and would wait out the ordinary long ceiling. What separates these cases
+without reading session text is the pid the head writes before exec: the launch command is wrapped so the shell
+records its own pid and then `exec`s the head, replacing the process image without a fork, so the recorded pid stays
+the head's pid for its whole life. On each waiting tick the dispatcher probes that pid with a null signal: a
+connected pane whose pid no longer answers takes the same path as a missing or disconnected pane. The file lives
+outside the workspace, like report and verdict bodies, under `SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`);
+respawn deletes it before a new launch so a dead predecessor's pid is not read before the new head overwrites it.
 
-Наличие pane само по себе недостаточно. Инвентарь содержит `lastOutputAt`; диспетчер хранит
-последний вывод именно сохранённого pane, не всего воркспейса. Если вывод не меняется до потолка,
-срабатывает тот же watchdog. Так ловится экран логина и другой живой, но бездействующий head, а
-вывод случайного shell в том же worktree не маскирует проблему. Заголовок терминала и
-`status:running` по-прежнему не используются: голова переписывает title своей OSC-последовательностью,
-а `status:running` может залипнуть на `working` после тихого выхода.
+If the pid probe confirms the head's process is alive, that is a positive liveness signal rather than merely an
+absence of proof of death, and the tick skips both timeouts — the short first-output window and the long idle
+ceiling — regardless of whether the last-output timestamp moved. Silence from a live head with a confirmed pid
+proves nothing, so only a real process exit triggers respawn or Blocked for it. While the file does not exist yet —
+a fresh launch has not run its write, or the runner does not provide this signal at all — that is read as neither
+death nor confirmed life, and the tick keeps using the ordinary last-output checks. The only runner without the
+signal is the raw command override, which substitutes a command bypassing the head registry and therefore gets no
+heartbeat wrapper. For it, as for a session manager without a last-output timestamp, the long ceiling is the only
+fallback, precisely because there is no way to confirm liveness independently of pane output.
 
-Третий случай (secretary-751, живой инцидент на secretary-731): pane остаётся connected, а Orca всё
-равно держит в нём собственный interactive shell воркспейса даже после того, как процесс головы
-завершился, — сам этот shell типизирует команду головы построчно и не закрывается вместе с ней.
-Возврат к приглашению shell один раз обновляет `lastOutputAt`, поэтому по признакам первых двух
-случаев такая голова читается как «вывод был, потом тишина» и ждала бы обычного длинного потолка.
-Отличить эти случаи без разбора текста сессии помогает pid, который голова сама пишет перед `exec`:
-launch-команда оборачивается в `echo "$$" > <pid-file>; exec <голова>`, `$$` внутри shell — это pid
-самого shell, а `exec` заменяет его образ процессом головы без fork, так что записанный pid
-остаётся pid'ом головы на всю её жизнь. На каждом тике ожидания диспетчер проверяет этот pid через
-`kill(pid, 0)`: если pane connected, а pid из файла уже не отвечает, это тот же путь, что missing
-или disconnected pane — один respawn в том же воркспейсе, затем Blocked. Файл лежит вне воркспейса,
-как report/verdict body: `SECRETARY_DISPATCHER_BODY_DIR` (дефолт `/tmp`), имя
-`secretary-<worker|review>-pid-<ref>.pid`; respawn удаляет его перед новым запуском, чтобы не
-прочитать pid мёртвого предшественника раньше, чем новая голова перезапишет файл своим.
+Every fresh progress signal starts a new waiting window. So the ceiling measures how long a head has been silent,
+not how long a task has run: a head producing output is not respawned merely because its card is old. If the
+last-output timestamp is known but has not moved past the head's launch time, a separate short window of 180 seconds
+applies, catching a login screen and any other head that printed nothing after launch. After the first output only
+the long ceiling applies, because a head is entitled to think for a long time. A TUI head on an alternate screen may
+not update the last-output timestamp, so for those profiles the signal is supplemented by the modification time of
+the session rollout file, which is tied to the worktree rather than to a specific pane. That is a deliberate
+compromise for the alternate screen: it inspects file metadata only and never reads session text. The first breach
+is one respawn of the same head in the same workspace; the second moves the card to Blocked with a signal to the
+operator.
 
-Если `kill(pid, 0)` подтверждает, что процесс головы жив, это положительный сигнал ливнеса, а не
-просто отсутствие доказательства смерти, — и тик пропускает оба таймаута, короткое окно первого
-вывода и длинный потолок бездействия, целиком, независимо от того, сдвигался ли `lastOutputAt`.
-Молчание живой головы с подтверждённым pid ничего не доказывает, поэтому respawn или Blocked для
-неё запускает только реальный выход процесса (тот же путь, что и missing/disconnected pane выше).
-Пока файла ещё нет — свежий запуск ещё не успел выполнить свой `echo`, либо раннер вообще не даёт
-этот сигнал, — это не читается ни как смерть головы, ни как подтверждение жизни, и тик продолжает
-использовать обычные проверки по `lastOutputAt`: короткое окно первого вывода и длинный потолок.
-Единственный такой раннер — сырой оверрайд `SECRETARY_DISPATCHER_WORKER_COMMAND` /
-`SECRETARY_DISPATCHER_REVIEW_COMMAND`: он подставляет команду в обход каталога голов и поэтому не
-получает обёртку с heartbeat. Для него, как и для старого Orca без `lastOutputAt`, длинный потолок
-остаётся единственным fallback — ровно потому, что для этих раннеров нет способа подтвердить
-ливнес независимо от вывода pane.
+A respawn writes a comment on the board, so the operator can tell a first stall from a card whose head has already
+been restarted, without waiting for the final Blocked.
 
-Каждый свежий сигнал прогресса начинает новое окно ожидания. Поэтому потолок означает, сколько
-голова молчит, а не сколько длится задача: пишущая вывод голова не получает respawn только из-за
-возраста карточки. Если `lastOutputAt` известен, но не сдвинулся дальше времени подъёма головы,
-действует отдельное короткое окно в 180 секунд: это ловит экран логина и другую голову, которая
-не напечатала ничего после запуска. После первого вывода действует только длинный потолок, потому
-что голова имеет право долго думать. У Codex TUI alternate screen может не обновлять
-`lastOutputAt`, поэтому для профилей `codex_mode: tui` сигнал дополняется mtime rollout JSONL,
-привязанного к worktree, а не к конкретному pane: активность другой Codex-сессии в том же worktree
-тоже обновит этот дополнительный сигнал. Это компромисс alternate screen, который проверяет только
-метаданные файла, не читает текст сессии. На старом
-Orca без `lastOutputAt` короткое окно не применяется, а потолок остаётся fallback. Первое
-превышение — один respawn той же головы в том же воркспейсе, второе — карточка в Blocked с
-сигналом оператору.
+- `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — the short first-output window, default 180 seconds.
+- `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — the ceiling for a verdict after first output, default 5400 seconds.
+- `SECRETARY_WORKER_REPORT_STALL_SECONDS` — the ceiling for a report after first output, default 21600 seconds.
 
-Respawn пишет комментарий на доску, чтобы оператор отличал первое залипание от карточки, у которой
-голову уже перезапускали, не дожидаясь финального Blocked.
+All three are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
+not stop the dispatcher from starting.
 
-- `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — короткое окно первого вывода, дефолт 180 секунд.
-- `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — потолок ожидания вердикта после первого вывода,
-  дефолт 5400 секунд.
-- `SECRETARY_WORKER_REPORT_STALL_SECONDS` — потолок ожидания отчёта после первого вывода,
-  дефолт 21600 секунд.
+A head writes report and verdict bodies to a file outside the workspace
+(`/tmp/secretary-report-<ref>-<round>.md`, `/tmp/secretary-verdict-<ref>-<round>.md`, with the directory overridden
+by `SECRETARY_DISPATCHER_BODY_DIR`) rather than assembling them inline in a shell: some agent runtimes reject
+commands containing `rm`, and quotes or backticks in the body break the call. The file is left in place and the head
+does not clean it up, which is why the round number is in the name: otherwise a second reviewer would pick up the
+first one's body.
 
-Все три переменные читаются в момент проверки; мусор или ноль в значении откатывается на дефолт, чтобы
-опечатка в юните не роняла старт диспетчера.
+The round number is also part of the verdict request id. The attempt id lives for the whole attempt and does not
+change across review-red, rework and report-done, so without the round a second red inside one attempt would look
+like a replay of the first to the task writer: no comment written, the CLI still answering "verdict recorded", the
+reviewer exiting, and the card standing in validate until the watchdog.
 
-Тело отчёта и вердикта голова пишет в файл вне воркспейса
-(`/tmp/secretary-report-<ref>-<round>.md`, `/tmp/secretary-verdict-<ref>-<round>.md`, каталог
-переопределяется `SECRETARY_DISPATCHER_BODY_DIR`), а не собирает inline в шелле: codex-рантайм
-режет команды с `rm`, а кавычки и backtick в теле ломают вызов. Файл остаётся на месте, подчищать
-его голове не нужно, поэтому в имени есть раунд: иначе второй ревьюер подобрал бы тело первого.
-
-Номер раунда (`review_baseline`) входит и в `--request-id` вердикта. `attempt_id` живёт всю
-попытку и не меняется на переходе review:red -> rework -> report:done, так что без раунда второй
-red в рамках одной попытки выглядит для `TaskWriter` реплеем первого: комментарий не пишется, CLI
-всё равно отвечает «вердикт записан», ревьюер выходит, карточка стоит в Validate до вотчдога.
-
-## Телеметрия фоновых ролей
+## Background-role telemetry
 
 ```bash
 python3 -m triggered_agents health
 ```
 
-Одна строка на роль: активен ли таймер и насколько свеж последний здоровый тик. Ненулевой код
-возврата — хотя бы одна роль красная.
+One line per role: whether its timer is active and how fresh its last healthy tick is. A non-zero exit means at
+least one role is red.
 
-Источники — живой data plane, не чекаут:
+The sources are the live data plane, not a checkout:
 
-- curator, steward и retro пишут `runs.jsonl` через `AgentState`, то есть в
-  `$TA_STATE/<agent>/` либо, если переменная не задана (так и стоит в packaged-юнитах), в
-  `<HOME>/secretary-data/automation-state/<agent>/`. Здоровым считается последнее событие без
-  `result: error`: precheck пишет `error` каждый тик, пока не поднимется доска или окружение, и
-  по сырому последнему событию мёртвая роль выглядела бы вечно свежей.
-- строка `pipeline` строится по телеметрии тиков production dispatcher —
-  `tick_telemetry` в `<data_dir>/dispatcher/production-state.json`. Диспетчер пишет её в конце
-  каждого терминального тика: время, healthy/degraded и диагностику (шаг, причина, коды ошибок).
-  Тик, закончившийся degraded, красит строку сам по себе — предыдущий здоровый тик за него не
-  отвечает. Degraded — это не только пойманная ошибка: если действие тика отчиталось
-  `degraded`/`failed` (например `launch-intent-stop-unconfirmed` — голову незакрытого запуска не
-  удалось погасить), тик тоже терминально degraded, а его диагностика лежит в `degradations`
-  записи и попадает в строку health. Карточка, уехавшая в Blocked, здоровью тика не мешает: это
-  штатная работа диспетчера, причина лежит на доске, и стюард видит её сигналом `new_blocked`.
-  Отдельно проверяется свежесть последнего здорового тика, на случай когда тики
-  перестали писаться вовсе. Заморозка паузой — намеренная остановка, она записывается здоровым
-  тиком; исключение — замороженный тик, который повторно не смог погасить голову обсервера
-  (`observer-stop-failed`): это невыполненная операция, поэтому такой тик терминально degraded и
-  красит строку. Тик, упавший с исключением (недоступная доска роняет первое же чтение задач), пишет
-  запись `status: failed` с кодом ошибки: иначе строка оставалась бы зелёной по прошлому тику,
-  пока свежесть не истечёт. Тик, который не дошёл до проверки прав на state (singleton lock занят,
-  mutation guard не пустил к чужому state), не пишет ничего: он и виден по тому, что здоровые
-  тики перестали появляться.
+- curator, steward and retro write a run log through their shared agent state, that is, under `$TA_STATE/<agent>/`
+  or, when that variable is unset (as it is in the packaged units), under the data directory. Healthy means the last
+  event without an error result: the precheck writes an error every tick until the board and environment come up, so
+  by the raw last event a dead role would look forever fresh.
+- the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
+  dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
+  error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for
+  it. Degraded is not only a caught exception: if a tick's action reported degraded or failed, the tick is terminally
+  degraded too, and its diagnostics are recorded and reach the health line. A card moving to Blocked does not hurt
+  tick health: that is the dispatcher working normally, the reason is on the board, and the steward sees it as a
+  new-blocked signal. Freshness of the last healthy tick is checked separately, for the case where ticks stopped
+  being written at all. A pause freeze is a deliberate stop and is recorded by a healthy tick; the exception is a
+  frozen tick that again failed to stop an observer head, which is an unperformed operation and therefore terminally
+  degraded. A tick that died with an exception (an unreachable board fails the very first task read) writes a failed
+  record with the error code, otherwise the line would stay green on the previous tick until freshness expired. A
+  tick that never got as far as checking its right to the state (the singleton lock was taken, or the mutation guard
+  refused another owner's state) writes nothing: it is visible by healthy ticks no longer appearing.
 
-Путь к state диспетчера читатели резолвят так же, как сам диспетчер: явный `--data-dir`, у которого
-дефолт `SECRETARY_DATA_DIR`, иначе `data_dir` из instance — это единственное, что packaged-юнит
-передаёт тиком `--instance`. Правило одно на всех: установка или drop-in, задающая
-`SECRETARY_DATA_DIR` в `runtime.env`, переносит и записи диспетчера, и чтение health со стюардом
-на тот же data plane, так что читатель не может смотреть в файл, которого никто не пишет. Юнит
-диспетчера забирает `runtime.env` целиком через `EnvironmentFile`, а до процессов ролей эта
-переменная доходит через allowlist `role_env` (`NONSECRET_ENV`) — она адрес data plane, а не
-секрет. Instance
-берётся из `SECRETARY_INSTANCE`, который юниты стюарда задают вместе с `TA_RUNTIME_ENV_FILE`; если
-переменной нет, читатель берёт каталог самого `TA_RUNTIME_ENV_FILE` (`<instance>/runtime.env` в
-рендере юнита) и только потом `/home/dev/secretary-instance`. На установке с нестандартным instance
-стюард таким образом читает тот же файл, что пишет диспетчер. `TA_PRODUCTION_STATE` переопределяет
-файл целиком. Нечитаемый instance откатывает читателя на `<HOME>/secretary-data`, и тогда health
-покажет путь, по которому он смотрел.
+Readers resolve the path to dispatcher state exactly as the dispatcher does: an explicit `--data-dir`, defaulting to
+`SECRETARY_DATA_DIR`, else `data_dir` from the instance, which is the only thing the packaged unit passes with
+`--instance`. One rule for everyone: an installation or drop-in that sets `SECRETARY_DATA_DIR` in `runtime.env`
+moves both the dispatcher's writes and the health reader onto the same data plane, so a reader cannot look at a file
+nobody writes. The dispatcher's unit takes `runtime.env` wholesale through `EnvironmentFile`, and the variable
+reaches role processes through the role-environment allowlist, since it is the address of the data plane rather than
+a secret.
 
-Непрерывная череда нездоровых тиков — это один **incident**. Недоступная доска роняет каждый тик,
-пока длится, и это одна поломка с одной причиной и одним моментом окончания. Диспетчер держит её в
-`tick_telemetry.incident`: первый нездоровый тик открывает запись (`id`, `opened_at`, `opened` —
-тик-причина целиком, с его `errors`/`degradations`) и двигает счётчик `incident_total`, каждый
-следующий нездоровый тик только продлевает её (`unhealthy_ticks`, `last_at`), а первый здоровый тик
-закрывает её в `tick_telemetry.recovery` (та же запись плюс `recovered_at`/`recovered_seq`/
-`recovered_status`) и двигает `recovery_total`. Прочитать текущее состояние можно прямо из
-state-файла:
+A continuous run of unhealthy ticks is one **incident**. An unreachable board fails every tick for as long as it
+lasts, and that is one breakage with one cause and one moment of ending. The dispatcher keeps it in its tick
+telemetry: the first unhealthy tick opens a record (id, open time, and the tick reason in full with its errors and
+degradations) and moves an incident counter, each following unhealthy tick only extends it, and the first healthy
+tick closes it into a recovery record and moves a recovery counter.
 
-```
-python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["tick_telemetry"]; print(json.dumps({k:t.get(k) for k in ("incident","recovery","incident_total","recovery_total")}, ensure_ascii=False, indent=2))' \
-  <data_dir>/dispatcher/production-state.json
-```
+The steward's pipeline-ticks signal reads the same telemetry, and its unit is the incident, not the tick: one
+unhealthy event per incident (with the opening reason and the number of failed ticks) and one recovered event for its
+recovery. Deduplication uses the monotonic incident and recovery counters, so an ordinary tick between two steward
+runs does not swallow an event the steward has not seen yet, and a repeat precheck or scan before the advance, along
+with new failures inside the same incident, does not open a second external incident. A first run with no counters in
+its watermark takes the current values as a baseline rather than replaying what is already in state. The baseline is
+saved by that same run, so a quiet hour that never reaches the advance does not leave the counters empty and the next
+failed tick is not read as a first scan and silenced.
 
-Ту же телеметрию читает сигнал `pipeline_ticks` в `python3 -m triggered_agents steward scan`, и
-единица там — incident, а не тик: один `pipeline-tick-unhealthy` на incident (с причиной из
-`opened` и числом упавших тиков) и один `pipeline-tick-recovered` на его восстановление (с id того
-же incident, его причиной и данными здорового тика). Дедуп идёт по монотонным счётчикам
-`incident_total`/`recovery_total`, поэтому обычный тик между двумя прогонами стюарда не съедает
-событие, которое тот ещё не посмотрел, а повторный precheck/scan до `advance` и новые падения того
-же incident не заводят второй внешний incident. Первый прогон без счётчиков в watermark берёт
-текущие значения как baseline, а не проигрывает заново то, что лежит в state; так же ведёт себя
-watermark, записанный до этого контракта, — он один раз пере-baseline'ится. Baseline сохраняется
-сразу тем же прогоном (`scan` и `precheck`), поэтому тихий час, который до `advance` не доходит, не
-оставляет счётчики пустыми и следующий упавший тик не читается как «первый скан» и не глушится.
+Counters only mean something inside one telemetry history, so the dispatcher keeps a `generation` next to them: an
+identifier issued once and never changed afterwards. The steward's watermark stores it with the counters, and as soon
+as the generation differs (a restore from a backup, a rebuilt installation, a manual edit) the steward gets a
+telemetry-reset hit and re-reports what the new history holds. Counters alone would not be enough, because a new
+history can land on exactly the numbers the watermark has already seen and its events would silently deduplicate. A
+counter that moved backwards still counts as a reset on its own, which is the only signal available on an
+installation whose dispatcher does not yet write a generation.
 
-Счётчики имеют смысл только внутри одной истории телеметрии, поэтому рядом с ними диспетчер держит
-`generation` — идентификатор истории, который выдаётся один раз и дальше не меняется. Watermark
-стюарда хранит его вместе со счётчиками: как только generation другой (восстановление из бэкапа,
-пересобранная установка, правка руками), стюард получает хит `pipeline-telemetry-reset` и заново
-сообщает то, что держит новая история. Одних счётчиков для этого мало — новая история может встать
-ровно на те числа, которые watermark уже видел, и тогда её события молча дедуплицировались бы.
-Счётчик, уехавший назад, по-прежнему считается сбросом сам по себе: на установке, чей диспетчер ещё
-не пишет `generation`, это единственный признак.
-
-Сигнал `resource_flip` того же скана читает кэш вердиктов production dispatcher —
-`<data_dir>/dispatcher/resource_health.json`, тот же файл, что пишет `HeadHealth` перед запуском
-головы, и тот же путь-контракт, что у `tick_telemetry` (`SECRETARY_DATA_DIR`, иначе `data_dir`
-instance; `TA_PRODUCTION_RESOURCE_HEALTH` переопределяет файл целиком). Своих probe стюард не
-гоняет: они стоят токенов и описывали бы проверку, которой сам диспетчер не видел. Нечитаемый или
-отсутствующий кэш оставляет прошлый baseline, а не обнуляет его, иначе флип потерялся бы на первом
-же удачном чтении.
+The same scan's resource-flip signal reads the production dispatcher's cache of readiness verdicts, the same file the
+head-readiness check writes before launching a head, resolved by the same path contract as the tick telemetry. The
+steward runs no probes of its own: they cost tokens and would describe a check the dispatcher never saw. An unreadable
+or missing cache leaves the previous baseline in place rather than clearing it, otherwise a flip would be lost on the
+first successful read.
 
 ## Units
 
-Актуальные templates и их назначение находятся в
-[packaging/systemd/README.md](../packaging/systemd/README.md). Юниты раскатывает
-`secretary reconcile apply`; ручная установка больше не нужна и не даёт ownership.
+The current templates and what they are for are documented in
+[packaging/systemd/README.md](../packaging/systemd/README.md). Units are rolled out by
+`secretary reconcile apply`; manual installation is neither needed nor a source of ownership.
 
-Production dispatcher timer запускает one-shot tick. Memory, curator, steward и retro должны иметь
-ровно одного scheduler owner.
+The production dispatcher timer runs a one-shot tick. Memory, curator, steward and retro must each have exactly one
+scheduler owner.
 
 ## Upgrade
 
-`secretary upgrade --instance <dir>` подтягивает новую версию продукта и пере-материализует
-установку под неё. Идемпотентна: повторный запуск на актуальном хосте не делает ничего.
+`secretary upgrade --instance <dir>` pulls a new product version and re-materialises the installation onto it. It is
+idempotent: a repeat run on an up-to-date host does nothing.
 
-```
-secretary upgrade --instance INSTANCE --dry-run   # решить всё, ничего не писать
+```bash
+secretary upgrade --instance INSTANCE --dry-run   # decide everything, write nothing
 secretary upgrade --instance INSTANCE
 ```
 
-Шаги, по порядку; каждый печатает `changed`/`unchanged`/`skipped`/`failed`, первый `failed`
-останавливает прогон:
+The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, and the first failure stops the run:
 
-| шаг | что делает |
+| step | what it does |
 | --- | --- |
-| `pull` | `git fetch` + `merge --ff-only` чекаута продукта. Грязный чекаут — отказ. |
-| `dependencies` | переустановка в `.venv`, если в pull двигался манифест зависимостей |
-| `head-registry` | генерация `heads/heads.yaml` из канона продукта плюс `heads/source.yaml` — чекаут и ревизия, из которых он сгенерирован |
-| `role-skills` | `role_skills sync` в shell-овые skill-директории |
-| `role-worktrees` | ff worktree ролей (`~/orca/workspaces/secretary/<role>`) на base branch |
-| `host` | `reconcile apply`: юниты из `packaging/systemd` + Orca-регистрации |
-| `automations` | create/repoint Orca-автоматизаций из `automation.toml` |
-| `memory` | рестарт `secretary-memory.service`, если менялся код, зависимости или сам юнит |
-| `verify` | повторный dry-run: вторая раскатка обязана быть no-op |
+| `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
+| `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
+| `head-registry` | generate `heads/heads.yaml` from the product canon plus `heads/source.yaml`, the checkout and revision it came from |
+| `role-skills` | `role_skills sync` into the shells' skill directories |
+| `role-worktrees` | fast-forward the role worktrees onto the base branch |
+| `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
+| `automations` | create or repoint session-manager automations from `automation.toml` |
+| `memory` | restart the memory service if its code, dependencies or unit changed |
+| `verify` | a repeat dry run: the second rollout must be a no-op |
 
-Флаги: `--no-pull` (только пере-материализация), `--base-branch`, `--product-root`, `--json`.
+Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--json`.
 
-### Реестр голов установки
+### The installation's head registry
 
-Живой тик читает реестр голов только из `heads/heads.yaml` самой установки и ни в какой чекаут
-продукта не заглядывает. Двигает этот файл единственная операция — `secretary upgrade`; рядом она
-пишет `heads/source.yaml` с путём чекаута и ревизией, из которых снапшот сгенерирован. Поэтому
-правка `triggered_agents/agents/pipeline/heads.toml` в рабочем дереве (ветка, незакоммиченное
-изменение, полуготовый рефакторинг) на работающую установку не влияет вообще.
+A live tick reads the head registry only from the installation's own `heads/heads.yaml` and never looks into a product
+checkout. The only operation that moves that file is `secretary upgrade`, which writes `heads/source.yaml` next to it
+with the checkout path and revision the snapshot was generated from. So editing the product's head canon in a working
+tree (a branch, an uncommitted change, a half-finished refactor) has no effect at all on a running installation.
 
-Источник виден снаружи: `secretary status --json` отдаёт
-`installation.head_registry` с полями `snapshot`, `product_root`, `revision` и `error`, текстовый
-`status` печатает ту же строку. `error` заполнен, когда пин ещё не записан (установка не проходила
-`upgrade` с этой версией) или когда снапшот сам сломан.
+The source is visible from outside: `secretary status --json` returns `installation.head_registry` with `snapshot`,
+`product_root`, `revision` and `error`, and the text `status` prints the same line. `error` is filled when the pin has
+not been written yet (the installation never ran `upgrade` on this version) or when the snapshot itself is broken.
 
-Сломанный снапшот тик по-прежнему останавливает и называет причину: отсутствующая таблица,
-неизвестный ресурс или адаптер у профиля, роль в `role_defaults`, указывающая на несуществующую
-голову. Диспетчер отвечает `invalid_heads` с текстом проверки; чинится это `secretary upgrade`.
+A broken snapshot still stops the tick and names the reason: a missing table, an unknown resource or adapter on a
+profile, or a role in `role_defaults` pointing at a head that does not exist. The dispatcher answers `invalid_heads`
+with the text of the check; the fix is `secretary upgrade`.
 
-### Ownership и fail-closed
+### Ownership and fail-closed behaviour
 
-`reconcile apply` пишет только то, что подтверждено `host-managed.json`. Имя под
-`host.unit_prefix`, которого нет ни в плане, ни в manifest, — это `conflict`, и любой conflict
-отменяет весь прогон до первой записи. Разрешить можно двумя способами:
+`reconcile apply` writes only what the managed manifest confirms. A name under the configured unit prefix that is in
+neither the plan nor the manifest is a conflict, and any conflict aborts the whole run before the first write. There
+are two ways to resolve it:
 
-- юнит действительно наш и совпадает с packaged-файлом байт в байт →
+- the unit really is ours and matches the packaged file byte for byte:
   `secretary reconcile adopt --instance <dir> --logical-id systemd:unit:<name> --yes`;
-- имя принадлежит чему-то другому (например dev-only `secretary-supervisor.*`) → перечислить его
-  в `host.foreign_units` в instance.yaml.
+- the name belongs to something else: list it in `host.foreign_units` in `instance.yaml`.
 
-Юнит, который отличается от packaged-файла, adopt не примет: сначала удалить его руками
-(`sudo rm /etc/systemd/system/<name>`) и дать `apply` поставить канон, либо разобраться, почему
-хост разошёлся с продуктом.
+A unit that differs from the packaged file will not be adopted: either remove it by hand and let `apply` install the
+canonical one, or work out why the host diverged from the product.
 
-Компонент, который эта установка сознательно не крутит, выключается в конфиге, а не отсутствием
-юнита на хосте:
+A component this installation deliberately does not run is switched off in config, not by the absence of a unit on the
+host:
 
 ```yaml
 host:
   components:
     curator:
       enabled: false
-      reason: "load shedding, secretary-XXX"
+      reason: "load shedding"
 ```
 
-Выключенный компонент, юнит которого стоит и принадлежит нам, будет остановлен и удалён.
+A disabled component whose unit is installed and owned by us will be stopped and removed.
 
-### Health-набор
+### Health suite
 
-Детерминированный набор, пригодный как gate перед и после upgrade:
+A deterministic set, usable as a gate before and after an upgrade:
 
-```
+```bash
 secretary doctor --instance <dir>
 secretary role-skills audit --check
 secretary dispatcher production-tick --instance <dir> --probe
 python3 -m unittest
 ```
 
-`--probe` — это настоящий сухой тик: он берёт тот же singleton-lock, проходит те же mutation
-guards, сканирует те же состояния карточек и прогоняет ту же логику решения, но первая же запись
-превращается в abort и попадает в отчёт как «что сделал бы следующий тик». Зелёный probe при
-сломанном тике невозможен — сломанный тик падает и здесь.
+`--probe` is a real dry tick: it takes the same singleton lock, passes the same mutation guards, scans the same card
+states and runs the same decision logic, but the first write turns into an abort and lands in the report as "what the
+next tick would do". A green probe with a broken tick is impossible, because a broken tick fails here too.
 
-### Готовность голов
+### Head readiness
 
-Перед новым worker-, reviewer- или observer-запуском диспетчер читает ресурс профиля из `heads/heads.yaml`
-и выполняет его `probe`. Вердикты лежат в
-`<data_dir>/dispatcher/resource_health.json`; их можно посмотреть без запуска карточки:
+Before a new worker, reviewer or observer launch, the dispatcher reads the profile's resource from `heads/heads.yaml`
+and runs its probe. The verdicts are cached in the data directory and can be inspected without running a card:
 
-```
+```bash
 secretary dispatcher resource-health --instance <dir>
 ```
 
-Проверка кэшируется на 300 секунд. Это ограничивает расход probe до одного дешёвого вызова на
-ресурс за окно, хотя production tick может идти чаще. `ready` разрешает запуск.
-`unauthenticated` и `unavailable` оставляют новую карточку в Ready до следующей проверки, без
-claim и без занятия project slot. Такой выбор не создаёт цикл claim/отказ и не превращает
-временную проблему провайдера в операторскую Blocked-карточку. Для уже взятой карточки повторный
-worker launch блокирует её с причиной, сохраняя контекст попытки. Для головы-наблюдателя те же два
-вердикта означают отложенный запуск: спринт остаётся открытым, причина видна в записи наблюдателя,
-следующий тик пробует снова.
+The check is cached for 300 seconds. That limits probe spend to one cheap call per resource per window, even though the
+production tick may run more often. `ready` allows a launch. `unauthenticated` and `unavailable` leave a new card in
+Ready until the next check, without a claim and without occupying a project slot. That choice avoids a claim/refuse
+loop and does not turn a temporary provider problem into an operator's Blocked card. For a card already taken, a repeat
+worker launch blocks it with the reason, preserving the attempt's context. For an observer head the same two verdicts
+mean a deferred launch: the sprint stays open, the reason is visible in the observer record, and the next tick tries
+again.
 
-`unknown` означает, что сам probe не удалось надёжно выполнить или классифицировать. Он виден в
-снимке, но не запрещает запуск: сбой наблюдения не доказывает отказ ресурса и не может навсегда
-остановить очередь.
+`unknown` means the probe itself could not be run or classified reliably. It is visible in the snapshot but does not
+forbid a launch: a failure to observe does not prove the resource is down and must not stop the queue forever.
 
-Если `claude-sub` показывает `unauthenticated`, оператор запускает `/login` в интерактивном
-Claude, затем ждёт окончания TTL или проверяет следующий тик. Для `openai-sub` восстановите
-ChatGPT-сессию через `codex login` в том же `CODEX_HOME`, который указан у профиля. При
-`unavailable` не перезапускайте карточки: проверьте состояние провайдера, дождитесь следующего
-TTL и снимите `resource-health`; fallback-маршрутизация сюда не входит.
+If a resource shows `unauthenticated`, re-authenticate that runtime's CLI in the runtime home the profile names, then
+wait out the TTL or check the next tick. On `unavailable` do not restart cards: check the provider's status, wait for
+the next TTL and re-read the readiness snapshot. Fallback routing is not part of this.

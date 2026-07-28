@@ -29,7 +29,7 @@ from secretary.installation import (
     _run,
     _set_installation_owner,
 )
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import LEGACY_IDEAS_COLUMN, KanboardClient, TaskError
 
 
 KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
@@ -38,7 +38,7 @@ ORCA_APPIMAGE_URL = (
     "https://github.com/stablyai/orca/releases/download/"
     f"{ORCA_VERSION}/orca-linux.AppImage"
 )
-PIPELINE_COLUMNS = ("Идеи", "Ready", "In progress", "Validate", "Blocked", "Done")
+PIPELINE_COLUMNS = ("Ideas", "Ready", "In progress", "Validate", "Blocked", "Done")
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
@@ -88,6 +88,17 @@ def _project_lanes(instance: Path) -> set[str]:
     return lanes
 
 
+def _rename_column(api: KanboardClient, column: dict, title: str) -> None:
+    """Rename one column, refusing to treat a declined updateColumn as done.
+
+    Kanboard answers this call with a boolean, so a rejected rename returns
+    false instead of raising.  Ignoring it would leave the old title on the
+    board while the caller reports a current schema.
+    """
+    if not api.call("updateColumn", column_id=int(column["id"]), title=title):
+        raise BootstrapError(f"Kanboard did not rename the Pipeline column to {title}")
+
+
 def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = None) -> int:
     """Create the Pipeline board, columns and registry swimlanes without moving cards."""
     try:
@@ -103,6 +114,17 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
         if not isinstance(columns, list):
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
+        if (
+            titles[:1] == [LEGACY_IDEAS_COLUMN]
+            and titles[1:] == list(PIPELINE_COLUMNS[1:])
+            and isinstance(columns[0], dict)
+            and columns[0].get("id")
+        ):
+            # A board created before the column titles were translated differs only in the
+            # first title.  updateColumn renames it where it stands, so every card keeps its
+            # column, position and swimlane; the board is then the current schema.
+            _rename_column(api, columns[0], PIPELINE_COLUMNS[0])
+            titles[0] = PIPELINE_COLUMNS[0]
         if titles != list(PIPELINE_COLUMNS):
             # Kanboard defaults getAllTasks to open cards.  status_id=0 asks
             # for closed cards, which must count too: removing a column moves
@@ -112,7 +134,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):
                 if index < len(columns) and isinstance(columns[index], dict) and columns[index].get("id"):
-                    api.call("updateColumn", column_id=int(columns[index]["id"]), title=title)
+                    _rename_column(api, columns[index], title)
                 else:
                     api.call("addColumn", project_id=board_id, title=title)
             # Kanboard 1.2.46 creates four defaults. Remove surplus only while empty.

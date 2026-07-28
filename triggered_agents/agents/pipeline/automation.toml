@@ -15,7 +15,8 @@ precheck = "python3 -m triggered_agents pipeline precheck"
 # tick is cheap after precheck, so a tight cadence (every 3 min) keeps latency low.
 calendar = "*:0/3:00 *:1/3:30"
 randomized_delay_sec = 20
-# Kanboard-креды для precheck и тика загружает ta-gate через role-scoped runtime env.
+# The board credentials for the precheck and the tick are loaded by the agent gate through the
+# role-scoped runtime environment.
 
 [health]
 # Freshness budget for health.py's runs.jsonl check: named cadences ("hourly"/"daily") get a

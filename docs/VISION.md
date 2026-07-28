@@ -1,92 +1,91 @@
 # Vision
 
-`secretary` превращает удалённый VPS в персональный командный центр для работы с несколькими
-AI-агентами и множеством проектов. Пользователь управляет целями, архитектурными решениями и
-качеством результата. Система хранит контекст, выбирает исполнителей, запускает работу, организует
-проверку и восстанавливается после потери машины.
+`secretary` turns a remote VPS into a personal command centre for working with several AI agents
+across many projects. The owner sets goals, architectural decisions and quality bars. The system
+keeps context, picks executors, launches work, organises review and recovers after losing the
+machine.
 
-## Для кого
+## Who it is for
 
-Первый пользовательский профиль собран вокруг «других меня»:
+The first user profile is someone who:
 
-- человек работает в основном на удалённом VPS;
-- ведёт много проектов параллельно;
-- использует подписки и модели нескольких провайдеров;
-- сильнее в продукте и архитектуре, чем в ручном написании и чтении кода;
-- хочет наблюдать за агентами и вмешиваться в работу, не обслуживая оркестратор вручную.
+- works mainly on a remote VPS;
+- runs many projects in parallel;
+- uses subscriptions and models from several providers;
+- is stronger at product and architecture than at writing and reading code by hand;
+- wants to watch agents and intervene without hand-operating an orchestrator.
 
-Первые релизы поддерживают одного доверенного владельца на одной машине. Это deployment profile,
-а не разрешение вшивать конкретного пользователя, host, account или каталог в продуктовый код.
+Early releases support one trusted owner on one machine. That is a deployment profile, not a licence
+to hard-code a specific user, host, account or directory into product code.
 
-## Продуктовое обещание
+## Product promise
 
-На новом VPS пользователь выполняет одну или две команды и получает готовый appliance: доску,
-менеджер сессий, память, dispatcher, фоновые роли, расписания и наблюдаемость. При установке с
-нуля credentials и `.env` заполняются вручную один раз; головы подключаются после bootstrap.
+On a fresh VPS the owner runs one or two commands and gets a working appliance: board, session
+manager, memory, dispatcher, background roles, schedules and observability. On a from-scratch
+install, credentials and `.env` are filled in by hand once; agent heads are connected after
+bootstrap.
 
-Приватный Git-репозиторий установки служит durable recovery checkpoint. Installation credentials
-восстановимы вместе с ним: канон их значений лежит в зашифрованном хранилище секретов и
-пересобирается одной recovery phrase, без повторного ручного набора значений. Переезд на новую
-машину должен требовать только установки продукта, доступа к этому репозиторию, recovery phrase
-хранилища и повторного ввода тех credentials, которые в нём не хранятся, — сегодня это первый
-ввод при установке с нуля и логины голов, которые продукт сознательно не хранит. Активный runtime
-пересоздаётся из переносимого состояния, а не восстанавливается копированием host-local мусора.
+The private installation Git repository is the durable recovery checkpoint. Installation credentials
+are recoverable with it: the canonical values live in an encrypted secret store and are rebuilt from
+a single recovery phrase, without retyping them. Moving to a new machine should require only
+installing the product, access to that repository, the store's recovery phrase, and re-entering the
+credentials the product deliberately does not keep, which today means the first-time install entry
+and the agent-head logins. The active runtime is rebuilt from portable state rather than restored by
+copying host-local debris.
 
-## Несколько голов
+## Several heads
 
-Голова не равна провайдеру модели. Codex, Claude Code, Gemini CLI и Hermes являются agent runtimes;
-каждый runtime может использовать доступные ему accounts, subscriptions, API keys и модели.
-Профиль головы связывает runtime, account pool, модель, параметры запуска и роли.
+A head is not a model provider. Codex, Claude Code, Gemini CLI and Hermes are agent runtimes; each
+runtime can use the accounts, subscriptions, API keys and models available to it. A head profile
+binds a runtime, an account pool, a model, launch parameters and roles.
 
-Маршрутизация остаётся детерминированной. Карточка по умолчанию задаёт требуемую мощность, а policy
-выбирает профиль, account и модель с учётом доступности, лимитов и предпочтения независимой
-перепроверки. Пользователь или оператор-секретарь может явно переопределить выбор. Фактическое
-решение и причина сохраняются в audit.
+Routing stays deterministic. A card states the capability it needs, and policy picks the profile,
+account and model given availability, limits and a preference for independent re-checking. The owner
+or an operator can override the choice explicitly. The actual decision and its reason are recorded in
+the audit log.
 
-Пользу проверки разными модельными семействами нужно измерять по найденным проблемам, циклам
-исправлений, последующим регрессиям, времени и расходу квоты. До появления данных diversity
-остаётся предпочтением, а не жёстким обещанием качества.
+The value of reviewing with a different model family has to be measured by problems found, fix
+cycles, later regressions, elapsed time and quota spend. Until that data exists, diversity is a
+preference, not a quality guarantee.
 
-## Спринт как единица работы
+## The sprint as the unit of work
 
-Спринт держит цель и Definition of Done; карточка может жить внутри спринта, но одиночные карточки
-остаются возможны. Открытый спринт ведёт отдельная голова-наблюдатель, которую поднимает production
-dispatcher, а не человек в чате. Общение с идущим спринтом идёт записями к его сущности, а его
-статус читается из данных доски.
+A sprint holds a goal and a Definition of Done. A card can live inside a sprint, but standalone cards
+remain valid. An open sprint is run by a dedicated observer head that the production dispatcher
+launches, not by a person in a chat window. You talk to a running sprint through entries on its
+entity, and read its status from board data.
 
-Сущность следует из продуктового принципа: состояние спринта хранится там же, где карточки,
-потому что самоотчёт работающего агента врёт именно тогда, когда правда нужнее всего. Связь
-карточек со спринтом и события работы должны быть доступны независимо от памяти или транскрипта
-наблюдателя.
+The entity follows from a product principle: sprint state is stored where the cards are, because a
+working agent's self-report is least reliable exactly when the truth matters most. The link between
+cards and their sprint, and the events of the work, must be readable independently of the observer's
+memory or transcript.
 
-## Продуктовые принципы
+## Product principles
 
-- Каждая новая фича уменьшает число installation-specific допущений.
-- Opinionated default важнее ранней поддержки множества backend'ов.
-- Сменные части отделяются протоколами, но публичный plugin API появляется только после реальной
-  потребности во второй реализации.
-- Board backend хранит live task state; `secretary task` владеет нормализованной моделью,
-  переходами, audit и переносимым export.
-- Session manager предоставляет управляемые PTY-сессии, потоковый вывод, ввод, состояние,
-  завершение process tree и recovery. Красивый live UI является frontend capability.
-- LLM выполняют и проверяют работу. Routing, lifecycle, recovery и ownership задаются обычными
-  проверяемыми протоколами.
-- Observability и восстановление входят в основной пользовательский путь.
-- Сам проект ведёт backlog через собственную доску и task-протокол.
+- Every new feature reduces the number of installation-specific assumptions.
+- An opinionated default beats early support for many backends.
+- Replaceable parts are separated by protocols, but a public plugin API appears only after a real
+  need for a second implementation.
+- The board backend holds live task state; `secretary task` owns the normalised model, transitions,
+  audit and the portable export.
+- The session manager provides managed PTY sessions, streamed output, input, state, process-tree
+  termination and recovery. A pretty live UI is a frontend capability.
+- LLMs do and review the work. Routing, lifecycle, recovery and ownership are ordinary checkable
+  protocols.
+- Observability and recovery are part of the main user path.
 
-## Поставка и развитие
+## Delivery and direction
 
-Первый appliance поставляет Kanboard и Orca из коробки. Их внутренние детали не должны протекать
-во весь продукт, чтобы позднее можно было принять отдельное решение о замене. Heads остаются
-выбором пользователя и подключаются независимо.
+The first appliance ships Kanboard and Orca out of the box. Their internals must not leak across the
+product, so that replacing either stays a decision that can be taken later. Heads remain the owner's
+choice and are connected independently.
 
-Целевой способ распространения продукта: open source. Репозиторий, публичная эксплуатация и
-измеримые результаты служат доказательством компетенции и входом в консалтинг. Hosted SaaS не
-требуется для этой модели.
+The intended distribution model is open source: a public repository and measurable results, without a
+hosted SaaS.
 
-## Не сейчас
+## Not now
 
-Ближайшие релизы не строят командную платформу, мультитенантный SaaS, собственный аналог Orca,
-публичную экосистему плагинов или автоматическое хранение всех provider credentials. Telegram,
-голосовой ввод, собственный control-plane UI и перенос конфигурации в базу остаются направлениями
-после автоматизации основного install/recovery пути.
+Near-term releases do not build a team platform, a multi-tenant SaaS, an in-house Orca replacement, a
+public plugin ecosystem or automatic storage of every provider credential. Telegram, voice input, a
+first-party control-plane UI and moving configuration into a database stay on the list for after the
+main install and recovery path is automated.

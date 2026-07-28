@@ -1,38 +1,51 @@
 # secretary
 
 Portable personal appliance for running multiple AI agent heads across many projects from a remote
-VPS. The repository contains the CLI, task and memory protocols, dispatcher runtime, restore logic,
-schemas and generic skills.
+VPS. The repository contains the CLI, the task and memory protocols, the dispatcher runtime, restore
+logic, schemas and generic skills.
 
-The current production installation runs from this product repository. Private installation
-configuration and the portable Git-backed recovery checkpoint live in `secretary-instance`;
-local mutable and derived runtime state lives in `secretary-data`. The supported Git-backed
-install/recovery path is documented in [Recovery](docs/RECOVERY.md).
+The product repository holds no installation data. Private installation configuration and the
+portable Git-backed recovery checkpoint live in a separate private instance repository; local mutable
+and derived runtime state lives in a local data directory. The supported Git-backed install and
+recovery path is documented in [Recovery](docs/RECOVERY.md).
 
 ## Documentation
 
-- [Vision](docs/VISION.md)
-- [Roadmap](docs/ROADMAP.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Protocols](docs/PROTOCOLS.md)
-- [Operations](docs/OPERATIONS.md)
-- [Recovery](docs/RECOVERY.md)
+- [Vision](docs/VISION.md) — what the appliance is for and who it is for
+- [Roadmap](docs/ROADMAP.md) — product states, milestones and open questions
+- [Architecture](docs/ARCHITECTURE.md) — storage boundary, runtime flow, security model
+- [Protocols](docs/PROTOCOLS.md) — command contracts for tasks, sprints, memory and secrets
+- [Operations](docs/OPERATIONS.md) — runbooks for a running installation
+- [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
 
-The Pipeline board is the only active backlog. Read project cards through the product protocol:
+## Install
 
-```bash
-python3 -m secretary task list --project secretary
-```
-
-Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available
-with `python3 -m pip install '.[memory]'`. On Ubuntu 24.04, bootstrap the
-derived Kanboard and Orca runtime before install:
+Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available with
+`python3 -m pip install '.[memory]'`. On a supported host, bootstrap the derived board and session
+manager before install:
 
 ```bash
-sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
-sudo secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
-sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user dev
+sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE \
+  --installation-user INSTALL_USER
+sudo secretary install --instance-remote REMOTE --instance-dir INSTANCE \
+  --installation-user INSTALL_USER
+sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
+  --installation-user INSTALL_USER
 ```
 
-Bootstrap pins Kanboard and Orca transports, generates the local Kanboard credentials in
+Bootstrap pins the board and session-manager transports, generates the local board credentials in
 `INSTANCE/runtime.env` with mode `0600`, and creates the Pipeline board from the instance registry.
+
+## Status
+
+The project is pre-1.0 and is developed against one opinionated deployment profile: a single trusted
+owner running one appliance on one host. See [SECURITY.md](SECURITY.md) for what that model does and
+does not promise.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[Apache License 2.0](LICENSE).

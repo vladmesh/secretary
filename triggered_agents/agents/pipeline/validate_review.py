@@ -17,11 +17,11 @@ def review_skipped_by_po(ref: str, pr: str | None, card: dict, is_stand: bool, r
     """PO set review_head=none: lower layers are already green, so skip only layer 3."""
     changed = False
     if not rec.get("no_review_logged"):
-        label = pr if pr else f"ветке `{contrib[0]}` @ `{contrib[1]}`"
+        label = pr if pr else f"branch `{contrib[0]}` @ `{contrib[1]}`"
         ops.add_comment(
             "dispatcher", ref,
-            f"PO отключил LLM-review для этой карточки (`review_head=none`). Нижние слои "
-            f"валидации зелёные; слой 3 пропущен по {label}.",
+            f"The PO disabled the LLM review for this card (`review_head=none`). The lower "
+            f"validation layers are green; layer 3 was skipped on {label}.",
             marker=model.MARKER_REVIEW_SKIPPED)
         rec["no_review_logged"] = True
         STATE.log_run("review", reference=ref, result="skipped-by-po", pr=pr,
@@ -70,8 +70,9 @@ def review_green(ref: str, pr: str | None, card: dict, is_stand: bool, rec: dict
         return changed
     if actual_base != expected_base:
         ops.add_comment("dispatcher", ref,
-                        f"PR {pr} открыт против `{actual_base}`, ожидалась база `{expected_base}` — "
-                        f"автомерж остановлен, карточка в Blocked.")
+                        f"PR {pr} was opened against `{actual_base}` while base `{expected_base}` "
+                        f"was expected; the automatic merge was stopped and the card moved to "
+                        f"Blocked.")
         ops.move_card("dispatcher", ref, "Blocked")
         records.pop(ref, None)
         STATE.log_run("review", reference=ref, to="Blocked", reason="base-mismatch", pr=pr,
@@ -81,19 +82,20 @@ def review_green(ref: str, pr: str | None, card: dict, is_stand: bool, rec: dict
     result = worker.merge_pr(pr)
     if result["ok"]:
         if review_skipped:
-            layers = "CI, стенд, LLM-review отключён PO" if is_stand else "CI, LLM-review отключён PO"
+            layers = ("CI, stand, LLM review disabled by the PO" if is_stand
+                      else "CI, LLM review disabled by the PO")
         else:
-            layers = "CI, стенд, ревью" if is_stand else "CI, ревью"
+            layers = "CI, stand, review" if is_stand else "CI, review"
         ops.add_comment("dispatcher", ref,
-                        f"Все слои валидации зелёные ({layers}) — автомерж {pr}.",
+                        f"All validation layers are green ({layers}); merging {pr} automatically.",
                         marker=model.MARKER_AUTOMERGE)
         log_result = "no-review-automerge" if review_skipped else "green-automerge"
         STATE.log_run("review", reference=ref, result=log_result, pr=pr)
         return True
-    scrubbed = worker.scrub_secrets(result.get("error") or "(без деталей)")
+    scrubbed = worker.scrub_secrets(result.get("error") or "(no details)")
     ops.add_comment("dispatcher", ref,
-                    f"Автомерж {pr} не удался: {scrubbed}. Карточка в Blocked, нужна ручная "
-                    f"проверка и мерж руками.")
+                    f"The automatic merge of {pr} failed: {scrubbed}. Card moved to Blocked; it "
+                    f"needs a manual check and a manual merge.")
     ops.move_card("dispatcher", ref, "Blocked")
     records.pop(ref, None)
     STATE.log_run("review", reference=ref, to="Blocked", reason="automerge-fail", pr=pr,

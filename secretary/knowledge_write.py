@@ -1,6 +1,6 @@
 """Writer for long recoverable documents in `state/knowledge`.
 
-Contract: docs/ARCHITECTURE.md, "Плоскости знания". Knowledge holds the long
+Contract: docs/ARCHITECTURE.md, "Knowledge planes". Knowledge holds the long
 reasoning behind a decision: brainstorms, decision logs, incident write-ups.
 It is plain tracked markdown, so a document written here rides to the remote
 with the rest of the checkpoint and survives a move to another machine.

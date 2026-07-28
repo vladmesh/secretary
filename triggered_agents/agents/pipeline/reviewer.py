@@ -1,22 +1,22 @@
 """Layer-3 reviewer prompt — the one-time REVIEW.md handed to the independent review head.
 
-Validate layer 3 (design-task-pipeline.md, «LLM-ревью против спеки»): once the cheap mechanical
-layers are green (CI, and the stand for stand projects), the dispatcher spawns a fresh Claude head
-that is NOT the card's worker and has no write access to the code. It reads the whole repo and the
-full PR (not just the diff) and posts one structured verdict, then the dispatcher acts on it like
-it acts on a worker report — including, on green, squash-merging the PR itself (validate.py). A
-green verdict is no longer double-checked by a human before merge, so this prompt also has the
-reviewer verify whatever live checks the worker's report claims. Safe local checks are re-run in
-the review worktree; heavyweight checks that need Docker, a stand or external writes are verified
-through the exact green mechanical gate for the current head SHA, its workflow and logs. This is
-the class of proof-of-work a human skim used to catch without forcing a read-only reviewer to
-repeat side effects that the lower validation layers already own.
+Validate layer 3 ("LLM review against the spec"): once the cheap mechanical layers are green (CI,
+and the stand for stand projects), the dispatcher spawns a fresh head that is NOT the card's worker
+and has no write access to the code. It reads the whole repo and the full PR (not just the diff) and
+posts one structured verdict, then the dispatcher acts on it like it acts on a worker report —
+including, on green, squash-merging the PR itself (validate.py). A green verdict is no longer
+double-checked by a human before merge, so this prompt also has the reviewer verify whatever live
+checks the worker's report claims. Safe local checks are re-run in the review worktree; heavyweight
+checks that need Docker, a stand or external writes are verified through the exact green mechanical
+gate for the current head SHA, its workflow and logs. This is the class of proof-of-work a human
+skim used to catch without forcing a read-only reviewer to repeat side effects that the lower
+validation layers already own.
 
 This module only builds the text of REVIEW.md. The host side (worktree + head) lives in worker.py,
 so the dispatcher keeps talking to a single host boundary. The thermo-nuclear quality lens is not
 copied into the source: the skill file is read at build time and embedded verbatim into the prompt
-(design decision: «использовать как есть, вчитывать файл в промпт ревьюера, не копировать в код»),
-falling back to a load-it-yourself instruction if the file is missing.
+(a deliberate decision — use it as it is, read the file into the reviewer prompt rather than
+duplicating it in code), falling back to a load-it-yourself instruction if the file is missing.
 """
 from __future__ import annotations
 
@@ -52,8 +52,8 @@ def _clip(body: str) -> str:
     if len(body) <= _COMMENT_CHARS:
         return body
     return (body[:_COMMENT_CHARS].rstrip()
-            + f"\n\n… обрезано, ещё {len(body) - _COMMENT_CHARS} символов "
-              "(полный текст — в `pipeline show`)")
+            + f"\n\n… clipped, {len(body) - _COMMENT_CHARS} more characters "
+              "(full text in `pipeline show`)")
 
 
 def _parse(comments: list[dict]) -> list[tuple[str, str, str]]:
@@ -90,16 +90,16 @@ def _spec_notes(parsed: list[tuple[str, str, str]]) -> list[str]:
         return []
     dropped = len(picked) - _SPEC_NOTE_LIMIT
     lines = [
-        "### Уточнения спеки комментариями",
+        "### Spec amendments in comments",
         "",
-        "Описание карточки выше после создания не редактируется, поэтому PO уточняет спеку "
-        "комментарием. Эти комментарии новее описания: где они расходятся, criterion задаёт "
-        "комментарий, а описание считается устаревшим в этой части. Прямые указания ревьюеру "
-        "здесь тоже обязательны к исполнению.",
+        "The card description above is not edited after creation, so the PO amends the spec by "
+        "comment. These comments are newer than the description: where they disagree, the comment "
+        "defines the criterion and the description is stale on that point. Direct instructions to "
+        "the reviewer here are also binding.",
         "",
     ]
     if dropped > 0:
-        lines += [f"(последние {_SPEC_NOTE_LIMIT} из {len(picked)}; остальные — в `pipeline show`)", ""]
+        lines += [f"(the last {_SPEC_NOTE_LIMIT} of {len(picked)}; the rest are in `pipeline show`)", ""]
     return lines + _entries(picked[-_SPEC_NOTE_LIMIT:])
 
 
@@ -108,27 +108,28 @@ def _rounds(parsed: list[tuple[str, str, str]]) -> list[str]:
 
     Without this a red verdict is amnesic by construction: `_review_red` returns the card to In
     progress and the next Validate entry spawns a brand-new head with a brand-new prompt, so round
-    N sees the worker's answer to round N-1's finding with no idea a finding existed. On
-    codegen_orchestrator-646 that cost a real miss — round 1 flagged a collision risk in a slug
-    rule, the worker replaced the rule, and round 2 read a description saying one thing and code
-    saying another, then passed it green as if the gap were nothing."""
+    N sees the worker's answer to round N-1's finding with no idea a finding existed. That has cost
+    a real miss: round 1 flagged a collision risk in a slug rule, the worker replaced the rule, and
+    round 2 read a description saying one thing and code saying another, then passed it green as if
+    the gap were nothing."""
     picked = [p for p in parsed if p[1] in _ROUND_MARKERS]
     if not picked:
         return []
     dropped = len(picked) - _ROUND_LIMIT
     lines = [
-        "## Прошлые раунды ревью этой карточки",
+        "## Earlier review rounds on this card",
         "",
-        "Эта карточка уже проходила ревью — ниже вердикты прошлых раундов и причины возвратов "
-        "диспетчера. Это НЕ описание текущего кода: воркер работал уже после них. Для каждой "
-        "прошлой находки реши, закрыта она в текущем состоянии или нет. И если текущий код "
-        "расходится со спекой именно потому, что так потребовал прошлый раунд, — это не новый "
-        "дефект, а расхождение спеки с кодом: зафиксируй его явно в вердикте, не пропусти молча "
-        "и не выдавай за находку.",
+        "This card has been reviewed before. Below are the verdicts of earlier rounds and the "
+        "dispatcher's reasons for sending it back. This is NOT a description of the current code: "
+        "the worker has worked since. For each earlier finding, decide whether it is closed in the "
+        "current state. And if the current code disagrees with the spec precisely because an "
+        "earlier round demanded it, that is not a new defect but a divergence between spec and "
+        "code: state it explicitly in the verdict rather than passing over it silently or "
+        "presenting it as a finding.",
         "",
     ]
     if dropped > 0:
-        lines += [f"(последние {_ROUND_LIMIT} из {len(picked)}; остальные — в `pipeline show`)", ""]
+        lines += [f"(the last {_ROUND_LIMIT} of {len(picked)}; the rest are in `pipeline show`)", ""]
     return lines + _entries(picked[-_ROUND_LIMIT:])
 
 
@@ -141,9 +142,9 @@ def _history(parsed: list[tuple[str, str, str]]) -> list[str]:
     if not picked:
         return []
     dropped = len(picked) - _HISTORY_LIMIT
-    lines = ["## Остальная история карточки", ""]
+    lines = ["## The rest of the card's history", ""]
     if dropped > 0:
-        lines += [f"(последние {_HISTORY_LIMIT} из {len(picked)}; остальные — в `pipeline show`)", ""]
+        lines += [f"(the last {_HISTORY_LIMIT} of {len(picked)}; the rest are in `pipeline show`)", ""]
     return lines + _entries(picked[-_HISTORY_LIMIT:])
 
 
@@ -151,18 +152,19 @@ def _quality_lens() -> str:
     """The thermo-nuclear skill, read from disk and embedded. Never hardcode its content — read
     the current file so the lens tracks the skill, and degrade to a pointer if it is absent."""
     try:
-        return (f"Ниже — модуль качества (скилл thermo-nuclear) целиком; применяй его как есть:\n\n"
+        return (f"Below is the whole quality module (the thermo-nuclear skill); apply it as it is:\n\n"
                 f"````\n{THERMO_SKILL.read_text(encoding='utf-8').strip()}\n````")
     except OSError:
-        return (f"Модуль качества — скилл thermo-nuclear по пути `{THERMO_SKILL}` "
-                f"(не прочитался при сборке промпта). Загрузи его сам и применяй как есть.")
+        return (f"The quality module is the thermo-nuclear skill at `{THERMO_SKILL}` "
+                f"(it could not be read while building this prompt). Load it yourself and apply it "
+                f"as it is.")
 
 
 def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str,
               branch: str | None = None, head_sha: str | None = None,
               comments: list[dict] | None = None) -> str:
     """REVIEW.md for the reviewer head: what to review, the three lenses, the blocking semantics,
-    and how to emit the verdict + Идеи cards through board-CLI. `spec` is the card description.
+    and how to emit the verdict + Ideas cards through board-CLI. `spec` is the card description.
     `pr` is the card's PR link — or None for a contrib (fork) card, which has no PR in this
     pipeline by definition (a human opens it against upstream from the pushed branch afterward);
     `branch`/`head_sha` then point at what to review instead (the worker's own report:done
@@ -174,132 +176,140 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
     review_branch = naming.reviewer_branch(ref)
     if pr:
         what_to_read = [
-            f"PR карточки: {pr}",
-            f"Отчёт воркера (report:done) и вся история карточки вклеены ниже, отдельными "
-            f"разделами — читай их там, а не догадывайся сходить за ними. В отчёте — заявленные "
-            f"живые проверки (см. ниже). За полным текстом того, что помечено обрезанным: "
-            f"`python3 -m triggered_agents pipeline show --ref {ref}`, роль не нужна.",
-            f"База проекта: `{base_branch}`.",
-            f"Воркспейс уже стоит на состоянии PR — своя ветка `{review_branch}` заведена от головы PR "
-            "при подъёме, чекаутить/переключать ветку не нужно. Тебе доступен весь репо и полный PR, "
-            "не только дифф:",
+            f"The card's PR: {pr}",
+            f"The worker's report (report:done) and the whole card history are pasted below as "
+            f"their own sections — read them there instead of guessing that you should go and "
+            f"fetch them. The report names the live checks that were claimed (see below). For the "
+            f"full text of anything marked as clipped: "
+            f"`python3 -m triggered_agents pipeline show --ref {ref}`, no role needed.",
+            f"The project's base branch: `{base_branch}`.",
+            f"The workspace already sits on the PR's state — your own branch `{review_branch}` was "
+            "cut from the PR head at launch, so there is nothing to check out or switch. You have "
+            "the whole repository and the full PR, not only the diff:",
             "```",
-            f"gh pr diff {pr}       # дифф PR, если нужен именно дифф, а не полный код",
+            f"gh pr diff {pr}       # the PR diff, when you specifically want a diff rather than the code",
             "```",
-            f"Читай нужные файлы репо на состоянии PR, а не только строки диффа. Своя ветка "
-            f"`{review_branch}` — только твоя рабочая копия, её (как и любую ветку) не пушить.",
+            f"Read the repository files at the PR's state, not only the diff lines. Your branch "
+            f"`{review_branch}` is only your working copy; do not push it, or any branch.",
         ]
     else:
         what_to_read = [
-            f"Contrib-карточка (форк): PR в этом пайплайне не открывается — ветку в форк для "
-            f"upstream-автора готовит человек. Ветка воркера: `{branch}`, голова: `{head_sha}`.",
-            f"Отчёт воркера (report:done) и вся история карточки вклеены ниже, отдельными "
-            f"разделами — читай их там, а не догадывайся сходить за ними. В отчёте — заявленные "
-            f"живые проверки (см. ниже). За полным текстом того, что помечено обрезанным: "
-            f"`python3 -m triggered_agents pipeline show --ref {ref}`, роль не нужна.",
-            f"База проекта: `{base_branch}`.",
-            f"Воркспейс уже стоит на состоянии этой ветки — своя ветка `{review_branch}` заведена от "
-            "той же головы при подъёме, чекаутить/переключать ветку не нужно. Тебе доступен весь "
-            "репо на этом состоянии, не только дифф:",
+            f"A contrib (fork) card: no PR is opened in this pipeline — a human prepares the branch "
+            f"in the fork for the upstream author. The worker's branch: `{branch}`, head: "
+            f"`{head_sha}`.",
+            f"The worker's report (report:done) and the whole card history are pasted below as "
+            f"their own sections — read them there instead of guessing that you should go and "
+            f"fetch them. The report names the live checks that were claimed (see below). For the "
+            f"full text of anything marked as clipped: "
+            f"`python3 -m triggered_agents pipeline show --ref {ref}`, no role needed.",
+            f"The project's base branch: `{base_branch}`.",
+            f"The workspace already sits on that branch's state — your own branch `{review_branch}` "
+            "was cut from the same head at launch, so there is nothing to check out or switch. You "
+            "have the whole repository at this state, not only the diff:",
             "```",
-            "git log --oneline -20     # история ветки, если нужен только список коммитов",
+            "git log --oneline -20     # the branch history, when you only want the commit list",
             "```",
-            f"Читай нужные файлы репо на этом состоянии, а не только строки диффа. Своя ветка "
-            f"`{review_branch}` — только твоя рабочая копия, её (как и любую ветку) не пушить.",
+            f"Read the repository files at this state, not only the diff lines. Your branch "
+            f"`{review_branch}` is only your working copy; do not push it, or any branch.",
         ]
     lines = [
-        f"# Ревью задачи {ref} ({project}) — слой 3 валидации",
+        f"# Review of task {ref} ({project}) — validation layer 3",
         "",
-        "Ты — независимая голова-ревьюер. Ты НЕ воркер этой карточки и прав на код нет: не коммить, "
-        "не пушь, не меняй PR. Твои единственные артефакты — один вердикт-коммент и, при "
-        "необходимости, карточки-идеи. Нижние слои валидации (CI, для стенд-проектов ещё стенд+e2e) "
-        "уже зелёные — твоя работа поверх них.",
+        "You are an independent reviewer head. You are NOT this card's worker and you have no "
+        "write access to the code: do not commit, do not push, do not change the PR. Your only "
+        "artifacts are one verdict comment and, if needed, idea cards. The lower validation layers "
+        "(CI, plus the stand and end-to-end run for stand projects) are already green; your work "
+        "sits on top of them.",
         "",
         naming.memory_block("reviewer", project),
         "",
-        "## Что вычитать",
+        "## What to read",
         "",
         *what_to_read,
         "",
-        "## Спека карточки (по ней проверяешь criterion за criterion)",
+        "## The card's spec (you check it criterion by criterion)",
         "",
-        spec or "(описание карточки пустое)",
+        spec or "(the card description is empty)",
         "",
         *_spec_notes(parsed),
         *_rounds(parsed),
-        "## Три линзы (все обязательны)",
+        "## Three lenses (all mandatory)",
         "",
-        "### 1. Спека-комплаенс",
-        "По каждому acceptance criterion спеки реши: выполнен РЕАЛЬНО или НА БУМАГЕ (заявлен в "
-        "отчёте, но код/тест этого не делает, проверка мокнута насквозь, criterion обойдён). "
-        "Для каждого — вердикт реально/на бумаге с обоснованием из кода.",
+        "### 1. Spec compliance",
+        "For each acceptance criterion of the spec, decide whether it is met FOR REAL or ON PAPER "
+        "(claimed in the report while the code or test does not do it, the check is mocked all the "
+        "way through, the criterion is worked around). Give each one a real/on-paper verdict with "
+        "justification from the code.",
         "",
-        "### 2. Adversarial-охота за багами",
-        "Ищи дефекты по классам отказов; ОБЯЗАТЕЛЬНЫ все:",
-        "- **Пути ошибок**: что происходит при падении каждой стадии/вызова (исключение проглочено? "
-        "частичное состояние? ретрай вечно?).",
-        "- **Гонки/конкурентность**: параллельные тики/воркеры/хендлы, общий стейт, лок-файлы, "
-        "read-check-write без атомарности.",
-        "- **Залипание навсегда без сигнала человеку**: может ли карточка/процесс встать так, что "
-        "никто не узнает (нет вотчдога, нет эскалации, бесконечный ретрай, потерянный хендл).",
-        "- **Утечка секретов** в комменты/логи/доску (токены, env, ключи — что постится без scrub).",
-        "- **Blast radius на соседние системы**: задевает ли изменение чужие контейнеры/ветки/"
-        "стейт/доску за рамками своей задачи.",
-        "Каждая находка — с конкретным файлом и сценарием поломки (какой вход/состояние → что "
-        "ломается).",
+        "### 2. Adversarial bug hunt",
+        "Look for defects by failure class; all of these are mandatory:",
+        "- **Error paths**: what happens when each stage or call fails (is the exception swallowed? "
+        "is state left partial? does it retry forever?).",
+        "- **Races and concurrency**: parallel ticks, workers and handles, shared state, lock files, "
+        "read-check-write without atomicity.",
+        "- **Hanging forever with no signal to a human**: can the card or process stall so that "
+        "nobody finds out (no watchdog, no escalation, an infinite retry, a lost handle).",
+        "- **Secret leakage** into comments, logs or the board (tokens, env, keys — anything posted "
+        "without scrubbing).",
+        "- **Blast radius on neighbouring systems**: does the change touch other containers, "
+        "branches, state or board entries outside its own task.",
+        "Every finding comes with a specific file and a breakage scenario (which input or state "
+        "leads to what going wrong).",
         "",
-        "### 3. Качество кода (thermo-nuclear)",
+        "### 3. Code quality (thermo-nuclear)",
         _quality_lens(),
         "",
         *_history(parsed),
-        "## Живые проверки из отчёта воркера",
+        "## Live checks from the worker's report",
         "",
-        "Зелёный вердикт теперь сам достаточен для автомержа — ручной вычитки человека после "
-        "него больше нет. Если в отчёте воркера заявлена конкретная живая проверка (смоук, "
-        "ручной прогон, curl на эндпоинт, запуск скрипта/команды) — прогони её сам там, где это "
-        "безопасно и воспроизводимо прямо в этом воркспейсе (без стенда, без докера, без записи "
-        "во внешние сервисы или чужие данные). Для heavyweight-проверки, которую reviewer "
-        "сознательно не должен повторять (Docker, стенд, внешняя запись), допускается независимое "
-        "механическое evidence: проверь, что точная CI/stand job зелёная на ТЕКУЩЕМ head SHA, "
-        "прочитай её workflow/команду и релевантные логи или artifact, и убедись, что job реально "
-        "исполняет заявленный путь, а не мок или no-op. Такое evidence считается реальным "
-        "выполнением criterion; отсутствие личного Docker-прогона само по себе не блокер. Если "
-        "нет ни безопасного rerun, ни подходящего механического evidence текущего SHA — не "
-        "догадывайся, фиксируй как «на бумаге» и объясни, чего не хватает.",
+        "A green verdict is now enough for an automatic merge; there is no human read after it. If "
+        "the worker's report claims a specific live check (a smoke test, a manual run, a request "
+        "against an endpoint, running a script or command), run it yourself where that is safe and "
+        "reproducible right in this workspace (no stand, no Docker, no writes to external services "
+        "or other people's data). For a heavyweight check a reviewer deliberately should not repeat "
+        "(Docker, a stand, an external write), independent mechanical evidence is acceptable: check "
+        "that the exact CI or stand job is green on the CURRENT head SHA, read its workflow or "
+        "command and the relevant logs or artifacts, and satisfy yourself that the job really "
+        "executes the claimed path rather than a mock or a no-op. Such evidence counts as the "
+        "criterion actually being met; the absence of a personal Docker run is not by itself a "
+        "blocker. If there is neither a safe rerun nor suitable mechanical evidence for the current "
+        "SHA, do not guess: record it as on-paper and explain what is missing.",
         "",
-        "## Семантика блокировки (важно — что блокер, а что нет)",
+        "## Blocking semantics (important — what blocks and what does not)",
         "",
-        "- **Блокеры** (красный вердикт): дифф самого PR подрывает качество кода и есть конкретное "
-        "исправимое замечание; ЛИБО файл переваливает за 1000 строк из-за этого PR; ЛИБО баг любого "
-        "из классов линзы 2; ЛИБО criterion выполнен только на бумаге.",
-        "- **НЕ блокеры**: pre-existing долг, находки в СОСЕДНЕМ коде (не тронутом PR), амбициозные "
-        "перестройки за рамками карточки. Их НЕ пихай в красный вердикт — оформляй карточками в "
-        "колонку Идеи (см. ниже). Это единственное исключение из «прав на код нет».",
+        "- **Blockers** (a red verdict): the PR's own diff undermines code quality and there is a "
+        "specific fixable remark; OR a file goes past 1000 lines because of this PR; OR a bug of "
+        "any class from lens 2; OR a criterion is met only on paper.",
+        "- **NOT blockers**: pre-existing debt, findings in NEIGHBOURING code the PR did not touch, "
+        "ambitious rebuilds outside the card. Do NOT push those into a red verdict — file them as "
+        "cards in the Ideas column (see below). That is the only exception to \"no write access to "
+        "the code\".",
         "",
-        "## Как отдать результат",
+        "## How to deliver the result",
         "",
-        "Один вердикт-коммент через board-CLI. Красный — если есть блокер любой линзы; иначе "
-        "зелёный. Тело вердикта:",
-        "1. По каждому criterion спеки: реально / на бумаге + почему.",
-        "2. По каждой живой проверке из отчёта воркера: прогнал сам (что вышло), ИЛИ подтвердил "
-        "механическим evidence текущего SHA (какая job, workflow/команда и результат), ИЛИ не "
-        "смог подтвердить (почему) — не пропускай молча.",
-        "3. Находки, ранжированные блокер / замечание, КАЖДАЯ с файлом и сценарием поломки.",
+        "One verdict comment through the board CLI. Red if there is a blocker in any lens; "
+        "otherwise green. The verdict body:",
+        "1. For each spec criterion: real or on paper, and why.",
+        "2. For each live check from the worker's report: ran it yourself (with the outcome), OR "
+        "confirmed it by mechanical evidence for the current SHA (which job, which workflow or "
+        "command, and the result), OR could not confirm it (why) — do not skip any of them "
+        "silently.",
+        "3. The findings, ranked as blocker or remark, EACH with a file and a breakage scenario.",
         "",
         "```",
-        "# красный (есть блокеры), тело обязательно:",
-        f"python3 -m triggered_agents pipeline --role reviewer verdict --ref {ref} --kind red --body-file <файл>",
-        "# зелёный (блокеров нет):",
-        f"python3 -m triggered_agents pipeline --role reviewer verdict --ref {ref} --kind green --body-file <файл>",
+        "# red (there are blockers), the body is mandatory:",
+        f"python3 -m triggered_agents pipeline --role reviewer verdict --ref {ref} --kind red --body-file <file>",
+        "# green (no blockers):",
+        f"python3 -m triggered_agents pipeline --role reviewer verdict --ref {ref} --kind green --body-file <file>",
         "```",
         "",
-        "Не-блокеры (соседний код, долг, идеи за рамками) — карточками в Идеи:",
+        "Non-blockers (neighbouring code, debt, ideas beyond the card) go into Ideas cards:",
         "```",
         f"python3 -m triggered_agents pipeline --role reviewer idea --project {project} "
-        "--title '<кратко>' --description-file <файл>",
+        "--title '<short>' --description-file <file>",
         "```",
         "",
-        "Постишь РОВНО ОДИН вердикт. Не двигай карточку и не пиши в код — на красный её вернёт "
-        "диспетчер сам.",
+        "You post EXACTLY ONE verdict. Do not move the card and do not write code: on a red verdict "
+        "the dispatcher returns it itself.",
     ]
     return "\n".join(lines)

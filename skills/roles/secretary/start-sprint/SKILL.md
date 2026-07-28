@@ -1,104 +1,103 @@
 ---
 name: start-sprint
-description: "Начать новый продуктовый спринт Secretary: собрать живой контекст, при необходимости провести grilling по нерешённым продуктовым развилкам, зафиксировать цель и Definition of Done в отдельном sprint-документе, очистить Ready затронутых репозиториев и установить единственный active-sprint pointer. Использовать по явным запросам «начни спринт», «новый спринт», «спланируй спринт», `$start-sprint`."
+description: "Start a new product sprint: gather live context, grill the unresolved product forks if needed, fix the goal and Definition of Done in a separate sprint document, clear Ready in the affected repositories and set the single active-sprint pointer. Use on explicit requests like 'start a sprint', 'new sprint', 'plan a sprint', `$start-sprint`."
 ---
 
 # Start Sprint
 
-Создай контракт одного автономно исполняемого спринта. Не создавай карточки и не начинай работу:
-это делает `$run-sprint`.
+Create the contract for one autonomously executable sprint. Do not create cards and do not start work:
+`$run-sprint` does that.
 
-## Канон
+## The canon
 
-- Один активный спринт на весь продукт Secretary.
-- Документы живут в `secretary-instance/state/knowledge/sprints/`.
-- `STATUS.md` указывает на активный документ.
-- Спринт может затрагивать `secretary`, `secretary-instance` и, когда появится,
-  `secretary-supervisor`.
-- У спринта нет фаз, task pool или соответствия «пункт = карточка». Карточки нарезаются по одной
-  во время исполнения.
-- Доска хранит исполнение. Sprint-документ хранит цель, решения и причинную историю.
+- One active sprint for the whole product.
+- Documents live under the sprints directory in the instance repository's knowledge tree.
+- A status pointer names the active document.
+- A sprint may touch the product repository, the instance repository and any related repository.
+- A sprint has no phases, task pool or one-item-per-card mapping. Cards are cut one at a time during
+  execution.
+- The board holds execution. The sprint document holds the goal, the decisions and the causal history.
 
-Пиши knowledge только через `secretary knowledge write`, чтобы сохранить writer lock, secret scan
-и Git audit. Не коммить instance-репозиторий вручную.
+Write knowledge only through `secretary knowledge write`, to keep the writer lock, the secret scan and the
+Git audit. Do not commit the instance repository by hand.
 
-## 1. Проверить состояние
+## 1. Check the state
 
-1. Вызвать `memory_search` с `caller=secretary`: цель, предыдущие решения, последний спринт.
-2. Прочитать:
-   - `state/knowledge/sprints/STATUS.md`, если существует;
-   - последний sprint-документ;
-   - актуальные vision, roadmap и backlog затронутых репозиториев;
-   - связанные Ideas и результаты предыдущих карточек.
-3. Если `STATUS.md` указывает на незакрытый спринт, не создавать новый. Предложить продолжить его
-   через `$run-sprint` либо явно отменить отдельным решением пользователя.
+1. Call `memory_search` with `caller=secretary`: the goal, previous decisions, the last sprint.
+2. Read:
+   - the sprint status pointer, if it exists;
+   - the most recent sprint document;
+   - the current vision, roadmap and backlog of the affected repositories;
+   - the related Ideas and the results of previous cards.
+3. If the status pointer names an unclosed sprint, do not create a new one. Offer to continue it through
+   `$run-sprint`, or to cancel it explicitly by a separate decision from the user.
 
-Не восстанавливай состояние из памяти, если live sprint-документ говорит другое.
+Do not reconstruct state from memory when the live sprint document says otherwise.
 
-## 2. Согласовать контракт
+## 2. Agree the contract
 
-Сначала выведи то, что можно доказать из кода и документов. Для оставшихся развилок используй
-grilling: задавай по одному вопросу, давай рекомендуемый ответ, жди ответа.
+First derive what can be proved from the code and the documents. For the remaining forks use grilling: one
+question at a time, with your recommended answer, waiting for the reply.
 
-Grilling не нужен, если пользователь уже явно согласовал всё необходимое:
+Grilling is unnecessary if the user has already explicitly agreed everything needed:
 
-- одно предложение продуктовой цели;
-- проверяемый Definition of Done;
-- затронутые репозитории;
-- Scope Hints как необязательные подсказки;
-- Out of Scope;
-- продуктовые decision gates;
-- пропорциональный Validation Plan.
+- one sentence of product goal;
+- a checkable Definition of Done;
+- the affected repositories;
+- scope hints, as optional pointers;
+- what is out of scope;
+- the product decision gates;
+- a proportionate validation plan.
 
-Проверить, что цель является продуктовым инкрементом, а не списком исправлений. Каждый scope hint
-должен объяснимо служить цели. Если цель расходится с vision, остановиться и вынести противоречие.
+Check that the goal is a product increment rather than a list of fixes. Every scope hint must plausibly
+serve the goal. If the goal conflicts with the product vision, stop and raise the contradiction.
 
-## 3. Создать sprint-документ
+## 3. Create the sprint document
 
-Путь: `sprints/YYYY-MM-DD-<slug>.md`, slug из 2–4 слов в kebab-case.
+Path: `sprints/YYYY-MM-DD-<slug>.md`, with a slug of 2 to 4 kebab-case words.
 
 ```markdown
 ---
-title: <название>
+title: <title>
 status: active
 created: YYYY-MM-DD
 repositories:
-  - secretary
+  - <repo>
 ---
 
-# Sprint: <название>
+# Sprint: <title>
 
 ## Goal
 
-<Одно предложение о конечном продуктовом состоянии.>
+<One sentence about the end product state.>
 
 ## Definition of Done
 
-- <Проверяемый результат>
+- <A checkable result>
 
 ## Context
 
-<Почему сейчас; ссылки на vision, roadmap, brainstorm и прошлый спринт.>
+<Why now; links to the vision, roadmap, brainstorm and previous sprint.>
 
 ## Scope Hints
 
-- <Необязательное направление, не task и не обещанная карточка>
+- <An optional direction, neither a task nor a promised card>
 
 ## Out of Scope
 
-- <Граница>
+- <A boundary>
 
 ## Stop Conditions
 
-- Цель доказанно недостижима.
-- Нужное решение меняет vision, продуктовый контракт, security boundary, ownership, durable
-  data contract, обязательную внешнюю зависимость или Definition of Done.
-- Не хватает доступа.
-- Требуется внешнее действие, способное оборвать текущего Secretary.
+- The goal is provably unreachable.
+- A required decision changes the vision, a product contract, the security boundary, ownership, a durable
+  data contract, a mandatory external dependency or the Definition of Done.
+- Access is missing.
+- An external action is required that could cut off the current session.
 
 ## Validation Plan
 
-<Минимально достаточная реальная проверка через продуктовый интерфейс.>
+<The minimal sufficient real check through a product interface.>
 
 ## Decisions
 
@@ -111,42 +110,42 @@ repositories:
 ## Results
 ```
 
-Цель, Definition of Done, Out of Scope и Stop Conditions после старта являются неизменяемым
-контрактом. `$run-sprint` может менять путь, но не ослаблять контракт.
+After the start, the goal, Definition of Done, out of scope and stop conditions are an immutable contract.
+`$run-sprint` may change the path but may not weaken the contract.
 
-## 4. Очистить Ready
+## 4. Clear Ready
 
-Для каждого затронутого репозитория:
+For each affected repository:
 
-1. Прочитать Ready, In progress и Validate через task protocol.
-2. Активную карточку не прерывать автоматически:
-   - если она прямо служит цели, записать её как уже начатый первый шаг;
-   - иначе дождаться завершения до открытия спринта.
-3. Все остальные Ready вернуть в Ideas с комментарием, что допуск снят на время атомарного
-   спринта.
-4. Ideas не продвигать. Они служат входным материалом; `$run-sprint` создаёт свежие карточки.
-5. Карточки других продуктов не трогать.
+1. Read Ready, In progress and Validate through the task protocol.
+2. Do not interrupt an active card automatically:
+   - if it directly serves the goal, record it as a first step already under way;
+   - otherwise wait for it to finish before opening the sprint.
+3. Return every other Ready card to Ideas, with a comment that its admission is withdrawn for the duration
+   of the atomic sprint.
+4. Do not promote Ideas. They are input material; `$run-sprint` creates fresh cards.
+5. Do not touch other products' cards.
 
-Если board write не завершился, не устанавливать active pointer.
+If a board write did not complete, do not set the active pointer.
 
-## 5. Установить указатель
+## 5. Set the pointer
 
-Записать `sprints/STATUS.md` через knowledge writer:
+Write the sprint status pointer through the knowledge writer:
 
 ```markdown
 # Sprint Status
 
-**Active:** [<название>](YYYY-MM-DD-<slug>.md)
+**Active:** `<title>` (`YYYY-MM-DD-<slug>.md`)
 **State:** ready
 **Updated:** <RFC3339>
 **Current card:** none
 **Next:** invoke `$run-sprint`
 ```
 
-Сначала записать sprint-документ, затем STATUS. После записи перечитать оба документа и проверить
-task audit. Частичный write исправить до отчёта.
+Write the sprint document first, then the status pointer. After writing, re-read both documents and check
+the task audit. Fix a partial write before reporting.
 
-## 6. Отчитаться
+## 6. Report back
 
-Сообщить путь к документу, цель, Definition of Done, репозитории, какие Ready возвращены в Ideas и
-что следующий шаг: `$run-sprint`. Не создавать карточку «на всякий случай».
+Give the path to the document, the goal, the Definition of Done, the repositories, which Ready cards were
+returned to Ideas, and that the next step is `$run-sprint`. Do not create a card "just in case".

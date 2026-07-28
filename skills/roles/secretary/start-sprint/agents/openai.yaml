@@ -1,4 +1,4 @@
 interface:
   display_name: "Start Sprint"
-  short_description: "Согласовать и открыть новый спринт"
-  default_prompt: "Используй $start-sprint, чтобы согласовать цель и открыть новый спринт."
+  short_description: "Agree and open a new sprint"
+  default_prompt: "Use $start-sprint to agree the goal and open a new sprint."

@@ -201,8 +201,8 @@ adapter = "claude"
 fallback = []
 
 [profiles.claude-sonnet]
-# No fallback (2026-07-04, vladmesh): product tasks run on Claude only. Overnight 04.07 the
-# gemini-flash fallback burned three worker attempts without ever reaching the report step, so a
+# No fallback by deliberate decision: product tasks run on Claude only. A cheaper fallback once
+# burned three worker attempts without ever reaching the report step, so a
 # red claude-sub now means claim-skip — the card waits in Ready until the resource recovers
 # (health.resolve_head returns None) instead of spending openrouter tokens on work that won't land.
 resource = "claude-sub"
@@ -227,9 +227,9 @@ model = "opus"
 fallback = []
 
 [profiles.claude-fable]
-# Fable head for the steward agent (triggered-agents-243 design grill, 2026-07-04). Fallback:
-# claude-opus first (Fable itself leaving the subscription), then hermes on a non-Anthropic
-# model (vladmesh, 2026-07-04) — the steward is the watcher of last resort and must wake even when
+# Fable head for the steward agent. Fallback: claude-opus first (Fable itself leaving the
+# subscription), then hermes on a non-Anthropic model — the steward is the watcher of last resort
+# and must wake even when
 # the whole claude-sub resource is red; a few paid openrouter tokens are the accepted price.
 resource = "claude-sub"
 adapter = "claude"
@@ -238,9 +238,9 @@ fallback = ["claude-opus", "hermes"]
 
 [profiles.hermes]
 # Last-resort head for the steward chain ONLY — deliberately absent from every product profile's
-# fallback (2026-07-04, vladmesh). Model is gpt-5.5, not a flash-tier one (same date): overnight
-# 04.07 gemini-flash finished worker turns declaring success without push/PR/report, so the one
-# place hermes still runs gets a model smart enough to follow the protocol.
+# fallback, by deliberate decision. The model is gpt-5.5 rather than a flash tier: a flash-tier
+# model finished worker turns declaring success without a push, PR or report, so the one place
+# hermes still runs gets a model smart enough to follow the protocol.
 resource = "openrouter"
 adapter = "hermes"
 model = "openai/gpt-5.5"

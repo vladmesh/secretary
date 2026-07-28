@@ -1,7 +1,7 @@
 """Checkpoint writer and pusher for the private instance repository.
 
-Contract: docs/RECOVERY.md, sections "Layout", "Каденция и RPO", "Writer",
-"Валидационный гейт", "Failure и divergence", "Observability". The writer
+Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers",
+"Validation gate", "Failure and divergence", "Observability". The writer
 regenerates the normalized board and runs exports, validates the snapshot, and
 commits `state/board` and `state/runs` into the private repo. It runs at the end
 of a dispatcher tick under `tick_lock`, and also takes the instance repo writer

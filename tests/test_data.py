@@ -276,8 +276,8 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(first.count, 1)
         self.assertEqual(second.count, 1)
         self.assertEqual(first_payload, second_payload)
-        # Один `pipeline export` на экспорт: писатель бежит под tick_lock, поэтому вызов
-        # на карточку сюда возвращаться не должен.
+        # One `pipeline export` per export run: the writer runs under the tick lock, so a
+        # per-card call must not come back here.
         self.assertEqual([command[-1] for command in calls], ["export", "export"])
 
     def test_export_board_writes_an_empty_sprint_set_without_a_sprint_board(self):
@@ -295,8 +295,8 @@ class ExportTests(unittest.TestCase):
             ndjson = (board / "sprints.ndjson").read_text(encoding="utf-8")
             summary = json.loads((board / "export.json").read_text(encoding="utf-8"))
 
-        # Доска спринтов может ещё не существовать: экспорт обязан писать пустой набор,
-        # а не молча пропускать компонент, иначе checkpoint не отличит его от потери.
+        # The sprints board may not exist yet: the export must write an empty set rather than
+        # silently skipping the component, or the checkpoint cannot tell that apart from loss.
         self.assertEqual(sprints, {"version": 1, "sprints": []})
         self.assertEqual(ndjson, "")
         self.assertEqual(summary["sprint_count"], 0)
@@ -322,7 +322,7 @@ class ExportTests(unittest.TestCase):
                     )
             published = sorted(path.name for path in (data_dir / "board").iterdir())
 
-        # Недоступные спринты не должны давать частичный снимок из одних карточек.
+        # Unreachable sprints must not produce a partial snapshot of cards alone.
         self.assertEqual(published, [])
 
     def test_export_board_records_matching_active_raw_count_when_dump_exists(self):
@@ -378,8 +378,8 @@ class ExportTests(unittest.TestCase):
                 export_board(data_dir, command=["pipeline"], sprint_client=SprintKanboard())
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
-        # Дамп без доски Pipeline: чужие 3 active tasks не должны ни попасть в счёт,
-        # ни уронить экспорт mismatch'ем — сверка пропускается явно.
+        # A dump with no Pipeline board: another board's 3 active tasks must neither enter the
+        # count nor fail the export as a mismatch; the check is skipped explicitly.
         self.assertIsNone(summary["raw_active_task_count"])
         self.assertEqual(summary["card_count"], 1)
 

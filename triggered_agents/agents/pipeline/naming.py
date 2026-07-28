@@ -2,11 +2,11 @@
 
 A card's slug (validated at create time against SLUG_RE) names its worker/reviewer workspace so
 GUI tabs and worktree dirs read `<id>-<slug>` instead of a bare timestamp. A card created before
-the slug field existed, or by hand, carries none — fallback_slug transliterates its title into one
+the slug field existed, or by hand, carries none — fallback_slug derives one from its title
 instead, so the pipeline never refuses to claim a card for lack of a slug.
 
-Workspaces already live under the project's own directory in Orca (`~/orca/workspaces/<project>/`),
-so repeating the project name in the workspace itself would just echo something the path already
+Workspaces already live under the project's own directory in the session manager
+(`<workspaces root>/<project>/`), so repeating the project name in the workspace itself would just echo something the path already
 says. `card_id` strips the reference (`<project>-<id>`, the board-CLI identity, left untouched)
 down to the numeric tail the workspace/title functions below key off.
 
@@ -18,29 +18,25 @@ host I/O and trivially unit-testable.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
-_CYRILLIC_TRANSLIT = {
-    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
-    "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
-    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
-    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
-    "я": "ya",
-}
-
 
 def fallback_slug(title: str) -> str:
-    """Best-effort slug for a card with no explicit slug: transliterate Cyrillic, keep only
-    [a-z0-9-], collapse runs of separators, cap at 30 chars. Never empty."""
-    translit = "".join(_CYRILLIC_TRANSLIT.get(ch, ch) for ch in (title or "").lower())
-    slug = re.sub(r"[^a-z0-9]+", "-", translit).strip("-")
+    """Best-effort slug for a card with no explicit slug: fold accents to their base letters, keep
+    only [a-z0-9-], collapse runs of separators, cap at 30 chars. A title written entirely in a
+    script that does not fold to ASCII yields the neutral `task` rather than an empty name, so the
+    pipeline still has a workspace to create."""
+    decomposed = unicodedata.normalize("NFKD", (title or "").lower())
+    folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    slug = re.sub(r"[^a-z0-9]+", "-", folded).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)[:30].strip("-")
     return slug or "task"
 
 
 def card_slug(card: dict) -> str:
-    """The card's explicit slug, or a transliterated fallback from its title — an old/manual card
+    """The card's explicit slug, or a fallback derived from its title — an old or manual card
     created before the slug field existed still claims fine."""
     slug = (card.get("slug") or "").strip()
     return slug if slug else fallback_slug(card.get("title") or card["reference"])
@@ -98,21 +94,20 @@ def stand_branch(project: str) -> str:
     return f"stand/{project}"
 
 
-# --- memory prompt block (design-политика memory-mcp, «приоритет общей памяти чтение личная
-# память») -----------------------------------------------------------------------------------
+# --- memory prompt block ---------------------------------------------------------------------
 # Shared between worker's TASK.md and reviewer's REVIEW.md so the wording/order/caller contract
 # stays one source of truth; the steward skill (static markdown, no per-card project) mirrors it
-# by hand with scope="project:secretary".
+# by hand with the product's own project scope.
 
 
 def memory_block(role: str, project: str) -> str:
-    """Короткий блок про общую память для роли `role` (worker/reviewer), скоуп из карточки
-    (`project`): сначала scope своего проекта, потом без scope; caller обязателен; при
-    конфликте с личной памятью верен канон."""
+    """A short block about shared memory for `role` (worker/reviewer), scoped by the card's
+    `project`: the project's own scope first, then no scope; caller is mandatory; the canon wins
+    over personal memory on a conflict."""
     return (
-        "## Память\n\n"
-        "Прежде чем разбираться в устройстве системы с нуля — поищи в общей памяти: MCP "
-        "`memory`, тул `memory_search(query, k, scope, caller)`. Порядок: сначала "
-        f'`scope="project:{project}"`, если пусто — без scope. `caller="{role}"` — передавай '
-        "всегда. При конфликте с личной памятью верен канон (общая память приоритетнее)."
+        "## Memory\n\n"
+        "Before working out how the system is built from scratch, search shared memory: the "
+        "`memory` MCP server, tool `memory_search(query, k, scope, caller)`. Order: "
+        f'`scope="project:{project}"` first, and without a scope if that is empty. Always pass '
+        f'`caller="{role}"`. When shared memory conflicts with personal memory, the canon wins.'
     )
