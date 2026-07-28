@@ -18,6 +18,7 @@ from secretary.installation import (
     InstallError,
     _clone_or_reuse,
     _ensure_installation_user,
+    _product_root,
     check_prerequisites,
     install,
     materialize_checkpoint,
@@ -26,6 +27,10 @@ from secretary.installation import (
 )
 from secretary.routing_journal import attempts
 
+# The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
+# an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
+# that only checked this branch out somewhere.
+PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 
 CARD = {
     "reference": "secretary-1",
@@ -375,9 +380,11 @@ class InstallationTests(unittest.TestCase):
             _git(source, "commit", "-m", "remote identity")
             _git(source, "push", str(remote), "HEAD:master")
 
+            # An install materializes the checkout it is told to, and this one is not `~/secretary`.
             base = [
                 "--instance-remote", str(remote), "--instance-dir", str(target),
                 "--installation-user", getpass.getuser(),
+                "--product-root", str(PRODUCT_ROOT),
             ]
             with mock.patch("secretary.installation._ensure_installation_user"):
                 first_code, first_output = self._cli(["install", *base])
@@ -499,6 +506,36 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("choose --recover", output)
             self.assertIn("adopt", output)
+
+    def test_a_product_root_holding_no_product_is_refused_by_name(self):
+        """The selected checkout is checked where it is selected.
+
+        An empty or moved path would otherwise arrive as an ENOENT on a file inside it, several
+        steps later, naming a directory the operator never meant to install from.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            empty = Path(tmpdir) / "not-a-checkout"
+            empty.mkdir()
+            args = SimpleNamespace(product_root=str(empty))
+
+            with self.assertRaises(InstallError) as refusal:
+                _product_root(args)
+
+            self.assertIn(str(empty), str(refusal.exception))
+            self.assertIn("--product-root", str(refusal.exception))
+
+    def test_the_default_product_root_follows_the_configured_checkout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            args = SimpleNamespace(product_root=None)
+
+            with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                os.environ.pop("TA_SECRETARY_REPO", None)
+                with self.assertRaisesRegex(InstallError, str(home / "secretary")):
+                    _product_root(args)
+                os.environ["TA_SECRETARY_REPO"] = str(PRODUCT_ROOT)
+                self.assertEqual(_product_root(args), PRODUCT_ROOT)
 
     @staticmethod
     def _cli(argv: list[str]) -> tuple[int, str]:

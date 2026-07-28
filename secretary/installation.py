@@ -55,6 +55,7 @@ from secretary.secret_store import (
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import UpgradeContext, default_product_root, run_steps
+from triggered_agents.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json")
@@ -612,10 +613,32 @@ def _validated_instance(instance_dir: Path):
     return report
 
 
+# Files no product checkout is without. An install materializes from the checkout it selects, and
+# the selection can miss: the operator ran the command out of a candidate tree without naming it,
+# or `TA_SECRETARY_REPO` still points at a checkout that has since moved.
+PRODUCT_MARKERS = (Path("packaging") / "codex-home", Path("skills") / "manifest.toml")
+
+
 def _product_root(args: argparse.Namespace) -> Path:
+    """The checkout this install materializes from, refused here if it is not one.
+
+    Named, else configured, else the home default — never the checkout running this module. A path
+    that holds no product would otherwise surface as an ENOENT from whichever step read it first,
+    naming a file inside a directory the operator never meant to install from.
+    """
     if args.product_root:
-        return Path(args.product_root).expanduser().resolve()
-    return default_product_root()
+        root = Path(args.product_root).expanduser().resolve()
+        source = "--product-root"
+    else:
+        root = default_product_root()
+        source = f"{PRODUCT_ENV} or the {PRODUCT_DIRNAME} default under this account's home"
+    missing = [str(marker) for marker in PRODUCT_MARKERS if not (root / marker).exists()]
+    if missing:
+        raise InstallError(
+            f"not a product checkout: {root} (from {source}) has no {missing[0]}; "
+            "name the checkout to install with --product-root"
+        )
+    return root
 
 
 def _restore_without_credentials(

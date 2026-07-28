@@ -24,7 +24,7 @@ from secretary.cli import main
 from secretary.secret_store import RecoveryPhraseError, import_env_file, initialize_store
 from secretary.secret_words import RECOVERY_WORDS
 
-from tests.test_installation import _checkpoint, _git
+from tests.test_installation import PRODUCT_ROOT, _checkpoint, _git
 
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
@@ -106,6 +106,8 @@ class RecoveryCase(unittest.TestCase):
             "--instance-remote", str(self.source),
             "--instance-dir", str(self.target),
             "--installation-user", getpass.getuser(),
+            # The recovery materializes this checkout; nothing points at one for it.
+            "--product-root", str(PRODUCT_ROOT),
             *extra,
         ]
         output = io.StringIO()

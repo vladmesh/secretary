@@ -909,7 +909,11 @@ delivering skills without running a whole upgrade.
 Without `--product-root`, an install or upgrade materializes the configured checkout —
 `TA_SECRETARY_REPO`, else `$HOME/secretary` — and not the checkout the command was typed in. A
 candidate checkout is the normal place to run the upgrade from, so the running module deciding
-would make the working directory pick the version a host ends up on.
+would make the working directory pick the version a host ends up on. `secretary install` and
+`secretary recover` select the same way and check the result before they use it: a path with no
+product in it is refused by name, rather than surfacing later as a missing file inside a directory
+nobody meant to install from. A first install out of a checkout that is not `~/secretary` therefore
+names it with `--product-root`.
 
 The checkout an upgrade selects is written into the dispatcher unit as `TA_SECRETARY_REPO`, and the
 dispatcher renders it into every head it launches. Orca creates a head's terminal, so it inherits

@@ -220,6 +220,12 @@ class PortableFixture(unittest.TestCase):
         (packaging / "secretary-dispatcher-production.timer").write_text(
             TIMER.format(component="dispatcher-production"), encoding="utf-8"
         )
+        # The non-secret codex runtime files an install seeds into the owner's managed CODEX_HOME.
+        # A checkout without them is not one an install can materialize, so the fixture ships them.
+        codex_home = self.product / "packaging" / "codex-home"
+        codex_home.mkdir(parents=True)
+        (codex_home / "AGENTS.md").write_text("# portable\n", encoding="utf-8")
+        (codex_home / "config.toml").write_text("[portable]\n", encoding="utf-8")
 
     def write_instance(self) -> None:
         (self.instance / "instance.yaml").write_text(
