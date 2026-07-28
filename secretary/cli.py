@@ -12,6 +12,7 @@ from secretary.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
 )
+from secretary import contract_migrations
 from secretary.config import ConfigError, load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
@@ -102,6 +103,12 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 2
+    if getattr(args, "dry_run", False):
+        # A dry run decides everything and writes nothing, contract migrations on
+        # the read path included. Set here rather than per call: a command reaches
+        # that path through helpers that validate the instance on their own.
+        with contract_migrations.suspended():
+            return handler(args)
     return handler(args)
 
 
