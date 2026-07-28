@@ -73,6 +73,10 @@ class DispatcherRecord:
     # from an unrelated shell in the same worktree must not keep a broken head alive.
     worker_started_at: float = 0.0
     worker_progress_at: float = 0.0
+    # A worker that has reported done is suspended while the mechanical gate owns the checkout.
+    # Unlike a pause, this is a short per-card handoff: a red gate can resume the same provider
+    # conversation, while a green gate confirms it stopped before review begins.
+    worker_retained_at: float = 0.0
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -125,6 +129,7 @@ class DispatcherRecord:
             "worker_pid_file": self.worker_pid_file,
             "review_pid_file": self.review_pid_file,
             "worker_progress_at": self.worker_progress_at,
+            "worker_retained_at": self.worker_retained_at,
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
@@ -165,6 +170,7 @@ class DispatcherRecord:
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
+            worker_retained_at=float(payload.get("worker_retained_at") or 0.0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),

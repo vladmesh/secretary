@@ -390,6 +390,12 @@ class FakeHost:
         self.fail_stop_head_reason = ""
         self.fail_stop_review_reason = ""
         self.fail_freeze_worker_reason = ""
+        self.fail_retain_worker_reason = ""
+        # Most fixture cards use the ordinary exec profile, which has no conversation to resume.
+        # Tests that model a retained Codex TUI clear this explicitly.
+        self.fail_resume_worker_reason = "retained worker session cannot accept a continuation"
+        self.retained_workers: list[str] = []
+        self.resumed_workers: list[str] = []
 
     def _write_head_pid(self, kind: str, reference: str) -> None:
         path = Path(pid_file_path(kind, reference))
@@ -595,6 +601,22 @@ class FakeHost:
             raise HostError(self.fail_freeze_worker_reason)
         if record.handle or record.worker_pid_file:
             self.stop_head(record, "worker")
+
+    def retain_worker(self, record) -> None:
+        self.calls.append("retain_worker")
+        if self.fail_retain_worker_reason:
+            raise HostError(self.fail_retain_worker_reason)
+        if not record.handle and not record.worker_pid_file:
+            raise HostError("worker session is unavailable for retention")
+        self.retained_workers.append(record.handle)
+
+    def resume_worker(self, task: dict, record) -> None:
+        self.calls.append("resume_worker")
+        if self.fail_resume_worker_reason:
+            raise HostError(self.fail_resume_worker_reason)
+        if not record.handle and not record.worker_pid_file:
+            raise HostError("retained worker session exited")
+        self.resumed_workers.append(record.handle)
 
     def _kill_head(self, kind: str, record) -> None:
         """Drop the heartbeat of a stopped head, the way a closed pty tree does.
@@ -1987,7 +2009,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(neighbor["state"], "ready")
         self.assertIsNone(neighbor["claim"]["worker"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
-        self.assertEqual(self.host.torn_down, self.host.stopped)
+        self.assertEqual(self.host.torn_down, ["secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot", "secretary-510-pilot-pilot"])
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
     def _run_worker_to_validate(self, request_id: str = "worker-done") -> None:
@@ -2540,6 +2563,48 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "review-started")
         self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("start_review"))
+
+    def test_gate_red_reuses_the_retained_worker_conversation(self) -> None:
+        """A live TUI session keeps both its terminal identity and its provider conversation."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        initial = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="worker-done-reused-session",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        retained = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertTrue(retained["worker_retained_at"])
+
+        gated = self.runtime.tick(self.selector)
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(gated["action"], "gate-red-reused-worker")
+        self.assertEqual(record["handle"], initial["handle"])
+        self.assertEqual(record["worker_pid_file"], initial["worker_pid_file"])
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(self.host.resumed_workers, [initial["handle"]])
+        continuation = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("continuation: reused", continuation)
+        self.assertIn("worker profile codex", continuation)
+
+    def test_gate_red_replaces_a_session_that_cannot_continue(self) -> None:
+        """A failed continuation is stopped before exactly one durable replacement is launched."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("restart_worker"))
+        self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_gate_red_bounces_card_to_worker(self) -> None:
         self.start_pilot()
@@ -2551,7 +2616,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "gate-red-rework")
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(task["state"], "in_progress")
-        self.assertIn("The mechanical validation gate is red", task["comments"][-1]["body"])
+        self.assertIn("The mechanical validation gate is red", task["comments"][-2]["body"])
+        self.assertIn("continuation: replacement", task["comments"][-1]["body"])
         self.assertEqual(self.host.reviews, [])
         # worker prepared once at claim, once on the gate-red relaunch
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
@@ -2583,7 +2649,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-2]["body"])
 
     def test_repeated_github_gate_red_for_the_same_reason_survives_a_new_sha(self) -> None:
         """secretary-766 review: a GitHub gate's rendered detail always carries the head SHA,
@@ -2619,7 +2685,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-2]["body"])
 
     def test_gate_red_with_a_different_local_error_is_not_marked_as_a_repeat(self) -> None:
         """secretary-766 review: two distinct local-gate failures must not be conflated into a
@@ -2735,7 +2801,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.runtime.tick(self.selector)
 
-        body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        body = self.reader.show("secretary-510-pilot")["comments"][-2]["body"]
         self.assertIn("API_TOKEN=<redacted>", body)
         self.assertNotIn("super-secret-value", body)
 
@@ -2865,7 +2931,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(task["state"], "blocked")
         self.assertIn("non-fast-forward", task["comments"][-1]["body"])
         self.assertEqual(self.host.torn_down, [], "a failed merge must not remove the workspace")
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot", "secretary-510-pilot-pilot"])
 
     def test_rework_bringup_failure_after_red_review_blocks_the_card(self) -> None:
         """The rework workspace can be gone by the time a red verdict lands. The card has already
@@ -3328,7 +3394,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "a red verdict must end the reviewer's pane",
         )
         self.assertEqual(
-            self.host.stopped, [], "a red verdict must not stop the whole worktree's terminals"
+            self.host.stopped,
+            ["secretary-510-pilot-pilot"],
+            "the green gate stops the retained worker before review; a red verdict stops only the reviewer",
         )
         self.assertEqual(self.host.torn_down, [], "rework must reuse the workspace, not tear it down")
 
@@ -3364,8 +3432,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotEqual(record["review_handle"], record["handle"])
         self.assertEqual(
             self.host.split_from,
-            ["term:secretary-510-pilot-pilot"],
-            "the reviewer pane must be split off the worker's own pane",
+            [""],
+            "the green gate ends the retained worker before the reviewer is launched",
         )
 
     def test_interrupted_review_tick_reuses_the_existing_pane(self) -> None:

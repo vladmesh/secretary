@@ -210,6 +210,7 @@ def forget_role_head(record: DispatcherRecord, role: str) -> None:
     record.handle = ""
     record.worker_leaf = ""
     record.worker_pid_file = ""
+    record.worker_retained_at = 0.0
 
 
 def mark_launch_aborted(

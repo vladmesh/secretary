@@ -833,7 +833,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
 
-        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertIn("stop_workspace", self.host.calls)
         self.assertFalse(self.head_alive("worker"), "the adopted worker must be stopped")
         record = self.record()
         assert record is not None

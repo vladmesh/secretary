@@ -198,6 +198,22 @@ a new attempt id at that moment, otherwise a repeat claim would land on an alrea
 id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
 new round enters the same workspace.
 
+### Worker retention around the mechanical gate
+
+After a worker reports `done`, the dispatcher suspends its live, addressable worker session before
+moving the card to Validate. The record carries that retained state while the mechanical gate is
+pending or running, so the worker cannot change the checkout during validation. A green gate
+confirms the retained worker has stopped before an independent reviewer starts; the reviewer is
+then the only head allowed to act on that checkout.
+
+A red gate first returns the card to In progress and updates `TASK.md` with the failure and the
+next report identity. When the retained provider session is still live and accepts delivery, that
+same terminal and session continue the rework. The routing record and card comment name this as a
+reused continuation with the worker profile, model, effort, reason and timestamp. A dead session,
+an unavailable continuation transport, or a lost handle is an explicit fallback: the dispatcher
+confirms the old worker has stopped, writes a durable launch intent, and starts exactly one
+replacement. An unconfirmed stop never permits a second writer in the workspace.
+
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
   "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",

@@ -620,6 +620,8 @@ class _ProbeHost:
         "stop_workspace",
         "stop_review",
         "freeze_worker",
+        "retain_worker",
+        "resume_worker",
         "verify_worker_result",
         "gate_check",
         "complete_green",
