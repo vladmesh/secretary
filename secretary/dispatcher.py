@@ -1138,6 +1138,11 @@ class CommandHostRuntime:
             status = _head_process_status(pid_file)
             if not status.get("known") or not status.get("alive"):
                 return
+            # SIGTERM and SIGHUP remain pending for a SIGSTOPed retained worker.  Wake its group
+            # before the graceful signal so green handoff does not wait out the whole grace period
+            # and then kill the worker unconditionally.
+            if signal_number == signal.SIGTERM:
+                self._signal_head(pid_file, signal.SIGCONT)
             self._signal_head(pid_file, signal_number)
             self._await_head_exit(pid_file)
         status = _head_process_status(pid_file)
@@ -1150,7 +1155,14 @@ class CommandHostRuntime:
         except (OSError, ValueError):
             return
         try:
-            os.kill(pid, signal_number)
+            # Heartbeat-wrapped launches create their own session, so this reaches helpers as
+            # well as the provider process.  Old launches and focused tests can share our group;
+            # do not turn those compatibility paths into a signal to the dispatcher itself.
+            group = os.getpgid(pid)
+            if group != os.getpgrp():
+                os.killpg(group, signal_number)
+            else:
+                os.kill(pid, signal_number)
         except ProcessLookupError:
             return
         except OSError as exc:
@@ -1506,32 +1518,41 @@ class CommandHostRuntime:
         confirmed-stop and durable replacement path instead of guessing that a pane is idle.
         """
         if self.mode == "noop":
-            return
+            raise HostError("noop runtime cannot retain a worker session")
         status = _head_process_status(record.worker_pid_file)
         if not status.get("known") or not status.get("alive"):
             raise HostError("worker session is unavailable for retention")
         try:
-            os.kill(int(Path(record.worker_pid_file).read_text(encoding="utf-8").strip()), signal.SIGSTOP)
+            self._signal_head(record.worker_pid_file, signal.SIGSTOP)
         except (KeyError, TypeError, ValueError, OSError) as exc:
             raise HostError(f"worker session could not be suspended: {exc}") from None
+        deadline = time.monotonic() + HEAD_STOP_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            retained = _head_process_status(record.worker_pid_file)
+            if retained.get("known") and retained.get("alive") and retained.get("stopped"):
+                return
+            time.sleep(HEAD_STOP_POLL_SECONDS)
+        raise HostError("worker session could not be confirmed suspended")
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
-        """Resume a retained Codex TUI worker and deliver its updated rework task.
+        """Resume an addressable retained worker and deliver its updated rework task.
 
-        Only a live TUI has an addressable provider conversation to reuse.  Other launch modes
-        deliberately fail closed so the dispatcher confirms the old head is gone and uses its
-        normal launch-intent fallback.
+        Codex TUI and Claude's interactive terminal are both live provider conversations.  A
+        Codex exec worker has already spent its turn, so it deliberately follows the replacement
+        path.  A resuming record can be replayed after a crash: a process that is already running
+        has already been sent its continuation, so it is never sent a duplicate prompt.
         """
         status = _head_process_status(record.worker_pid_file)
         if not status.get("known") or not status.get("alive"):
             raise HostError("retained worker session exited")
         run = record.worker_run
-        if run.get("adapter") != "codex" or run.get("codex_mode") != "tui" or not record.handle:
+        adapter = run.get("adapter")
+        if not record.handle or not (
+            adapter == "claude" or (adapter == "codex" and run.get("codex_mode") == "tui")
+        ):
             raise HostError("retained worker session cannot accept a continuation")
-        try:
-            os.kill(int(Path(record.worker_pid_file).read_text(encoding="utf-8").strip()), signal.SIGCONT)
-        except (KeyError, TypeError, ValueError, OSError) as exc:
-            raise HostError(f"retained worker session could not resume: {exc}") from None
+        if not status.get("stopped"):
+            return
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("retained worker workspace is missing")
@@ -1542,16 +1563,21 @@ class CommandHostRuntime:
             self._worker_task_doc(task, base, record.attempt_id, record.review_baseline),
         )
         try:
-            _deliver_tui_prompt(
-                record.handle,
-                str(workspace),
-                "TASK.md",
-                run_json=self._run_json,
-                prompt_text=(
-                    "The mechanical validation gate returned red. Read the updated TASK.md, "
-                    "fix the failure, then report through its command."
-                ),
+            self._signal_head(record.worker_pid_file, signal.SIGCONT)
+            prompt = (
+                "The mechanical validation gate returned red. Read the updated TASK.md, "
+                "fix the failure, then report through its command."
             )
+            if adapter == "codex":
+                _deliver_tui_prompt(
+                    record.handle, str(workspace), "TASK.md", run_json=self._run_json,
+                    prompt_text=prompt,
+                )
+            else:
+                self._run_json([
+                    "orca", "terminal", "send", "--terminal", record.handle,
+                    "--text", prompt, "--enter", "--json",
+                ])
         except (TuiDeliveryError, HostError) as exc:
             raise HostError(f"retained worker continuation was not delivered: {exc}") from None
 
@@ -2550,6 +2576,15 @@ class DispatcherRuntime:
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
+        if record.state == "worker_resuming":
+            try:
+                self.host.resume_worker(task, record)
+            except HostError as exc:
+                return self._restart_gate_red_worker(
+                    task, record, records, payload, attempt_id,
+                    continuation_reason=scrub_host_output(str(exc)), phase="gate",
+                )
+            return self._finish_retained_worker_resume(task, record, records, payload, attempt_id, phase="gate")
         if marker == "report:done":
             if record.state == "worker_retained":
                 # The process was frozen and recorded before a tick died between retention and
@@ -3235,40 +3270,68 @@ class DispatcherRuntime:
         # a new TASK.md, so its next report must not dedupe against the completed round.
         record.review_baseline = len(moved.get("comments") or [])
         if record.worker_retained_at:
+            # Persist the red delivery boundary before waking the worker.  If this tick dies after
+            # delivery, replay stays on this branch instead of treating the old done marker as a
+            # completion from the new rework round.
+            record.state = "worker_resuming"
+            records[ref] = record
+            self.save_records(payload, records)
             try:
                 self.host.resume_worker(moved, record)
             except HostError as exc:
-                # Delivery can fail after the process was resumed. Confirm it is gone before the
-                # replacement path is even allowed to write its launch intent.
-                unconfirmed = self._stop_worker_confirmed(
-                    record, ref, step="gate", attempt_id=attempt_id
+                return self._restart_gate_red_worker(
+                    moved, record, records, payload, attempt_id,
+                    continuation_reason=scrub_host_output(str(exc)), phase=phase,
                 )
-                if unconfirmed is not None:
-                    return unconfirmed
-                continuation = "replacement"
-                continuation_reason = scrub_host_output(str(exc))
             else:
-                record.worker_retained_at = 0.0
-                record.state = "claimed"
-                rework_round = record.attempt_round + 1
-                retained_run = dict(record.worker_run)
-                self.open_worker_round(record, round_number=rework_round)
-                # The provider session and pane did not change. Preserve the launch snapshot but
-                # still record the next round and its gate result in the ordinary routing journal.
-                self.record_worker_routing(moved, record, retained_run)
-                self._record_worker_continuation(ref, record, "reused", phase, "retained worker resumed")
-                record.worker_started_at = record.worker_progress_at = time.time()
-                records[ref] = record
-                self.save_records(payload, records)
-                return {
-                    "status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id,
-                    "action": f"{phase}-red-reused-worker",
-                }
+                return self._finish_retained_worker_resume(
+                    moved, record, records, payload, attempt_id, phase=phase
+                )
         else:
             continuation = "replacement"
             continuation_reason = "no retained worker session was available"
         # Same reservation as the review-red bounce: the round the rework head belongs to is fixed
         # on disk with the intent, so an adoption resumes it instead of the round the gate closed.
+        return self._restart_gate_red_worker(
+            moved, record, records, payload, attempt_id,
+            continuation_reason=continuation_reason, phase=phase,
+        )
+
+    def _finish_retained_worker_resume(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, *, phase: str,
+    ) -> dict[str, Any]:
+        ref = task["ref"]
+        record.worker_retained_at = 0.0
+        record.state = "claimed"
+        rework_round = record.attempt_round + 1
+        retained_run = dict(record.worker_run)
+        self.open_worker_round(record, round_number=rework_round)
+        self.record_worker_routing(task, record, retained_run)
+        self._record_worker_continuation(ref, record, "reused", phase, "retained worker resumed")
+        record.worker_started_at = record.worker_progress_at = time.time()
+        records[ref] = record
+        self.save_records(payload, records)
+        return {
+            "status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id,
+            "action": f"{phase}-red-reused-worker",
+        }
+
+    def _restart_gate_red_worker(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, *, continuation_reason: str, phase: str,
+    ) -> dict[str, Any]:
+        """Launch the red-gate fallback only after its worker was conclusively stopped."""
+        ref = task["ref"]
+        continuation = "replacement"
+        # This is intentionally unconditional.  A record written by an older dispatcher, or one
+        # adopted after a crash, may not carry the retained timestamp even while its old worker is
+        # still alive.  Lack of that field is ambiguous, never permission for a second writer.
+        unconfirmed = self._stop_worker_confirmed(
+            record, ref, step="gate", attempt_id=attempt_id
+        )
+        if unconfirmed is not None:
+            return unconfirmed
         rework_round = record.attempt_round + 1
         failure = self._worker_relaunch_intent(
             payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
@@ -3282,7 +3345,7 @@ class DispatcherRuntime:
                 reason=failure,
             )
         launched, failed = self._bring_up_worker_head(
-            moved,
+            task,
             record,
             records,
             payload,
@@ -3298,9 +3361,8 @@ class DispatcherRuntime:
             return failed
         record.state = "claimed"
         self.open_worker_round(record, round_number=rework_round)
-        self.record_worker_routing(moved, record, launched.run)
-        if phase == "gate":
-            self._record_worker_continuation(ref, record, continuation, phase, continuation_reason)
+        self.record_worker_routing(task, record, launched.run)
+        self._record_worker_continuation(ref, record, continuation, phase, continuation_reason)
         _clear_launch_intent(record)
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record

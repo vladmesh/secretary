@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -473,6 +475,78 @@ class LaunchIntentTests(unittest.TestCase):
         record = self.record()
         assert record is not None
         self.assertEqual(record.attempt_round, 2)
+
+    def test_a_red_delivery_that_outlives_its_tick_replays_without_a_second_worker(self) -> None:
+        """The durable resuming state masks the old done report on recovery."""
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.state_dies_after("resume_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        retained = self.record()
+        assert retained is not None
+        self.assertEqual(retained.state, "worker_resuming")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "gate-red-reused-worker")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.record().state, "claimed")  # type: ignore[union-attr]
+
+    def test_a_freeze_crash_replays_the_validate_move_without_waking_the_worker(self) -> None:
+        self.tick()
+        self.report_done("worker-done-freeze-crash")
+        real_move = self.writer.move
+
+        def die_before_move(**kwargs):
+            if kwargs.get("target") == "validate":
+                raise OSError("dispatcher died before board move")
+            return real_move(**kwargs)
+
+        with mock.patch.object(self.writer, "move", die_before_move):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        retained = self.record()
+        assert retained is not None
+        self.assertEqual(retained.state, "worker_retained")
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["to"], "validate")
+        self.assertEqual(self.host.calls.count("retain_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+
+    def test_a_crash_after_validate_move_keeps_the_worker_frozen_for_review(self) -> None:
+        self.tick()
+        self.report_done("worker-done-after-validate-move")
+        real_save = self.runtime.state.save
+
+        def die_after_move(payload: dict) -> None:
+            record = payload.get("records", {}).get(REF, {})
+            if record.get("state") == "validate":
+                raise OSError("dispatcher died after board move")
+            real_save(payload)
+
+        with mock.patch.object(self.runtime.state, "save", die_after_move):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.reader.show(REF)["state"], "validate")
+        retained = self.record()
+        assert retained is not None
+        self.assertEqual(retained.state, "worker_retained")
+        self.host.gate_results = [GateResult("green", "passed")]
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "review-started")
+        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("start_review"))
 
     def test_a_dead_rework_intent_relaunches_inside_the_round_it_reserved(self) -> None:
         """The reservation outlives the head the rework never got.
@@ -1376,6 +1450,108 @@ class HostLaunchContourTests(unittest.TestCase):
         self.host.stop_head(record, "worker")
 
         self.assertIsNotNone(head.poll(), "the head must actually be gone")
+
+    def test_a_stopped_head_is_woken_before_its_graceful_stop(self) -> None:
+        """SIGTERM is pending while stopped, so handoff must SIGCONT first."""
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="", head="codex",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
+            state="worker_retained", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+        )
+        os.kill(head.pid, signal.SIGSTOP)
+
+        self.host.stop_head(record, "worker")
+
+        self.assertIsNotNone(head.poll(), "a retained head must exit without SIGKILL grace")
+
+    def test_retention_stops_the_head_process_group(self) -> None:
+        """A helper started by a worker is frozen with the worker, not left writing alone."""
+        child_file = self.data_dir / "child.pid"
+        head = subprocess.Popen([
+            "setsid", "sh", "-c", f"sleep 30 & echo $! > {child_file}; wait",
+        ])
+        def reap_group() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(head.pid), signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                head.wait(timeout=1)
+        self.addCleanup(reap_group)
+        for _ in range(50):
+            if child_file.exists():
+                break
+            time.sleep(0.01)
+        child = int(child_file.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: os.kill(child, signal.SIGKILL))
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="codex",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+        )
+
+        self.host.retain_worker(record)
+
+        status = ""
+        for _ in range(50):
+            status = Path(f"/proc/{child}/status").read_text(encoding="utf-8")
+            if "State:\tT" in status:
+                break
+            time.sleep(0.01)
+        self.assertIn("State:\tT", status)
+
+    def test_claude_retained_worker_rewrites_task_before_delivering_rework(self) -> None:
+        """Claude's interactive pane is reusable just like Codex TUI."""
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude", "head": "claude-opus"},
+        )
+        os.kill(head.pid, signal.SIGSTOP)
+        time.sleep(0.05)
+        calls: list[list[str]] = []
+        task_at_delivery: list[str] = []
+
+        def run_json(command: list[str]) -> dict:
+            calls.append(command)
+            if command[2] == "send":
+                task_at_delivery.append((self.data_dir / "TASK.md").read_text())
+            return {}
+
+        with mock.patch.object(self.host, "_run_json", run_json):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+        self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
+        self.assertTrue(any(command[2] == "send" for command in calls))
+
+    def test_dead_or_missing_retained_worker_refuses_continuation(self) -> None:
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir / "missing"), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
+            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(DEAD_PID)),
+            worker_run={"adapter": "claude"},
+        )
+
+        with self.assertRaisesRegex(HostError, "session exited"):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+    def test_a_stopped_retained_worker_with_no_workspace_refuses_continuation(self) -> None:
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir / "missing"), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
+            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude"},
+        )
+        os.kill(head.pid, signal.SIGSTOP)
+        time.sleep(0.05)
+
+        with self.assertRaisesRegex(HostError, "workspace is missing"):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
     def test_a_head_nothing_names_cannot_be_reported_as_stopped(self) -> None:
         record = DispatcherRecord(

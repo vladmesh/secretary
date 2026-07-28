@@ -75,6 +75,18 @@ def _is_zombie(pid: int) -> bool:
     return False
 
 
+def _is_stopped(pid: int) -> bool:
+    """Whether a live process is suspended with SIGSTOP/SIGTSTP."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in status.splitlines():
+        if line.startswith("State:"):
+            return "T" in line
+    return False
+
+
 def head_process_status(pid_file: str) -> dict[str, Any]:
     """Whether the OS process named by a pid-heartbeat file is still alive.
 
@@ -103,7 +115,8 @@ def head_process_status(pid_file: str) -> dict[str, Any]:
         return {"known": True, "alive": True}
     except OSError:
         return {"known": False}
-    return {"known": True, "alive": not _is_zombie(pid)}
+    alive = not _is_zombie(pid)
+    return {"known": True, "alive": alive, "stopped": alive and _is_stopped(pid)}
 
 
 def wait_outcome(

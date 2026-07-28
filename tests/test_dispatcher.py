@@ -2586,6 +2586,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "gate-red-reused-worker")
         self.assertEqual(record["handle"], initial["handle"])
         self.assertEqual(record["worker_pid_file"], initial["worker_pid_file"])
+        self.assertEqual(record["worker_run"], initial["worker_run"])
         self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
         self.assertNotIn("restart_worker", self.host.calls)
         self.assertEqual(self.host.resumed_workers, [initial["handle"]])
@@ -2605,6 +2606,37 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("restart_worker"))
         self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_gate_red_with_an_old_record_stops_before_replacement(self) -> None:
+        """A pre-retention record cannot turn unknown worker liveness into a second writer."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_retained_at"] = 0.0
+        self.runtime.state.save(payload)
+        self.host.calls.clear()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertLess(self.host.calls.index("stop_workspace"), self.host.calls.index("restart_worker"))
+
+    def test_failed_retention_with_an_unconfirmed_stop_never_enters_validate(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.fail_retain_worker_reason = "head is gone"
+        self.host.fail_stop_workspace_reason = "Orca cannot confirm terminal stop"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="worker-done-unconfirmed-retention",
+        )
+
+        outcome = self.runtime.tick(self.selector)
+
+        self.assertEqual(outcome["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
     def test_gate_red_bounces_card_to_worker(self) -> None:
         self.start_pilot()
@@ -3515,7 +3547,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.completed, [], "a verdict for another code state must not merge")
         self.assertEqual(self.host.torn_down, [])
-        self.assertIn("a different state of the code", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        comments = self.reader.show("secretary-510-pilot")["comments"]
+        self.assertTrue(any("a different state of the code" in comment["body"] for comment in comments))
+        self.assertIn("continuation: replacement", comments[-1]["body"])
 
     def test_green_verdict_for_a_descendant_checkout_is_not_merged_by_default(self) -> None:
         """A descendant can contain new commits after review; only the instance publish recovery
@@ -5821,10 +5855,8 @@ class PidHeartbeatTests(unittest.TestCase):
     def test_heartbeat_writes_the_shells_own_pid_then_execs_the_head(self) -> None:
         wrapped = with_pid_heartbeat("codex exec --dangerously-bypass-approvals-and-sandbox", "/tmp/x.pid")
 
-        self.assertEqual(
-            wrapped,
-            'echo "$$" > /tmp/x.pid; exec env codex exec --dangerously-bypass-approvals-and-sandbox',
-        )
+        self.assertTrue(wrapped.startswith("setsid sh -c "))
+        self.assertIn('echo "$$" > /tmp/x.pid; exec env codex exec', wrapped)
 
     def test_heartbeat_survives_a_leading_environment_assignment(self) -> None:
         """secretary-751 review: catalog commands from `head_launch` start with `NAME=value`, which
@@ -5892,7 +5924,7 @@ class PidHeartbeatTests(unittest.TestCase):
 
             status = head_process_status(str(pid_file))
 
-            self.assertEqual(status, {"known": True, "alive": True})
+            self.assertEqual(status, {"known": True, "alive": True, "stopped": False})
 
     def test_a_pid_file_that_has_not_been_written_yet_is_not_known(self) -> None:
         """A fresh launch has not run its `echo $$` yet, and a raw

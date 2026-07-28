@@ -484,7 +484,11 @@ def with_pid_heartbeat(command: str, pid_file: str) -> str:
     assignments before it execs the real program in place, so the pid captured above still ends up
     belonging to the head once `env` hands off to it.
     """
-    return f'echo "$$" > {shlex.quote(pid_file)}; exec env {command}'
+    # A head owns a private session and process group.  Retention and confirmed shutdown signal
+    # that group, so a helper the head started cannot keep changing the checkout after its parent
+    # was frozen or stopped.  `setsid` also keeps a terminal shell outside that group.
+    script = f'echo "$$" > {shlex.quote(pid_file)}; exec env {command}'
+    return f"setsid sh -c {shlex.quote(script)}"
 
 
 def _delivered_prompt(prompt_file: str, launch_prompt: str | None) -> str:

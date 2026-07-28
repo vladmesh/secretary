@@ -206,13 +206,21 @@ pending or running, so the worker cannot change the checkout during validation. 
 confirms the retained worker has stopped before an independent reviewer starts; the reviewer is
 then the only head allowed to act on that checkout.
 
+The stop can leave no worker pane to split from, so the reviewer may be created as a separate
+terminal for the same worktree. Operators who watch a card in the terminal UI should open that
+worktree rather than assume the reviewer appears beside the retained worker's closed pane.
+
 A red gate first returns the card to In progress and updates `TASK.md` with the failure and the
-next report identity. When the retained provider session is still live and accepts delivery, that
-same terminal and session continue the rework. The routing record and card comment name this as a
-reused continuation with the worker profile, model, effort, reason and timestamp. A dead session,
-an unavailable continuation transport, or a lost handle is an explicit fallback: the dispatcher
-confirms the old worker has stopped, writes a durable launch intent, and starts exactly one
-replacement. An unconfirmed stop never permits a second writer in the workspace.
+next report identity. The dispatcher persists a resuming boundary before delivery, so recovery
+after a crash cannot mistake the previous `done` report for a new completion. When the retained
+provider session is still live and accepts delivery, the same terminal and session continue the
+rework. Codex TUI and Claude interactive workers support this path; one-shot Codex exec workers
+do not. The routing record and card comment name this as a reused continuation with the worker
+profile, model, effort, reason and timestamp. A dead session, an unavailable continuation
+transport, or a lost handle is an explicit fallback: the dispatcher confirms the old worker has
+stopped, writes a durable launch intent, and starts exactly one replacement. Retention and stop
+signal the head's private process group, so its helpers are frozen too. An unconfirmed stop never
+permits a second writer in the workspace.
 
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
