@@ -34,8 +34,8 @@ end-to-end gate and full adoption of an existing live host remain open parts of 
 ## Sprints today
 
 A sprint is the product's unit of work: an entity on the sprints board holds the goal, Definition of Done,
-repositories, status, budget, current card and resume entry. Linked cards stay on the Pipeline board and
-carry a reference to the sprint.
+repositories, status, budget, current card and resume entry. The current implementation links Pipeline
+cards directly to the sprint.
 
 The production dispatcher launches one observer head per open sprint and runs its lifecycle. The observer
 recovers its work from the sprint entity and the live board, and writes a structured resume entry after
@@ -46,9 +46,24 @@ While a sprint is open, its repositories belong to the observer as the only prod
 cards from outside requires `--sprint-override` and a recorded reason. The `open-sprint` role skill
 prepares the goal, Definition of Done and repositories, after which the product command creates the entity.
 
-The model does not yet have closing cards or a coded completeness check, review levels or per-project
-overlay deviations, an in-house CI runner for private repositories, or cleanup by owner label. Four gaps in
-the loop itself are known and not yet closed:
+The current card model is now the main product-model gap. Ideas mixes bugs, features, open questions and
+prematurely sliced implementation work, while executable cards can exist independently of a sprint. The
+target model separates durable product issues from tasks that an observer cuts just in time:
+
+- a Product owns issues and sprints and groups one or more projects;
+- an issue requires a product, a kind (`bug`, `feature`, `question` or `improvement`) and a priority
+  (`P0` through `P3`);
+- the first Pipeline column becomes Issues, and issues cannot move into task columns;
+- a sprint takes one or more issues, reserves projects and creates tasks only while it is running;
+- tasks are execution records, not product backlog, and are archived when their sprint closes;
+- only the PO explicitly closes an issue after checking the sprint outcome and product invariants.
+
+The first implementation permits one active sprint per installation. Reservations are recorded from the
+start so this can later loosen to parallel sprints whose project sets do not overlap.
+
+The model does not yet have typed execution gates, a coded completeness check, per-project overlay
+deviations, an in-house CI runner for private repositories, or cleanup by owner label. Four gaps in the
+loop itself are known and not yet closed:
 
 - a stale resume entry is visible from outside but wakes nobody and raises no signal;
 - observer liveness is measured by process, not by work: a head whose agent queue has ended stays
@@ -56,6 +71,38 @@ the loop itself are known and not yet closed:
 - a rework round leaves a dead terminal tab in the card's workspace;
 - a change to the sprint contract sent as an entry on the entity does not reach the observer: it accepts
   material and questions, but not a narrowing of the Definition of Done.
+
+## Current product-work programme and self-hosting cutover
+
+The next programme is deliberately bootstrapped by hand. The presence of sprint code is not evidence that
+the sprint system can safely develop itself.
+
+1. **Manual sprint: observer reliability.** Close the stale-resume and process-versus-work liveness gaps.
+2. **Manual sprint: Product/Issue/Task foundation.** Add Product, valid prioritised issues, sprint issue
+   references, project reservations, just-in-time tasks and terminal-task archival.
+3. **Self-hosted canary.** Run one short code-only sprint through the new observer path. It must create its
+   own task, survive a restart, keep resume current, close, archive the terminal task and leave the issue
+   open for a separate PO decision.
+
+The cutover is an explicit PO decision, recorded as `sprint system accepted for self-hosting`. A failed
+canary returns the programme to manual repair and is repeated; it never advances automatically.
+
+After cutover, the sprint system implements its remaining programme through itself:
+
+1. typed tasks: `code`, `research` and `operation`, with a versioned knowledge artifact required for every
+   research task and a structured state-evidence report for an operation;
+2. abstract routing levels (`low`, `medium`, `high`, `frontier`) resolved by the dispatcher into explicit
+   family, model and effort, with append-only per-round telemetry and a single-family degraded mode;
+3. task review convergence: a review-only budget with analysis on red review three, a hard decision on
+   five, one exceptional sixth fix round, and then a mechanical wait for the owner;
+4. durable product decision requests and `awaiting_decision` when the Definition of Done proves impossible
+   or materially incomplete;
+5. parallel product sprints whose project reservations do not overlap.
+
+Reviewer verdict and release decision remain distinct. Review stays independent and may report every real
+blocker. At the budget boundary the observer may accept a mechanically green, architecturally convergent
+increment with follow-up issues, reslice it, or use the last fix round. It does not rewrite a red review
+into green.
 
 ## Milestone 1. Reliable fresh install
 
@@ -181,12 +228,18 @@ secretary head add
 
 - The model distinguishes agent runtime, account, account pool and head profile; a runtime is not equated
   with a model provider.
-- A card selects `light`, `standard` or `deep`, but may name a model or head explicitly.
+- Every task selects one required abstract level (`low`, `medium`, `high` or `frontier`). The observer sees
+  levels and model families, not concrete model names or effort values.
 - The router applies overrides and hard availability constraints first, then weighs capability, quota and
   reset state, and a preference for a different model family for review.
+- Worker and reviewer receive the same level. The dispatcher resolves both to explicit profiles, models
+  and efforts and may swap their families after a convergence signal.
+- If one provider budget is already exhausted, work continues in a visible single-family degraded mode;
+  predicting budget exhaustion and rotating accounts in advance is not part of the first routing step.
 - An account in an `unknown` state is available optimistically; quota, auth and transient failures move it
   into an explainable circuit-breaker state.
-- Every run records the resolved runtime, model, account and decision trace.
+- Every run records the requested level and the resolved family, runtime, profile, model, explicit effort,
+  account, outcome and decision trace. Automatic model-quality scoring is a separate later task.
 
 ### Open questions
 

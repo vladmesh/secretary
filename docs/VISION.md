@@ -40,26 +40,43 @@ A head is not a model provider. Codex, Claude Code and Hermes are the agent runt
 the current adapters; each runtime can use the accounts, subscriptions, API keys and models available
 to it. A head profile binds a runtime, an account pool, a model, launch parameters and roles.
 
-Routing stays deterministic. A card states the capability it needs, and policy picks the profile,
-account and model given availability, limits and a preference for independent re-checking. The owner
-or an operator can override the choice explicitly. The actual decision and its reason are recorded in
-the audit log.
+Routing stays deterministic. An observer assigns each executable task an abstract capability level;
+policy picks the family, profile, account, model and explicit effort given availability, limits and a
+preference for independent re-checking. Concrete models and effort values remain configuration rather
+than planning vocabulary. The owner or an operator can override the routing intent explicitly. Every
+round records both the requested level and the resolved decision.
 
 The value of reviewing with a different model family has to be measured by problems found, fix
 cycles, later regressions, elapsed time and quota spend. Until that data exists, diversity is a
-preference, not a quality guarantee.
+preference, not a quality guarantee. An exhausted family degrades work to the family that remains
+available instead of stopping delivery merely because cross-family review is unavailable.
 
 ## The sprint as the unit of work
 
-A sprint holds a goal and a Definition of Done. A card can live inside a sprint, but standalone cards
-remain valid. An open sprint is run by a dedicated observer head that the production dispatcher
-launches, not by a person in a chat window. You talk to a running sprint through entries on its
-entity, and read its status from board data.
+A Product groups the projects that together deliver one product. Durable prioritised issues describe
+why work matters; they are fuel for a sprint, not pre-sliced implementation. A sprint belongs to one
+Product, takes one or more issues, holds a goal and a Definition of Done, and reserves the projects it
+may change. Its observer cuts executable tasks only when the next step is known. Tasks are process
+records and disappear from the live board after sprint close; issues remain open until the owner,
+through the secretary acting as the PO interface, explicitly closes them after checking product
+invariants.
+
+An open sprint is run by a dedicated observer head that the production dispatcher launches, not by a
+person in a chat window. The observer chooses implementation tactics, task boundaries and routing
+levels inside the sprint contract. It cannot silently change the Definition of Done or make a material
+product choice. If the Definition of Done proves impossible or materially incomplete, the observer
+records a durable decision request and waits for the owner through the secretary. You talk to a
+running sprint through entries on its entity, and read its status from board data.
 
 The entity follows from a product principle: sprint state is stored where the cards are, because a
 working agent's self-report is least reliable exactly when the truth matters most. The link between
-cards and their sprint, and the events of the work, must be readable independently of the observer's
-memory or transcript.
+tasks and their sprint, its source issues, product decisions and the events of the work must be
+readable independently of the observer's memory or transcript.
+
+Independent review reports what it finds; it is not weakened to make work converge. The sprint
+controller separately decides how to use that evidence. A bounded review cycle can reslice a failed
+approach or accept a mechanically green, architecturally sound increment while preserving remaining
+findings as prioritised issues. It cannot continue ordinary fix rounds indefinitely.
 
 ## Product principles
 
@@ -69,10 +86,14 @@ memory or transcript.
   need for a second implementation.
 - The board backend holds live task state; `secretary task` owns the normalised model, transitions,
   audit and the portable export.
+- Product intent and execution are different planes: issues are durable and prioritised, while tasks
+  are cut just in time inside a sprint.
 - The session manager provides managed PTY sessions, streamed output, input, state, process-tree
   termination and recovery. A pretty live UI is a frontend capability.
 - LLMs do and review the work. Routing, lifecycle, recovery and ownership are ordinary checkable
   protocols.
+- The owner retains product authority. The secretary is the interactive PO interface; an observer is
+  an autonomous sprint controller with bounded authority, not a substitute product owner.
 - Observability and recovery are part of the main user path.
 
 ## Delivery and direction
