@@ -314,6 +314,14 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        entry = {
+            "selected_step": "check board", "selected_why": "initial card claim", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
+        }
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry, request_id="routing-baseline",
+        )
+        self.runtime.production_tick()
         self.audit.append("routing-only", {
             "event_id": "evt_routing_only", "request_id": "routing-only", "ref": "secretary-510-pilot",
             "kind": "routing", "outcome": "success", "occurred_at": "2026-07-29T12:00:00Z",
@@ -357,22 +365,28 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertTrue(reads)
         self.assertEqual(reads[0][reads[0].index("--terminal") + 1], "observer:rotated")
 
-    def test_active_card_keeps_a_finished_observer_queue_in_waiting_state(self) -> None:
+    def test_active_card_does_not_relaunch_a_finished_observer_without_a_new_event(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.board.metadata[100]["sprint_current_task"] = "secretary-510-pilot"
         self.runtime.production_tick()
+        entry = {
+            "selected_step": "wait for card", "selected_why": "the card is active", "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait for transition",
+        }
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry, request_id="active-card-baseline",
+        )
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
             "queue_finished": True,
         }
 
-        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
-            result = self.runtime.production_tick()
+        result = self.runtime.production_tick()
 
-        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observers, ["sprint:1"])
-        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.host.observer_nudges, [])
 
     def test_closed_sprint_stops_the_head_and_drops_the_record(self) -> None:
         self.open_sprint()

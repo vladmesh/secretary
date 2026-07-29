@@ -451,7 +451,7 @@ def _reconcile_open_sprint(
                 "head": record.head,
                 "launches": record.launches,
             }
-        if record.state in {"waiting", "idle-recovering"}:
+        if record.state in {"waiting", "idle-grace", "idle-recovering"}:
             _set_observer_state(record, "running")
         return {
             "status": "ok",
@@ -672,18 +672,13 @@ def _defer_event_wake(record: ObserverRecord, ref: str, event_id: str, reason: s
 def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Classify the live observer without turning an ordinary card wait into a restart.
 
-    The observer skill keeps watching a card in every active Pipeline state.  That durable board
-    fact wins over terminal silence.  An inactive sprint plus Codex's completed-turn footer is an
-    idle queue, but idle alone never causes another model turn.
+    A confirmed completed turn means the observer is idle even while a card is in flight. The
+    card's next durable transition, not a periodic idle check, provides its next model turn.
     """
     try:
-        sprint = runtime.sprints.show(ref)
+        runtime.sprints.show(ref)
     except (HostError, TaskError):
         return {"state": "unknown", "reason": "the sprint could not be read for idle recovery"}
-    cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
-    active_states = {"ready", "in_progress", "validate"}
-    if any(str(card.get("state") or "") in active_states for card in cards if isinstance(card, dict)):
-        return {"state": "waiting", "reason": "an active sprint card is awaiting its normal cycle"}
     try:
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError):
