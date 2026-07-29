@@ -63,7 +63,7 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_types import HostError
 from secretary.role_skills import skill_delivery
-from secretary.tasks import TaskError
+from secretary.tasks import TaskError, is_significant_card_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_WATCHDOG_KIND = "observer"
@@ -673,14 +673,18 @@ def _reconcile_open_sprint(
 def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Read linked-card work and acknowledge only the active delivery batch.
 
-    Append order makes a resume causally later than the delivery intent's resume cursor. The
-    immutable `through_event` prevents a resume for A from accidentally crediting B, which may
-    have arrived while A's turn was already in flight.
+    A resume acknowledges only when its audit payload carries the active delivery's immutable
+    marker. That prevents an older turn, which may complete after a newer intent is persisted,
+    from crediting work it never received.
     """
     try:
         sprint = runtime.sprints.show(ref)
         cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
-        refs = {str(card.get("ref") or "") for card in cards if isinstance(card, dict)}
+        refs = {
+            str(card.get("ref") or "")
+            for card in cards
+            if isinstance(card, dict) and str(card.get("ref") or "")
+        }
         events = runtime.audit.events()
     except (TaskError, HostError, OSError, ValueError, TypeError):
         return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
@@ -689,7 +693,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     for event in events:
         if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
             resumes.append(event)
-        if str(event.get("ref") or "") in refs and _significant_card_event(event):
+        if is_significant_card_event(event, linked_refs=refs):
             significant.append(event)
     _acknowledge_delivery_from_resume(record.delivery, resumes)
     if not significant:
@@ -713,14 +717,6 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         "latest_resume_id": _event_id(resumes[-1]) if resumes else "",
         "reason": "latest significant linked-card event is not acknowledged",
     }
-
-
-def _significant_card_event(event: dict[str, Any]) -> bool:
-    """Routing records and failed guard writes do not ask the observer to make a new decision."""
-    return (
-        str(event.get("kind") or "") not in {"routing", "sprint_guard_denied"}
-        and str(event.get("outcome") or "success") == "success"
-    )
 
 
 def _timestamp(value: str) -> datetime | None:
@@ -753,17 +749,6 @@ def _event_index(events: list[dict[str, Any]], event_id: str) -> int:
     return -1
 
 
-def _resume_after_cursor(resumes: list[dict[str, Any]], delivery: ObserverDelivery) -> str:
-    """The newest resume appended after this delivery's persisted baseline, if any."""
-
-    if not delivery.resume_cursor_known:
-        return ""
-    if not delivery.resume_cursor:
-        return _event_id(resumes[-1]) if resumes else ""
-    cursor = _event_index(resumes, delivery.resume_cursor)
-    return _event_id(resumes[-1]) if cursor >= 0 and cursor < len(resumes) - 1 else ""
-
-
 def _reset_delivery_to_idle(
     delivery: ObserverDelivery,
     *,
@@ -791,20 +776,34 @@ def _reset_delivery_to_idle(
 def _acknowledge_delivery_from_resume(
     delivery: ObserverDelivery, resumes: list[dict[str, Any]]
 ) -> None:
-    """Advance only an active batch whose own delivery intent predates this resume."""
+    """Advance only when the active batch's marker was written by its observer."""
 
     if delivery.stage not in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}:
         return
     if not delivery.delivery_id or not delivery.through_event:
         return
-    resume_id = _resume_after_cursor(resumes, delivery)
-    if resume_id:
+    for resume in reversed(resumes):
+        payload = resume.get("payload")
+        actor = resume.get("actor")
+        if not isinstance(payload, dict) or not isinstance(actor, dict):
+            continue
+        if str(actor.get("role") or "") != OBSERVER_ROLE:
+            continue
+        if (
+            str(payload.get("delivery_id") or "") != delivery.delivery_id
+            or str(payload.get("through_event") or "") != delivery.through_event
+        ):
+            continue
+        resume_id = _event_id(resume)
+        if not resume_id:
+            continue
         _reset_delivery_to_idle(
             delivery,
             acknowledged_through=delivery.through_event,
             acknowledged_delivery_id=delivery.delivery_id,
             acknowledged_resume_id=resume_id,
         )
+        return
 
 
 def _new_delivery_intent(
@@ -1310,7 +1309,9 @@ def _launch_observer(
         launched = runtime.host.prepare_observer(
             sprint,
             head,
-            prompt=render_observer_prompt(sprint, skill_path=_first_path(delivery)),
+            prompt=render_observer_prompt(
+                sprint, skill_path=_first_path(delivery), delivery=record.delivery,
+            ),
         )
     except ObserverLaunchAborted as exc:
         # The bring-up failed with its terminal still up. The staged event is dropped, because no
@@ -1891,7 +1892,9 @@ def _first_path(delivery: dict[str, Any]) -> str:
     return str(paths[0]) if paths else ""
 
 
-def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> str:
+def render_observer_prompt(
+    sprint: dict[str, Any], *, skill_path: str = "", delivery: ObserverDelivery | None = None,
+) -> str:
     """The observer's launch document: the sprint entity, and the skill that says what to do.
 
     The document carries data and one pointer. How a sprint is led belongs to the role skill alone,
@@ -1901,6 +1904,11 @@ def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> s
     repositories = [str(repo) for repo in (sprint.get("repositories") or [])]
     current = str(sprint.get("current_task") or "")
     budget = sprint.get("budget") if isinstance(sprint.get("budget"), dict) else {}
+    marker = (
+        (delivery.delivery_id, delivery.through_event)
+        if delivery is not None and delivery.delivery_id and delivery.through_event
+        else ("", "")
+    )
     sections = [
         f"# Sprint {ref}",
         "",
@@ -1943,6 +1951,14 @@ def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> s
         "Hard threshold reached." if budget.get("hard_reached") else "Hard threshold not reached.",
         "",
     ]
+    if marker[0]:
+        sections.extend([
+            "## Pending delivery acknowledgement",
+            "",
+            f"delivery_id: {marker[0]}",
+            f"through_event: {marker[1]}",
+            "",
+        ])
     return "\n".join(sections)
 
 

@@ -134,6 +134,15 @@ _ROUTING_PHASES = {"worker", "review", "verdict"}
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
 
+def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
+    """Whether a committed card-audit line requires the sprint observer's attention."""
+    return (
+        str(event.get("ref") or "") in linked_refs
+        and str(event.get("kind") or "") not in {"routing", "sprint_guard_denied"}
+        and str(event.get("outcome") or "") == "success"
+    )
+
+
 class KanboardClient:
     """Small JSON-RPC client. Credentials are supplied only by runtime env."""
 

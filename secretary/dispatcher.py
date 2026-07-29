@@ -796,10 +796,18 @@ class CommandHostRuntime:
         current = str(terminal.get("handle") or "") if isinstance(terminal, dict) else ""
         if not current:
             raise HostError("observer terminal is unavailable for an event wake")
+        delivery = getattr(record, "delivery", None)
+        delivery_id = str(getattr(delivery, "delivery_id", "") or "")
+        through_event = str(getattr(delivery, "through_event", "") or "")
+        message = "A linked card changed. Reread the live sprint board, take the next step, then record resume."
+        if delivery_id and through_event:
+            message += (
+                " Acknowledge this delivery in that resume with --delivery-id "
+                f"{delivery_id} --through-event {through_event}."
+            )
         self._run_json([
             "orca", "terminal", "send",
-            "--terminal", current,
-            "--text", "A linked card changed. Reread the live sprint board, take the next step, then record resume.",
+            "--terminal", current, "--text", message,
             "--enter",
             "--json",
         ])

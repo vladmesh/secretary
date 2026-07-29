@@ -328,11 +328,59 @@ class SprintTests(unittest.TestCase):
         }
 
         result = self.writer.resume(
-            role="observer", actor="observer-head", reference=ref, entry=entry, request_id="observer-resume",
+            role="observer", actor="observer-head", reference=ref, entry=entry,
+            request_id="observer-resume", delivery_id="delivery-1", through_event="evt-card-1",
         )
 
         self.assertEqual(result["action"], "resume_recorded")
         self.assertEqual(result["sprint"]["resume"]["selected_step"], "implement")
+        self.assertNotIn("delivery_id", result["sprint"]["resume"])
+        resume_event = TaskAudit(self.tmp.name).events(reference=ref)[-1]
+        self.assertEqual(resume_event["payload"]["delivery_id"], "delivery-1")
+        self.assertEqual(resume_event["payload"]["through_event"], "evt-card-1")
+        with self.assertRaisesRegex(TaskError, "requires both"):
+            self.writer.resume(
+                role="observer", actor="observer-head", reference=ref, entry=entry,
+                delivery_id="delivery-2",
+            )
+        with self.assertRaisesRegex(TaskError, "only an observer"):
+            self.writer.resume(
+                role="po", actor="operator", reference=ref, entry=entry,
+                delivery_id="delivery-2", through_event="evt-card-2",
+            )
+
+    def test_resume_freshness_ignores_denied_and_failed_card_events(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="event predicate")["sprint"]["ref"]
+        task = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            sprint=ref, request_id="predicate-card",
+        )["task"]
+        entry = {
+            "selected_step": "wait", "selected_why": "no durable transition", "rejected_alternatives": "act",
+            "current_task": task["ref"], "dod_state": "open", "next_safe_step": "wait",
+        }
+        self.writer.resume(role="observer", actor="observer", reference=ref, entry=entry)
+        audit = TaskAudit(self.tmp.name)
+        baseline = SprintReader(self.client, data_dir=self.tmp.name).show(ref)["resume_freshness"]  # type: ignore[arg-type]
+        for request_id, kind, outcome in (
+            ("predicate-denied", "sprint_guard_denied", "denied"),
+            ("predicate-guard-success", "sprint_guard_denied", "success"),
+            ("predicate-failed", "commented", "failed"),
+            ("predicate-missing-outcome", "commented", ""),
+        ):
+            audit.append(request_id, {
+                "event_id": "evt_" + request_id,
+                "request_id": request_id,
+                "ref": task["ref"],
+                "kind": kind,
+                "outcome": outcome,
+                "occurred_at": "2099-01-01T00:00:00Z",
+            })
+
+        freshness = SprintReader(self.client, data_dir=self.tmp.name).show(ref)["resume_freshness"]  # type: ignore[arg-type]
+
+        self.assertTrue(freshness["fresh"])
+        self.assertEqual(freshness["last_event_at"], baseline["last_event_at"])
 
 
 class SprintSingleWriterGuardTests(unittest.TestCase):

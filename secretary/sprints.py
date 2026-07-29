@@ -15,6 +15,7 @@ from secretary.tasks import (
     TaskAudit,
     TaskError,
     TaskReader,
+    is_significant_card_event,
     _digest,
     _now,
     _positive_int,
@@ -328,9 +329,13 @@ class SprintReader:
             }
         last_event = ""
         if self.data_dir is not None:
-            refs = {str(card.get("ref") or "") for card in sprint.get("cards") or [] if isinstance(card, dict)}
+            refs = {
+                str(card.get("ref") or "")
+                for card in sprint.get("cards") or []
+                if isinstance(card, dict) and str(card.get("ref") or "")
+            }
             for event in TaskAudit(self.data_dir).events():
-                if event.get("ref") in refs and event.get("kind") != "routing":
+                if is_significant_card_event(event, linked_refs=refs):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")
         lag_seconds = _resume_lag_seconds(recorded_at, last_event)
@@ -500,14 +505,37 @@ class SprintWriter:
         self.audit.stage(stop_request_id, event)
         self._record("budget_hard_stopped", event)
 
-    def resume(self, *, role: str, actor: str, reference: str, entry: dict[str, Any], request_id: str | None = None) -> dict[str, Any]:
+    def resume(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        entry: dict[str, Any],
+        request_id: str | None = None,
+        delivery_id: str = "",
+        through_event: str = "",
+    ) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "observer", "steward"})
         normalized = _resume(entry, required=True)
         assert normalized is not None
+        delivery_id = delivery_id.strip()
+        through_event = through_event.strip()
+        if bool(delivery_id) != bool(through_event):
+            raise TaskError(
+                "validation",
+                "resume delivery acknowledgement requires both delivery_id and through_event",
+                2,
+            )
+        if (delivery_id or through_event) and role != "observer":
+            raise TaskError("role_forbidden", "only an observer resume can acknowledge delivery", 3)
         def mutation(sprint: dict[str, Any]) -> None:
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))})
             self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content="[sprint:resume]\n" + normalized["selected_step"])
-        return self._write("resume_recorded", role, actor, reference, request_id, {"fields": list(RESUME_FIELDS)}, mutation)
+        payload = {"fields": list(RESUME_FIELDS)}
+        if delivery_id:
+            payload.update({"delivery_id": delivery_id, "through_event": through_event})
+        return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
 
     def close(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"po"})
