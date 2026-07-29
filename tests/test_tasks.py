@@ -616,6 +616,93 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.reconcile(), (1, 0))
         self.assertEqual(writes, len([call for call in self.client.calls if call[0] == "createComment"]))
 
+    def test_legacy_pending_record_is_migrated_by_contents_not_its_request_id_path(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        request_id = "../cannot-escape"
+        legacy = pending / "legacy-record.json"
+        legacy.write_text(
+            json.dumps({"request_id": request_id, "event_id": "evt_legacy", "kind": "comment"}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(audit.reconcile(), (1, 0))
+        self.assertFalse(legacy.exists())
+        self.assertFalse((Path(audit.board_dir).parent / "cannot-escape.json").exists())
+        self.assertEqual([event["request_id"] for event in audit.events()], [request_id])
+        self.assertEqual(audit.status(), {"ok": True, "pending": 0})
+
+    def test_legacy_records_are_removed_by_append_discard_and_matching_collision_cleanup(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        append_event = {"request_id": "legacy-append", "event_id": "evt_append", "kind": "comment"}
+        append_legacy = pending / "legacy-append.json"
+        append_legacy.write_text(json.dumps(append_event), encoding="utf-8")
+        audit.append("legacy-append", append_event)
+        self.assertFalse(append_legacy.exists())
+
+        discard_event = {"request_id": "legacy-discard", "event_id": "evt_discard", "kind": "comment"}
+        discard_legacy = pending / "legacy-discard.json"
+        discard_legacy.write_text(json.dumps(discard_event), encoding="utf-8")
+        audit.discard("legacy-discard")
+        self.assertFalse(discard_legacy.exists())
+
+        collision_event = {"request_id": "matching-collision", "event_id": "evt_matching", "kind": "comment"}
+        audit.stage("matching-collision", collision_event)
+        matching_legacy = pending / "matching-collision.json"
+        matching_legacy.write_text(json.dumps(collision_event), encoding="utf-8")
+        self.assertEqual(audit.pending_event("matching-collision"), collision_event)
+        self.assertFalse(matching_legacy.exists())
+        audit.discard("matching-collision")
+
+    def test_legacy_new_collision_fails_closed_without_an_audit_event(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        event = {"request_id": "collision", "event_id": "evt_new", "kind": "comment", "payload": {"body": "one"}}
+        audit.stage("collision", event)
+        legacy = Path(audit.pending_dir) / "collision.json"
+        legacy.write_text(
+            json.dumps(event | {"event_id": "evt_legacy", "payload": {"body": "other"}}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(audit.reconcile(), (0, 2))
+        self.assertEqual(audit.events(), [])
+        self.assertTrue(legacy.exists())
+        self.assertEqual(audit.status(), {"ok": False, "pending": 2})
+        with self.assertRaisesRegex(TaskError, "conflicting pending audit records"):
+            audit.append("collision", event)
+
+    def test_nested_and_symlinked_legacy_entries_block_checkpoint(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        (pending / "nested").mkdir()
+        (pending / "linked.json").symlink_to(pending / "missing.json")
+
+        self.assertEqual(audit.status(), {"ok": False, "pending": 2})
+        self.assertEqual(audit.reconcile(), (0, 2))
+        with self.assertRaisesRegex(TaskError, "nested or symlinked"):
+            audit.pending_events()
+
+    def test_legacy_cleanup_failure_remains_retryable_without_duplicate_event(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        event = {"request_id": "legacy-cleanup", "event_id": "evt_cleanup", "kind": "comment"}
+        audit.stage("legacy-cleanup", event)
+        legacy = Path(audit.pending_dir) / "legacy-cleanup.json"
+        Path(audit._pending_path("legacy-cleanup")).replace(legacy)
+
+        with mock.patch("secretary.tasks.os.unlink", side_effect=OSError("disk error")):
+            with self.assertRaises(OSError):
+                audit.append("legacy-cleanup", event)
+        self.assertEqual([item["request_id"] for item in audit.events()], ["legacy-cleanup"])
+        self.assertEqual(audit.status(), {"ok": False, "pending": 1})
+
+        audit.append("legacy-cleanup", event)
+        self.assertEqual([item["request_id"] for item in audit.events()], ["legacy-cleanup"])
+        self.assertEqual(audit.status(), {"ok": True, "pending": 0})
+
     def test_restore_comment_retry_after_lost_reply_does_not_duplicate_history(self) -> None:
         self.client.lose_comment_reply = True
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:

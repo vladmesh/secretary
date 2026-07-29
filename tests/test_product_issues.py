@@ -772,6 +772,68 @@ class ProductIssueStoreTests(unittest.TestCase):
             ],
         )
 
+    def test_legacy_pending_records_restart_each_product_issue_operation_once(self) -> None:
+        """A pre-digest pending file keeps the parent transaction replay semantics."""
+        operations: list[tuple[str, object]] = []
+
+        operations.append((
+            "product",
+            lambda store: store.create_product(
+                product_id="legacy-product", projects=["secretary"], title="Product", description="",
+                actor="po", request_id="legacy-product-request",
+            ),
+        ))
+        self.store.create_product(
+            product_id="legacy-issue-product", projects=["secretary"], title="Product", description="", actor="po",
+        )
+        operations.append((
+            "issue",
+            lambda store: store.create_issue(
+                product="legacy-issue-product", issue_kind="bug", priority="P2", title="Issue", description="",
+                actor="po", request_id="legacy-issue-request",
+            ),
+        ))
+        priority_issue = self.store.create_issue(
+            product="legacy-issue-product", issue_kind="feature", priority="P2", title="Priority", description="", actor="po",
+        )
+        operations.append((
+            "priority",
+            lambda store: store.update_priority(
+                reference=priority_issue["ref"], priority="P1", reason="urgent", actor="po",
+                request_id="legacy-priority-request",
+            ),
+        ))
+        close_issue = self.store.create_issue(
+            product="legacy-issue-product", issue_kind="question", priority="P2", title="Close", description="", actor="po",
+        )
+        operations.append((
+            "close",
+            lambda store: store.close_issue(
+                reference=close_issue["ref"], reason="resolved", actor="po", request_id="legacy-close-request",
+            ),
+        ))
+
+        for name, invoke in operations:
+            request_id = f"legacy-{name}-request"
+            with mock.patch("secretary.tasks.os.unlink", side_effect=OSError("audit cleanup lost")):
+                with self.subTest(operation=name), self.assertRaises(TaskError) as raised:
+                    invoke(self.store)  # type: ignore[operator]
+                self.assertEqual(raised.exception.code, "audit_pending")
+
+            pending = Path(self.store.audit._pending_path(request_id))
+            legacy = pending.with_name(f"legacy-{name}.json")
+            pending.replace(legacy)
+            self.assertEqual(TaskWriter(self.client, data_dir=self.root / "data").reconcile(), (0, 1))
+
+            restarted = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+            invoke(restarted)  # type: ignore[operator]
+            self.assertFalse(legacy.exists())
+            self.assertEqual(restarted.audit.status(), {"ok": True, "pending": 0})
+            self.assertEqual(
+                len([event for event in restarted.audit.events() if event["request_id"] == request_id]), 1,
+            )
+            self.store = restarted
+
     def test_every_product_issue_write_boundary_is_repairable(self) -> None:
         """False replies, exceptions and lost replies all leave one replayable intent."""
         boundaries = {

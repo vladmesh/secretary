@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 import urllib.error
@@ -303,7 +304,9 @@ class TaskAudit:
 
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
         os.makedirs(self.pending_dir, exist_ok=True)
-        self._atomic_json(self._pending_path(request_id), event)
+        with self._locked():
+            self._migrate_legacy_pending_locked(request_id)
+            self._atomic_json(self._pending_path(request_id), event)
 
     def claim(self, request_id: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
         """Atomically reserve a request id or return its durable record.
@@ -314,19 +317,15 @@ class TaskAudit:
         sequence a single durable claim.
         """
         os.makedirs(self.pending_dir, exist_ok=True)
-        with open(self.lock_path, "a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                committed = self.committed_event(request_id)
-                pending = self.pending_event(request_id)
-                if committed is not None:
-                    return committed, True, pending is not None
-                if pending is not None:
-                    return pending, False, False
-                self._atomic_json(self._pending_path(request_id), event)
-                return event, False, False
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self._locked():
+            committed = self.committed_event(request_id)
+            pending = self._pending_event_locked(request_id)
+            if committed is not None:
+                return committed, True, pending is not None
+            if pending is not None:
+                return pending, False, False
+            self._atomic_json(self._pending_path(request_id), event)
+            return event, False, False
 
     @contextmanager
     def request_lock(self, request_id: str) -> Any:
@@ -356,40 +355,35 @@ class TaskAudit:
 
     def append(self, request_id: str, event: dict[str, Any]) -> str:
         os.makedirs(self.board_dir, exist_ok=True)
-        with open(self.lock_path, "a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                if not self._has_request(request_id):
-                    with open(self.events_path, "a", encoding="utf-8") as events:
-                        events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-                        events.flush()
-                        os.fsync(events.fileno())
-                pending = self._pending_path(request_id)
-                if os.path.exists(pending):
-                    os.unlink(pending)
-                return str(event["event_id"])
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self._locked():
+            self._migrate_legacy_pending_locked(request_id)
+            if not self._has_request(request_id):
+                with open(self.events_path, "a", encoding="utf-8") as events:
+                    events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+                    events.flush()
+                    os.fsync(events.fileno())
+            self._remove_pending_locked(request_id)
+            return str(event["event_id"])
 
     def discard(self, request_id: str) -> None:
-        try:
-            os.unlink(self._pending_path(request_id))
-        except FileNotFoundError:
-            pass
+        with self._locked():
+            self._migrate_legacy_pending_locked(request_id)
+            self._remove_pending_locked(request_id)
 
     def reconcile(self) -> tuple[int, int]:
         if not os.path.isdir(self.pending_dir):
             return 0, 0
+        try:
+            events = self.pending_events()
+        except TaskError:
+            return 0, self._pending_count()
         repaired = 0
         unresolved = 0
-        for name in sorted(os.listdir(self.pending_dir)):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(self.pending_dir, name)
+        for event in events:
             try:
-                with open(path, encoding="utf-8") as source:
-                    event = json.load(source)
-                request_id = str(event["request_id"])
+                request_id = event["request_id"]
+                if not isinstance(request_id, str):
+                    raise TaskError("audit_pending", "pending audit request id is invalid", 4)
                 if event.get("protocol") == "product_issue_transaction" or event.get("kind") in {
                     "product_created", "issue_created", "issue_priority_changed", "issue_closed",
                 }:
@@ -399,28 +393,28 @@ class TaskAudit:
                     continue
                 self.append(request_id, event)
                 repaired += 1
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, TaskError):
                 unresolved += 1
         return repaired, unresolved
 
     def pending_events(self) -> list[dict[str, Any]]:
         if not os.path.isdir(self.pending_dir):
             return []
-        result = []
-        for name in sorted(os.listdir(self.pending_dir)):
-            if not name.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(self.pending_dir, name), encoding="utf-8") as source:
-                    result.append(json.load(source))
-            except (OSError, ValueError):
-                continue
-        return result
+        with self._locked():
+            self._migrate_all_legacy_pending_locked()
+            return self._all_pending_events_locked()
 
     def status(self) -> dict[str, int | bool]:
-        pending = 0
-        if os.path.isdir(self.pending_dir):
-            pending = sum(name.endswith(".json") for name in os.listdir(self.pending_dir))
+        if not os.path.isdir(self.pending_dir):
+            return {"ok": True, "pending": 0}
+        with self._locked():
+            try:
+                self._migrate_all_legacy_pending_locked()
+                pending = len(self._all_pending_events_locked())
+            except (OSError, TaskError):
+                # A suspicious record is itself pending work.  Do not let a bad
+                # legacy filename make checkpoint believe the audit is empty.
+                pending = self._pending_count_locked()
         return {"ok": pending == 0, "pending": pending}
 
     def event(self, request_id: str) -> dict[str, Any] | None:
@@ -469,12 +463,138 @@ class TaskAudit:
         return None
 
     def pending_event(self, request_id: str) -> dict[str, Any] | None:
+        with self._locked():
+            return self._pending_event_locked(request_id)
+
+    def _pending_event_locked(self, request_id: str) -> dict[str, Any] | None:
+        self._migrate_legacy_pending_locked(request_id)
         pending = self._pending_path(request_id)
         try:
-            with open(pending, encoding="utf-8") as source:
-                return json.load(source)
+            event = self._read_pending_file(pending)
         except FileNotFoundError:
             return None
+        if event.get("request_id") != request_id:
+            raise TaskError("audit_pending", "pending audit filename does not match its request id", 4)
+        return event
+
+    @contextmanager
+    def _locked(self) -> Any:
+        """Hold the audit lock while discovering or migrating pending records."""
+        os.makedirs(self.board_dir, exist_ok=True)
+        with open(self.lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _pending_entries_locked(self) -> list[os.DirEntry[str]]:
+        if not os.path.isdir(self.pending_dir):
+            return []
+        entries = sorted(os.scandir(self.pending_dir), key=lambda entry: entry.name)
+        for entry in entries:
+            if re.fullmatch(r"\.(?:request|entity)-[0-9a-f]{64}\.lock", entry.name):
+                if not entry.is_file(follow_symlinks=False):
+                    raise TaskError("audit_pending", "pending audit lock entry is unsafe", 4)
+                continue
+            if not entry.name.endswith(".json"):
+                raise TaskError("audit_pending", "pending audit contains an unexpected entry", 4)
+            if not entry.is_file(follow_symlinks=False):
+                raise TaskError("audit_pending", "pending audit contains a nested or symlinked record", 4)
+        return entries
+
+    def _read_pending_file(self, path: str) -> dict[str, Any]:
+        """Read one direct regular record without following a legacy symlink."""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise TaskError("audit_pending", "pending audit record is not a regular file", 4)
+            with os.fdopen(fd, encoding="utf-8") as source:
+                fd = -1
+                event = json.load(source)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        if not isinstance(event, dict) or not isinstance(event.get("request_id"), str):
+            raise TaskError("audit_pending", "pending audit record is malformed", 4)
+        return event
+
+    def _matching_pending_locked(self, request_id: str) -> list[tuple[str, dict[str, Any]]]:
+        result: list[tuple[str, dict[str, Any]]] = []
+        for entry in self._pending_entries_locked():
+            if not entry.name.endswith(".json"):
+                continue
+            event = self._read_pending_file(entry.path)
+            expected = os.path.basename(self._pending_path(event["request_id"]))
+            # A digest-shaped filename belongs either to this event's current
+            # digest path or to the old raw request-id spelling.  Anything else
+            # is an ownership collision, not a record we may rename over.
+            if (
+                re.fullmatch(r"[0-9a-f]{64}\.json", entry.name)
+                and entry.name not in {expected, f"{event['request_id']}.json"}
+            ):
+                raise TaskError("audit_pending", "pending audit digest name has conflicting ownership", 4)
+            if event["request_id"] == request_id:
+                result.append((entry.path, event))
+        return result
+
+    def _migrate_legacy_pending_locked(self, request_id: str) -> None:
+        """Move verified raw-name records to their digest name, or fail closed."""
+        matches = self._matching_pending_locked(request_id)
+        if not matches:
+            return
+        canonical = self._pending_path(request_id)
+        canonical_match = next((item for item in matches if item[0] == canonical), None)
+        source_path, source_event = canonical_match or matches[0]
+        if any(event != source_event for _, event in matches):
+            raise TaskError("audit_pending", "conflicting pending audit records for request id", 4)
+        if canonical_match is None:
+            # A digest name owned by another embedded request id must never be
+            # overwritten while upgrading a raw-name record.
+            if os.path.lexists(canonical):
+                raise TaskError("audit_pending", "pending audit digest name has conflicting ownership", 4)
+            os.replace(source_path, canonical)
+        for path, event in matches:
+            if path == source_path:
+                continue
+            os.unlink(path)
+
+    def _migrate_all_legacy_pending_locked(self) -> None:
+        request_ids: set[str] = set()
+        for entry in self._pending_entries_locked():
+            if entry.name.endswith(".json"):
+                request_ids.add(self._read_pending_file(entry.path)["request_id"])
+        for request_id in sorted(request_ids):
+            self._migrate_legacy_pending_locked(request_id)
+
+    def _all_pending_events_locked(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for entry in self._pending_entries_locked():
+            if entry.name.endswith(".json"):
+                result.append(self._read_pending_file(entry.path))
+        return result
+
+    def _remove_pending_locked(self, request_id: str) -> None:
+        pending = self._pending_path(request_id)
+        try:
+            self._read_pending_file(pending)
+        except FileNotFoundError:
+            return
+        os.unlink(pending)
+
+    def _pending_count(self) -> int:
+        if not os.path.isdir(self.pending_dir):
+            return 0
+        with self._locked():
+            return self._pending_count_locked()
+
+    def _pending_count_locked(self) -> int:
+        try:
+            entries = list(os.scandir(self.pending_dir))
+        except OSError:
+            return 1
+        return max(1, len([entry for entry in entries if not re.fullmatch(r"\.(?:request|entity)-[0-9a-f]{64}\.lock", entry.name)]))
 
     def _has_request(self, request_id: str) -> bool:
         try:
