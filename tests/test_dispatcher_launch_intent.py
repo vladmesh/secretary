@@ -11,6 +11,7 @@ head created that nobody can find, and did the recovery produce a second one.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -1572,7 +1573,8 @@ class HostLaunchContourTests(unittest.TestCase):
                 return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"]}}
             return {}
 
-        with mock.patch.object(self.host, "_run_json", run_json):
+        with mock.patch.object(self.host, "_run_json", run_json), \
+             mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
@@ -1620,12 +1622,39 @@ class HostLaunchContourTests(unittest.TestCase):
                 return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"] if sent else [""]}}
             return {}
 
-        with mock.patch.object(self.host, "_run_json", run_json):
+        with mock.patch.object(self.host, "_run_json", run_json), \
+             mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
         self.assertTrue(any(command[2] == "wait" for command in calls))
         self.assertTrue(any(command[2] == "send" for command in calls))
+
+    def test_a_running_retained_claude_recovers_from_its_durable_user_turn(self) -> None:
+        """A Claude JSONL user record proves delivery after a crash without terminal guessing."""
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        sent_at = time.time() - 1
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude", "head": "claude-opus"}, worker_resume_sent_at=sent_at,
+        )
+        projects = self.data_dir / "claude-projects"
+        session = projects / str(self.data_dir.resolve()).replace("/", "-") / "session.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text(
+            json.dumps({"type": "user", "timestamp": "2099-01-02T03:04:05Z"}) + "\n",
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}), \
+             mock.patch.object(self.host, "_run_json", lambda command: calls.append(command) or {}):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+        self.assertEqual(calls, [])
 
     def test_a_confirmed_retained_continuation_is_not_delivered_twice_on_recovery(self) -> None:
         """A crash after checkpointing delivery must leave the active worker alone."""

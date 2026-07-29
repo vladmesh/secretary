@@ -1567,7 +1567,13 @@ class CommandHostRuntime:
             if status.get("stopped"):
                 raise HostError("confirmed retained continuation is no longer running")
             return
-        if not status.get("stopped") and _terminal_turn_started(record.handle, run_json=self._run_json):
+        if not status.get("stopped") and _terminal_turn_started(
+            record.handle,
+            run_json=self._run_json,
+            workspace=str(workspace),
+            since=record.worker_resume_sent_at,
+            adapter=str(adapter or ""),
+        ):
             # The dispatcher may have died after the provider started but before it recorded
             # that confirmation. Returning lets recovery checkpoint it before finishing, without
             # touching a TASK.md or report body the resumed worker may already be using.
@@ -1591,7 +1597,7 @@ class CommandHostRuntime:
                     prompt_text=prompt,
                 )
             else:
-                _deliver_interactive_prompt(record.handle, prompt, run_json=self._run_json)
+                _deliver_interactive_prompt(record.handle, str(workspace), prompt, run_json=self._run_json)
         except (TuiDeliveryError, HostError) as exc:
             raise HostError(f"retained worker continuation was not delivered: {exc}") from None
 
@@ -2409,6 +2415,7 @@ class DispatcherRuntime:
         record.worker_retained_at = 0.0
         record.worker_resume_phase = ""
         record.worker_resume_delivery = ""
+        record.worker_resume_sent_at = 0.0
         return None
 
     def _worker_launch_aborted(
@@ -3285,6 +3292,15 @@ class DispatcherRuntime:
         )
         if unconfirmed is not None:
             return unconfirmed
+        # A worker that was not retained has no conversation to resume. Stop it before moving
+        # the card: a refusal then leaves the card in Validate, where the next tick can retry
+        # instead of waiting in In progress for a report from a worker that was already stopped.
+        worker_stopped = False
+        if not record.worker_retained_at:
+            unconfirmed = self._stop_worker_confirmed(record, ref, step="gate", attempt_id=attempt_id)
+            if unconfirmed is not None:
+                return unconfirmed
+            worker_stopped = True
         # The round ends here without a reviewer verdict: the outcome names the gate so a later
         # reading does not attribute the bounce to whoever reviewed the round.
         self._record_verdict_routing(ref, record, f"{phase}_red")
@@ -3314,6 +3330,7 @@ class DispatcherRuntime:
             record.state = "worker_resuming"
             record.worker_resume_phase = phase
             record.worker_resume_delivery = "pending"
+            record.worker_resume_sent_at = time.time()
             records[ref] = record
             self.save_records(payload, records)
             try:
@@ -3336,7 +3353,7 @@ class DispatcherRuntime:
         # on disk with the intent, so an adoption resumes it instead of the round the gate closed.
         return self._restart_gate_red_worker(
             moved, record, records, payload, attempt_id,
-            continuation_reason=continuation_reason, phase=phase,
+            continuation_reason=continuation_reason, phase=phase, worker_stopped=worker_stopped,
         )
 
     def _finish_retained_worker_resume(
@@ -3347,6 +3364,7 @@ class DispatcherRuntime:
         record.worker_retained_at = 0.0
         record.worker_resume_phase = ""
         record.worker_resume_delivery = ""
+        record.worker_resume_sent_at = 0.0
         record.state = "claimed"
         rework_round = record.attempt_round + 1
         retained_run = dict(record.worker_run)
@@ -3364,6 +3382,7 @@ class DispatcherRuntime:
     def _restart_gate_red_worker(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
         payload: dict[str, Any], attempt_id: str, *, continuation_reason: str, phase: str,
+        worker_stopped: bool = False,
     ) -> dict[str, Any]:
         """Launch the red-gate fallback only after its worker was conclusively stopped."""
         ref = task["ref"]
@@ -3371,11 +3390,12 @@ class DispatcherRuntime:
         # This is intentionally unconditional.  A record written by an older dispatcher, or one
         # adopted after a crash, may not carry the retained timestamp even while its old worker is
         # still alive.  Lack of that field is ambiguous, never permission for a second writer.
-        unconfirmed = self._stop_worker_confirmed(
-            record, ref, step="gate", attempt_id=attempt_id
-        )
-        if unconfirmed is not None:
-            return unconfirmed
+        if not worker_stopped:
+            unconfirmed = self._stop_worker_confirmed(
+                record, ref, step="gate", attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
         rework_round = record.attempt_round + 1
         failure = self._worker_relaunch_intent(
             payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round

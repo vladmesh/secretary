@@ -2624,6 +2624,32 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
 
+    def test_gate_red_retries_an_unconfirmed_stop_without_leaving_validate(self) -> None:
+        """A non-retained worker cannot strand the card after a red gate stop refusal."""
+        self.start_pilot()
+        self.host.gate_results = [
+            GateResult("red", "local validation failed", "assert False"),
+            GateResult("red", "local validation failed", "assert False"),
+        ]
+        self._run_worker_to_validate()
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_retained_at"] = 0.0
+        self.runtime.state.save(payload)
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        stopped = self.runtime.tick(self.selector)
+
+        self.assertEqual(stopped["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+
+        self.host.fail_stop_head_reason = ""
+        retried = self.runtime.tick(self.selector)
+
+        self.assertEqual(retried["action"], "gate-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
     def test_failed_retention_with_an_unconfirmed_stop_never_enters_validate(self) -> None:
         self.start_pilot()
         self.runtime.tick(self.selector)

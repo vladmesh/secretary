@@ -84,6 +84,9 @@ class DispatcherRecord:
     # visibly accepted the continuation. A crash may therefore retry an incomplete delivery, but
     # never overwrite a continuation the prior tick already confirmed.
     worker_resume_delivery: str = ""
+    # The delivery boundary is saved before SIGCONT. Recovery uses provider session JSONL after
+    # this point before it trusts a terminal repaint as proof that the continuation was accepted.
+    worker_resume_sent_at: float = 0.0
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -139,6 +142,7 @@ class DispatcherRecord:
             "worker_retained_at": self.worker_retained_at,
             "worker_resume_phase": self.worker_resume_phase,
             "worker_resume_delivery": self.worker_resume_delivery,
+            "worker_resume_sent_at": self.worker_resume_sent_at,
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
@@ -182,6 +186,7 @@ class DispatcherRecord:
             worker_retained_at=float(payload.get("worker_retained_at") or 0.0),
             worker_resume_phase=str(payload.get("worker_resume_phase") or ""),
             worker_resume_delivery=str(payload.get("worker_resume_delivery") or ""),
+            worker_resume_sent_at=float(payload.get("worker_resume_sent_at") or 0.0),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),

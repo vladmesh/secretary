@@ -210,8 +210,9 @@ pane remains a split anchor for the reviewer.
 
 A red gate first returns the card to In progress and updates `TASK.md` with the failure and the
 next report identity. The dispatcher persists a pending-delivery boundary before SIGCONT, then
-checkpoints confirmation only after the provider visibly starts the continuation turn. Recovery
-after a crash cannot mistake the previous `done` report for a new completion, replay an incomplete
+checkpoints confirmation only after the provider durably records the continuation user turn.
+Terminal activity is a recovery hint for records without that boundary, not the delivery proof.
+Recovery after a crash cannot mistake the previous `done` report for a new completion, replay an incomplete
 delivery as if it were confirmed, or overwrite a confirmed continuation. A crash after SIGCONT but
 before delivery replays the prompt, while a turn already underway is checkpointed and not sent
 again. When the retained

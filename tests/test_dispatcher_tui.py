@@ -10,15 +10,15 @@ from unittest import mock
 from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import terminal_turn_started
+from secretary.dispatcher_tui import deliver_interactive_prompt, terminal_turn_started
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
-    def test_claude_turn_detection_requires_its_status_line(self) -> None:
+    def test_claude_turn_detection_accepts_real_status_lines(self) -> None:
         def run_json(command: list[str]) -> dict:
             return {"terminal": {"tail": [
                 "The completed response says it was thinking while working.",
-                "✻ Thinking… (esc to interrupt)",
+                "✻ Forming... (4s · ↑ 13.2k tokens)",
             ]}}
 
         self.assertTrue(terminal_turn_started("term-claude", run_json=run_json))
@@ -29,6 +29,30 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             ]}}
 
         self.assertFalse(terminal_turn_started("term-claude", run_json=completed_run_json))
+
+    def test_claude_delivery_accepts_its_durable_user_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            projects = Path(tmp) / "claude-projects"
+            session = projects / str(workspace.resolve()).replace("/", "-") / "session.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                json.dumps({"type": "user", "timestamp": "2099-01-02T03:04:05Z"}) + "\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def run_json(command: list[str]) -> dict:
+                calls.append(command)
+                if command[2] == "read":
+                    return {"terminal": {"tail": ["Claude Code", "❯"]}}
+                return {}
+
+            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
+                deliver_interactive_prompt("term-claude", str(workspace), "Read TASK.md", run_json=run_json)
+
+        self.assertTrue(any(command[2] == "send" for command in calls))
 
     def test_tui_launch_waits_then_sends_initial_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
