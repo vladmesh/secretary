@@ -674,6 +674,42 @@ class TaskWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "conflicting pending audit records"):
             audit.append("collision", event)
 
+    def test_malformed_legacy_record_blocks_reconcile_without_an_audit_event(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        legacy = pending / "malformed.json"
+        legacy.write_text(json.dumps({"request_id": "malformed-request"}), encoding="utf-8")
+
+        self.assertEqual(audit.reconcile(), (0, 1))
+        self.assertEqual(audit.events(), [])
+        self.assertTrue(legacy.exists())
+        self.assertEqual(audit.status(), {"ok": False, "pending": 1})
+
+    def test_hash_shaped_legacy_request_cannot_claim_another_request_target(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        request_id = "new-request"
+        target = hashlib.sha256(request_id.encode()).hexdigest()
+        legacy_event = {"request_id": target, "event_id": "evt_legacy", "kind": "comment"}
+        new_event = {"request_id": request_id, "event_id": "evt_new", "kind": "comment"}
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        occupied = pending / f"{target}.json"
+        occupied.write_text(json.dumps(legacy_event), encoding="utf-8")
+
+        for operation in (
+            lambda: audit.stage(request_id, new_event),
+            lambda: audit.claim(request_id, new_event),
+            lambda: audit.append(request_id, new_event),
+            lambda: audit.discard(request_id),
+        ):
+            with self.assertRaisesRegex(TaskError, "conflicting ownership"):
+                operation()
+
+        self.assertEqual(json.loads(occupied.read_text(encoding="utf-8")), legacy_event)
+        self.assertEqual(audit.events(), [])
+        self.assertEqual(audit.status(), {"ok": False, "pending": 1})
+
     def test_nested_and_symlinked_legacy_entries_block_checkpoint(self) -> None:
         audit = TaskAudit(self.tmpdir.name)
         pending = Path(audit.pending_dir)
@@ -1117,7 +1153,9 @@ class TaskWriterTests(unittest.TestCase):
             self.assertEqual(len(events.readlines()), 1)
 
     def test_pending_blocks_export_from_the_same_data_root(self) -> None:
-        self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
+        self.writer.audit.stage(
+            "pending", {"request_id": "pending", "event_id": "evt_pending", "kind": "comment"}
+        )
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
             export_board(Path(self.tmpdir.name), command=["pipeline"])
 

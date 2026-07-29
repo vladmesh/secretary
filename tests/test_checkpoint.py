@@ -299,7 +299,9 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertNotEqual(second.commit, first.commit)
 
     def test_pending_audit_blocks_the_commit(self):
-        TaskAudit(self.data_dir).stage("request-1", {"event_id": "e1"})
+        TaskAudit(self.data_dir).stage(
+            "request-1", {"request_id": "request-1", "event_id": "e1", "kind": "comment"}
+        )
 
         result = self.write()
 

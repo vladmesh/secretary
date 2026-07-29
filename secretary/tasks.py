@@ -303,9 +303,11 @@ class TaskAudit:
         self.lock_path = os.path.join(self.board_dir, ".audit.lock")
 
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
+        self._validate_pending_event(event, request_id)
         os.makedirs(self.pending_dir, exist_ok=True)
         with self._locked():
             self._migrate_legacy_pending_locked(request_id)
+            self._ensure_pending_target_owned_locked(request_id)
             self._atomic_json(self._pending_path(request_id), event)
 
     def claim(self, request_id: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
@@ -318,12 +320,16 @@ class TaskAudit:
         """
         os.makedirs(self.pending_dir, exist_ok=True)
         with self._locked():
+            self._migrate_legacy_pending_locked(request_id)
+            self._ensure_pending_target_owned_locked(request_id)
             committed = self.committed_event(request_id)
             pending = self._pending_event_locked(request_id)
             if committed is not None:
                 return committed, True, pending is not None
             if pending is not None:
                 return pending, False, False
+            self._validate_pending_event(event, request_id)
+            self._ensure_pending_target_owned_locked(request_id)
             self._atomic_json(self._pending_path(request_id), event)
             return event, False, False
 
@@ -354,9 +360,11 @@ class TaskAudit:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def append(self, request_id: str, event: dict[str, Any]) -> str:
+        self._validate_pending_event(event, request_id)
         os.makedirs(self.board_dir, exist_ok=True)
         with self._locked():
             self._migrate_legacy_pending_locked(request_id)
+            self._ensure_pending_target_owned_locked(request_id)
             if not self._has_request(request_id):
                 with open(self.events_path, "a", encoding="utf-8") as events:
                     events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
@@ -368,6 +376,7 @@ class TaskAudit:
     def discard(self, request_id: str) -> None:
         with self._locked():
             self._migrate_legacy_pending_locked(request_id)
+            self._ensure_pending_target_owned_locked(request_id)
             self._remove_pending_locked(request_id)
 
     def reconcile(self) -> tuple[int, int]:
@@ -516,9 +525,23 @@ class TaskAudit:
         finally:
             if fd >= 0:
                 os.close(fd)
-        if not isinstance(event, dict) or not isinstance(event.get("request_id"), str):
-            raise TaskError("audit_pending", "pending audit record is malformed", 4)
+        self._validate_pending_event(event)
         return event
+
+    @staticmethod
+    def _validate_pending_event(event: object, request_id: str | None = None) -> None:
+        """Reject incomplete intents before they can be committed or replayed."""
+        if (
+            not isinstance(event, dict)
+            or not isinstance(event.get("request_id"), str)
+            or not event["request_id"]
+            or not isinstance(event.get("event_id"), str)
+            or not event["event_id"]
+            or not isinstance(event.get("kind"), str)
+            or not event["kind"]
+            or (request_id is not None and event["request_id"] != request_id)
+        ):
+            raise TaskError("audit_pending", "pending audit record is malformed", 4)
 
     def _matching_pending_locked(self, request_id: str) -> list[tuple[str, dict[str, Any]]]:
         result: list[tuple[str, dict[str, Any]]] = []
@@ -568,6 +591,15 @@ class TaskAudit:
         for request_id in sorted(request_ids):
             self._migrate_legacy_pending_locked(request_id)
 
+    def _ensure_pending_target_owned_locked(self, request_id: str) -> None:
+        """Refuse a digest target already occupied by another embedded request id."""
+        try:
+            event = self._read_pending_file(self._pending_path(request_id))
+        except FileNotFoundError:
+            return
+        if event["request_id"] != request_id:
+            raise TaskError("audit_pending", "pending audit digest name has conflicting ownership", 4)
+
     def _all_pending_events_locked(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for entry in self._pending_entries_locked():
@@ -578,9 +610,11 @@ class TaskAudit:
     def _remove_pending_locked(self, request_id: str) -> None:
         pending = self._pending_path(request_id)
         try:
-            self._read_pending_file(pending)
+            event = self._read_pending_file(pending)
         except FileNotFoundError:
             return
+        if event["request_id"] != request_id:
+            raise TaskError("audit_pending", "pending audit digest name has conflicting ownership", 4)
         os.unlink(pending)
 
     def _pending_count(self) -> int:
