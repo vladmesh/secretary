@@ -112,16 +112,32 @@ class ProductIssueStoreTests(unittest.TestCase):
             product="secretary", issue_kind="question", priority="P3", title="Question", description="", actor="po",
         )
         writer = TaskWriter(self.client, data_dir=self.root / "data")
-        for target in ("ready", "in_progress", "validate", "blocked", "done"):
-            with self.subTest(target=target), self.assertRaises(TaskError) as raised:
-                writer.move(role="po", actor="po", reference=issue["ref"], target=target, reason="")
-            self.assertEqual(raised.exception.code, "transition_forbidden")
+        for role in ("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"):
+            for target in ("ready", "in_progress", "validate", "blocked", "done"):
+                with self.subTest(role=role, target=target), self.assertRaises(TaskError) as raised:
+                    writer.move(role=role, actor=role, reference=issue["ref"], target=target, reason="")
+                self.assertEqual(raised.exception.code, "transition_forbidden")
         with self.assertRaises(TaskError) as raised:
             writer.create(
                 role="steward", actor="steward", project="secretary", task_type="research",
                 title="Wrong column", target="issues",
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
+
+    def test_legacy_ideas_require_po_triage_and_mark_the_execution_task(self) -> None:
+        self.client.tasks[0]["column_id"] = 1
+        self.client.metadata[12] = {}
+        writer = TaskWriter(self.client, data_dir=self.root / "data")
+
+        with self.assertRaises(TaskError) as raised:
+            writer.move(
+                role="steward", actor="steward", reference="secretary-468", target="ready", reason="",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertNotIn("record_type", self.client.metadata[12])
+
+        writer.move(role="po", actor="po", reference="secretary-468", target="ready", reason="")
+        self.assertEqual(self.client.metadata[12]["record_type"], "task")
 
     def test_missing_issue_arguments_are_structured(self) -> None:
         output, errors = io.StringIO(), io.StringIO()

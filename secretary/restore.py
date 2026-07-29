@@ -635,6 +635,9 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def _product_issue_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    record_type = metadata.get("record_type")
+    if record_type not in {"issue", "product"}:
+        return {}
     return {
         key: str(metadata[key])
         for key in _PRODUCT_ISSUE_METADATA
