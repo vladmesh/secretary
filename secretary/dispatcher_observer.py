@@ -302,15 +302,15 @@ def observer_queue_finished(screen: str) -> bool:
     """Whether a Codex TUI is back at its empty composer after completing a turn.
 
     `Worked for …` is Codex's completion footer.  Requiring a composer after it avoids treating a
-    historical footer in a transcript as the current state.  This is intentionally only a positive
-    signal: an unknown adapter or an unreadable screen remains live rather than being guessed idle.
+    historical footer in a transcript as the current state.  Codex 0.145 sometimes leaves the
+    framed footer as the final visible line instead of repainting the composer, so that final-line
+    form is equally terminal.  This is intentionally only a positive signal: an unknown adapter or
+    an unreadable screen remains live rather than being guessed idle.
     """
     composer = screen.rfind("›")
-    return (
-        composer >= 0
-        and not screen[composer + 1:].strip()
-        and bool(_OBSERVER_QUEUE_FINISHED_RE.search(screen[:composer]))
-    )
+    if composer >= 0 and not screen[composer + 1:].strip():
+        return bool(_OBSERVER_QUEUE_FINISHED_RE.search(screen[:composer]))
+    return bool(re.search(r"\bWorked for\s+\d[^\n]*$", screen.rstrip(), re.IGNORECASE))
 
 
 def reconcile_observers(

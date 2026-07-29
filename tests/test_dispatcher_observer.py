@@ -1338,10 +1338,11 @@ class ObserverLifecycleTests(unittest.TestCase):
 
 
 class ObserverConfigurationTests(unittest.TestCase):
-    def test_codex_completed_queue_requires_an_empty_composer(self) -> None:
+    def test_codex_completed_queue_requires_a_terminal_footer(self) -> None:
         self.assertTrue(observer_queue_finished("Worked for 2h 00m 46s\n› "))
-        self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s"))
+        self.assertTrue(observer_queue_finished("─ Worked for 2h 00m 46s ─"))
         self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s\n› continue"))
+        self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s\nstill working"))
 
     def test_the_observer_head_comes_from_its_own_role_default(self) -> None:
         canonical = canonical_heads(Path(__file__).resolve().parents[1])

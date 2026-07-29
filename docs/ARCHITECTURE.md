@@ -170,7 +170,7 @@ the next tick.
 Liveness uses the same pid heartbeat as worker and reviewer. A dead pid causes a relaunch on the next
 tick; a launch counter in the record and a distinct audit event type separate a relaunch from a first
 launch. A live Codex TUI can still have finished its agent queue, so the dispatcher also reads its
-completed-turn footer and terminal output time. A positive footer immediately exposes `idle-grace` in
+completed-turn footer and terminal output time. A positive terminal footer immediately exposes `idle-grace` in
 the observer record; after `SECRETARY_OBSERVER_IDLE_SECONDS` (20 minutes by default), it replaces that
 head through the normal relaunch path, rather than prompting the old session.
 An active card in Ready, In progress or Validate is recorded as `waiting` and is never treated as idle.
