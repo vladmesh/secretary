@@ -1137,12 +1137,16 @@ class CommandHostRuntime:
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             status = _head_process_status(pid_file)
             if not status.get("known") or not status.get("alive"):
+                if status.get("known"):
+                    Path(pid_file).unlink(missing_ok=True)
                 return
             self._signal_head(pid_file, signal_number)
             self._await_head_exit(pid_file)
         status = _head_process_status(pid_file)
         if status.get("known") and status.get("alive"):
             raise HostError(f"head process from {pid_file} is still running after stop")
+        if status.get("known"):
+            Path(pid_file).unlink(missing_ok=True)
 
     def _signal_head(self, pid_file: str, signal_number: int) -> None:
         try:
@@ -2031,11 +2035,7 @@ class DispatcherRuntime:
         # the old report, and the journal gets a second attempt instead of nothing. A committed
         # claim without a record is a genuine board divergence and still fails closed below.
         active = records.get(ref)
-        requeued = (
-            active is not None
-            and (active.attempt_id or attempt_id) == attempt_id
-            and self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
-        )
+        requeued = active is not None
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
@@ -2062,7 +2062,7 @@ class DispatcherRuntime:
             # workspace is what it is stopped through, not the handle: a head adopted from a launch
             # intent is running with no handle on record, and skipping it here would leave it in
             # the checkout the new round is about to hand a second head.
-            if active.review_handle or active.review_leaf or active.review_pid_file:
+            if active.owns_head("review"):
                 # A preempt out of Validate leaves the worker pane already closed by
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
@@ -2071,7 +2071,7 @@ class DispatcherRuntime:
                 )
                 if unconfirmed is not None:
                     return unconfirmed
-            if active.handle or active.workspace or active.worker_pid_file:
+            if active.needs_settling():
                 unconfirmed = self._stop_worker_confirmed(
                     active, ref, step="claim", attempt_id=attempt_id
                 )
@@ -2081,6 +2081,7 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
+        claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
@@ -2092,7 +2093,7 @@ class DispatcherRuntime:
             resolved_review_head=review_head,
             slug=task.get("workspace", {}).get("slug") or "",
             base_branch=task.get("workspace", {}).get("base_branch") or "",
-            request_id=_attempt_request_id(attempt_id, "claim", ref),
+            request_id=claim_request_id,
         )
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
@@ -2155,6 +2156,37 @@ class DispatcherRuntime:
                 "reason": "claim live board mismatch",
                 "divergence_id": divergence["id"],
             }
+        live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
+        if live_head.get("known") and live_head.get("alive"):
+            record.workspace = self.host.restore_workspace(claimed, record.worker)
+            record.worker_pid_file = _launch_pid_file(WORKER_ROLE, ref)
+            records[ref] = record
+            try:
+                self.host.stop_workspace(record)
+            except HostError as exc:
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=(
+                        "dispatcher found an unowned live worker and could not confirm its stop: "
+                        f"{scrub_host_output(str(exc))}"
+                    ),
+                    request_id=_attempt_request_id(
+                        record.attempt_id, "orphan-worker-stop-blocked", ref
+                    ),
+                )
+                self.save_records(payload, records)
+                return {
+                    "status": "blocked",
+                    "step": "claim",
+                    "action": "orphan-worker-stop-unconfirmed",
+                    "pilot_ref": ref,
+                    "attempt_id": record.attempt_id,
+                    "reason": "an unowned live worker could not be stopped",
+                }
+            _forget_role_head(record, WORKER_ROLE)
         # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
         # resolves the same path itself, and the answer is exactly what a tick that dies mid-launch
         # never sees. With it and the pid file in the record, the next tick can read the head's

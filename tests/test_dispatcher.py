@@ -381,9 +381,6 @@ class FakeHost:
         # that never wrote one would make every intent look like a head that never came up. None
         # models a runtime that writes no heartbeat at all.
         self.head_pid: int | None = os.getpid()
-        # Every heartbeat this fake has written, per role: a stop drops them, so a head the test
-        # stopped stops reading as alive.
-        self.head_pid_files: dict[str, set[str]] = {"worker": set(), "review": set()}
         # Stop refusals (secretary-820). A stop the host will not confirm must never be followed by
         # a replacement head, and these are how a test makes one refuse.
         self.fail_stop_workspace_reason = ""
@@ -397,7 +394,6 @@ class FakeHost:
         if self.head_pid is None:
             path.unlink(missing_ok=True)
             return
-        self.head_pid_files[kind].add(str(path))
         path.write_text(str(self.head_pid), encoding="utf-8")
 
     def prepare_worker(
@@ -603,9 +599,8 @@ class FakeHost:
         every later liveness read would answer that the head the test just stopped is running.
         """
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
-        for path in {pid_file, *self.head_pid_files.get(kind, set())}:
-            if path:
-                Path(path).unlink(missing_ok=True)
+        if pid_file:
+            Path(pid_file).unlink(missing_ok=True)
 
     def stop_review(self, record) -> None:
         self.calls.append("stop_review")
@@ -909,11 +904,126 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(action["card_state"], "ideas")
         payload = self.runtime.production_state.load()
         self.assertNotIn("secretary-510-pilot", payload["records"])
-        # Reconciliation only ever removes bookkeeping: the workspace and terminal it had are
-        # untouched (claiming a now-unblocked neighbor card is a separate, legitimate tick action).
-        self.assertEqual(self.host.stopped, [])
+        # The record owns the live head. It must be stopped before the record can disappear, or a
+        # later requeue will open another writer in the same workspace.
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
         self.assertEqual(self.host.torn_down, [])
         self.assertNotIn("secretary-510-pilot", self.host.prepared)
+
+    def test_production_reconcile_keeps_record_when_head_stop_is_unconfirmed(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="park it",
+            request_id="move-to-blocked-stop-refused",
+        )
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        self.assertEqual([a["action"] for a in actions], ["head-stop-unconfirmed"])
+        self.assertEqual(result["status"], "degraded")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_production_requeue_stops_previous_head_before_claiming_again(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="replace the active attempt",
+            request_id="production-fast-requeue",
+        )
+        self.host.calls.clear()
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual(len(claim), 1)
+        self.assertIn("stop_workspace", self.host.calls, result)
+        self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
+
+    def test_fresh_claim_stops_an_unowned_live_worker_before_launch(self) -> None:
+        self.commit_cutover()
+        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        process = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: process.poll() is None and (process.kill(), process.wait()))
+        pid_file.write_text(str(process.pid), encoding="utf-8")
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a.get("status") for a in claim], ["ok"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+
+    def test_fresh_claim_blocks_when_an_unowned_worker_will_not_stop(self) -> None:
+        self.commit_cutover()
+        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a["action"] for a in claim], ["orphan-worker-stop-unconfirmed"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.prepared, [])
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_production_tick_stops_respawn_started_after_po_parked_the_card(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        stale = time.time() - stall_seconds("worker") - 60
+        record["worker_started_at"] = stale
+        record["worker_progress_at"] = stale
+        self.runtime.production_state.save(payload)
+        self.host.worker_status_result = {
+            "known": True,
+            "live": False,
+            "reason": "missing-terminal",
+        }
+        real_show = self.reader.show
+        raced = {"done": False}
+
+        def show_then_park(reference: str):
+            task = real_show(reference)
+            if reference == "secretary-510-pilot" and not raced["done"]:
+                raced["done"] = True
+                self.writer.move(
+                    role="po",
+                    actor="operator",
+                    reference=reference,
+                    target="blocked",
+                    reason="park after the active reread",
+                    request_id="park-during-active-tick",
+                )
+            return task
+
+        with mock.patch.object(self.reader, "show", side_effect=show_then_park):
+            result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
+        self.assertEqual(actions, [])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+        result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
+        self.assertEqual([a["action"] for a in actions], ["record-removed"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
         # secretary-755 reviewer finding: `active_refs` is a snapshot taken at the top of the
@@ -3189,6 +3299,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.start_pilot()
         self.runtime.tick(self.selector)
         first_attempt = self.runtime.state.load()["attempt_id"]
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = ""
+        self.runtime.state.save(payload)
+        Path(pid_file_path("worker", "secretary-510-pilot")).unlink(missing_ok=True)
         self.writer.move(
             role="po", actor="operator", reference="secretary-510-pilot",
             target="ready", reason="preempted", request_id="po-preempt-attempt-2",

@@ -1376,6 +1376,7 @@ class HostLaunchContourTests(unittest.TestCase):
         self.host.stop_head(record, "worker")
 
         self.assertIsNotNone(head.poll(), "the head must actually be gone")
+        self.assertFalse(Path(record.worker_pid_file).exists())
 
     def test_a_head_nothing_names_cannot_be_reported_as_stopped(self) -> None:
         record = DispatcherRecord(
@@ -1564,6 +1565,95 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.assertEqual(
             self.host.prepared.count(REF), 2, "one head for the first claim, one for the requeue"
         )
+
+    def test_ready_card_settles_its_unresolved_launch_before_reclaim(self) -> None:
+        self.leave_a_post_launch_intent()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-neighbor",
+            target="ideas",
+            reason="make the requeue claimable",
+            request_id="park-neighbor-for-ready-intent",
+        )
+        self.move_card("ready", "requeue during bring-up", "ready-with-live-intent")
+        self.host.calls.clear()
+
+        result = self.tick()
+
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertEqual(self.host.prepared.count(REF), 2)
+        self.assertEqual(self.stored_intent(), {})
+
+    def test_workspace_only_adopted_record_is_stopped_before_removal(self) -> None:
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"][REF]
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = ""
+        self.runtime.production_state.save(payload)
+        self.move_card("blocked", "park the adopted card", "park-workspace-only-record")
+        self.host.calls.clear()
+
+        result = self.tick()
+
+        actions = [a for a in self.actions(result) if a["step"] == "production-reconcile"]
+        self.assertEqual([a["action"] for a in actions], ["record-removed"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertNotIn(REF, self.records())
+
+    def test_settled_ready_workspace_is_not_stopped_again_on_later_ticks(self) -> None:
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"][REF]
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = ""
+        self.runtime.production_state.save(payload)
+        self.move_card("ready", "park behind the other ready card", "park-workspace-record")
+        self.runtime.pause.save({"mode": "drain"})
+        self.host.calls.clear()
+
+        self.tick()
+        self.tick()
+
+        self.assertEqual(self.host.calls.count("stop_workspace"), 1)
+        record = self.records()[REF]
+        self.assertTrue(record["workspace_settled"])
+        restored = DispatcherRecord.from_json(record)
+        self.assertFalse(restored.owns_head())
+        self.assertFalse(restored.needs_settling())
+
+    def test_role_identity_without_workspace_is_stopped_before_removal(self) -> None:
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"][REF]
+        record["workspace"] = ""
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = pid_file_path("review", REF)
+        self.runtime.production_state.save(payload)
+        self.host._write_head_pid("review", REF)
+        self.move_card("blocked", "park the identity-only record", "park-identity-only-record")
+        self.host.calls.clear()
+
+        result = self.tick()
+
+        actions = [a for a in self.actions(result) if a["step"] == "production-reconcile"]
+        self.assertEqual([a["action"] for a in actions], ["record-removed"])
+        self.assertIn("stop_head:review", self.host.calls)
+        self.assertNotIn(REF, self.records())
 
     def test_a_stop_the_host_refuses_keeps_the_record_and_its_intent(self) -> None:
         self.leave_a_post_launch_intent()

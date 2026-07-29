@@ -64,6 +64,10 @@ class DispatcherRecord:
     # together with the handle whenever that role's head is confirmed stopped.
     worker_pid_file: str = ""
     review_pid_file: str = ""
+    # A Ready record keeps its workspace so the next claim can reuse the checkout. Once
+    # reconciliation has stopped that workspace, remember the result separately from the head
+    # identities so later ticks do not stop the same checkout again.
+    workspace_settled: bool = False
     # Wait watchdogs (secretary-654): when the current wait for a worker report / review
     # verdict started, and how many times that wait has already respawned its head. Both
     # reset whenever the card enters a fresh wait of that kind.
@@ -95,6 +99,20 @@ class DispatcherRecord:
     # before the host is asked for a head and cleared once the host has answered. Empty at rest.
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
     launch_intent: dict[str, Any] = field(default_factory=dict)
+
+    def owns_head(self, role: str | None = None) -> bool:
+        """Whether this record still carries an identity that must be settled before replacement."""
+        worker = bool(self.handle or self.worker_leaf or self.worker_pid_file)
+        review = bool(self.review_handle or self.review_leaf or self.review_pid_file)
+        if role == "worker":
+            return worker
+        if role == "review":
+            return review
+        return worker or review
+
+    def needs_settling(self) -> bool:
+        """Whether reconciliation still owes this record a confirmed stop."""
+        return self.owns_head() or bool(self.workspace and not self.workspace_settled)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -132,6 +150,7 @@ class DispatcherRecord:
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
+            "workspace_settled": self.workspace_settled,
         }
 
     @classmethod
@@ -171,6 +190,7 @@ class DispatcherRecord:
             review_progress_at=float(payload.get("review_progress_at") or 0.0),
             paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
+            workspace_settled=bool(payload.get("workspace_settled", False)),
         )
 
 
