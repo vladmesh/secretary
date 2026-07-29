@@ -167,16 +167,20 @@ The reason lands in the observer record and is visible in the external summary. 
 instructions would improvise a sprint from a single entity, which is worse than a sprint waiting for
 the next tick.
 
-Liveness uses the same pid heartbeat as worker and reviewer. A dead pid causes a relaunch on the next
-tick; a launch counter in the record and a distinct audit event type separate a relaunch from a first
-launch. A live Codex TUI can still have finished its agent queue, so the dispatcher also reads its
-completed-turn footer and terminal output time. A positive terminal footer immediately exposes `idle-grace` in
-the observer record; after `SECRETARY_OBSERVER_IDLE_SECONDS` (20 minutes by default), it replaces that
-head through the normal relaunch path, rather than prompting the old session.
-An active card in Ready, In progress or Validate is recorded as `waiting` and is never treated as idle.
-The replacement recovers from the live sprint entity and cards, which prevents a card already created by
-the old head from being created again. The record reads `idle-recovering`, with the idle timestamp and reason,
-until the new terminal makes progress.
+Liveness uses the same pid heartbeat as worker and reviewer. A live Codex TUI can still have finished its
+agent queue, so the dispatcher also reads its completed-turn footer and terminal output time. A positive
+footer exposes `idle-grace` in the observer record, but does not relaunch it by itself. A committed,
+successful non-routing, non-guard-denied event on a linked card opens one durable delivery batch. Its immutable high-water mark is
+written before a nudge or replacement launch, and only an observer resume carrying that delivery's exact audit
+marker can acknowledge the specific batch. Events
+that arrive before the intent coalesce; later events wait for the next batch. A dead head is replaced only for
+pending work. An unacknowledged batch receives the same recovery attempt after 30 minutes by default. Failed
+wakes carry their reason and bounded retry time in the observer record.
+
+An active card does not itself create another observer turn. Once Codex reports a completed queue,
+the head is `idle-grace` even if its linked card remains active; the next significant durable card
+event wakes it. If that event arrived while the queue was still running, the dispatcher keeps the
+pending event and checks again on later ticks, delivering the nudge as soon as the queue finishes.
 
 All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
 by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a

@@ -68,6 +68,18 @@ change of plan at a budget threshold, a stop, and closing the sprint.
 python3 -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
 ```
 
+When `sprint status` shows a non-idle `observer.delivery`, its `delivery_id` and `through_event`
+belong to the turn that woke you. Add both to this command:
+
+```bash
+python3 -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json> \
+  --delivery-id <delivery_id> --through-event <through_event>
+```
+
+They are an audit acknowledgement, not resume fields. Copy the exact pair from the live status or
+the wake message. Do not reuse a pair from an earlier turn, and do not invent one. A resume without
+the matching pair still records the six fields but does not acknowledge the wake.
+
 `<file.json>` is an object with all fields present, each a non-empty string:
 
 ```json

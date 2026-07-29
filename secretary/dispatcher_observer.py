@@ -51,6 +51,8 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
@@ -61,7 +63,7 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_types import HostError
 from secretary.role_skills import skill_delivery
-from secretary.tasks import TaskError
+from secretary.tasks import TaskError, is_significant_card_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_WATCHDOG_KIND = "observer"
@@ -74,11 +76,12 @@ OBSERVER_PROMPT_FILE = "SPRINT.md"
 # the dispatcher's: the prompt points at the file and never restates it.
 OBSERVER_SKILL = "observe-sprint"
 
-# A finished Codex TUI keeps its wrapper process alive.  Its screen is a much stronger signal than
-# silence alone, but wait a generous interval before replacing it: an observer can spend time
-# reading a repository or an external result without changing the board.  A card in Ready, In
-# progress or Validate is always treated as an ordinary wait, never as this kind of idle head.
-OBSERVER_IDLE_DEFAULT_SECONDS = 20 * 60
+# A finished Codex TUI keeps its wrapper process alive. Its screen is the positive signal needed
+# to nudge it for a new durable card event. A card in Ready, In progress or Validate is always an
+# ordinary wait, never an idle queue.
+OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS = 30 * 60
+OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
+OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
 _OBSERVER_QUEUE_FINISHED_RE = re.compile(r"\bWorked for\s+\d", re.IGNORECASE)
 
 # Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
@@ -125,6 +128,139 @@ class ObserverLaunchAborted(HostError):
         self.run = dict(run or {})
 
 
+class DeliveryStage(str, Enum):
+    """The durable state of one observer event-delivery batch."""
+
+    IDLE = "idle"
+    WAITING_FOR_IDLE = "waiting_for_idle"
+    DELIVERY_INTENT = "delivery_intent"
+    AWAITING_ACK = "awaiting_ack"
+    RETRY_DEFERRED = "retry_deferred"
+
+
+@dataclass
+class ObserverDelivery:
+    """One causal delivery cursor, independent of observer process lifecycle.
+
+    `through_event` is fixed before a terminal send or replacement launch.  A resume can only
+    acknowledge that fixed batch after the cursor that was present when its intent was written.
+    Events appended after the intent are deliberately left for the next batch.
+    """
+
+    stage: DeliveryStage = DeliveryStage.IDLE
+    acknowledged_through: str = ""
+    acknowledged_delivery_id: str = ""
+    acknowledged_resume_id: str = ""
+    pending_from: str = ""
+    delivery_id: str = ""
+    method: str = ""
+    through_event: str = ""
+    # The newest resume event known when the intent was persisted.  An empty cursor is meaningful:
+    # it says there was no resume yet, so the first one appended afterwards can acknowledge this
+    # delivery.  Legacy records set `resume_cursor_known` false and fail closed until watchdog.
+    resume_cursor: str = ""
+    resume_cursor_known: bool = True
+    sent_at: float = 0.0
+    deadline: float = 0.0
+    attempts: int = 0
+    next_at: float = 0.0
+    reason: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage.value,
+            "acknowledged_through": self.acknowledged_through,
+            "acknowledged_delivery_id": self.acknowledged_delivery_id,
+            "acknowledged_resume_id": self.acknowledged_resume_id,
+            "pending_from": self.pending_from,
+            "delivery_id": self.delivery_id,
+            "method": self.method,
+            "through_event": self.through_event,
+            "resume_cursor": self.resume_cursor,
+            "resume_cursor_known": self.resume_cursor_known,
+            "sent_at": self.sent_at,
+            "deadline": self.deadline,
+            "attempts": self.attempts,
+            "next_at": self.next_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "ObserverDelivery":
+        if not isinstance(payload, dict):
+            return cls()
+        try:
+            stage = DeliveryStage(str(payload.get("stage") or DeliveryStage.IDLE.value))
+        except ValueError:
+            stage = DeliveryStage.IDLE
+        return cls(
+            stage=stage,
+            acknowledged_through=str(payload.get("acknowledged_through") or ""),
+            acknowledged_delivery_id=str(payload.get("acknowledged_delivery_id") or ""),
+            acknowledged_resume_id=str(payload.get("acknowledged_resume_id") or ""),
+            pending_from=str(payload.get("pending_from") or ""),
+            delivery_id=str(payload.get("delivery_id") or ""),
+            method=str(payload.get("method") or ""),
+            through_event=str(payload.get("through_event") or ""),
+            resume_cursor=str(payload.get("resume_cursor") or ""),
+            resume_cursor_known=bool(payload.get("resume_cursor_known", True)),
+            sent_at=_float(payload.get("sent_at")),
+            deadline=_float(payload.get("deadline")),
+            attempts=_int(payload.get("attempts")),
+            next_at=_float(payload.get("next_at")),
+            reason=str(payload.get("reason") or ""),
+        )
+
+
+def _legacy_delivery(payload: dict[str, Any]) -> ObserverDelivery:
+    """Migrate the former independent wake flags without inventing a causal acknowledgement."""
+
+    acknowledged = str(payload.get("acknowledged_event_id") or "")
+    through = str(payload.get("wake_event_id") or "")
+    wake_sent = bool(payload.get("wake_sent"))
+    attempts = _int(payload.get("wake_attempts"))
+    next_at = _float(payload.get("wake_next_at"))
+    reason = str(payload.get("wake_reason") or "")
+    if wake_sent and through:
+        deadline = next_at or time.time() + observer_event_watchdog_seconds()
+        return ObserverDelivery(
+            stage=DeliveryStage.AWAITING_ACK,
+            acknowledged_through=acknowledged,
+            delivery_id="legacy-" + uuid.uuid4().hex,
+            method="nudge",
+            through_event=through,
+            # The old record has no durable resume fence.  Waiting to the watchdog is the only
+            # recovery that cannot falsely credit an earlier resume to this delivery.
+            resume_cursor_known=False,
+            deadline=deadline,
+            attempts=attempts,
+            next_at=deadline,
+            reason=reason or "legacy event delivery awaits watchdog recovery",
+        )
+    if attempts and through:
+        return ObserverDelivery(
+            stage=DeliveryStage.RETRY_DEFERRED,
+            acknowledged_through=acknowledged,
+            pending_from=through,
+            delivery_id="legacy-" + uuid.uuid4().hex,
+            method="nudge",
+            through_event=through,
+            resume_cursor_known=False,
+            attempts=attempts,
+            next_at=next_at,
+            reason=reason,
+        )
+    if through:
+        return ObserverDelivery(
+            stage=DeliveryStage.WAITING_FOR_IDLE,
+            acknowledged_through=acknowledged,
+            pending_from=through,
+            next_at=next_at,
+            reason=reason,
+        )
+    return ObserverDelivery(acknowledged_through=acknowledged)
+
+
 @dataclass
 class ObserverRecord:
     """One observer head as the dispatcher last left it."""
@@ -167,10 +303,16 @@ class ObserverRecord:
     deferred_reason: str = ""
     stopped_reason: str = ""
     paused_at: float = 0.0
-    # The last confirmed queue-end is kept after its replacement launches.  `idle-recovering` in the
-    # state plus these fields tells an operator why a live pid is not reported as plain running.
+    # The last confirmed queue-end explains why a live head is waiting for a card event.
     idle_since: float = 0.0
     idle_reason: str = ""
+    # The event cursor is dispatcher-owned state. A resume entry stays its established six-field
+    # document; this delivery machine carries the causal acknowledgement for its fixed batch.
+    delivery: ObserverDelivery = field(default_factory=ObserverDelivery)
+    # Launch failures are retried on the same bounded schedule as terminal nudges.  They are
+    # separate because a sprint can be headless without having a linked-card event to wake for.
+    launch_attempts: int = 0
+    launch_next_at: float = 0.0
     run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -196,12 +338,21 @@ class ObserverRecord:
             "paused_at": self.paused_at,
             "idle_since": self.idle_since,
             "idle_reason": self.idle_reason,
+            "delivery": self.delivery.to_json(),
+            "launch_attempts": self.launch_attempts,
+            "launch_next_at": self.launch_next_at,
             "run": dict(self.run),
         }
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "ObserverRecord":
         run = payload.get("run")
+        delivery_payload = payload.get("delivery")
+        delivery = (
+            ObserverDelivery.from_json(delivery_payload)
+            if isinstance(delivery_payload, dict)
+            else _legacy_delivery(payload)
+        )
         return cls(
             sprint=str(payload.get("sprint") or ""),
             generation=str(payload.get("generation") or "") or uuid.uuid4().hex[:12],
@@ -229,6 +380,9 @@ class ObserverRecord:
             paused_at=_float(payload.get("paused_at")),
             idle_since=_float(payload.get("idle_since")),
             idle_reason=str(payload.get("idle_reason") or ""),
+            delivery=delivery,
+            launch_attempts=_int(payload.get("launch_attempts")),
+            launch_next_at=_float(payload.get("launch_next_at")),
             run=dict(run) if isinstance(run, dict) else {},
         )
 
@@ -291,17 +445,23 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "paused": record.paused_at > 0,
             "idle_since": record.idle_since,
             "idle_reason": record.idle_reason,
+            "delivery": record.delivery.to_json(),
+            "launch_attempts": record.launch_attempts,
+            "launch_next_at": record.launch_next_at,
         })
     return rows
 
 
-def observer_idle_seconds() -> int:
-    """Return the explicit, per-installation idle threshold for observer queue recovery."""
+def observer_event_watchdog_seconds() -> int:
+    """Return the explicit maximum age of an unacknowledged card event."""
     try:
-        value = int(os.environ.get("SECRETARY_OBSERVER_IDLE_SECONDS", "") or OBSERVER_IDLE_DEFAULT_SECONDS)
+        value = int(
+            os.environ.get("SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS", "")
+            or OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+        )
     except ValueError:
-        return OBSERVER_IDLE_DEFAULT_SECONDS
-    return value if value > 0 else OBSERVER_IDLE_DEFAULT_SECONDS
+        return OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+    return value if value > 0 else OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
 
 
 def observer_queue_finished(screen: str) -> bool:
@@ -387,6 +547,7 @@ def _reconcile_open_sprint(
     # A terminal left over from an aborted bring-up is skipped here whatever its pid says: that
     # head never received its sprint, and reading it as the live observer would park the sprint
     # forever on a head that is doing nothing.
+    pending_event: dict[str, Any] | None = None
     if (
         record is not None
         and not unresolved_intent
@@ -400,18 +561,20 @@ def _reconcile_open_sprint(
             record.state = "running"
             record.stopped_reason = ""
             record.paused_at = 0.0
+        event = _observer_event_state(runtime, ref, record)
+        if event["pending"]:
+            return _wake_for_event(runtime, payload, observers, ref, record, event)
         work = _observer_work_state(runtime, ref, record)
         if work["state"] == "idle":
-            return _restart_idle_observer(runtime, payload, observers, ref, record, work["reason"])
-        if work["state"] == "idle-grace":
             _mark_idle_grace(record, since=work["since"], reason=work["reason"])
             return {
                 "status": "ok",
                 "step": "observer-reconcile",
                 "sprint": ref,
-                "action": "observer-idle-grace",
+                "action": "observer-idle",
                 "head": record.head,
                 "launches": record.launches,
+                "reason": work["reason"],
             }
         if work["state"] == "waiting":
             _set_observer_state(record, "waiting", reason=work["reason"])
@@ -423,7 +586,7 @@ def _reconcile_open_sprint(
                 "head": record.head,
                 "launches": record.launches,
             }
-        if record.state in {"waiting", "idle-recovering"}:
+        if record.state in {"waiting", "idle-grace", "idle-recovering"}:
             _set_observer_state(record, "running")
         return {
             "status": "ok",
@@ -433,6 +596,28 @@ def _reconcile_open_sprint(
             "head": record.head,
             "launches": record.launches,
         }
+    # A process recovery still happens, but only for work that an observer has not durably
+    # acknowledged.  A completed, quiet queue with no new card event is deliberately left alone.
+    if (
+        record is not None
+        and not unresolved_intent
+        and record.launches > 0
+        and record.state != STATE_STOPPED_BY_PAUSE
+        and record.state != "pending"
+    ):
+        event = _observer_event_state(runtime, ref, record)
+        if not event["pending"]:
+            _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-idle",
+                "head": record.head,
+                "launches": record.launches,
+                "reason": event["reason"],
+            }
+        pending_event = event
     if pause_mode == "drain":
         # A drain claims nothing new. A dead observer is a bring-up, so it waits for the resume
         # exactly like a Ready card does. The record is still written: an open sprint has to be
@@ -451,25 +636,379 @@ def _reconcile_open_sprint(
             # An intent nobody could resolve stays an intent through the drain: the resume then
             # closes what it may have started instead of opening a head beside it.
             keep_state=unresolved_intent,
+            retry=False,
         )
-    return _launch_observer(runtime, payload, observers, ref, record)
+    if (
+        record is not None
+        and record.state == "deferred"
+        and not record.abandoned_handle
+        and time.time() < record.launch_next_at
+    ):
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-launch-deferred",
+            "head": record.head,
+            "reason": record.deferred_reason,
+        }
+    if record is None:
+        # The first observer launch renders the current sprint board. Card history from before
+        # that head existed is therefore its baseline, not a second turn immediately after its
+        # own initial queue. Later transitions still enter the delivery machine normally.
+        record = ObserverRecord(sprint=ref)
+        baseline = _observer_event_state(runtime, ref, record)
+        if baseline.get("pending"):
+            record.delivery.acknowledged_through = str(baseline.get("event_id") or "")
+    return _launch_observer(
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        pending_event=pending_event,
+    )
+
+
+def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
+    """Read linked-card work and acknowledge only the active delivery batch.
+
+    A resume acknowledges only when its audit payload carries the active delivery's immutable
+    marker. That prevents an older turn, which may complete after a newer intent is persisted,
+    from crediting work it never received.
+    """
+    try:
+        sprint = runtime.sprints.show(ref)
+        cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
+        refs = {
+            str(card.get("ref") or "")
+            for card in cards
+            if isinstance(card, dict) and str(card.get("ref") or "")
+        }
+        events = runtime.audit.events()
+    except (TaskError, HostError, OSError, ValueError, TypeError):
+        return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
+    significant: list[dict[str, Any]] = []
+    resumes: list[dict[str, Any]] = []
+    for event in events:
+        if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
+            resumes.append(event)
+        if is_significant_card_event(event, linked_refs=refs):
+            significant.append(event)
+    _acknowledge_delivery_from_resume(record.delivery, resumes)
+    if not significant:
+        return {"known": True, "pending": False, "reason": "no significant linked-card event"}
+    latest = significant[-1]
+    latest_id = _event_id(latest)
+    if not latest_id:
+        return {"known": False, "pending": False, "reason": "latest card event has no durable id"}
+    acknowledged_at = _event_index(significant, record.delivery.acknowledged_through)
+    pending_events = significant[acknowledged_at + 1:] if acknowledged_at >= 0 else significant
+    if not pending_events:
+        return {"known": True, "pending": False, "reason": "latest significant linked-card event is acknowledged"}
+    first = pending_events[0]
+    return {
+        "known": True,
+        "pending": True,
+        "event_id": latest_id,
+        "pending_from": _event_id(first),
+        "occurred_at": str(latest.get("occurred_at") or ""),
+        "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
+        "latest_resume_id": _event_id(resumes[-1]) if resumes else "",
+        "reason": "latest significant linked-card event is not acknowledged",
+    }
+
+
+def _timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def _event_age_seconds(occurred_at: str) -> float:
+    occurred = _timestamp(occurred_at)
+    if occurred is None:
+        return 0.0
+    return max(0.0, time.time() - occurred.timestamp())
+
+
+def _event_id(event: dict[str, Any] | None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    return str(event.get("event_id") or event.get("request_id") or "")
+
+
+def _event_index(events: list[dict[str, Any]], event_id: str) -> int:
+    if not event_id:
+        return -1
+    for index, event in enumerate(events):
+        if _event_id(event) == event_id:
+            return index
+    return -1
+
+
+def _reset_delivery_to_idle(
+    delivery: ObserverDelivery,
+    *,
+    acknowledged_through: str,
+    acknowledged_delivery_id: str,
+    acknowledged_resume_id: str,
+) -> None:
+    delivery.stage = DeliveryStage.IDLE
+    delivery.acknowledged_through = acknowledged_through
+    delivery.acknowledged_delivery_id = acknowledged_delivery_id
+    delivery.acknowledged_resume_id = acknowledged_resume_id
+    delivery.pending_from = ""
+    delivery.delivery_id = ""
+    delivery.method = ""
+    delivery.through_event = ""
+    delivery.resume_cursor = ""
+    delivery.resume_cursor_known = True
+    delivery.sent_at = 0.0
+    delivery.deadline = 0.0
+    delivery.attempts = 0
+    delivery.next_at = 0.0
+    delivery.reason = ""
+
+
+def _acknowledge_delivery_from_resume(
+    delivery: ObserverDelivery, resumes: list[dict[str, Any]]
+) -> None:
+    """Advance only when the active batch's marker was written by its observer."""
+
+    if delivery.stage not in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}:
+        return
+    if not delivery.delivery_id or not delivery.through_event:
+        return
+    for resume in reversed(resumes):
+        payload = resume.get("payload")
+        actor = resume.get("actor")
+        if not isinstance(payload, dict) or not isinstance(actor, dict):
+            continue
+        if str(actor.get("role") or "") != OBSERVER_ROLE:
+            continue
+        if (
+            str(payload.get("delivery_id") or "") != delivery.delivery_id
+            or str(payload.get("through_event") or "") != delivery.through_event
+        ):
+            continue
+        resume_id = _event_id(resume)
+        if not resume_id:
+            continue
+        _reset_delivery_to_idle(
+            delivery,
+            acknowledged_through=delivery.through_event,
+            acknowledged_delivery_id=delivery.delivery_id,
+            acknowledged_resume_id=resume_id,
+        )
+        return
+
+
+def _new_delivery_intent(
+    delivery: ObserverDelivery,
+    *,
+    method: str,
+    through_event: str,
+    resume_cursor: str,
+    now: float,
+    delivery_id: str = "",
+) -> None:
+    """Fix a high-water mark before an external observer action."""
+
+    delivery.stage = DeliveryStage.DELIVERY_INTENT
+    delivery.pending_from = ""
+    delivery.delivery_id = delivery_id or "delivery-" + uuid.uuid4().hex
+    delivery.method = method
+    delivery.through_event = through_event
+    delivery.resume_cursor = resume_cursor
+    delivery.resume_cursor_known = True
+    delivery.sent_at = now
+    delivery.deadline = now + observer_event_watchdog_seconds()
+    delivery.next_at = delivery.deadline
+    delivery.reason = f"{method} delivery intent is persisted before external action"
+
+
+def _prepare_launch_delivery(record: ObserverRecord, event: dict[str, Any]) -> str:
+    """Put a replacement launch through the same state machine as a terminal nudge."""
+
+    delivery = record.delivery
+    now = time.time()
+    active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
+    retrying = delivery.stage == DeliveryStage.RETRY_DEFERRED
+    _new_delivery_intent(
+        delivery,
+        method="launch",
+        through_event=(delivery.through_event if active or retrying else str(event["event_id"])),
+        resume_cursor=str(event.get("latest_resume_id") or ""),
+        now=now,
+        delivery_id=delivery.delivery_id if active or retrying else "",
+    )
+    return delivery.through_event
+
+
+def _set_delivery_waiting(delivery: ObserverDelivery, event: dict[str, Any], *, reason: str) -> None:
+    if delivery.stage == DeliveryStage.IDLE:
+        delivery.stage = DeliveryStage.WAITING_FOR_IDLE
+        delivery.pending_from = str(event.get("pending_from") or event.get("event_id") or "")
+    delivery.reason = reason
+
+
+def _defer_delivery(record: ObserverRecord, ref: str, reason: str) -> dict[str, Any]:
+    """Persist bounded external-delivery retry state without creating a busy loop."""
+
+    delivery = record.delivery
+    delivery.stage = DeliveryStage.RETRY_DEFERRED
+    delivery.attempts += 1
+    delay = min(
+        OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (delivery.attempts - 1)),
+        OBSERVER_WAKE_RETRY_MAX_SECONDS,
+    )
+    delivery.next_at = time.time() + delay
+    delivery.deadline = 0.0
+    delivery.reason = f"{reason}; retry in {delay}s"
+    _set_observer_state(record, "wake-deferred", reason=delivery.reason)
+    return {
+        "status": "degraded",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-wake-deferred",
+        "head": record.head,
+        "delivery_id": delivery.delivery_id,
+        "event_id": delivery.through_event,
+        "reason": delivery.reason,
+    }
+
+
+def _wake_for_event(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Deliver one immutable event batch to a completed observer queue."""
+    now = time.time()
+    delivery = record.delivery
+    event_id = str(event["event_id"])
+    overdue = event["age_seconds"] >= observer_event_watchdog_seconds()
+    active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
+    if active and now < delivery.deadline:
+        return {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-pending",
+            "head": record.head,
+            "delivery_id": delivery.delivery_id,
+            "event_id": delivery.through_event,
+        }
+    if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-deferred",
+            "head": record.head,
+            "delivery_id": delivery.delivery_id,
+            "event_id": delivery.through_event,
+            "reason": delivery.reason,
+        }
+    if delivery.stage == DeliveryStage.IDLE:
+        _set_delivery_waiting(
+            delivery, event, reason="observer has unacknowledged significant card work"
+        )
+    try:
+        status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
+    except (HostError, OSError, TypeError, ValueError) as exc:
+        if delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
+            _new_delivery_intent(
+                delivery,
+                method="nudge",
+                through_event=event_id,
+                resume_cursor=str(event.get("latest_resume_id") or ""),
+                now=now,
+            )
+        return _defer_delivery(record, ref, f"observer terminal could not be read: {exc}")
+    if not isinstance(status, dict) or not status.get("queue_finished"):
+        if delivery.stage == DeliveryStage.IDLE:
+            _set_delivery_waiting(delivery, event, reason="observer has not confirmed a completed queue")
+        elif delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
+            delivery.reason = "observer has not confirmed a completed queue"
+        _set_observer_state(record, "waiting", reason=delivery.reason)
+        return {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-watchdog-waiting" if overdue else "observer-wake-waiting",
+            "head": record.head,
+            "event_id": delivery.through_event or event_id,
+            "reason": delivery.reason,
+        }
+    watchdog_delivery = active and now >= delivery.deadline
+    if watchdog_delivery:
+        # A watchdog retry keeps the original high-water mark. A newer B may be visible to the
+        # observer, but a resume for this turn still acknowledges only the unconfirmed A batch.
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=delivery.through_event,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+        )
+    elif delivery.stage == DeliveryStage.RETRY_DEFERRED:
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=delivery.through_event or event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+            delivery_id=delivery.delivery_id,
+        )
+    else:
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+        )
+    observers[ref] = record
+    if not _persist_quietly(runtime, payload, observers):
+        return _defer_delivery(record, ref, "observer wake intent could not be persisted")
+    try:
+        runtime.host.nudge_observer(record)
+    except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
+        return _defer_delivery(record, ref, f"observer wake failed: {exc}")
+    delivery.stage = DeliveryStage.AWAITING_ACK
+    delivery.sent_at = now
+    delivery.deadline = now + observer_event_watchdog_seconds()
+    delivery.next_at = delivery.deadline
+    delivery.reason = "observer was nudged for an unacknowledged card event"
+    _set_observer_state(record, "running")
+    return {
+        "status": "ok",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-watchdog-woke" if overdue or watchdog_delivery else "observer-nudged",
+        "head": record.head,
+        "delivery_id": delivery.delivery_id,
+        "event_id": delivery.through_event,
+    }
 
 
 def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Classify the live observer without turning an ordinary card wait into a restart.
 
-    The observer skill keeps watching a card in every active Pipeline state.  That durable board
-    fact wins over terminal silence.  Only an inactive sprint plus Codex's completed-turn footer
-    and a stale output timestamp is an idle queue that may safely be replaced.
+    A confirmed completed turn means the observer is idle even while a card is in flight. The
+    card's next durable transition, not a periodic idle check, provides its next model turn.
     """
     try:
-        sprint = runtime.sprints.show(ref)
+        runtime.sprints.show(ref)
     except (HostError, TaskError):
         return {"state": "unknown", "reason": "the sprint could not be read for idle recovery"}
-    cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
-    active_states = {"ready", "in_progress", "validate"}
-    if any(str(card.get("state") or "") in active_states for card in cards if isinstance(card, dict)):
-        return {"state": "waiting", "reason": "an active sprint card is awaiting its normal cycle"}
     try:
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError):
@@ -481,21 +1020,12 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
     except (TypeError, ValueError):
         return {"state": "unknown", "reason": "the observer terminal has no activity timestamp"}
     age = time.time() - last_activity
-    threshold = observer_idle_seconds()
-    if age < threshold:
-        return {
-            "state": "idle-grace",
-            "since": last_activity,
-            "reason": (
-                "Codex completed its queue and the observer terminal has been quiet for "
-                f"{int(age)}s; automatic relaunch waits for the {threshold}s idle threshold"
-            ),
-        }
     return {
         "state": "idle",
+        "since": last_activity,
         "reason": (
             "Codex completed its queue and the observer terminal has been quiet for "
-            f"{int(age)}s (threshold {threshold}s) with no active sprint card"
+            f"{int(age)}s with no unacknowledged significant card event"
         ),
     }
 
@@ -510,7 +1040,7 @@ def _set_observer_state(record: ObserverRecord, state: str, *, reason: str = "")
 
 
 def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> None:
-    """Persist a completed queue immediately while its relaunch grace period runs."""
+    """Persist a completed queue while it waits for a new linked-card event."""
     if (
         record.state == "idle-grace"
         and record.idle_since == since
@@ -523,49 +1053,6 @@ def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> No
     record.idle_reason = reason
     record.last_action = "idle-grace"
     record.last_action_at = now
-
-
-def _restart_idle_observer(
-    runtime: Any,
-    payload: dict[str, Any],
-    observers: dict[str, ObserverRecord],
-    ref: str,
-    record: ObserverRecord,
-    reason: str,
-) -> dict[str, Any]:
-    """Replace one demonstrably finished observer queue through the usual relaunch path.
-
-    The replacement starts from the live board, not the old terminal's transcript.  Thus a card
-    the previous head already created is visible as active during recovery and cannot be cut again.
-    """
-    now = time.time()
-    record.state = "idle"
-    record.idle_since = now
-    record.idle_reason = reason
-    record.last_action = "idle-detected"
-    record.last_action_at = now
-    observers[ref] = record
-    outcome = _launch_observer(runtime, payload, observers, ref, record)
-    replacement = observers.get(ref)
-    if outcome.get("action") != "observer-relaunched" or replacement is None:
-        # The reason survives a readiness or teardown failure, so status does not turn this back
-        # into a misleading healthy-looking deferred head.
-        if replacement is not None:
-            replacement.idle_since = now
-            replacement.idle_reason = reason
-            _persist_quietly(runtime, payload, observers)
-        outcome["action"] = "observer-idle-restart-deferred"
-        outcome["reason"] = reason
-        return outcome
-    replacement.state = "idle-recovering"
-    replacement.idle_since = now
-    replacement.idle_reason = reason
-    replacement.last_action = "idle-relaunched"
-    replacement.last_action_at = time.time()
-    _persist_quietly(runtime, payload, observers)
-    outcome["action"] = "observer-idle-relaunched"
-    outcome["reason"] = reason
-    return outcome
 
 
 def _head_may_be_running(record: ObserverRecord) -> bool:
@@ -726,6 +1213,8 @@ def _launch_observer(
     observers: dict[str, ObserverRecord],
     ref: str,
     record: ObserverRecord | None,
+    *,
+    pending_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
@@ -771,11 +1260,36 @@ def _launch_observer(
     kind = EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED
     attempt = record.launches + 1
     request_id = _bring_up_request_id(ref, record.generation, attempt)
+    delivery_event_id = ""
+    if pending_event is not None:
+        # The lifecycle launch is also this event's only permitted observer turn. The delivery
+        # intent is saved by `_write_launch_intent` before `prepare_observer` reaches the host.
+        delivery_event_id = _prepare_launch_delivery(record, pending_event)
     try:
         # Staged before the host is asked for anything, so a head that comes up while the process
         # dies mid-launch still has its event on disk for `TaskAudit.reconcile()` to pick up.
-        event = stage_event(runtime, kind, ref, request_id, {"head": head, "launches": attempt})
+        event = stage_event(
+            runtime,
+            kind,
+            ref,
+            request_id,
+            {
+                "head": head,
+                "launches": attempt,
+                **(
+                    {
+                        "delivery_id": record.delivery.delivery_id,
+                        "delivery_method": record.delivery.method,
+                        "through_event": delivery_event_id,
+                    }
+                    if delivery_event_id
+                    else {}
+                ),
+            },
+        )
     except OSError as exc:
+        if delivery_event_id:
+            _defer_delivery(record, ref, f"observer launch event could not be staged: {exc}")
         return _defer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer lifecycle event could not be staged: {exc}",
@@ -785,6 +1299,8 @@ def _launch_observer(
         # State that cannot be written means no head: a launch nobody can record is exactly how a
         # sprint ends up with two of them.
         discard_event(runtime, request_id)
+        if delivery_event_id:
+            _defer_delivery(record, ref, "observer launch delivery intent could not be persisted")
         return _defer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer launch intent could not be persisted: {intent}",
@@ -793,7 +1309,9 @@ def _launch_observer(
         launched = runtime.host.prepare_observer(
             sprint,
             head,
-            prompt=render_observer_prompt(sprint, skill_path=_first_path(delivery)),
+            prompt=render_observer_prompt(
+                sprint, skill_path=_first_path(delivery), delivery=record.delivery,
+            ),
         )
     except ObserverLaunchAborted as exc:
         # The bring-up failed with its terminal still up. The staged event is dropped, because no
@@ -801,6 +1319,8 @@ def _launch_observer(
         # first and only then opens the replacement.
         discard_event(runtime, request_id)
         _clear_launch_intent(record, head_possible=bool(exc.handle))
+        if delivery_event_id:
+            _defer_delivery(record, ref, f"observer replacement launch failed: {exc}")
         if exc.handle:
             record.handle = exc.handle
             record.workspace = exc.workspace or record.workspace
@@ -817,6 +1337,12 @@ def _launch_observer(
         # nothing left to close here either.
         discard_event(runtime, request_id)
         _clear_launch_intent(record, head_possible=False)
+        if delivery_event_id:
+            _defer_delivery(
+                record,
+                ref,
+                f"observer replacement launch failed: {getattr(exc, 'message', str(exc))}",
+            )
         return _defer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
@@ -843,8 +1369,16 @@ def _launch_observer(
     record.last_action = "relaunched" if relaunch else "launched"
     record.last_action_at = now
     record.deferred_reason = ""
+    record.launch_attempts = 0
+    record.launch_next_at = 0.0
     record.stopped_reason = ""
     record.paused_at = 0.0
+    if delivery_event_id:
+        record.delivery.stage = DeliveryStage.AWAITING_ACK
+        record.delivery.sent_at = now
+        record.delivery.deadline = now + observer_event_watchdog_seconds()
+        record.delivery.next_at = record.delivery.deadline
+        record.delivery.reason = "replacement launch is pending confirmation for an unacknowledged card event"
     observers[ref] = record
     if event is not None:
         event["payload"]["workspace"] = record.workspace
@@ -857,6 +1391,9 @@ def _launch_observer(
         "workspace": record.workspace,
         "launches": record.launches,
     }
+    if delivery_event_id:
+        outcome["delivery_id"] = record.delivery.delivery_id
+        outcome["event_id"] = delivery_event_id
     # A failure here is not a lost head: the intent on disk still names this launch, and the next
     # tick adopts the head it started instead of opening a second one.
     if not _persist_quietly(runtime, payload, observers):
@@ -913,7 +1450,10 @@ def _write_launch_intent(
         runtime.production_state.save(payload)
     except Exception as exc:
         for name, value in previous.items():
-            setattr(record, name, value)
+            if name == "delivery":
+                record.delivery = ObserverDelivery.from_json(value)
+            else:
+                setattr(record, name, value)
         return f"{type(exc).__name__}: {exc}"
     return None
 
@@ -937,19 +1477,32 @@ def _defer(
     action: str = "observer-launch-deferred",
     readiness: dict[str, Any] | None = None,
     keep_state: bool = False,
+    retry: bool = True,
 ) -> dict[str, Any]:
     """Park a launch without losing the sprint or damaging an existing record.
 
     Only the deferral fields are written: the head, workspace, handle and launch counter of a
     record that already exists stay as they were, so the next tick retries from the same state.
     `keep_state` leaves even the state alone, for a record whose unresolved launch intent is the
-    one thing the next tick must still see.
+    one thing the next tick must still see. Failed launches use a persisted exponential deadline;
+    a deliberate drain is retried when the drain ends rather than on that deadline.
     """
     record = record or ObserverRecord(sprint=ref)
     record.head = record.head or head
     if not keep_state:
         record.state = "deferred"
-    record.deferred_reason = reason
+    if retry:
+        record.launch_attempts += 1
+        delay = min(
+            OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (record.launch_attempts - 1)),
+            OBSERVER_WAKE_RETRY_MAX_SECONDS,
+        )
+        record.launch_next_at = time.time() + delay
+        record.deferred_reason = f"{reason}; retry in {delay}s"
+    else:
+        record.launch_attempts = 0
+        record.launch_next_at = 0.0
+        record.deferred_reason = reason
     record.last_action = "launch-deferred"
     record.last_action_at = time.time()
     observers[ref] = record
@@ -958,7 +1511,7 @@ def _defer(
         EVENT_DEFERRED,
         ref,
         observer_request_id("deferred", ref, record.generation, record.launches),
-        {"head": record.head, "reason": reason, "launches": record.launches},
+        {"head": record.head, "reason": record.deferred_reason, "launches": record.launches},
     )
     outcome = {
         "status": "skipped",
@@ -966,7 +1519,7 @@ def _defer(
         "sprint": ref,
         "action": action,
         "head": record.head,
-        "reason": reason,
+        "reason": record.deferred_reason,
     }
     if readiness is not None:
         outcome["readiness"] = readiness
@@ -1339,7 +1892,9 @@ def _first_path(delivery: dict[str, Any]) -> str:
     return str(paths[0]) if paths else ""
 
 
-def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> str:
+def render_observer_prompt(
+    sprint: dict[str, Any], *, skill_path: str = "", delivery: ObserverDelivery | None = None,
+) -> str:
     """The observer's launch document: the sprint entity, and the skill that says what to do.
 
     The document carries data and one pointer. How a sprint is led belongs to the role skill alone,
@@ -1349,6 +1904,11 @@ def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> s
     repositories = [str(repo) for repo in (sprint.get("repositories") or [])]
     current = str(sprint.get("current_task") or "")
     budget = sprint.get("budget") if isinstance(sprint.get("budget"), dict) else {}
+    marker = (
+        (delivery.delivery_id, delivery.through_event)
+        if delivery is not None and delivery.delivery_id and delivery.through_event
+        else ("", "")
+    )
     sections = [
         f"# Sprint {ref}",
         "",
@@ -1391,6 +1951,14 @@ def render_observer_prompt(sprint: dict[str, Any], *, skill_path: str = "") -> s
         "Hard threshold reached." if budget.get("hard_reached") else "Hard threshold not reached.",
         "",
     ]
+    if marker[0]:
+        sections.extend([
+            "## Pending delivery acknowledgement",
+            "",
+            f"delivery_id: {marker[0]}",
+            f"through_event: {marker[1]}",
+            "",
+        ])
     return "\n".join(sections)
 
 

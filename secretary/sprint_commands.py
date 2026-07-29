@@ -62,6 +62,8 @@ def add_sprint_subcommands(subparsers) -> None:
             command.add_argument("--type", required=True, choices=BUDGET_EVENT_TYPES)
         elif name == "resume":
             command.add_argument("--body-file", required=True)
+            command.add_argument("--delivery-id")
+            command.add_argument("--through-event")
         command.set_defaults(handler=handler)
     sprint.set_defaults(handler=not_implemented)
 
@@ -156,7 +158,18 @@ def run_resume(args: argparse.Namespace) -> int:
     except (TaskError, ValueError):
         print(json.dumps({"error": {"code": "validation", "message": "resume file must contain JSON"}}), file=os.sys.stderr)
         return 2
-    return _write(args, lambda writer: writer.resume(role=args.role, actor=args.actor or args.role, reference=args.ref, entry=entry, request_id=args.request_id))
+    return _write(
+        args,
+        lambda writer: writer.resume(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            entry=entry,
+            request_id=args.request_id,
+            delivery_id=args.delivery_id or "",
+            through_event=args.through_event or "",
+        ),
+    )
 
 
 def run_reopen(args: argparse.Namespace) -> int:

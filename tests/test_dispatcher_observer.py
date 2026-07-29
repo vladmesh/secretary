@@ -25,6 +25,8 @@ from secretary.dispatcher_observer import (
     EVENT_RELAUNCHED,
     EVENT_STOPPED,
     OBSERVER_HEAD_FALLBACK,
+    DeliveryStage,
+    ObserverDelivery,
     ObserverLaunchAborted,
     ObserverRecord,
     load_observers,
@@ -35,7 +37,7 @@ from secretary.dispatcher_observer import (
     render_observer_prompt,
     stop_observer_head,
 )
-from secretary.sprints import SprintReader
+from secretary.sprints import SprintReader, SprintWriter
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_production import _budget_event_type, _production_claim_ready, _reconcile_sprint_budget
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
@@ -43,7 +45,7 @@ from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import ROLE_ALLOWLIST, ROLE_REQUIRED, runtime_env
 from secretary.status import _observers as status_observers
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
 
@@ -149,6 +151,25 @@ class ObserverLifecycleTests(unittest.TestCase):
         record = self.observers()[reference]
         Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
 
+    def acknowledge_delivery(self, entry: dict[str, str], *, request_id: str) -> None:
+        delivery = self.observers()["sprint:1"].delivery
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
+            request_id=request_id,
+            delivery_id=delivery.delivery_id,
+            through_event=delivery.through_event,
+        )
+
+    def expire_launch_retry(self, reference: str = "sprint:1") -> None:
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers[reference].launch_next_at = time.time() - 1
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
     # lifecycle ---------------------------------------------------------------
 
     def test_open_sprint_gets_one_observer_head(self) -> None:
@@ -177,80 +198,517 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].to_json(), before.to_json())
 
-    def test_dead_pid_is_relaunched_and_distinguishable_from_the_first_launch(self) -> None:
+    def test_dead_pid_without_pending_card_work_is_not_relaunched(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
         self.kill_observer()
 
         result = self.runtime.production_tick()
 
-        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-relaunched"])
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-idle"])
         record = self.observers()["sprint:1"]
-        self.assertEqual(record.launches, 2)
-        self.assertEqual(record.last_action, "relaunched")
-        # The pane the dead head left behind is closed before the new one opens.
-        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(self.host.stopped_observers, [])
         kinds = [event["kind"] for event in self.audit.events("sprint:1")]
-        self.assertEqual(kinds, [EVENT_LAUNCHED, EVENT_RELAUNCHED])
+        self.assertEqual(kinds, [EVENT_LAUNCHED])
 
-    def test_finished_observer_queue_is_relaunched_and_visible_as_recovering(self) -> None:
+    def test_finished_observer_queue_is_quiet_without_a_new_card_event(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
         self.host.observer_status_result = {
-            "last_activity": time.time() - 2,
+            "last_activity": time.time() - 31 * 60,
             "queue_finished": True,
         }
 
-        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
-            result = self.runtime.production_tick()
+        result = self.runtime.production_tick()
 
         action = self.actions(result)[0]
-        self.assertEqual(action["action"], "observer-idle-relaunched")
+        self.assertEqual(action["action"], "observer-idle")
         self.assertIn("completed its queue", action["reason"])
-        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
-        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.host.stopped_observers, [])
+        self.assertEqual(self.host.observer_nudges, [])
         record = self.observers()["sprint:1"]
-        self.assertEqual(record.state, "idle-recovering")
+        self.assertEqual(record.state, "idle-grace")
         self.assertTrue(record.idle_since)
-        self.assertIn("threshold 1s", record.idle_reason)
         status = status_observers(self.runtime.production_state.load())[0]
-        self.assertEqual(status["state"], "idle-recovering")
+        self.assertEqual(status["state"], "idle-grace")
         self.assertIsNotNone(status["idle_since"])
         self.assertIn("completed its queue", status["idle_reason"])
         sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
-        self.assertEqual(sprint_status["observer"]["state"], "idle-recovering")
+        self.assertEqual(sprint_status["observer"]["state"], "idle-grace")
 
         self.host.observer_status_result = {"last_activity": time.time(), "queue_finished": False}
         resumed = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(resumed)], ["observer-live"])
-        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].state, "running")
 
-    def test_finished_observer_queue_is_visible_during_the_idle_grace_period(self) -> None:
+    def test_finished_observer_queue_is_nudged_once_for_a_linked_card_event(self) -> None:
         self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
             "queue_finished": True,
         }
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="observer-event",
+        )
 
-        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "3600"}):
-            result = self.runtime.production_tick()
+        result = self.runtime.production_tick()
 
         action = self.actions(result)[0]
-        self.assertEqual(action["action"], "observer-idle-grace")
+        self.assertEqual(action["action"], "observer-nudged")
         self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
         record = self.observers()["sprint:1"]
-        self.assertEqual(record.state, "idle-grace")
-        self.assertTrue(record.idle_since)
-        self.assertIn("3600s idle threshold", record.idle_reason)
-        status = status_observers(self.runtime.production_state.load())[0]
-        self.assertEqual(status["state"], "idle-grace")
-        self.assertIn("automatic relaunch waits", status["idle_reason"])
-        sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
-        self.assertEqual(sprint_status["observer"]["state"], "idle-grace")
+        self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertTrue(record.delivery.delivery_id)
+        repeated = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(repeated)], ["observer-wake-pending"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
 
-    def test_rotated_observer_handle_still_recovers_a_finished_queue(self) -> None:
+    def test_event_waiting_for_an_active_queue_is_nudged_when_that_queue_finishes(self) -> None:
+        """The watchdog is not a delay between a normal turn completing and its event wake."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time(), "queue_finished": False}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed while observer was working", request_id="event-during-active-turn",
+        )
+
+        waiting = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.delivery.stage, DeliveryStage.WAITING_FOR_IDLE)
+        self.assertTrue(record.delivery.pending_from)
+        self.assertEqual(self.host.observer_nudges, [])
+
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        delivered = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(delivered)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(
+            self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK
+        )
+
+    def test_resume_acknowledges_the_event_and_prevents_a_second_wake_after_restart(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="ack-event",
+        )
+        self.runtime.production_tick()
+        delivery_id = self.observers()["sprint:1"].delivery.delivery_id
+        event_id = self.observers()["sprint:1"].delivery.through_event
+        entry = {
+            "selected_step": "check board", "selected_why": "card changed", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="ack-resume")
+
+        acknowledged = self.runtime.production_tick()
+
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.delivery.acknowledged_through, event_id)
+        self.assertEqual(record.delivery.acknowledged_delivery_id, delivery_id)
+        self.assertEqual(record.delivery.acknowledged_resume_id, self.audit.events()[-1]["event_id"])
+        self.assertEqual(record.delivery.stage, DeliveryStage.IDLE)
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        restarted = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(restarted)], ["observer-idle"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+    def test_only_the_active_delivery_marker_acknowledges_an_event(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="marker-event",
+        )
+        self.runtime.production_tick()
+        delivery = self.observers()["sprint:1"].delivery
+        entry = {
+            "selected_step": "read board", "selected_why": "card changed", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
+        }
+        writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
+        writer.resume(
+            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            request_id="unrelated-resume",
+        )
+        writer.resume(
+            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            request_id="wrong-delivery", delivery_id="delivery-old", through_event=delivery.through_event,
+        )
+        writer.resume(
+            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            request_id="wrong-through", delivery_id=delivery.delivery_id, through_event="evt-old",
+        )
+
+        pending = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(pending)], ["observer-wake-pending"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(self.observers()["sprint:1"].delivery.delivery_id, delivery.delivery_id)
+
+        self.acknowledge_delivery(entry, request_id="matching-marker")
+        acknowledged = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.acknowledged_delivery_id, delivery.delivery_id)
+
+    def test_crash_before_nudge_keeps_an_unrelated_resume_unacknowledged(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="crash-before-nudge-event",
+        )
+
+        with mock.patch.object(
+            self.host, "nudge_observer", side_effect=KeyboardInterrupt("crash before nudge")
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "crash before nudge"):
+                self.runtime.production_tick()
+
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.DELIVERY_INTENT)
+        self.assertEqual(self.host.observer_nudges, [])
+        entry = {
+            "selected_step": "wait", "selected_why": "the board is quiet", "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+        }
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            request_id="old-turn-resume",
+        )
+
+        recovered = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(recovered)], ["observer-wake-pending"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.delivery.stage, DeliveryStage.DELIVERY_INTENT)
+        self.assertEqual(record.delivery.delivery_id, delivery.delivery_id)
+        self.assertEqual(self.host.observer_nudges, [])
+
+    def test_resume_before_a_same_second_event_does_not_acknowledge_it(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        same_second = _now()
+        entry = {
+            "selected_step": "wait", "selected_why": "board is quiet", "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "recorded_at": same_second,
+        }
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry, request_id="same-second-resume",
+        )
+        self.audit.append("same-second-card-event", {
+            "event_id": "evt_same_second_card", "request_id": "same-second-card-event",
+            "ref": "secretary-510-pilot", "kind": "commented", "outcome": "success",
+            "occurred_at": same_second,
+        })
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertNotEqual(
+            self.observers()["sprint:1"].delivery.acknowledged_through, "evt_same_second_card"
+        )
+
+    def test_new_event_after_woken_turn_is_delivered_after_its_resume(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="first", request_id="first-wake-event",
+        )
+        self.runtime.production_tick()
+        entry = {
+            "selected_step": "read board", "selected_why": "first event", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+        }
+        self.acknowledge_delivery(entry, request_id="first-wake-resume")
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="second", request_id="second-wake-event",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1", "sprint:1"])
+
+    def test_a_nudge_b_resume_a_c_delivers_a_second_batch_through_c(self) -> None:
+        """A resume for A cannot absorb B or C appended after A's delivery intent."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="first", request_id="burst-first",
+        )
+        self.runtime.production_tick()
+        first_id = self.observers()["sprint:1"].delivery.through_event
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="coalesced", request_id="burst-second",
+        )
+        waiting = self.runtime.production_tick()
+        second_id = self.audit.events()[-1]["event_id"]
+
+        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-pending"])
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(self.observers()["sprint:1"].delivery.through_event, first_id)
+        entry = {
+            "selected_step": "read board", "selected_why": "coalesced burst", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+        }
+        self.acknowledge_delivery(entry, request_id="burst-resume")
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="after resume", request_id="after-burst-resume",
+        )
+
+        delivered = self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+
+        self.assertEqual([row["action"] for row in self.actions(delivered)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1", "sprint:1"])
+        self.assertEqual(record.delivery.acknowledged_through, first_id)
+        self.assertEqual(record.delivery.through_event, self.audit.events()[-1]["event_id"])
+
+    def test_replacement_launch_delivers_pending_event_without_a_second_nudge(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="replacement-event",
+        )
+        pending_id = self.audit.events()[-1]["event_id"]
+
+        replacement = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(replacement)], ["observer-relaunched"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(record.delivery.method, "launch")
+        self.assertEqual(record.delivery.through_event, pending_id)
+        launch_prompt = (Path(record.workspace) / "SPRINT.md").read_text(encoding="utf-8")
+        self.assertIn(record.delivery.delivery_id, launch_prompt)
+        self.assertIn(record.delivery.through_event, launch_prompt)
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+
+        repeated = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(repeated)], ["observer-wake-pending"])
+        self.assertEqual(self.host.observer_nudges, [])
+
+    def test_burst_of_card_events_coalesces_to_one_observer_nudge(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        for request_id in ("burst-one", "burst-two"):
+            self.writer.comment(
+                role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+                body=request_id, request_id=request_id,
+            )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(
+            self.observers()["sprint:1"].delivery.through_event, self.audit.events()[-1]["event_id"]
+        )
+        entry = {
+            "selected_step": "read board", "selected_why": "coalesced batch", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+        }
+        self.acknowledge_delivery(entry, request_id="burst-ack")
+
+        acknowledged = self.runtime.production_tick()
+
+        record = self.observers()["sprint:1"]
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        self.assertEqual(record.delivery.stage, DeliveryStage.IDLE)
+        self.assertEqual(record.delivery.acknowledged_through, self.audit.events()[-2]["event_id"])
+
+    def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_deadline(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="crash boundary", request_id="crash-boundary-event",
+        )
+
+        def crash_after_send(record) -> None:
+            self.host.observer_nudges.append(str(record.sprint))
+            raise KeyboardInterrupt("simulated dispatcher crash")
+
+        with mock.patch.object(self.host, "nudge_observer", side_effect=crash_after_send):
+            with self.assertRaisesRegex(KeyboardInterrupt, "simulated dispatcher crash"):
+                self.runtime.production_tick()
+
+        persisted = self.observers()["sprint:1"].delivery
+        self.assertEqual(persisted.stage, DeliveryStage.DELIVERY_INTENT)
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+        recovered = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(recovered)], ["observer-wake-pending"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers["sprint:1"].delivery.deadline = time.time() - 1
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
+        watchdog = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(watchdog)], ["observer-watchdog-woke"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1", "sprint:1"])
+
+    def test_failed_nudge_retries_with_the_same_delivery_after_restart(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="retry delivery", request_id="retry-delivery-event",
+        )
+        self.host.fail_observer_reason = "terminal transport failed"
+
+        failed = self.runtime.production_tick()
+
+        delivery = self.observers()["sprint:1"].delivery
+        delivery_id = delivery.delivery_id
+        self.assertEqual([row["action"] for row in self.actions(failed)], ["observer-wake-deferred"])
+        self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+        self.assertEqual(delivery.attempts, 1)
+        self.assertIn("retry in 30s", delivery.reason)
+
+        self.host.fail_observer_reason = ""
+        deferred = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(deferred)], ["observer-wake-deferred"])
+        self.assertEqual(self.host.observer_nudges, [])
+
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers["sprint:1"].delivery.next_at = time.time() - 1
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
+        retried = self.runtime.production_tick()
+
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual([row["action"] for row in self.actions(retried)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(delivery.delivery_id, delivery_id)
+        self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
+
+    def test_overdue_unacknowledged_event_uses_the_watchdog_wake(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.audit.append("old-event", {
+            "event_id": "evt_old_event", "request_id": "old-event", "ref": "secretary-510-pilot",
+            "kind": "commented", "outcome": "success", "occurred_at": "2000-01-01T00:00:00Z",
+        })
+
+        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS": "1"}):
+            result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-watchdog-woke"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+    def test_routing_event_and_closed_sprint_do_not_wake_an_observer(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        # The dispatcher claim in the initial tick is a real card transition. Acknowledge its
+        # delivery first, then prove the later routing-only audit line starts no additional turn.
+        self.assertEqual(
+            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-nudged"]
+        )
+        entry = {
+            "selected_step": "check board", "selected_why": "initial card claim", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="routing-baseline")
+        self.assertEqual(
+            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-idle"]
+        )
+        self.audit.append("routing-only", {
+            "event_id": "evt_routing_only", "request_id": "routing-only", "ref": "secretary-510-pilot",
+            "kind": "routing", "outcome": "success", "occurred_at": "2026-07-29T12:00:00Z",
+        })
+
+        routing = self.runtime.production_tick()
+        self.close_sprint()
+        closed = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(routing)], ["observer-idle"])
+        self.assertEqual([row["action"] for row in self.actions(closed)], ["observer-stopped"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+    def test_denied_and_failed_card_events_do_not_wake_an_observer(self) -> None:
+        self.open_sprint()
+        self.board.tasks[0]["column_id"] = 6
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        for request_id, kind, outcome in (
+            ("denied-card-event", "sprint_guard_denied", "denied"),
+            ("guard-success-event", "sprint_guard_denied", "success"),
+            ("failed-card-event", "commented", "failed"),
+            ("missing-outcome-event", "commented", ""),
+        ):
+            self.audit.append(request_id, {
+                "event_id": "evt_" + request_id,
+                "request_id": request_id,
+                "ref": "secretary-510-pilot",
+                "kind": kind,
+                "outcome": outcome,
+                "occurred_at": "2099-01-01T00:00:00Z",
+            })
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
+        self.assertEqual(self.host.observer_nudges, [])
+
+    def test_rotated_observer_handle_still_reports_a_finished_queue(self) -> None:
         """Orca may rotate the handle while retaining leafId, so status must read the alias."""
         self.open_sprint()
         self.runtime.production_tick()
@@ -273,21 +731,14 @@ class ObserverLifecycleTests(unittest.TestCase):
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json):
             self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "3600"}):
-                grace = self.runtime.production_tick()
-            self.assertEqual([row["action"] for row in self.actions(grace)], ["observer-idle-grace"])
+            grace = self.runtime.production_tick()
+            self.assertEqual([row["action"] for row in self.actions(grace)], ["observer-idle"])
             self.assertEqual(self.observers()["sprint:1"].state, "idle-grace")
-
-            with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
-                recovered = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(recovered)], ["observer-idle-relaunched"])
-        self.assertEqual(self.observers()["sprint:1"].state, "idle-recovering")
         reads = [args for args in calls if args[1:3] == ["terminal", "read"]]
         self.assertTrue(reads)
         self.assertEqual(reads[0][reads[0].index("--terminal") + 1], "observer:rotated")
 
-    def test_active_card_keeps_a_finished_observer_queue_in_waiting_state(self) -> None:
+    def test_active_card_does_not_relaunch_a_finished_observer_without_a_new_event(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.board.metadata[100]["sprint_current_task"] = "secretary-510-pilot"
@@ -296,13 +747,22 @@ class ObserverLifecycleTests(unittest.TestCase):
             "last_activity": time.time() - 2,
             "queue_finished": True,
         }
+        # The initial dispatcher tick claims the linked card after the observer comes up. That
+        # transition gets one nudge; the completed turn below is then quiet despite the active
+        # card remaining on the board.
+        self.assertEqual(
+            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-nudged"]
+        )
+        entry = {
+            "selected_step": "wait for card", "selected_why": "the card is active", "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait for transition",
+        }
+        self.acknowledge_delivery(entry, request_id="active-card-baseline")
+        result = self.runtime.production_tick()
 
-        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
-            result = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-waiting"])
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observers, ["sprint:1"])
-        self.assertEqual(self.observers()["sprint:1"].state, "waiting")
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
 
     def test_closed_sprint_stops_the_head_and_drops_the_record(self) -> None:
         self.open_sprint()
@@ -548,7 +1008,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].state, "running")
 
-    def test_a_refused_stop_before_a_relaunch_defers_instead_of_doubling_the_head(self) -> None:
+    def test_a_dead_observer_without_pending_work_does_not_need_a_teardown(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
         self.kill_observer()
@@ -556,14 +1016,11 @@ class ObserverLifecycleTests(unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observers, ["sprint:1"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
         self.assertEqual(record.handle, "observer:sprint:1")
-        self.assertIn("could not be stopped", record.deferred_reason)
 
     def test_a_bring_up_that_left_its_terminal_up_keeps_the_handle_on_the_record(self) -> None:
         self.open_sprint()
@@ -697,12 +1154,13 @@ class ObserverLifecycleTests(unittest.TestCase):
         # The same reason has to be readable from outside, or the sprint just looks headless.
         self.assertIn("observe-sprint", status_observers(self.runtime.production_state.load())[0]["deferred_reason"])
 
-    def test_a_delivered_skill_launches_the_head_on_the_next_tick(self) -> None:
+    def test_a_delivered_skill_launches_after_the_deferred_retry_deadline(self) -> None:
         self.observer_skill.unlink()
         self.open_sprint()
         self.runtime.production_tick()
 
         install_skill_registry(self.data_dir)
+        self.expire_launch_retry()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -732,13 +1190,18 @@ class ObserverLifecycleTests(unittest.TestCase):
         prompt = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(encoding="utf-8")
         self.assertIn(str(self.observer_skill), prompt)
 
-    def test_deferred_launch_retries_on_the_next_tick(self) -> None:
+    def test_deferred_launch_waits_for_a_persisted_retry_deadline(self) -> None:
         self.open_sprint()
         unready = HeadReadiness("openai-sub", "unavailable", "resource provider is unavailable", 1.0)
         self.runtime.head_readiness = lambda _head: unready
         self.runtime.production_tick()
 
         del self.runtime.head_readiness
+        waiting = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(waiting)], ["observer-launch-deferred"])
+        self.assertEqual(self.host.calls.count("prepare_observer"), 0)
+        self.expire_launch_retry()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -768,6 +1231,19 @@ class ObserverLifecycleTests(unittest.TestCase):
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 0)
         self.assertIn("orca refused the terminal", record.deferred_reason)
+
+    def test_failed_bring_up_is_not_retried_on_every_tick(self) -> None:
+        self.open_sprint()
+        self.host.fail_observer_reason = "orca refused the terminal"
+
+        self.runtime.production_tick()
+        repeated = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(repeated)], ["observer-launch-deferred"])
+        self.assertEqual(self.host.calls.count("prepare_observer"), 1)
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launch_attempts, 1)
+        self.assertGreater(record.launch_next_at, time.time())
 
     # audit durability --------------------------------------------------------
 
@@ -830,6 +1306,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.launches, 0)
         self.assertIn("could not be staged", record.deferred_reason)
 
+        self.expire_launch_retry()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -1475,8 +1952,56 @@ class ObserverConfigurationTests(unittest.TestCase):
             ObserverRecord(sprint="sprint:1").generation,
         )
 
+    def test_legacy_wake_flags_migrate_to_one_fail_closed_delivery(self) -> None:
+        record = ObserverRecord.from_json({
+            "sprint": "sprint:1",
+            "acknowledged_event_id": "evt_older",
+            "wake_event_id": "evt_pending",
+            "wake_sent": True,
+            "wake_attempts": 2,
+            "wake_next_at": 123.0,
+            "wake_reason": "old wake",
+        })
+
+        self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(record.delivery.acknowledged_through, "evt_older")
+        self.assertEqual(record.delivery.through_event, "evt_pending")
+        self.assertFalse(record.delivery.resume_cursor_known)
+        persisted = record.to_json()
+        self.assertIn("delivery", persisted)
+        self.assertNotIn("wake_sent", persisted)
+
 
 class ObserverTerminalStatusTests(unittest.TestCase):
+    def test_real_host_nudge_carries_the_active_delivery_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1",
+                workspace="/workspace",
+                handle="observer:sprint:1",
+                delivery=ObserverDelivery(
+                    delivery_id="delivery-1", through_event="evt-card-1",
+                ),
+            )
+            calls: list[list[str]] = []
+
+            def run_json(args: list[str]) -> dict:
+                calls.append(args)
+                if args[1:3] == ["terminal", "list"]:
+                    return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
+                if args[1:3] == ["terminal", "send"]:
+                    return {}
+                raise AssertionError(args)
+
+            with mock.patch.object(host, "_run_json", side_effect=run_json):
+                host.nudge_observer(record)
+
+        sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
+        message = sent[sent.index("--text") + 1]
+        self.assertIn("--delivery-id delivery-1", message)
+        self.assertIn("--through-event evt-card-1", message)
+
     def test_real_host_reads_the_completed_queue_and_output_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")

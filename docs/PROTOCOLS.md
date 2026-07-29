@@ -125,8 +125,11 @@ launched observer prompt but does not stop work. At the hard limit the dispatche
 `sprint resume` accepts JSON with required string fields `selected_step`, `selected_why`,
 `rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored separately from
 normal comments and carries a `[sprint:resume]` marker. `show` and `status` compute freshness from card
-audit records: missing data is `resume_missing`, and a record older than the latest non-routing card event
-is `resume_stale`. Neither command reads an observer transcript. `secretary status --json` exposes the
+audit records: missing data is `resume_missing`; a resume may trail a successful non-routing, non-guard-denied card event for up to
+five minutes, then is `resume_stale`. Neither command reads an observer transcript. The dispatcher records a
+durable delivery batch before it wakes or replaces an observer. An observer acknowledges it by passing the
+matching `--delivery-id` and `--through-event` from `status` to `sprint resume`; those values are audit payload,
+not part of the six stored resume fields. `secretary status --json` exposes the
 same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.

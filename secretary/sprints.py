@@ -6,6 +6,7 @@ import fcntl
 import json
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ from secretary.tasks import (
     TaskAudit,
     TaskError,
     TaskReader,
+    is_significant_card_event,
     _digest,
     _now,
     _positive_int,
@@ -45,6 +47,10 @@ BUDGET_EVENT_TYPES = (
 )
 DEFAULT_BUDGET_SIGNAL = 3
 DEFAULT_BUDGET_HARD = 6
+# An observer gets a short window to durably reflect a card transition.  Freshness is
+# based on the transition itself, rather than the time a status reader happens to run,
+# so a timely resume stays fresh until another meaningful transition occurs.
+RESUME_FRESHNESS_GRACE_SECONDS = 5 * 60
 RESUME_FIELDS = (
     "selected_step",
     "selected_why",
@@ -316,20 +322,34 @@ class SprintReader:
 
     def _resume_freshness(self, sprint: dict[str, Any], resume: dict[str, Any] | None) -> dict[str, Any]:
         if not resume:
-            return {"fresh": False, "error": "resume_missing", "last_event_at": None}
+            return {
+                "fresh": False, "error": "resume_missing", "recorded_at": None,
+                "last_event_at": None, "lag_seconds": None,
+                "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
+            }
         last_event = ""
         if self.data_dir is not None:
-            refs = {str(card.get("ref") or "") for card in sprint.get("cards") or [] if isinstance(card, dict)}
+            refs = {
+                str(card.get("ref") or "")
+                for card in sprint.get("cards") or []
+                if isinstance(card, dict) and str(card.get("ref") or "")
+            }
             for event in TaskAudit(self.data_dir).events():
-                if event.get("ref") in refs and event.get("kind") != "routing":
+                if is_significant_card_event(event, linked_refs=refs):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")
-        stale = bool(last_event and recorded_at < last_event)
+        lag_seconds = _resume_lag_seconds(recorded_at, last_event)
+        invalid_recorded_at = _timestamp(recorded_at) is None
+        stale = invalid_recorded_at or bool(
+            last_event and (lag_seconds is None or lag_seconds > RESUME_FRESHNESS_GRACE_SECONDS)
+        )
         return {
             "fresh": not stale,
             "error": "resume_stale" if stale else None,
             "recorded_at": recorded_at or None,
             "last_event_at": last_event or None,
+            "lag_seconds": lag_seconds,
+            "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
         }
 
 
@@ -485,14 +505,37 @@ class SprintWriter:
         self.audit.stage(stop_request_id, event)
         self._record("budget_hard_stopped", event)
 
-    def resume(self, *, role: str, actor: str, reference: str, entry: dict[str, Any], request_id: str | None = None) -> dict[str, Any]:
+    def resume(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        entry: dict[str, Any],
+        request_id: str | None = None,
+        delivery_id: str = "",
+        through_event: str = "",
+    ) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "observer", "steward"})
         normalized = _resume(entry, required=True)
         assert normalized is not None
+        delivery_id = delivery_id.strip()
+        through_event = through_event.strip()
+        if bool(delivery_id) != bool(through_event):
+            raise TaskError(
+                "validation",
+                "resume delivery acknowledgement requires both delivery_id and through_event",
+                2,
+            )
+        if (delivery_id or through_event) and role != "observer":
+            raise TaskError("role_forbidden", "only an observer resume can acknowledge delivery", 3)
         def mutation(sprint: dict[str, Any]) -> None:
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))})
             self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content="[sprint:resume]\n" + normalized["selected_step"])
-        return self._write("resume_recorded", role, actor, reference, request_id, {"fields": list(RESUME_FIELDS)}, mutation)
+        payload = {"fields": list(RESUME_FIELDS)}
+        if delivery_id:
+            payload.update({"delivery_id": delivery_id, "through_event": through_event})
+        return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
 
     def close(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"po"})
@@ -601,6 +644,25 @@ def _repositories(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value.strip() for value in values if value.strip()))
 
 
+def _resume_lag_seconds(recorded_at: str, last_event_at: str) -> int | None:
+    """Seconds a resume trails its latest linked-card event, or None for bad timestamps."""
+    if not recorded_at or not last_event_at:
+        return 0
+    recorded = _timestamp(recorded_at)
+    event = _timestamp(last_event_at)
+    if recorded is None or event is None:
+        return None
+    return max(0, int((event - recorded).total_seconds()))
+
+
+def _timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
 def _json_list(value: str | None) -> list[str]:
     try:
         raw = json.loads(value or "[]")
@@ -653,4 +715,7 @@ def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
         if required:
             raise TaskError("validation", "resume entry is missing required fields: " + ", ".join(missing), 2)
         return None
-    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": _text(source.get("recorded_at")) or _now()}
+    recorded_at = _text(source.get("recorded_at")) or _now()
+    if required and _timestamp(recorded_at) is None:
+        raise TaskError("validation", "resume recorded_at must include a timezone", 2)
+    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": recorded_at}

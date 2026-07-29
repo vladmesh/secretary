@@ -776,6 +776,42 @@ class CommandHostRuntime:
             "queue_finished": _observer_queue_finished(screen),
         }
 
+    def nudge_observer(self, record: Any) -> None:
+        """Give a completed observer queue one event-driven turn without replacing its head."""
+        if self.mode == "noop":
+            return
+        workspace = str(getattr(record, "workspace", "") or "")
+        handle = str(getattr(record, "handle", "") or "")
+        leaf = str(getattr(record, "leaf", "") or "")
+        if not workspace or not (handle or leaf):
+            raise HostError("observer has no terminal handle for an event wake")
+        terminals = self._worktree_terminals(workspace)
+        terminal = next(
+            (
+                item for item in terminals
+                if (handle and item.get("handle") == handle) or (leaf and item.get("leafId") == leaf)
+            ),
+            None,
+        )
+        current = str(terminal.get("handle") or "") if isinstance(terminal, dict) else ""
+        if not current:
+            raise HostError("observer terminal is unavailable for an event wake")
+        delivery = getattr(record, "delivery", None)
+        delivery_id = str(getattr(delivery, "delivery_id", "") or "")
+        through_event = str(getattr(delivery, "through_event", "") or "")
+        message = "A linked card changed. Reread the live sprint board, take the next step, then record resume."
+        if delivery_id and through_event:
+            message += (
+                " Acknowledge this delivery in that resume with --delivery-id "
+                f"{delivery_id} --through-event {through_event}."
+            )
+        self._run_json([
+            "orca", "terminal", "send",
+            "--terminal", current, "--text", message,
+            "--enter",
+            "--json",
+        ])
+
     def _stop_observer_terminals(self, workspace: str) -> None:
         """Stop every pane of an observer workspace.
 
