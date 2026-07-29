@@ -56,6 +56,7 @@ from secretary.dispatcher_observer import (
     OBSERVER_ROLE,
     ObserverLaunchAborted,
     observer_launch_prompt as _observer_launch_prompt,
+    observer_queue_finished as _observer_queue_finished,
     observer_pid_file as _observer_pid_file,
 )
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
@@ -93,6 +94,7 @@ from secretary.dispatcher_review import (
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
+from secretary.dispatcher_tui import read_terminal_text as _read_terminal_text
 from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
@@ -740,6 +742,39 @@ class CommandHostRuntime:
         self._run_json([
             "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
         ])
+
+    def observer_status(self, record: Any) -> dict[str, Any]:
+        """Read the observer pane's output clock and completed-turn marker.
+
+        This is advisory work liveness, not process liveness.  The lifecycle still owns the pid
+        heartbeat, and an unreadable terminal deliberately returns no queue-end signal rather than
+        risking a replacement beside an observer that is merely invisible to Orca.
+        """
+        if self.mode == "noop" or not record.workspace or not (record.handle or record.leaf):
+            return {}
+        terminals = self._worktree_terminals(str(record.workspace))
+        terminal = next(
+            (
+                item for item in terminals
+                if (record.handle and item.get("handle") == record.handle)
+                or (record.leaf and item.get("leafId") == record.leaf)
+            ),
+            None,
+        )
+        if terminal is None or terminal.get("connected") is False:
+            return {}
+        try:
+            last = float(terminal.get("lastOutputAt")) / 1000.0
+        except (TypeError, ValueError):
+            return {}
+        try:
+            screen = _read_terminal_text(str(terminal.get("handle") or ""), run_json=self._run_json)
+        except (HostError, OSError, ValueError, TypeError):
+            return {"last_activity": last, "queue_finished": False}
+        return {
+            "last_activity": last,
+            "queue_finished": _observer_queue_finished(screen),
+        }
 
     def _stop_observer_terminals(self, workspace: str) -> None:
         """Stop every pane of an observer workspace.

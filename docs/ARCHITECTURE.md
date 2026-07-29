@@ -169,9 +169,18 @@ the next tick.
 
 Liveness uses the same pid heartbeat as worker and reviewer. A dead pid causes a relaunch on the next
 tick; a launch counter in the record and a distinct audit event type separate a relaunch from a first
-launch. All lifecycle events go to the same durable audit log keyed by the sprint reference and are
-deduplicated by request id. The record's generation is part of that id, so a sprint reappearing on
-the board starts a fresh cycle of events instead of being deduplicated against the previous one.
+launch. A live Codex TUI can still have finished its agent queue, so the dispatcher also reads its
+completed-turn footer and terminal output time. A positive terminal footer immediately exposes `idle-grace` in
+the observer record; after `SECRETARY_OBSERVER_IDLE_SECONDS` (20 minutes by default), it replaces that
+head through the normal relaunch path, rather than prompting the old session.
+An active card in Ready, In progress or Validate is recorded as `waiting` and is never treated as idle.
+The replacement recovers from the live sprint entity and cards, which prevents a card already created by
+the old head from being created again. The record reads `idle-recovering`, with the idle timestamp and reason,
+until the new terminal makes progress.
+
+All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
+by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a
+fresh cycle of events instead of being deduplicated against the previous one.
 
 Ordering matches card writes: the event is staged first, then the host is called, and only then is
 the event committed. Storage that fails at staging cancels the action itself, because an unrecordable

@@ -370,6 +370,9 @@ class FakeHost:
         # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
         self.observer_terminals: dict[str, str] = {}
         self.observer_pid = os.getpid()
+        # Work liveness is separate from the pid.  Tests can make a live TUI report a completed,
+        # stale queue without pretending the process has died.
+        self.observer_status_result: dict | None = None
         self.fail_observer_reason = ""
         # A bring-up failure the caller has to read for more than its message, e.g. an
         # ObserverLaunchAborted that carries the handle of a terminal that stayed up.
@@ -457,6 +460,11 @@ class FakeHost:
             "pid_file": str(pid_file),
             "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
         }
+
+    def observer_status(self, _record) -> dict:
+        if self.observer_status_result is not None:
+            return dict(self.observer_status_result)
+        return {"last_activity": time.time(), "queue_finished": False}
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")

@@ -46,6 +46,8 @@ dead afterwards.
 
 from __future__ import annotations
 
+import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -71,6 +73,13 @@ OBSERVER_PROMPT_FILE = "SPRINT.md"
 # `skills/manifest.toml`. What the observer does inside its session is the skill's business, not
 # the dispatcher's: the prompt points at the file and never restates it.
 OBSERVER_SKILL = "observe-sprint"
+
+# A finished Codex TUI keeps its wrapper process alive.  Its screen is a much stronger signal than
+# silence alone, but wait a generous interval before replacing it: an observer can spend time
+# reading a repository or an external result without changing the board.  A card in Ready, In
+# progress or Validate is always treated as an ordinary wait, never as this kind of idle head.
+OBSERVER_IDLE_DEFAULT_SECONDS = 20 * 60
+_OBSERVER_QUEUE_FINISHED_RE = re.compile(r"\bWorked for\s+\d", re.IGNORECASE)
 
 # Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
 # so a respawn after a dead pid is readable in the log without joining it against the record.
@@ -129,6 +138,9 @@ class ObserverRecord:
     head: str = ""
     workspace: str = ""
     handle: str = ""
+    # Orca can reissue a handle for the same PTY.  Its leafId remains stable, so keep it beside
+    # the launch handle and use it to find the observer's current handle on later ticks.
+    leaf: str = ""
     pid_file: str = ""
     # How many times a head has been brought up for this sprint. 1 is the first launch, every
     # value above it is a respawn after a dead pid, which is what tells the two apart in the record.
@@ -155,6 +167,10 @@ class ObserverRecord:
     deferred_reason: str = ""
     stopped_reason: str = ""
     paused_at: float = 0.0
+    # The last confirmed queue-end is kept after its replacement launches.  `idle-recovering` in the
+    # state plus these fields tells an operator why a live pid is not reported as plain running.
+    idle_since: float = 0.0
+    idle_reason: str = ""
     run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -164,6 +180,7 @@ class ObserverRecord:
             "head": self.head,
             "workspace": self.workspace,
             "handle": self.handle,
+            "leaf": self.leaf,
             "pid_file": self.pid_file,
             "launches": self.launches,
             "pending_launch": self.pending_launch,
@@ -177,6 +194,8 @@ class ObserverRecord:
             "deferred_reason": self.deferred_reason,
             "stopped_reason": self.stopped_reason,
             "paused_at": self.paused_at,
+            "idle_since": self.idle_since,
+            "idle_reason": self.idle_reason,
             "run": dict(self.run),
         }
 
@@ -189,6 +208,7 @@ class ObserverRecord:
             head=str(payload.get("head") or ""),
             workspace=str(payload.get("workspace") or ""),
             handle=str(payload.get("handle") or ""),
+            leaf=str(payload.get("leaf") or ""),
             pid_file=str(payload.get("pid_file") or ""),
             launches=_int(payload.get("launches")),
             pending_launch=_int(payload.get("pending_launch")),
@@ -207,6 +227,8 @@ class ObserverRecord:
             deferred_reason=str(payload.get("deferred_reason") or ""),
             stopped_reason=str(payload.get("stopped_reason") or ""),
             paused_at=_float(payload.get("paused_at")),
+            idle_since=_float(payload.get("idle_since")),
+            idle_reason=str(payload.get("idle_reason") or ""),
             run=dict(run) if isinstance(run, dict) else {},
         )
 
@@ -254,6 +276,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "state": record.state,
             "workspace": record.workspace,
             "handle": record.handle,
+            "leaf": record.leaf,
             "launches": record.launches,
             "alive": liveness["alive"],
             "pid_known": liveness["pid_known"],
@@ -266,8 +289,34 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "deferred_reason": record.deferred_reason,
             "stopped_reason": record.stopped_reason,
             "paused": record.paused_at > 0,
+            "idle_since": record.idle_since,
+            "idle_reason": record.idle_reason,
         })
     return rows
+
+
+def observer_idle_seconds() -> int:
+    """Return the explicit, per-installation idle threshold for observer queue recovery."""
+    try:
+        value = int(os.environ.get("SECRETARY_OBSERVER_IDLE_SECONDS", "") or OBSERVER_IDLE_DEFAULT_SECONDS)
+    except ValueError:
+        return OBSERVER_IDLE_DEFAULT_SECONDS
+    return value if value > 0 else OBSERVER_IDLE_DEFAULT_SECONDS
+
+
+def observer_queue_finished(screen: str) -> bool:
+    """Whether a Codex TUI is back at its empty composer after completing a turn.
+
+    `Worked for …` is Codex's completion footer.  Requiring a composer after it avoids treating a
+    historical footer in a transcript as the current state.  Codex 0.145 sometimes leaves the
+    framed footer as the final visible line instead of repainting the composer, so that final-line
+    form is equally terminal.  This is intentionally only a positive signal: an unknown adapter or
+    an unreadable screen remains live rather than being guessed idle.
+    """
+    composer = screen.rfind("›")
+    if composer >= 0 and not screen[composer + 1:].strip():
+        return bool(_OBSERVER_QUEUE_FINISHED_RE.search(screen[:composer]))
+    return bool(re.search(r"\bWorked for\s+\d[^\n]*$", screen.rstrip(), re.IGNORECASE))
 
 
 def reconcile_observers(
@@ -351,6 +400,31 @@ def _reconcile_open_sprint(
             record.state = "running"
             record.stopped_reason = ""
             record.paused_at = 0.0
+        work = _observer_work_state(runtime, ref, record)
+        if work["state"] == "idle":
+            return _restart_idle_observer(runtime, payload, observers, ref, record, work["reason"])
+        if work["state"] == "idle-grace":
+            _mark_idle_grace(record, since=work["since"], reason=work["reason"])
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-idle-grace",
+                "head": record.head,
+                "launches": record.launches,
+            }
+        if work["state"] == "waiting":
+            _set_observer_state(record, "waiting", reason=work["reason"])
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-waiting",
+                "head": record.head,
+                "launches": record.launches,
+            }
+        if record.state in {"waiting", "idle-recovering"}:
+            _set_observer_state(record, "running")
         return {
             "status": "ok",
             "step": "observer-reconcile",
@@ -379,6 +453,119 @@ def _reconcile_open_sprint(
             keep_state=unresolved_intent,
         )
     return _launch_observer(runtime, payload, observers, ref, record)
+
+
+def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
+    """Classify the live observer without turning an ordinary card wait into a restart.
+
+    The observer skill keeps watching a card in every active Pipeline state.  That durable board
+    fact wins over terminal silence.  Only an inactive sprint plus Codex's completed-turn footer
+    and a stale output timestamp is an idle queue that may safely be replaced.
+    """
+    try:
+        sprint = runtime.sprints.show(ref)
+    except (HostError, TaskError):
+        return {"state": "unknown", "reason": "the sprint could not be read for idle recovery"}
+    cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
+    active_states = {"ready", "in_progress", "validate"}
+    if any(str(card.get("state") or "") in active_states for card in cards if isinstance(card, dict)):
+        return {"state": "waiting", "reason": "an active sprint card is awaiting its normal cycle"}
+    try:
+        status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
+    except (HostError, OSError, TypeError, ValueError):
+        return {"state": "unknown", "reason": "the observer terminal could not be read for idle recovery"}
+    if not isinstance(status, dict) or not status.get("queue_finished"):
+        return {"state": "unknown", "reason": "the observer terminal has no confirmed completed queue"}
+    try:
+        last_activity = float(status.get("last_activity"))
+    except (TypeError, ValueError):
+        return {"state": "unknown", "reason": "the observer terminal has no activity timestamp"}
+    age = time.time() - last_activity
+    threshold = observer_idle_seconds()
+    if age < threshold:
+        return {
+            "state": "idle-grace",
+            "since": last_activity,
+            "reason": (
+                "Codex completed its queue and the observer terminal has been quiet for "
+                f"{int(age)}s; automatic relaunch waits for the {threshold}s idle threshold"
+            ),
+        }
+    return {
+        "state": "idle",
+        "reason": (
+            "Codex completed its queue and the observer terminal has been quiet for "
+            f"{int(age)}s (threshold {threshold}s) with no active sprint card"
+        ),
+    }
+
+
+def _set_observer_state(record: ObserverRecord, state: str, *, reason: str = "") -> None:
+    """Update an externally readable work state without touching lifecycle ownership fields."""
+    if record.state == state and (not reason or record.idle_reason == reason):
+        return
+    record.state = state
+    record.last_action = state
+    record.last_action_at = time.time()
+
+
+def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> None:
+    """Persist a completed queue immediately while its relaunch grace period runs."""
+    if (
+        record.state == "idle-grace"
+        and record.idle_since == since
+        and record.idle_reason == reason
+    ):
+        return
+    now = time.time()
+    record.state = "idle-grace"
+    record.idle_since = since
+    record.idle_reason = reason
+    record.last_action = "idle-grace"
+    record.last_action_at = now
+
+
+def _restart_idle_observer(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    reason: str,
+) -> dict[str, Any]:
+    """Replace one demonstrably finished observer queue through the usual relaunch path.
+
+    The replacement starts from the live board, not the old terminal's transcript.  Thus a card
+    the previous head already created is visible as active during recovery and cannot be cut again.
+    """
+    now = time.time()
+    record.state = "idle"
+    record.idle_since = now
+    record.idle_reason = reason
+    record.last_action = "idle-detected"
+    record.last_action_at = now
+    observers[ref] = record
+    outcome = _launch_observer(runtime, payload, observers, ref, record)
+    replacement = observers.get(ref)
+    if outcome.get("action") != "observer-relaunched" or replacement is None:
+        # The reason survives a readiness or teardown failure, so status does not turn this back
+        # into a misleading healthy-looking deferred head.
+        if replacement is not None:
+            replacement.idle_since = now
+            replacement.idle_reason = reason
+            _persist_quietly(runtime, payload, observers)
+        outcome["action"] = "observer-idle-restart-deferred"
+        outcome["reason"] = reason
+        return outcome
+    replacement.state = "idle-recovering"
+    replacement.idle_since = now
+    replacement.idle_reason = reason
+    replacement.last_action = "idle-relaunched"
+    replacement.last_action_at = time.time()
+    _persist_quietly(runtime, payload, observers)
+    outcome["action"] = "observer-idle-relaunched"
+    outcome["reason"] = reason
+    return outcome
 
 
 def _head_may_be_running(record: ObserverRecord) -> bool:
@@ -638,6 +825,12 @@ def _launch_observer(
     record.head = head
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
+    try:
+        record.leaf = str(runtime.host.pane_leaf(record.workspace, record.handle) or "")
+    except (HostError, OSError, TypeError, ValueError, AttributeError):
+        # The returned handle is still enough when an older host cannot expose a leaf.  Retaining
+        # the launch is safer than treating an identity lookup failure as a failed bring-up.
+        record.leaf = ""
     record.abandoned_handle = False
     record.pid_file = str(launched.get("pid_file") or observer_pid_file(ref))
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}

@@ -389,6 +389,15 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 
 - `observer-launched` — an open sprint with no record got a head;
 - `observer-live` — the head is alive, the tick did nothing;
+- `observer-waiting` — an active card is in its normal Ready, In progress or Validate cycle, so the
+  observer is deliberately not classified as idle;
+- `observer-idle-grace` — the live Codex TUI has confirmed that its queue finished. The observer
+  row immediately reads `idle-grace`, while automatic replacement waits for
+  `SECRETARY_OBSERVER_IDLE_SECONDS`; this is a terminal-completion signal, not ordinary work silence;
+- `observer-idle-relaunched` — a live Codex TUI had completed its queue, stayed quiet longer than
+  `SECRETARY_OBSERVER_IDLE_SECONDS` (20 minutes by default), and was replaced from the live board;
+- `observer-idle-restart-deferred` — that same completed queue needs replacement, but readiness or
+  teardown prevented it; the idle reason remains visible in the observer row;
 - `observer-relaunched` — the head's pid is dead, a new one was launched;
 - `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
 - `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in
@@ -558,10 +567,10 @@ secretary dispatcher production-observe --instance INSTANCE    # .observers
 secretary pause-status --instance INSTANCE                     # .observers, .stopped_observer
 ```
 
-An observer row carries the sprint, the head profile, the state (`running`, `launching`, `deferred`,
-`stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness, the launch count, the
-workspace, the handle-known and abandoned-handle flags, the time and kind of the last action, and the reason for
-a deferred launch.
+An observer row carries the sprint, the head profile, the state (`running`, `waiting`, `idle-grace`, `idle-recovering`,
+`launching`, `deferred`, `stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness,
+the launch count, the workspace, the handle-known and abandoned-handle flags, the time and kind of the last
+action, the reason for a deferred launch, and the timestamp and reason of the last completed-queue recovery.
 
 ## Checkpoint push
 

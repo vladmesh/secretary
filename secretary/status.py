@@ -276,6 +276,8 @@ def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
             "deferred_reason": row["deferred_reason"] or None,
             "stopped_reason": row["stopped_reason"] or None,
             "paused": row["paused"],
+            "idle_since": _epoch(row["idle_since"]),
+            "idle_reason": row["idle_reason"] or None,
         }
         for row in observer_snapshot(production)
     ]

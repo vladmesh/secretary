@@ -29,6 +29,7 @@ from secretary.dispatcher_observer import (
     ObserverRecord,
     load_observers,
     observer_pid_file,
+    observer_queue_finished,
     put_observers,
     observer_request_id,
     render_observer_prompt,
@@ -191,6 +192,117 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
         kinds = [event["kind"] for event in self.audit.events("sprint:1")]
         self.assertEqual(kinds, [EVENT_LAUNCHED, EVENT_RELAUNCHED])
+
+    def test_finished_observer_queue_is_relaunched_and_visible_as_recovering(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.host.observer_status_result = {
+            "last_activity": time.time() - 2,
+            "queue_finished": True,
+        }
+
+        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
+            result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-idle-relaunched")
+        self.assertIn("completed its queue", action["reason"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "idle-recovering")
+        self.assertTrue(record.idle_since)
+        self.assertIn("threshold 1s", record.idle_reason)
+        status = status_observers(self.runtime.production_state.load())[0]
+        self.assertEqual(status["state"], "idle-recovering")
+        self.assertIsNotNone(status["idle_since"])
+        self.assertIn("completed its queue", status["idle_reason"])
+        sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
+        self.assertEqual(sprint_status["observer"]["state"], "idle-recovering")
+
+        self.host.observer_status_result = {"last_activity": time.time(), "queue_finished": False}
+        resumed = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(resumed)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].state, "running")
+
+    def test_finished_observer_queue_is_visible_during_the_idle_grace_period(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.host.observer_status_result = {
+            "last_activity": time.time() - 2,
+            "queue_finished": True,
+        }
+
+        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "3600"}):
+            result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-idle-grace")
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "idle-grace")
+        self.assertTrue(record.idle_since)
+        self.assertIn("3600s idle threshold", record.idle_reason)
+        status = status_observers(self.runtime.production_state.load())[0]
+        self.assertEqual(status["state"], "idle-grace")
+        self.assertIn("automatic relaunch waits", status["idle_reason"])
+        sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
+        self.assertEqual(sprint_status["observer"]["state"], "idle-grace")
+
+    def test_rotated_observer_handle_still_recovers_a_finished_queue(self) -> None:
+        """Orca may rotate the handle while retaining leafId, so status must read the alias."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.leaf, "leaf:observer:sprint:1")
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        calls: list[list[str]] = []
+        stale_output = int((time.time() - 2) * 1000)
+
+        def run_json(args: list[str]) -> dict:
+            calls.append(args)
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": "observer:rotated", "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": stale_output,
+                }]}
+            if args[1:3] == ["terminal", "read"]:
+                return {"terminal": {"tail": ["Worked for 2h 00m 46s", "› "]}}
+            raise AssertionError(args)
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "3600"}):
+                grace = self.runtime.production_tick()
+            self.assertEqual([row["action"] for row in self.actions(grace)], ["observer-idle-grace"])
+            self.assertEqual(self.observers()["sprint:1"].state, "idle-grace")
+
+            with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
+                recovered = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(recovered)], ["observer-idle-relaunched"])
+        self.assertEqual(self.observers()["sprint:1"].state, "idle-recovering")
+        reads = [args for args in calls if args[1:3] == ["terminal", "read"]]
+        self.assertTrue(reads)
+        self.assertEqual(reads[0][reads[0].index("--terminal") + 1], "observer:rotated")
+
+    def test_active_card_keeps_a_finished_observer_queue_in_waiting_state(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.metadata[100]["sprint_current_task"] = "secretary-510-pilot"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {
+            "last_activity": time.time() - 2,
+            "queue_finished": True,
+        }
+
+        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
+            result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-waiting"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].state, "waiting")
 
     def test_closed_sprint_stops_the_head_and_drops_the_record(self) -> None:
         self.open_sprint()
@@ -1263,6 +1375,12 @@ class ObserverLifecycleTests(unittest.TestCase):
 
 
 class ObserverConfigurationTests(unittest.TestCase):
+    def test_codex_completed_queue_requires_a_terminal_footer(self) -> None:
+        self.assertTrue(observer_queue_finished("Worked for 2h 00m 46s\n› "))
+        self.assertTrue(observer_queue_finished("─ Worked for 2h 00m 46s ─"))
+        self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s\n› continue"))
+        self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s\nstill working"))
+
     def test_the_observer_head_comes_from_its_own_role_default(self) -> None:
         canonical = canonical_heads(Path(__file__).resolve().parents[1])
         role_defaults = canonical["role_defaults"]
@@ -1356,6 +1474,38 @@ class ObserverConfigurationTests(unittest.TestCase):
             ObserverRecord(sprint="sprint:1").generation,
             ObserverRecord(sprint="sprint:1").generation,
         )
+
+
+class ObserverTerminalStatusTests(unittest.TestCase):
+    def test_real_host_reads_the_completed_queue_and_output_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1"
+            )
+            calls: list[list[str]] = []
+
+            def run_json(args: list[str]) -> dict:
+                calls.append(args)
+                if args[1:3] == ["terminal", "list"]:
+                    return {
+                        "terminals": [
+                            {
+                                "handle": "observer:sprint:1",
+                                "connected": True,
+                                "lastOutputAt": 1_753_456_789_123,
+                            }
+                        ]
+                    }
+                if args[1:3] == ["terminal", "read"]:
+                    return {"terminal": {"tail": ["Worked for 2h 00m 46s", "› "]}}
+                raise AssertionError(args)
+
+            with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
+                status = host.observer_status(record)
+
+        self.assertEqual(status, {"last_activity": 1_753_456_789.123, "queue_finished": True})
+        self.assertEqual([args[1:3] for args in calls], [["terminal", "list"], ["terminal", "read"]])
 
 
 class RealHostStopObserverTests(unittest.TestCase):
