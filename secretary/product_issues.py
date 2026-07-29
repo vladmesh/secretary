@@ -491,15 +491,15 @@ class ProductIssueStore:
             raise TaskError("validation", "product id must match [a-z0-9][a-z0-9-]{0,62}", 2)
         if not title.strip() or not projects or len(set(projects)) != len(projects):
             raise TaskError("validation", "product needs a title and a non-empty unique project set", 2)
-        unknown = sorted(set(projects) - registered_projects(self.instance))
-        if unknown:
-            raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
         request_id = request_id or str(uuid.uuid4())
         intent = {"product_id": product_id, "projects": json.dumps(sorted(projects), separators=(",", ":")), "title": title, "description": description, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="product.create", intent=intent, request_id=request_id)
         existing, _, _ = transaction._existing()
         if existing is not None:
             return transaction.run()
+        unknown = sorted(set(projects) - registered_projects(self.instance))
+        if unknown:
+            raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
         ref = f"product:{product_id}"
         board_id, column_id = self._board()
         if self.client.call("getTaskByReference", project_id=board_id, reference=ref):

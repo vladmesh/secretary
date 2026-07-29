@@ -344,6 +344,50 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "validation")
         self.assertEqual(len(self.client.calls), writes)
 
+    def test_product_retry_precedes_mutable_registry_validation(self) -> None:
+        product = self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="completed-registry-retry",
+        )
+        (self.root / "projects" / "secretary.yaml").unlink()
+        replayed = self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="completed-registry-retry",
+        )
+        self.assertEqual(replayed, product)
+        self.assertEqual(
+            len([event for event in self.store.audit.events() if event["request_id"] == "completed-registry-retry"]),
+            1,
+        )
+
+        (self.root / "projects" / "recovery.yaml").write_text("id: recovery\n", encoding="utf-8")
+        original = self.client.call
+        rejected = False
+
+        def reject_metadata_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "saveTaskMetadata" and not rejected:
+                rejected = True
+                return False
+            return original(method, **params)
+
+        self.client.call = reject_metadata_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="recovery", projects=["recovery"], title="Recovery", description="",
+                actor="po", request_id="pending-registry-retry",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        (self.root / "projects" / "recovery.yaml").unlink()
+        self.client.call = original  # type: ignore[method-assign]
+
+        recovered = self.store.create_product(
+            product_id="recovery", projects=["recovery"], title="Recovery", description="",
+            actor="po", request_id="pending-registry-retry",
+        )
+        self.assertEqual(recovered["id"], "recovery")
+        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
+
     def test_retries_after_interruption_at_each_operation_boundary(self) -> None:
         def interrupt_after(method_name: str):
             original = self.client.call
