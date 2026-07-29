@@ -44,7 +44,8 @@ from secretary.data import (
 )
 from secretary import state_repo
 from secretary.state_repo import BOARD_RUNS_PATHSPEC
-from secretary.tasks import TaskAudit
+from secretary.tasks import TaskAudit, TaskError
+from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
 
 from triggered_agents.runtime.redact import redact
 
@@ -128,7 +129,10 @@ class CheckpointWriter:
             )
 
         board, runs = self._regenerate()
-        self._publish("board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE, _validate_board)
+        self._publish(
+            "board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE,
+            lambda staging: _validate_board(staging, instance=self.instance_dir),
+        )
         self._publish("runs", RUNS_ENTRIES, RUNS_REQUIRED, RUNS_IGNORE, _validate_runs)
         return self._commit(board_cards=board, run_records=runs)
 
@@ -607,7 +611,12 @@ def _scan_for_secrets(staging: Path, staged: tuple[str, ...], component: str) ->
             raise CheckpointBlocked(f"secret detected in state/{component}/{entry}")
 
 
-def _validate_board(staging: Path) -> None:
+def _validate_board(
+    staging: Path,
+    *,
+    instance: Path | None = None,
+    registered_project_ids: set[str] | None = None,
+) -> None:
     summary = _read_json(staging / "export.json", "board export.json")
     declared = _int_field(summary, "card_count", "board export.json")
     actual = _count_lines(staging / "cards.ndjson", "board cards.ndjson")
@@ -615,6 +624,21 @@ def _validate_board(staging: Path) -> None:
         raise CheckpointBlocked(
             f"board export count mismatch: export.json={declared} cards.ndjson={actual}"
         )
+    try:
+        cards = _read_ndjson(staging / "cards.ndjson", "board cards.ndjson")
+        typed_records = any(
+            isinstance(card.get("metadata"), dict)
+            and card["metadata"].get("record_type") in {"product", "issue"}
+            for card in cards
+        )
+        if typed_records and registered_project_ids is None and instance is not None:
+            try:
+                registered_project_ids = registered_projects(instance)
+            except TaskError as exc:
+                raise CheckpointBlocked(f"cannot validate Product projects: {exc.message}") from None
+        validate_product_issue_records(cards, registered_project_ids=registered_project_ids)
+    except ProductIssueValidationError as exc:
+        raise CheckpointBlocked(f"invalid Product/Issue board record: {exc}") from None
     declared_sprints = _int_field(summary, "sprint_count", "board export.json")
     actual_sprints = _count_lines(staging / "sprints.ndjson", "board sprints.ndjson")
     if declared_sprints != actual_sprints:
@@ -656,6 +680,21 @@ def _validate_runs(staging: Path) -> None:
 
 def _count_lines(path: Path, label: str) -> int:
     return sum(1 for line in _read_text(path, label).splitlines() if line.strip())
+
+
+def _read_ndjson(path: Path, label: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for number, line in enumerate(_read_text(path, label).splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError as exc:
+            raise CheckpointBlocked(f"could not parse {label} line {number}: {exc}") from None
+        if not isinstance(record, dict):
+            raise CheckpointBlocked(f"{label} line {number} must be an object")
+        records.append(record)
+    return records
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:

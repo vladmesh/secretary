@@ -765,7 +765,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             # state and must exist before restore can prove card parity.
             from secretary.bootstrap import ensure_pipeline_board
             ensure_pipeline_board(target)
-            restored = import_normalized_board(data_dir)
+            restored = import_normalized_board(data_dir, instance=target)
             result.add("board", "changed", f"{restored} card(s) at parity")
             host = report.host if isinstance(report.host, dict) else {}
             threads = host.get("memory_threads", 1)

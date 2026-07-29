@@ -190,6 +190,73 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
+    def test_rejected_product_or_issue_metadata_never_reports_a_typed_write(self) -> None:
+        class RejectMetadata(ProductBoard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "saveTaskMetadata":
+                    self.calls.append((method, params))
+                    return False
+                return super().call(method, **params)
+
+        store = ProductIssueStore(RejectMetadata(), data_dir=self.root / "data", instance=self.root)
+        with self.assertRaises(TaskError) as raised:
+            store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+            )
+        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertEqual(store.audit.events(), [])
+
+    def test_rejected_issue_metadata_does_not_claim_a_priority_or_close_change(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original_call = self.client.call
+
+        def reject_metadata(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata":
+                self.client.calls.append((method, params))
+                return False
+            return original_call(method, **params)
+
+        self.client.call = reject_metadata  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.update_priority(reference=issue["ref"], priority="P0", reason="urgent", actor="po")
+        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertEqual(self.store.show_issue(issue["ref"])["priority"], "P2")
+        with self.assertRaises(TaskError) as raised:
+            self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po")
+        self.assertEqual(raised.exception.code, "backend_error")
+        shown = self.store.show_issue(issue["ref"])
+        self.assertFalse(shown["closed"])
+        self.assertIsNone(shown["close_reason"])
+        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created"])
+
+    def test_rejected_priority_comment_keeps_auditable_backend_change(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original_call = self.client.call
+
+        def reject_comment(method: str, **params: object) -> object:
+            if method == "createComment":
+                self.client.calls.append((method, params))
+                return 0
+            return original_call(method, **params)
+
+        self.client.call = reject_comment  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.update_priority(reference=issue["ref"], priority="P0", reason="urgent", actor="po")
+        self.assertEqual(raised.exception.code, "backend_error")
+        shown = self.store.show_issue(issue["ref"])
+        self.assertEqual(shown["priority"], "P0")
+        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created", "issue_priority_changed"])
+
 
 if __name__ == "__main__":
     unittest.main()

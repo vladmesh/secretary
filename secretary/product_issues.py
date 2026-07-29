@@ -33,6 +33,91 @@ ISSUE_CLOSE_REASONS = {"resolved", "invalid", "duplicate", "wont_do"}
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
+class ProductIssueValidationError(ValueError):
+    """A normalized Product or Issue record is not durable canonical state."""
+
+
+def validate_product_issue_records(
+    records: list[dict[str, Any]], *, registered_project_ids: set[str] | None = None
+) -> None:
+    """Validate typed board records without classifying any legacy cards.
+
+    Checkpoint has the instance project registry and passes it here. Restore is also
+    used as a standalone recovery primitive, so it always validates the durable
+    shape and cross-record Product references, while its callers may additionally
+    supply the registry when it is available.
+    """
+    products: dict[str, dict[str, Any]] = {}
+    issues: list[tuple[dict[str, Any], dict[str, str]]] = []
+    for record in records:
+        metadata = record.get("metadata")
+        if not isinstance(metadata, dict):
+            # Older checkpoints and task-shaped test fixtures predate normalized
+            # metadata. They are not typed Product/Issue records and remain legacy.
+            continue
+        kind = metadata.get(META_RECORD_TYPE)
+        if kind not in {PRODUCT_TYPE, ISSUE_TYPE}:
+            continue
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items()):
+            raise ProductIssueValidationError("record metadata must contain strings")
+        if record.get("column") != ISSUES_COLUMN:
+            raise ProductIssueValidationError("Product or Issue record is outside the Issues column")
+        if kind == PRODUCT_TYPE:
+            product_id = metadata.get(META_PRODUCT_ID, "")
+            if not _ID.fullmatch(product_id):
+                raise ProductIssueValidationError("Product has an invalid product_id")
+            if record.get("reference") != f"product:{product_id}":
+                raise ProductIssueValidationError("Product reference does not match product_id")
+            if not isinstance(record.get("title"), str) or not record["title"].strip():
+                raise ProductIssueValidationError("Product has no title")
+            projects = _validated_product_projects(metadata.get(META_PRODUCT_PROJECTS))
+            if registered_project_ids is not None:
+                unknown = sorted(set(projects) - registered_project_ids)
+                if unknown:
+                    raise ProductIssueValidationError(
+                        "Product has unknown registered project(s): " + ", ".join(unknown)
+                    )
+            if product_id in products:
+                raise ProductIssueValidationError(f"duplicate Product id: {product_id}")
+            products[product_id] = record
+        else:
+            issues.append((record, metadata))
+    for record, metadata in issues:
+        product = metadata.get(META_ISSUE_PRODUCT, "")
+        if product not in products:
+            raise ProductIssueValidationError("Issue has no registered Product")
+        if metadata.get(META_ISSUE_KIND) not in ISSUE_KINDS:
+            raise ProductIssueValidationError("Issue has an invalid kind")
+        if metadata.get(META_ISSUE_PRIORITY) not in ISSUE_PRIORITIES:
+            raise ProductIssueValidationError("Issue has an invalid priority")
+        reason = metadata.get(META_ISSUE_CLOSED_REASON, "")
+        if bool(record.get("closed")):
+            if reason not in ISSUE_CLOSE_REASONS:
+                raise ProductIssueValidationError("closed Issue has an invalid close reason")
+        elif reason:
+            raise ProductIssueValidationError("open Issue has a close reason")
+
+
+def _validated_product_projects(raw: str | None) -> list[str]:
+    try:
+        projects = json.loads(raw or "")
+    except (TypeError, json.JSONDecodeError):
+        raise ProductIssueValidationError("Product has invalid product_projects") from None
+    if (
+        not isinstance(projects, list)
+        or not projects
+        or any(not isinstance(project, str) or not _ID.fullmatch(project) for project in projects)
+        or len(set(projects)) != len(projects)
+    ):
+        raise ProductIssueValidationError("Product needs a non-empty unique project set")
+    return projects
+
+
+def _comment_was_saved(result: Any) -> bool:
+    """Kanboard returns a positive comment id, unlike its boolean metadata API."""
+    return result is True or (isinstance(result, int) and not isinstance(result, bool) and result > 0)
+
+
 def registered_projects(instance: str | Path) -> set[str]:
     root = Path(instance).expanduser()
     if root.name == "instance.yaml":
@@ -137,7 +222,8 @@ class ProductIssueStore:
             raise TaskError("backend_error", "Kanboard rejected the product", 1)
         if not self.client.call("updateTask", id=task_id, reference=ref):
             raise TaskError("backend_error", "Kanboard rejected the product reference", 1)
-        self.client.call("saveTaskMetadata", task_id=task_id, values={META_RECORD_TYPE: PRODUCT_TYPE, META_PRODUCT_ID: product_id, META_PRODUCT_PROJECTS: json.dumps(sorted(projects), separators=(",", ":"))})
+        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_RECORD_TYPE: PRODUCT_TYPE, META_PRODUCT_ID: product_id, META_PRODUCT_PROJECTS: json.dumps(sorted(projects), separators=(",", ":"))}) is not True:
+            raise TaskError("backend_error", "Kanboard rejected product metadata", 1)
         self._event(kind="product_created", role="po", actor=actor, reference=ref, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"product_id": product_id, "projects": sorted(projects)})
         return self.show_product(product_id)
 
@@ -159,7 +245,8 @@ class ProductIssueStore:
         ref = f"issue:{task_id}"
         if not self.client.call("updateTask", id=task_id, reference=ref):
             raise TaskError("backend_error", "Kanboard rejected the issue reference", 1)
-        self.client.call("saveTaskMetadata", task_id=task_id, values={META_RECORD_TYPE: ISSUE_TYPE, META_ISSUE_PRODUCT: product, META_ISSUE_KIND: issue_kind, META_ISSUE_PRIORITY: priority})
+        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_RECORD_TYPE: ISSUE_TYPE, META_ISSUE_PRODUCT: product, META_ISSUE_KIND: issue_kind, META_ISSUE_PRIORITY: priority}) is not True:
+            raise TaskError("backend_error", "Kanboard rejected issue metadata", 1)
         self._event(kind="issue_created", role="po", actor=actor, reference=ref, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"product": product, "kind": issue_kind, "priority": priority})
         return self.show_issue(ref)
 
@@ -206,8 +293,20 @@ class ProductIssueStore:
             raise TaskError("closed", "cannot reprioritize a closed issue", 3)
         task_id = int(card["id"])
         previous = meta.get(META_ISSUE_PRIORITY, "")
-        self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_PRIORITY: priority})
-        self.client.call("createComment", task_id=task_id, user_id=0, content=f"[issue:priority]\n{reason}")
+        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_PRIORITY: priority}) is not True:
+            raise TaskError("backend_error", "Kanboard rejected issue priority", 1)
+        try:
+            comment = self.client.call(
+                "createComment", task_id=task_id, user_id=0, content=f"[issue:priority]\n{reason}"
+            )
+        except TaskError:
+            self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason})
+            raise
+        if not _comment_was_saved(comment):
+            # The priority is already canonical backend state.  Record its audit event so an
+            # append failure remains repairable instead of silently losing provenance.
+            self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason})
+            raise TaskError("backend_error", "Kanboard rejected issue priority comment", 1)
         self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason})
         return self.show_issue(reference)
 
@@ -218,8 +317,10 @@ class ProductIssueStore:
         task_id = int(card["id"])
         if int(card.get("is_active", 1) or 0) == 0:
             raise TaskError("closed", "issue is already closed", 3)
-        self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason})
-        self.client.call("createComment", task_id=task_id, user_id=0, content=f"[issue:closed]\n{reason}")
+        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason}) is not True:
+            raise TaskError("backend_error", "Kanboard rejected issue closure metadata", 1)
+        if not _comment_was_saved(self.client.call("createComment", task_id=task_id, user_id=0, content=f"[issue:closed]\n{reason}")):
+            raise TaskError("backend_error", "Kanboard rejected issue closure comment", 1)
         if not self.client.call("closeTask", task_id=task_id):
             raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
         self._event(kind="issue_closed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"reason": reason})

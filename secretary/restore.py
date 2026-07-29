@@ -36,6 +36,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
 )
+from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,9 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
+def import_normalized_board(
+    data_dir: Path, *, client: KanboardClient | None = None, instance: Path | None = None
+) -> int:
     """Populate an empty board from the normalized export and prove parity on every retry.
 
     Returns the number of restored Pipeline cards; the sprint entities restored
@@ -83,7 +86,7 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
     data_dir = data_dir.expanduser().resolve()
     with file_lock(data_dir / "board" / ".restore.lock"):
         try:
-            cards = _normalized_cards(data_dir)
+            cards = _normalized_cards(data_dir, registered_project_ids=(registered_projects(instance) if instance else None))
             sprints = _normalized_sprints(data_dir)
             client = client or KanboardClient()
             reader = TaskReader(client)
@@ -399,7 +402,9 @@ def mark_reconcile_applied(data_dir: Path) -> None:
     _update_restore_state(data_dir, reconcile="complete")
 
 
-def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
+def _normalized_cards(
+    data_dir: Path, *, registered_project_ids: set[str] | None = None
+) -> list[dict[str, Any]]:
     try:
         payload = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
         cards = payload["cards"]
@@ -415,11 +420,6 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             raise RestoreError("normalized board export has an invalid column")
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
-        if (
-            card["metadata"].get("record_type") in {"issue", "product"}
-            and _state_for_column(card["column"]) != "issues"
-        ):
-            raise RestoreError("normalized Product or Issue record is outside the Issues column")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
         if "closed" in card and not isinstance(card["closed"], bool):
@@ -429,6 +429,10 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             for comment in card.get("comments", [])
         ):
             raise RestoreError("normalized board export has invalid comments")
+    try:
+        validate_product_issue_records(cards, registered_project_ids=registered_project_ids)
+    except ProductIssueValidationError as exc:
+        raise RestoreError(f"normalized Product/Issue record is invalid: {exc}") from None
     return sorted(cards, key=lambda card: str(card["reference"]))
 
 

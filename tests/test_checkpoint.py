@@ -203,6 +203,20 @@ class CheckpointWriterTests(unittest.TestCase):
             ["sprint:41"],
         )
 
+    def test_typed_records_with_invalid_product_projects_block_checkpoint(self):
+        (self.instance_dir / "projects").mkdir()
+        (self.instance_dir / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        product = {
+            "reference": "product:secretary", "title": "Secretary", "column": "Issues", "closed": False,
+            "metadata": {"record_type": "product", "product_id": "secretary", "product_projects": "[]"},
+        }
+        self.seed_board([product])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("non-empty unique project set", result.reason)
+
     def test_sprint_count_mismatch_blocks_the_commit(self):
         self.seed_board([CARD], sprints=[SPRINT], sprint_count=4)
 
