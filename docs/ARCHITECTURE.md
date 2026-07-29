@@ -176,7 +176,10 @@ Several events before that acknowledgement coalesce into one turn. A dead head i
 work. An unacknowledged event receives the same recovery attempt after 30 minutes by default. Failed wakes
 carry their reason and bounded retry time in the observer record.
 
-An active card in Ready, In progress or Validate is recorded as `waiting` and is never treated as idle.
+An active card does not itself create another observer turn. Once Codex reports a completed queue,
+the head is `idle-grace` even if its linked card remains active; the next significant durable card
+event wakes it. If that event arrived while the queue was still running, the dispatcher keeps the
+pending event and checks again on later ticks, delivering the nudge as soon as the queue finishes.
 
 All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
 by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a

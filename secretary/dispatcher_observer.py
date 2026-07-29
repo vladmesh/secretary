@@ -176,6 +176,11 @@ class ObserverRecord:
     # document; the dispatcher advances this cursor only after that entry postdates the event.
     acknowledged_event_id: str = ""
     wake_event_id: str = ""
+    # True once a wake intent has been persisted for a terminal send.  This is deliberately
+    # separate from the event id: an event first seen while the observer is busy must be checked
+    # again as soon as that queue finishes, while a possibly delivered terminal send must not be
+    # repeated before its acknowledgement or watchdog recovery window.
+    wake_sent: bool = False
     wake_attempts: int = 0
     wake_next_at: float = 0.0
     wake_reason: str = ""
@@ -206,6 +211,7 @@ class ObserverRecord:
             "idle_reason": self.idle_reason,
             "acknowledged_event_id": self.acknowledged_event_id,
             "wake_event_id": self.wake_event_id,
+            "wake_sent": self.wake_sent,
             "wake_attempts": self.wake_attempts,
             "wake_next_at": self.wake_next_at,
             "wake_reason": self.wake_reason,
@@ -244,6 +250,7 @@ class ObserverRecord:
             idle_reason=str(payload.get("idle_reason") or ""),
             acknowledged_event_id=str(payload.get("acknowledged_event_id") or ""),
             wake_event_id=str(payload.get("wake_event_id") or ""),
+            wake_sent=bool(payload.get("wake_sent")),
             wake_attempts=_int(payload.get("wake_attempts")),
             wake_next_at=_float(payload.get("wake_next_at")),
             wake_reason=str(payload.get("wake_reason") or ""),
@@ -311,6 +318,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "idle_reason": record.idle_reason,
             "acknowledged_event_id": record.acknowledged_event_id,
             "wake_event_id": record.wake_event_id,
+            "wake_sent": record.wake_sent,
             "wake_attempts": record.wake_attempts,
             "wake_next_at": record.wake_next_at,
             "wake_reason": record.wake_reason,
@@ -533,6 +541,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     if _resume_acknowledges(resume, latest):
         record.acknowledged_event_id = event_id
         record.wake_event_id = ""
+        record.wake_sent = False
         record.wake_attempts = 0
         record.wake_next_at = 0.0
         record.wake_reason = ""
@@ -593,7 +602,7 @@ def _wake_for_event(
     now = time.time()
     event_id = str(event["event_id"])
     overdue = event["age_seconds"] >= observer_event_watchdog_seconds()
-    if record.wake_event_id and now < record.wake_next_at:
+    if record.wake_sent and now < record.wake_next_at:
         record.wake_event_id = event_id
         return {
             "status": "ok",
@@ -603,12 +612,24 @@ def _wake_for_event(
             "head": record.head,
             "event_id": event_id,
         }
+    if record.state == "wake-deferred" and now < record.wake_next_at:
+        record.wake_event_id = event_id
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-deferred",
+            "head": record.head,
+            "event_id": event_id,
+            "reason": record.wake_reason,
+        }
     try:
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError) as exc:
         return _defer_event_wake(record, ref, event_id, f"observer terminal could not be read: {exc}")
     if not isinstance(status, dict) or not status.get("queue_finished"):
         record.wake_event_id = event_id
+        record.wake_sent = False
         record.wake_reason = "observer has not confirmed a completed queue"
         record.wake_next_at = now + observer_event_watchdog_seconds()
         _set_observer_state(record, "waiting", reason=record.wake_reason)
@@ -624,6 +645,7 @@ def _wake_for_event(
     # The pending wake is durable before the terminal receives it. A dispatcher crash after the
     # send therefore conservatively waits for the watchdog instead of creating a duplicate turn.
     record.wake_event_id = event_id
+    record.wake_sent = True
     record.wake_next_at = now + observer_event_watchdog_seconds()
     record.wake_reason = "event wake is pending confirmation"
     observers[ref] = record
@@ -634,6 +656,7 @@ def _wake_for_event(
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         return _defer_event_wake(record, ref, event_id, f"observer wake failed: {exc}")
     record.wake_event_id = event_id
+    record.wake_sent = True
     record.wake_attempts = 0
     record.wake_next_at = now + observer_event_watchdog_seconds()
     record.wake_reason = "observer was nudged for an unacknowledged card event"
@@ -650,6 +673,7 @@ def _wake_for_event(
 
 def _defer_event_wake(record: ObserverRecord, ref: str, event_id: str, reason: str) -> dict[str, Any]:
     record.wake_event_id = event_id
+    record.wake_sent = False
     record.wake_attempts += 1
     delay = min(
         OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (record.wake_attempts - 1)),

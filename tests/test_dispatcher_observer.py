@@ -247,6 +247,33 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(repeated)], ["observer-wake-pending"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
 
+    def test_event_waiting_for_an_active_queue_is_nudged_when_that_queue_finishes(self) -> None:
+        """The watchdog is not a delay between a normal turn completing and its event wake."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time(), "queue_finished": False}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed while observer was working", request_id="event-during-active-turn",
+        )
+
+        waiting = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
+        record = self.observers()["sprint:1"]
+        self.assertTrue(record.wake_event_id)
+        self.assertFalse(record.wake_sent)
+        self.assertGreater(record.wake_next_at, time.time())
+        self.assertEqual(self.host.observer_nudges, [])
+
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        delivered = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(delivered)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertTrue(self.observers()["sprint:1"].wake_sent)
+
     def test_resume_acknowledges_the_event_and_prevents_a_second_wake_after_restart(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
