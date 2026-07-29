@@ -397,6 +397,16 @@ def _reconcile_open_sprint(
         work = _observer_work_state(runtime, ref, record)
         if work["state"] == "idle":
             return _restart_idle_observer(runtime, payload, observers, ref, record, work["reason"])
+        if work["state"] == "idle-grace":
+            _mark_idle_grace(record, since=work["since"], reason=work["reason"])
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-idle-grace",
+                "head": record.head,
+                "launches": record.launches,
+            }
         if work["state"] == "waiting":
             _set_observer_state(record, "waiting", reason=work["reason"])
             return {
@@ -439,7 +449,7 @@ def _reconcile_open_sprint(
     return _launch_observer(runtime, payload, observers, ref, record)
 
 
-def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, str]:
+def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Classify the live observer without turning an ordinary card wait into a restart.
 
     The observer skill keeps watching a card in every active Pipeline state.  That durable board
@@ -465,13 +475,21 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
     except (TypeError, ValueError):
         return {"state": "unknown", "reason": "the observer terminal has no activity timestamp"}
     age = time.time() - last_activity
-    if age < observer_idle_seconds():
-        return {"state": "working", "reason": "the completed queue is still inside its idle grace period"}
+    threshold = observer_idle_seconds()
+    if age < threshold:
+        return {
+            "state": "idle-grace",
+            "since": last_activity,
+            "reason": (
+                "Codex completed its queue and the observer terminal has been quiet for "
+                f"{int(age)}s; automatic relaunch waits for the {threshold}s idle threshold"
+            ),
+        }
     return {
         "state": "idle",
         "reason": (
             "Codex completed its queue and the observer terminal has been quiet for "
-            f"{int(age)}s (threshold {observer_idle_seconds()}s) with no active sprint card"
+            f"{int(age)}s (threshold {threshold}s) with no active sprint card"
         ),
     }
 
@@ -483,6 +501,22 @@ def _set_observer_state(record: ObserverRecord, state: str, *, reason: str = "")
     record.state = state
     record.last_action = state
     record.last_action_at = time.time()
+
+
+def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> None:
+    """Persist a completed queue immediately while its relaunch grace period runs."""
+    if (
+        record.state == "idle-grace"
+        and record.idle_since == since
+        and record.idle_reason == reason
+    ):
+        return
+    now = time.time()
+    record.state = "idle-grace"
+    record.idle_since = since
+    record.idle_reason = reason
+    record.last_action = "idle-grace"
+    record.last_action_at = now
 
 
 def _restart_idle_observer(

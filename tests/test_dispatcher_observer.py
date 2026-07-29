@@ -226,6 +226,30 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].state, "running")
 
+    def test_finished_observer_queue_is_visible_during_the_idle_grace_period(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.host.observer_status_result = {
+            "last_activity": time.time() - 2,
+            "queue_finished": True,
+        }
+
+        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "3600"}):
+            result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-idle-grace")
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "idle-grace")
+        self.assertTrue(record.idle_since)
+        self.assertIn("3600s idle threshold", record.idle_reason)
+        status = status_observers(self.runtime.production_state.load())[0]
+        self.assertEqual(status["state"], "idle-grace")
+        self.assertIn("automatic relaunch waits", status["idle_reason"])
+        sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
+        self.assertEqual(sprint_status["observer"]["state"], "idle-grace")
+
     def test_active_card_keeps_a_finished_observer_queue_in_waiting_state(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
