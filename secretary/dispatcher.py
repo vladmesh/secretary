@@ -2631,7 +2631,7 @@ class DispatcherRuntime:
                 task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
         if marker == "report:done":
-            if continuation.awaiting_continuation:
+            if continuation.validation_move_pending:
                 # The process was frozen and recorded before a tick died between retention and
                 # the board move. Replaying this idempotent move never wakes the worker.
                 self.writer.move(
@@ -2682,7 +2682,7 @@ class DispatcherRuntime:
             # while CI or a reviewer owns this checkout.
             try:
                 self.host.retain_worker(record)
-                continuation.mark_retained(time.time())
+                continuation.begin_retention(time.time())
             except HostError:
                 # A worker with no reusable conversation is still made safe. A red gate will use
                 # the normal replacement path, and an unconfirmed stop keeps this tick inert.
@@ -2704,6 +2704,8 @@ class DispatcherRuntime:
                 reason="worker report:done",
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-done", ref, str(record.review_baseline)),
             )
+            if continuation.validation_move_pending:
+                continuation.confirm_validation_move()
             record.state = "validate"
             self.save_records(payload, records)
             return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "validate"}
@@ -3228,6 +3230,12 @@ class DispatcherRuntime:
         review this same tick) or a tick outcome (red bounced the card to the worker, pending is
         waiting on CI, or the gate infra failed and the card is Blocked)."""
         ref = task["ref"]
+        if record.worker_continuation.validation_move_pending:
+            # The board move committed but the dispatcher died before checkpointing it. Close
+            # that boundary before a red gate can move the card back to the worker.
+            record.worker_continuation.confirm_validation_move()
+            records[ref] = record
+            self.save_records(payload, records)
         try:
             result = self.host.gate_check(task, record)
         except HostError as exc:

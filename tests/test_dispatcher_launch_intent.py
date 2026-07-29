@@ -535,7 +535,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()
         record = self.record()
         assert record is not None
-        record.worker_continuation.mark_retained(time.time())
+        record.worker_continuation.begin_retention(time.time())
+        record.worker_continuation.confirm_validation_move()
         record.worker_continuation.begin_delivery("merge-gate", time.time())
         payload = self.runtime.state.load()
         payload["records"][REF] = record.to_json()
@@ -564,7 +565,7 @@ class LaunchIntentTests(unittest.TestCase):
         assert retained is not None
         self.assertEqual(
             retained.worker_continuation.stage,
-            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
         )
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
 
@@ -594,7 +595,7 @@ class LaunchIntentTests(unittest.TestCase):
         assert retained is not None
         self.assertEqual(
             retained.worker_continuation.stage,
-            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
         )
         self.host.gate_results = [GateResult("green", "passed")]
 
@@ -602,6 +603,34 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertEqual(recovered["action"], "review-started")
         self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("start_review"))
+
+    def test_a_crash_after_red_move_does_not_replay_the_old_validate_handoff(self) -> None:
+        """The initial freeze checkpoint must not survive a completed Validate handoff."""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+        real_save = self.runtime.state.save
+
+        def die_after_red_move(payload: dict) -> None:
+            if self.reader.show(REF)["state"] == "in_progress":
+                raise OSError("dispatcher died after red board move")
+            real_save(payload)
+
+        with mock.patch.object(self.runtime.state, "save", die_after_red_move):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        retained = self.record()
+        assert retained is not None
+        self.assertEqual(
+            retained.worker_continuation.stage,
+            WorkerContinuationStage.RETAINED,
+        )
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["to"], "validate")
+        self.assertEqual(self.reader.show(REF)["state"], "validate")
 
     def test_a_dead_rework_intent_relaunches_inside_the_round_it_reserved(self) -> None:
         """The reservation outlives the head the rework never got.

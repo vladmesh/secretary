@@ -68,6 +68,42 @@ from secretary.dispatcher_worker_lifecycle import WorkerContinuationStage
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
+class WorkerContinuationStateTests(unittest.TestCase):
+    def test_flat_retained_worker_state_is_migrated(self) -> None:
+        record = DispatcherRecord.from_json({
+            "state": "worker_resuming",
+            "worker_retained_at": 10.0,
+            "worker_resume_phase": "merge-gate",
+            "worker_resume_delivery": "pending",
+            "worker_resume_sent_at": 12.0,
+        })
+
+        self.assertEqual(
+            record.worker_continuation.stage,
+            WorkerContinuationStage.DELIVERY_PENDING,
+        )
+        self.assertEqual(record.worker_continuation.phase, "merge-gate")
+        self.assertEqual(record.worker_continuation.retained_at, 10.0)
+        self.assertEqual(record.worker_continuation.sent_at, 12.0)
+
+    def test_flat_pre_validate_checkpoint_is_migrated(self) -> None:
+        record = DispatcherRecord.from_json({
+            "state": "worker_retained",
+            "worker_retained_at": 10.0,
+        })
+
+        self.assertEqual(
+            record.worker_continuation.stage,
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
+        )
+
+    def test_unknown_nested_stage_is_not_silently_discarded(self) -> None:
+        with self.assertRaises(ValueError):
+            DispatcherRecord.from_json({
+                "worker_continuation": {"stage": "future-stage"},
+            })
+
+
 def _clear_env(test: unittest.TestCase, *names: str) -> None:
     """Drop dispatcher env overrides for the duration of a test and restore them afterwards.
     These are documented as unit-level knobs in docs/OPERATIONS.md, so a host that exports one
