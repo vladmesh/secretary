@@ -1,14 +1,16 @@
 # Contributing
 
 Thanks for looking at `secretary`. The project is developed in the open, but it is built around one
-opinionated deployment profile: a single trusted owner running one appliance on one host. Changes
-that widen that profile need a design discussion before code.
+opinionated deployment profile: a single trusted owner running one appliance on one host.
 
-## Before you start
+## Feedback is welcome
 
-Open an issue describing the problem and the behaviour you expect. For anything that touches task
-lifecycle, recovery, host ownership or the security boundary, agree on the contract in the issue
-first. A pull request that changes those contracts without a documented rationale will be sent back.
+Issues, pull requests, security reports, rough ideas and incomplete notes are all welcome. Use
+whatever format is convenient; there is no required template. Please keep real credentials and
+other private data out of public reports.
+
+If a change touches task lifecycle, recovery, host ownership or the security boundary, explaining
+the intended contract in an issue or pull request will make it easier to work through together.
 
 ## Development setup
 
@@ -41,10 +43,6 @@ python3 -m secretary role-skills audit --check
 
 CI runs the unit suite on every pull request. Describe what you changed, why, and what you verified.
 If a change is not covered by the suite, say how you tested it.
-
-## Reporting security problems
-
-Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 
 ## License
 

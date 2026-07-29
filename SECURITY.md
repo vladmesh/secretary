@@ -4,13 +4,13 @@
 
 The project is pre-1.0 and has no release branches. Only the current `main` receives fixes.
 
-## Reporting a vulnerability
+## Reporting a security problem
 
-Report privately through GitHub's "Report a vulnerability" flow on the repository's Security tab.
-Do not open a public issue and do not include working credentials in the report.
+Reports are welcome in whatever form is convenient: a public issue, a pull request or GitHub's
+private vulnerability-reporting flow. Rough notes and incomplete reports are welcome too.
 
-Include what an attacker can reach, the steps to reproduce it, and the commit you tested. Expect an
-acknowledgement within seven days. Fixes land on `main`; the advisory is published once a fix exists.
+Please do not include working credentials, private keys, recovery phrases, personal data or other
+secrets in a public report.
 
 ## Security model
 
