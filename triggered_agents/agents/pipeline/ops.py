@@ -85,7 +85,7 @@ def _ensure_swimlane(pid: int, name: str) -> int:
 
 
 def ensure_structure() -> dict:
-    """Idempotently bring the board's columns to exactly model.COLUMNS; add the admin member.
+    """Idempotently migrate the first legacy Ideas column to Issues and reconcile the board.
 
     Same reconcile as the legacy board: rename in place, append missing, drop extras beyond
     len(COLUMNS). Swimlanes are left alone here — a card gets its project swimlane created on
@@ -294,7 +294,7 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
 
 
 def create_card(project: str, task_type: str, title: str, description: str = "",
-                ref: str | None = None, column: str = "Ideas",
+                ref: str | None = None, column: str = "Ready",
                 blocked_by: str | None = None, head: str | None = None,
                 slug: str | None = None, base_branch: str | None = None,
                 review_head: str | None = None, role: str | None = None,
@@ -324,8 +324,8 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     verbatim, unchanged from before."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
-    if column not in ("Ideas", "Ready"):
-        raise model.GuardError(f"cards are created only in 'Ideas' or 'Ready', not {column!r}")
+    if column != "Ready":
+        raise model.GuardError("execution cards are created only in 'Ready'; Issues is Product backlog")
     if slug is not None and not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
     if head:
@@ -478,6 +478,11 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     pid = board_id()
     task = _get_by_ref(reference)
     cur = _column_title(pid, int(task["column_id"]))
+    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
+    if meta.get(model.META_RECORD_TYPE) in {model.RECORD_ISSUE, model.RECORD_PRODUCT}:
+        raise model.GuardError("Product issues and products cannot enter execution task columns")
+    if cur in model.LEGACY_ISSUE_COLUMNS:
+        cur = "Issues"
     model.check_move(role, cur, to_column)
     move = (cur, to_column)
     reason_text = reason.strip()
@@ -790,7 +795,7 @@ def export_cards() -> list[dict]:
     pid = board_id()
     cols = {int(c["id"]): c["title"] for c in call("getColumns", project_id=pid) or []}
     lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
-    tasks = call("getAllTasks", project_id=pid, status_id=1) or []
+    tasks = call("getAllTasks", project_id=pid, status_id=0) or []
     batched = call_batch(
         [(method, {"task_id": int(t["id"])})
          for t in tasks
@@ -803,6 +808,7 @@ def export_cards() -> list[dict]:
         out.append({
             **_card_view(pid, task, cols, lanes, meta),
             "description": task.get("description", "") or "",
+            "closed": int(task.get("is_active", task.get("status", 1)) or 0) == 0,
             "metadata": meta,
             "comments": [
                 {"ts": c.get("date_creation", ""), "text": c.get("comment", "")}

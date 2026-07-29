@@ -67,6 +67,7 @@ from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
 from secretary.state_repo import StateRepoError
 from secretary.task_commands import add_task_subcommands
+from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.sprint_commands import add_sprint_subcommands
 from secretary.role_skills import add_role_skills_subcommands
 from secretary.upgrade import add_upgrade_command
@@ -333,6 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     project.set_defaults(handler=not_implemented("project"))
 
     add_task_subcommands(subparsers)
+    add_product_issue_subcommands(subparsers)
 
     shell = subparsers.add_parser(
         "shell",

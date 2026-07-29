@@ -47,7 +47,7 @@ The public path to the board is `secretary task`. A card carries a `ref`, projec
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
-ideas → ready → in_progress → validate → done
+Issues → ready → in_progress → validate → done
                          └────────────→ blocked
 ```
 
@@ -66,7 +66,9 @@ python3 -m secretary task create --role po --project PROJECT --type code --title
 ```
 
 `create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
-Worker, reviewer and retro roles may only create Ideas; the PO may choose Ready. `--codex-mode` is
+Execution tasks are created in Ready, never in Issues. Old task-shaped Ideas remain readable after
+the supported board migration but are fail-closed: only the PO may explicitly triage one to Ready,
+which marks it as a task without inventing Product, issue kind or priority. `--codex-mode` is
 valid only for a worker profile on a `codex` adapter. Without an override, launch mode comes from the
 head profile.
 
@@ -84,6 +86,29 @@ task document, so an edit goes through preempt and requeue rather than a silent 
 event records the old and new digests; the full text of past versions is recoverable from the Git history
 of the board export in the checkpoint. Comments stay the dialogue of an attempt; the spec lives only in
 the description.
+
+## Products and issues
+
+`secretary product` and `secretary issue` use typed records in the existing Pipeline backend. They do
+not introduce a file or a second board as a competing source of truth, so normal board export,
+checkpoint and restore carry their metadata and comments.
+
+```bash
+python3 -m secretary product create --role po --id secretary --project secretary --title Secretary
+python3 -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
+python3 -m secretary issue list --product secretary
+python3 -m secretary issue show --ref issue:123
+python3 -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
+python3 -m secretary issue close --role po --ref issue:123 --reason resolved
+```
+
+A Product id is stable and its non-empty project set must contain only ids registered under the
+instance `projects/` directory. Product ids cannot be duplicated. Every new issue requires its
+Product, one kind (`bug`, `feature`, `question`, `improvement`) and one priority (`P0` through `P3`).
+Priority changes require a non-empty reason, add an `[issue:priority]` board comment and append a
+durable audit event. Only the PO may close an issue, using exactly one of `resolved`, `invalid`,
+`duplicate` or `wont_do`; closure archives the backend record but leaves its comments and audit
+history available through `issue show --ref` and checkpoint recovery.
 
 ## Sprints
 

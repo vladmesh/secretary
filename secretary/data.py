@@ -244,6 +244,7 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
         "column": str(shown_card.get("column") or list_card.get("column") or ""),
         "position": _int_or_none(list_card.get("position")) or 0,
         "date_moved": _int_or_none(list_card.get("date_moved")),
+        "closed": bool(shown_card.get("closed", list_card.get("closed", False))),
         "metadata": {str(k): str(v) for k, v in sorted(metadata.items())},
         "fields": {
             "task_type": str(shown_card.get("task_type") or list_card.get("task_type") or ""),

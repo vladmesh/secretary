@@ -75,12 +75,12 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
-# Installations created before the board titles were translated carry the former first-column
-# title.  Reads keep accepting it so an existing board stays usable until bootstrap/upgrade runs
-# ensure_pipeline_board, which renames the column in place.  Spelled as escapes to keep the
-# tracked tree ASCII.
+# Installations created before Product/Issue used Ideas (or its translated form) as the first
+# column.  Reads keep accepting both names until the supported bootstrap migration renames the
+# column in place.  Spelled as escapes to keep the tracked tree ASCII.
 LEGACY_IDEAS_COLUMN = "\u0418\u0434\u0435\u0438"  # "Ideas" in the pre-translation board schema
 _STATE_BY_COLUMN = {
+    "Issues": "issues",
     "Ideas": "ideas",
     LEGACY_IDEAS_COLUMN: "ideas",
     "Ready": "ready",
@@ -105,7 +105,7 @@ _COMMENT_ROLES = _ROLES
 _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
 _EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ideas", "ready", "blocked"}
-_STATES = ("ideas", "ready", "in_progress", "validate", "blocked", "done")
+_STATES = ("issues", "ideas", "ready", "in_progress", "validate", "blocked", "done")
 _TRANSITIONS = {
     # PO is the human operator and may move a card between any two states.
     "po": {(source, target) for source in _STATES for target in _STATES if source != target},
@@ -117,8 +117,8 @@ _TRANSITIONS = {
     "observer": {(source, target) for source in _STATES for target in _STATES if source != target},
     "worker": set(), "reviewer": set(), "retro": set(),
     "steward": {
-        ("ideas", "ready"), ("blocked", "ready"), ("blocked", "done"),
-        ("in_progress", "done"), ("ideas", "blocked"), ("ready", "blocked"),
+        ("blocked", "ready"), ("blocked", "done"),
+        ("in_progress", "done"), ("ready", "blocked"),
         ("in_progress", "blocked"), ("validate", "blocked"),
     },
 }
@@ -257,6 +257,7 @@ class TaskReader:
         result: dict[str, Any] = {
             "id": f"task_kanboard_{task_id}", "ref": ref, "title": _text(card.get("title")),
             "description": _text(card.get("description")), "state": _STATE_BY_COLUMN[column],
+            "closed": _positive_int(card.get("is_active")) == 0,
             "position": _nonnegative_int(card.get("position")), "project": _text(meta.get("project")),
             "type": _text(meta.get("task_type")), "blocked_by": _null_if_empty(meta.get("blocked_by")),
             "claim": {"worker": _null_if_empty(meta.get("claim")), "claimed_at": None},
@@ -276,6 +277,7 @@ class TaskReader:
             "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
             "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
             "sprint": _null_if_empty(meta.get("sprint_ref")),
+            "record_type": _null_if_empty(meta.get("record_type")),
             "audit": {"created_at": _rfc3339(card.get("date_creation")), "updated_at": _rfc3339(card.get("date_modification")), "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name}},
         }
         extensions = {key: value for key, value in meta.items() if key not in _KNOWN_METADATA}
@@ -504,8 +506,14 @@ class TaskWriter:
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
-        if target not in {"ideas", "ready"}:
-            raise TaskError("validation", "create target must be ideas or ready", 2)
+        if target not in {"ideas", "ready", "issues"}:
+            raise TaskError("validation", "create target must be ready (Ideas is legacy-only)", 2)
+        _board_id, columns, _ = self.reader._board()
+        legacy_ideas = "Ideas" in columns.values() or LEGACY_IDEAS_COLUMN in columns.values()
+        if target == "ideas" and not legacy_ideas:
+            raise TaskError("legacy_layout", "execution tasks cannot be created in Issues; create a Ready task", 2)
+        if target == "issues" and role != "steward":
+            raise TaskError("role_forbidden", "execution tasks cannot be created in Issues", 3)
         if role in {"worker", "reviewer", "retro"} and target != "ideas":
             raise TaskError("role_forbidden", f"{role} may create only ideas cards", 3)
         if complexity not in _COMPLEXITIES:
@@ -650,7 +658,7 @@ class TaskWriter:
         board_id, columns, swimlanes = self.reader._board()
         if reference and self.client.call("getTaskByReference", project_id=board_id, reference=reference):
             raise TaskError("validation", "task reference already exists", 2)
-        column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+        column_id = _target_column_id(columns, target)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         swimlane_id = _matching_swimlane(swimlanes, project)
@@ -674,6 +682,7 @@ class TaskWriter:
             if not ok:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
             values = {
+                "record_type": "task",
                 "task_type": task_type,
                 "project": project,
                 "complexity": complexity,
@@ -858,14 +867,26 @@ class TaskWriter:
         )
         def mutation(task: dict[str, Any]) -> Any:
             source = task["state"]
+            record_type = task.get("record_type")
+            if record_type in {"issue", "product"}:
+                raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
+            if source == "issues" and not record_type:
+                if role != "po" or target != "ready":
+                    raise TaskError("transition_forbidden", "legacy Ideas require explicit PO triage to Ready", 3)
             if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
                 raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-            if (source, target) not in _TRANSITIONS[role]:
+            _board_id, columns, _lanes = self.reader._board()
+            legacy_ideas_target = target == "ideas" and any(
+                title in {"Ideas", LEGACY_IDEAS_COLUMN} for title in columns.values()
+            )
+            if (source, target) not in _TRANSITIONS[role] and not (role == "po" and legacy_ideas_target):
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
+                if source == "issues" and not record_type:
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"record_type": "task"})
                 if target == "ready":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
                 elif source == "validate":
@@ -1121,7 +1142,7 @@ class TaskWriter:
         self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int
     ) -> None:
         board_id, columns, _ = self.reader._board()
-        column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+        column_id = _target_column_id(columns, target)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         ok = self.client.call(
@@ -1419,6 +1440,13 @@ class TaskWriter:
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else "" if value is None else str(value)
+
+
+def _target_column_id(columns: dict[int, str], target: str) -> int | None:
+    """Resolve a write target without making the legacy Ideas column a current state."""
+    if target == "ideas":
+        return next((identifier for identifier, name in columns.items() if name in {"Ideas", LEGACY_IDEAS_COLUMN}), None)
+    return next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
 
 
 def _has_archive_reason(task: dict[str, Any], reason_sha256: str) -> bool:

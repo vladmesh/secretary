@@ -38,7 +38,7 @@ ORCA_APPIMAGE_URL = (
     "https://github.com/stablyai/orca/releases/download/"
     f"{ORCA_VERSION}/orca-linux.AppImage"
 )
-PIPELINE_COLUMNS = ("Ideas", "Ready", "In progress", "Validate", "Blocked", "Done")
+PIPELINE_COLUMNS = ("Issues", "Ready", "In progress", "Validate", "Blocked", "Done")
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
@@ -115,7 +115,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
         if (
-            titles[:1] == [LEGACY_IDEAS_COLUMN]
+            titles[:1] in ([LEGACY_IDEAS_COLUMN], ["Ideas"])
             and titles[1:] == list(PIPELINE_COLUMNS[1:])
             and isinstance(columns[0], dict)
             and columns[0].get("id")

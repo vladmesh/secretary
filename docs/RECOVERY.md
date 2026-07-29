@@ -55,7 +55,7 @@ archive:
 The board export is kept only as NDJSON, for line-wise diffs. The JSON duplicates are not part of the
 checkpoint.
 
-Pipeline cards and sprint entities go into the checkpoint as separate sets: sprints live on their own
+Pipeline cards, including Product and Issue records, and sprint entities go into the checkpoint as separate sets: sprints live on their own
 board and are not part of the card export, so the writer reads them in its own pass instead of
 deriving them from cards that reference a sprint. A sprint record carries its reference, goal,
 Definition of Done, repositories, status, budget by event type, current card, resume entry, all entries
