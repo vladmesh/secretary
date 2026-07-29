@@ -184,6 +184,10 @@ class ObserverRecord:
     wake_attempts: int = 0
     wake_next_at: float = 0.0
     wake_reason: str = ""
+    # Launch failures are retried on the same bounded schedule as terminal nudges.  They are
+    # separate because a sprint can be headless without having a linked-card event to wake for.
+    launch_attempts: int = 0
+    launch_next_at: float = 0.0
     run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -215,6 +219,8 @@ class ObserverRecord:
             "wake_attempts": self.wake_attempts,
             "wake_next_at": self.wake_next_at,
             "wake_reason": self.wake_reason,
+            "launch_attempts": self.launch_attempts,
+            "launch_next_at": self.launch_next_at,
             "run": dict(self.run),
         }
 
@@ -254,6 +260,8 @@ class ObserverRecord:
             wake_attempts=_int(payload.get("wake_attempts")),
             wake_next_at=_float(payload.get("wake_next_at")),
             wake_reason=str(payload.get("wake_reason") or ""),
+            launch_attempts=_int(payload.get("launch_attempts")),
+            launch_next_at=_float(payload.get("launch_next_at")),
             run=dict(run) if isinstance(run, dict) else {},
         )
 
@@ -322,6 +330,8 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "wake_attempts": record.wake_attempts,
             "wake_next_at": record.wake_next_at,
             "wake_reason": record.wake_reason,
+            "launch_attempts": record.launch_attempts,
+            "launch_next_at": record.launch_next_at,
         })
     return rows
 
@@ -508,7 +518,22 @@ def _reconcile_open_sprint(
             # An intent nobody could resolve stays an intent through the drain: the resume then
             # closes what it may have started instead of opening a head beside it.
             keep_state=unresolved_intent,
+            retry=False,
         )
+    if (
+        record is not None
+        and record.state == "deferred"
+        and not record.abandoned_handle
+        and time.time() < record.launch_next_at
+    ):
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-launch-deferred",
+            "head": record.head,
+            "reason": record.deferred_reason,
+        }
     return _launch_observer(runtime, payload, observers, ref, record)
 
 
@@ -517,8 +542,8 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
 
     The audit is the same source used by sprint resume freshness.  The cursor lives with the
     observer record because it describes dispatcher delivery, not a seventh field in the resume
-    document.  An observer acknowledgement is accepted only when its durable resume timestamp is
-    at or after the event it is acknowledging.
+    document.  An acknowledgement is the append-order relationship between the card event and a
+    later durable `resume_recorded` event, not two wall-clock values with second precision.
     """
     try:
         sprint = runtime.sprints.show(ref)
@@ -528,8 +553,14 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     except (TaskError, HostError, OSError, ValueError, TypeError):
         return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
     latest: dict[str, Any] | None = None
+    acknowledged: dict[str, Any] | None = None
     for event in events:
         if str(event.get("ref") or "") not in refs or not _significant_card_event(event):
+            if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
+                # The audit is append-only.  The last linked-card event seen before this record is
+                # causally earlier than this resume even when their RFC3339 timestamps are equal.
+                if latest is not None:
+                    acknowledged = latest
             continue
         latest = event
     if latest is None:
@@ -537,14 +568,16 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     event_id = str(latest.get("event_id") or latest.get("request_id") or "")
     if not event_id:
         return {"known": False, "pending": False, "reason": "latest card event has no durable id"}
-    resume = sprint.get("resume") if isinstance(sprint.get("resume"), dict) else None
-    if _resume_acknowledges(resume, latest):
-        record.acknowledged_event_id = event_id
-        record.wake_event_id = ""
-        record.wake_sent = False
-        record.wake_attempts = 0
-        record.wake_next_at = 0.0
-        record.wake_reason = ""
+    if acknowledged is not None:
+        acknowledged_id = str(acknowledged.get("event_id") or acknowledged.get("request_id") or "")
+        if acknowledged_id:
+            record.acknowledged_event_id = acknowledged_id
+            if record.wake_event_id == acknowledged_id:
+                record.wake_event_id = ""
+                record.wake_sent = False
+                record.wake_attempts = 0
+                record.wake_next_at = 0.0
+                record.wake_reason = ""
     return {
         "known": True,
         "pending": record.acknowledged_event_id != event_id,
@@ -563,19 +596,12 @@ def _significant_card_event(event: dict[str, Any]) -> bool:
     )
 
 
-def _resume_acknowledges(resume: dict[str, Any] | None, event: dict[str, Any]) -> bool:
-    if not resume:
-        return False
-    recorded = _timestamp(str(resume.get("recorded_at") or ""))
-    occurred = _timestamp(str(event.get("occurred_at") or ""))
-    return recorded is not None and occurred is not None and recorded >= occurred
-
-
 def _timestamp(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
 
 
 def _event_age_seconds(occurred_at: str) -> float:
@@ -603,7 +629,6 @@ def _wake_for_event(
     event_id = str(event["event_id"])
     overdue = event["age_seconds"] >= observer_event_watchdog_seconds()
     if record.wake_sent and now < record.wake_next_at:
-        record.wake_event_id = event_id
         return {
             "status": "ok",
             "step": "observer-reconcile",
@@ -1024,6 +1049,8 @@ def _launch_observer(
     record.last_action = "relaunched" if relaunch else "launched"
     record.last_action_at = now
     record.deferred_reason = ""
+    record.launch_attempts = 0
+    record.launch_next_at = 0.0
     record.stopped_reason = ""
     record.paused_at = 0.0
     observers[ref] = record
@@ -1118,19 +1145,32 @@ def _defer(
     action: str = "observer-launch-deferred",
     readiness: dict[str, Any] | None = None,
     keep_state: bool = False,
+    retry: bool = True,
 ) -> dict[str, Any]:
     """Park a launch without losing the sprint or damaging an existing record.
 
     Only the deferral fields are written: the head, workspace, handle and launch counter of a
     record that already exists stay as they were, so the next tick retries from the same state.
     `keep_state` leaves even the state alone, for a record whose unresolved launch intent is the
-    one thing the next tick must still see.
+    one thing the next tick must still see. Failed launches use a persisted exponential deadline;
+    a deliberate drain is retried when the drain ends rather than on that deadline.
     """
     record = record or ObserverRecord(sprint=ref)
     record.head = record.head or head
     if not keep_state:
         record.state = "deferred"
-    record.deferred_reason = reason
+    if retry:
+        record.launch_attempts += 1
+        delay = min(
+            OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (record.launch_attempts - 1)),
+            OBSERVER_WAKE_RETRY_MAX_SECONDS,
+        )
+        record.launch_next_at = time.time() + delay
+        record.deferred_reason = f"{reason}; retry in {delay}s"
+    else:
+        record.launch_attempts = 0
+        record.launch_next_at = 0.0
+        record.deferred_reason = reason
     record.last_action = "launch-deferred"
     record.last_action_at = time.time()
     observers[ref] = record
@@ -1139,7 +1179,7 @@ def _defer(
         EVENT_DEFERRED,
         ref,
         observer_request_id("deferred", ref, record.generation, record.launches),
-        {"head": record.head, "reason": reason, "launches": record.launches},
+        {"head": record.head, "reason": record.deferred_reason, "launches": record.launches},
     )
     outcome = {
         "status": "skipped",
@@ -1147,7 +1187,7 @@ def _defer(
         "sprint": ref,
         "action": action,
         "head": record.head,
-        "reason": reason,
+        "reason": record.deferred_reason,
     }
     if readiness is not None:
         outcome["readiness"] = readiness

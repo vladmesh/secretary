@@ -334,7 +334,10 @@ class SprintReader:
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")
         lag_seconds = _resume_lag_seconds(recorded_at, last_event)
-        stale = bool(last_event and (lag_seconds is None or lag_seconds > RESUME_FRESHNESS_GRACE_SECONDS))
+        invalid_recorded_at = _timestamp(recorded_at) is None
+        stale = invalid_recorded_at or bool(
+            last_event and (lag_seconds is None or lag_seconds > RESUME_FRESHNESS_GRACE_SECONDS)
+        )
         return {
             "fresh": not stale,
             "error": "resume_stale" if stale else None,
@@ -617,12 +620,19 @@ def _resume_lag_seconds(recorded_at: str, last_event_at: str) -> int | None:
     """Seconds a resume trails its latest linked-card event, or None for bad timestamps."""
     if not recorded_at or not last_event_at:
         return 0
-    try:
-        recorded = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
-        event = datetime.fromisoformat(last_event_at.replace("Z", "+00:00"))
-    except ValueError:
+    recorded = _timestamp(recorded_at)
+    event = _timestamp(last_event_at)
+    if recorded is None or event is None:
         return None
     return max(0, int((event - recorded).total_seconds()))
+
+
+def _timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
 
 
 def _json_list(value: str | None) -> list[str]:
@@ -677,4 +687,7 @@ def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
         if required:
             raise TaskError("validation", "resume entry is missing required fields: " + ", ".join(missing), 2)
         return None
-    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": _text(source.get("recorded_at")) or _now()}
+    recorded_at = _text(source.get("recorded_at")) or _now()
+    if required and _timestamp(recorded_at) is None:
+        raise TaskError("validation", "resume recorded_at must include a timezone", 2)
+    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": recorded_at}

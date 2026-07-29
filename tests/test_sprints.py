@@ -294,6 +294,32 @@ class SprintTests(unittest.TestCase):
         self.assertFalse(stale["resume_freshness"]["fresh"])
         self.assertEqual(stale["resume_freshness"]["error"], "resume_stale")
 
+    def test_naive_resume_timestamp_is_rejected_and_legacy_data_fails_closed(self) -> None:
+        ref = self.writer.create(role="po", actor="operator", goal="naive resume") ["sprint"]["ref"]
+        entry = {
+            "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+            "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
+            "recorded_at": "2026-07-29T12:00:00",
+        }
+        with self.assertRaisesRegex(TaskError, "must include a timezone"):
+            self.writer.resume(role="observer", actor="observer", reference=ref, entry=entry)
+
+        sprint = next(item for item in self.client.tasks if item["reference"] == ref)
+        self.client.metadata[int(sprint["id"])] ["sprint_resume"] = json.dumps(entry)
+        task = TaskWriter(self.client, data_dir=self.tmp.name).create(
+            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            sprint=ref, request_id="naive-card",
+        )["task"]
+        TaskWriter(self.client, data_dir=self.tmp.name).comment(
+            role="po", actor="operator", reference=task["ref"], body="meaningful", request_id="naive-event",
+        )
+
+        shown = SprintReader(self.client, data_dir=self.tmp.name).show(ref)  # type: ignore[arg-type]
+
+        self.assertFalse(shown["resume_freshness"]["fresh"])
+        self.assertEqual(shown["resume_freshness"]["error"], "resume_stale")
+        self.assertIsNone(shown["resume_freshness"]["lag_seconds"])
+
     def test_observer_can_record_a_complete_resume_entry(self) -> None:
         ref = self.writer.create(role="po", actor="operator", goal="observer resume")["sprint"]["ref"]
         entry = {

@@ -43,7 +43,7 @@ from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import ROLE_ALLOWLIST, ROLE_REQUIRED, runtime_env
 from secretary.status import _observers as status_observers
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
 
@@ -148,6 +148,13 @@ class ObserverLifecycleTests(unittest.TestCase):
     def kill_observer(self, reference: str = "sprint:1") -> None:
         record = self.observers()[reference]
         Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
+
+    def expire_launch_retry(self, reference: str = "sprint:1") -> None:
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers[reference].launch_next_at = time.time() - 1
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
 
     # lifecycle ---------------------------------------------------------------
 
@@ -302,6 +309,59 @@ class ObserverLifecycleTests(unittest.TestCase):
         restarted = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(restarted)], ["observer-idle"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+    def test_resume_before_a_same_second_event_does_not_acknowledge_it(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        same_second = _now()
+        entry = {
+            "selected_step": "wait", "selected_why": "board is quiet", "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "recorded_at": same_second,
+        }
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry, request_id="same-second-resume",
+        )
+        self.audit.append("same-second-card-event", {
+            "event_id": "evt_same_second_card", "request_id": "same-second-card-event",
+            "ref": "secretary-510-pilot", "kind": "commented", "outcome": "success",
+            "occurred_at": same_second,
+        })
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertNotEqual(self.observers()["sprint:1"].acknowledged_event_id, "evt_same_second_card")
+
+    def test_new_event_after_woken_turn_is_delivered_after_its_resume(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="first", request_id="first-wake-event",
+        )
+        self.runtime.production_tick()
+        entry = {
+            "selected_step": "read board", "selected_why": "first event", "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+        }
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry, request_id="first-wake-resume",
+        )
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="second", request_id="second-wake-event",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1", "sprint:1"])
 
     def test_burst_of_card_events_coalesces_to_one_observer_nudge(self) -> None:
         self.open_sprint()
@@ -805,12 +865,13 @@ class ObserverLifecycleTests(unittest.TestCase):
         # The same reason has to be readable from outside, or the sprint just looks headless.
         self.assertIn("observe-sprint", status_observers(self.runtime.production_state.load())[0]["deferred_reason"])
 
-    def test_a_delivered_skill_launches_the_head_on_the_next_tick(self) -> None:
+    def test_a_delivered_skill_launches_after_the_deferred_retry_deadline(self) -> None:
         self.observer_skill.unlink()
         self.open_sprint()
         self.runtime.production_tick()
 
         install_skill_registry(self.data_dir)
+        self.expire_launch_retry()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -840,13 +901,18 @@ class ObserverLifecycleTests(unittest.TestCase):
         prompt = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(encoding="utf-8")
         self.assertIn(str(self.observer_skill), prompt)
 
-    def test_deferred_launch_retries_on_the_next_tick(self) -> None:
+    def test_deferred_launch_waits_for_a_persisted_retry_deadline(self) -> None:
         self.open_sprint()
         unready = HeadReadiness("openai-sub", "unavailable", "resource provider is unavailable", 1.0)
         self.runtime.head_readiness = lambda _head: unready
         self.runtime.production_tick()
 
         del self.runtime.head_readiness
+        waiting = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(waiting)], ["observer-launch-deferred"])
+        self.assertEqual(self.host.calls.count("prepare_observer"), 0)
+        self.expire_launch_retry()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -876,6 +942,19 @@ class ObserverLifecycleTests(unittest.TestCase):
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 0)
         self.assertIn("orca refused the terminal", record.deferred_reason)
+
+    def test_failed_bring_up_is_not_retried_on_every_tick(self) -> None:
+        self.open_sprint()
+        self.host.fail_observer_reason = "orca refused the terminal"
+
+        self.runtime.production_tick()
+        repeated = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(repeated)], ["observer-launch-deferred"])
+        self.assertEqual(self.host.calls.count("prepare_observer"), 1)
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launch_attempts, 1)
+        self.assertGreater(record.launch_next_at, time.time())
 
     # audit durability --------------------------------------------------------
 
@@ -938,6 +1017,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.launches, 0)
         self.assertIn("could not be staged", record.deferred_reason)
 
+        self.expire_launch_retry()
         result = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
