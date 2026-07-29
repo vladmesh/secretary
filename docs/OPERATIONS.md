@@ -392,7 +392,7 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-waiting` — the observer is working and no durable event needs a new turn;
 - `observer-idle` — the live Codex TUI has completed its queue with no unacknowledged linked-card event;
 - `observer-nudged` — a committed linked-card event woke one idle observer turn;
-- `observer-wake-pending` — a wake was already sent, so a burst of card events coalesced into it;
+- `observer-wake-pending` — a delivery batch was already sent and awaits its own acknowledgement;
 - `observer-wake-waiting` — an event arrived while the observer was working; its next tick after
   Codex finishes delivers one nudge, without waiting for the watchdog;
 - `observer-watchdog-woke` — an event remained unacknowledged for
@@ -570,7 +570,8 @@ secretary pause-status --instance INSTANCE                     # .observers, .st
 An observer row carries the sprint, the head profile, the state (`running`, `waiting`, `idle-grace`, `wake-deferred`,
 `launching`, `deferred`, `stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness,
 the launch count, the workspace, the handle-known and abandoned-handle flags, the time and kind of the last
-action, the reason for a deferred launch, the latest acknowledged card-event id, and wake retry state.
+action, the reason for a deferred launch, and a delivery object with its stage, fixed event high-water mark,
+causal acknowledgement, deadline, retry state and external-failure reason.
 
 ## Checkpoint push
 

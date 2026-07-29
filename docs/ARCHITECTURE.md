@@ -170,11 +170,11 @@ the next tick.
 Liveness uses the same pid heartbeat as worker and reviewer. A live Codex TUI can still have finished its
 agent queue, so the dispatcher also reads its completed-turn footer and terminal output time. A positive
 footer exposes `idle-grace` in the observer record, but does not relaunch it by itself. A committed,
-non-routing event on a linked card wakes that idle head once. The observer rereads the live board and writes
-a resume entry; the dispatcher advances its durable event cursor only when that entry postdates the event.
-Several events before that acknowledgement coalesce into one turn. A dead head is replaced only for pending
-work. An unacknowledged event receives the same recovery attempt after 30 minutes by default. Failed wakes
-carry their reason and bounded retry time in the observer record.
+non-routing event on a linked card opens one durable delivery batch. Its immutable high-water mark is written
+before a nudge or replacement launch, and only a later resume can acknowledge that specific batch. Events
+that arrive before the intent coalesce; later events wait for the next batch. A dead head is replaced only for
+pending work. An unacknowledged batch receives the same recovery attempt after 30 minutes by default. Failed
+wakes carry their reason and bounded retry time in the observer record.
 
 An active card does not itself create another observer turn. Once Codex reports a completed queue,
 the head is `idle-grace` even if its linked card remains active; the next significant durable card

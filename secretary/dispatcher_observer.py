@@ -52,6 +52,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
@@ -127,6 +128,139 @@ class ObserverLaunchAborted(HostError):
         self.run = dict(run or {})
 
 
+class DeliveryStage(str, Enum):
+    """The durable state of one observer event-delivery batch."""
+
+    IDLE = "idle"
+    WAITING_FOR_IDLE = "waiting_for_idle"
+    DELIVERY_INTENT = "delivery_intent"
+    AWAITING_ACK = "awaiting_ack"
+    RETRY_DEFERRED = "retry_deferred"
+
+
+@dataclass
+class ObserverDelivery:
+    """One causal delivery cursor, independent of observer process lifecycle.
+
+    `through_event` is fixed before a terminal send or replacement launch.  A resume can only
+    acknowledge that fixed batch after the cursor that was present when its intent was written.
+    Events appended after the intent are deliberately left for the next batch.
+    """
+
+    stage: DeliveryStage = DeliveryStage.IDLE
+    acknowledged_through: str = ""
+    acknowledged_delivery_id: str = ""
+    acknowledged_resume_id: str = ""
+    pending_from: str = ""
+    delivery_id: str = ""
+    method: str = ""
+    through_event: str = ""
+    # The newest resume event known when the intent was persisted.  An empty cursor is meaningful:
+    # it says there was no resume yet, so the first one appended afterwards can acknowledge this
+    # delivery.  Legacy records set `resume_cursor_known` false and fail closed until watchdog.
+    resume_cursor: str = ""
+    resume_cursor_known: bool = True
+    sent_at: float = 0.0
+    deadline: float = 0.0
+    attempts: int = 0
+    next_at: float = 0.0
+    reason: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage.value,
+            "acknowledged_through": self.acknowledged_through,
+            "acknowledged_delivery_id": self.acknowledged_delivery_id,
+            "acknowledged_resume_id": self.acknowledged_resume_id,
+            "pending_from": self.pending_from,
+            "delivery_id": self.delivery_id,
+            "method": self.method,
+            "through_event": self.through_event,
+            "resume_cursor": self.resume_cursor,
+            "resume_cursor_known": self.resume_cursor_known,
+            "sent_at": self.sent_at,
+            "deadline": self.deadline,
+            "attempts": self.attempts,
+            "next_at": self.next_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> "ObserverDelivery":
+        if not isinstance(payload, dict):
+            return cls()
+        try:
+            stage = DeliveryStage(str(payload.get("stage") or DeliveryStage.IDLE.value))
+        except ValueError:
+            stage = DeliveryStage.IDLE
+        return cls(
+            stage=stage,
+            acknowledged_through=str(payload.get("acknowledged_through") or ""),
+            acknowledged_delivery_id=str(payload.get("acknowledged_delivery_id") or ""),
+            acknowledged_resume_id=str(payload.get("acknowledged_resume_id") or ""),
+            pending_from=str(payload.get("pending_from") or ""),
+            delivery_id=str(payload.get("delivery_id") or ""),
+            method=str(payload.get("method") or ""),
+            through_event=str(payload.get("through_event") or ""),
+            resume_cursor=str(payload.get("resume_cursor") or ""),
+            resume_cursor_known=bool(payload.get("resume_cursor_known", True)),
+            sent_at=_float(payload.get("sent_at")),
+            deadline=_float(payload.get("deadline")),
+            attempts=_int(payload.get("attempts")),
+            next_at=_float(payload.get("next_at")),
+            reason=str(payload.get("reason") or ""),
+        )
+
+
+def _legacy_delivery(payload: dict[str, Any]) -> ObserverDelivery:
+    """Migrate the former independent wake flags without inventing a causal acknowledgement."""
+
+    acknowledged = str(payload.get("acknowledged_event_id") or "")
+    through = str(payload.get("wake_event_id") or "")
+    wake_sent = bool(payload.get("wake_sent"))
+    attempts = _int(payload.get("wake_attempts"))
+    next_at = _float(payload.get("wake_next_at"))
+    reason = str(payload.get("wake_reason") or "")
+    if wake_sent and through:
+        deadline = next_at or time.time() + observer_event_watchdog_seconds()
+        return ObserverDelivery(
+            stage=DeliveryStage.AWAITING_ACK,
+            acknowledged_through=acknowledged,
+            delivery_id="legacy-" + uuid.uuid4().hex,
+            method="nudge",
+            through_event=through,
+            # The old record has no durable resume fence.  Waiting to the watchdog is the only
+            # recovery that cannot falsely credit an earlier resume to this delivery.
+            resume_cursor_known=False,
+            deadline=deadline,
+            attempts=attempts,
+            next_at=deadline,
+            reason=reason or "legacy event delivery awaits watchdog recovery",
+        )
+    if attempts and through:
+        return ObserverDelivery(
+            stage=DeliveryStage.RETRY_DEFERRED,
+            acknowledged_through=acknowledged,
+            pending_from=through,
+            delivery_id="legacy-" + uuid.uuid4().hex,
+            method="nudge",
+            through_event=through,
+            resume_cursor_known=False,
+            attempts=attempts,
+            next_at=next_at,
+            reason=reason,
+        )
+    if through:
+        return ObserverDelivery(
+            stage=DeliveryStage.WAITING_FOR_IDLE,
+            acknowledged_through=acknowledged,
+            pending_from=through,
+            next_at=next_at,
+            reason=reason,
+        )
+    return ObserverDelivery(acknowledged_through=acknowledged)
+
+
 @dataclass
 class ObserverRecord:
     """One observer head as the dispatcher last left it."""
@@ -172,18 +306,9 @@ class ObserverRecord:
     # The last confirmed queue-end explains why a live head is waiting for a card event.
     idle_since: float = 0.0
     idle_reason: str = ""
-    # The event cursor is dispatcher-owned state.  A resume entry stays its established six-field
-    # document; the dispatcher advances this cursor only after that entry postdates the event.
-    acknowledged_event_id: str = ""
-    wake_event_id: str = ""
-    # True once a wake intent has been persisted for a terminal send.  This is deliberately
-    # separate from the event id: an event first seen while the observer is busy must be checked
-    # again as soon as that queue finishes, while a possibly delivered terminal send must not be
-    # repeated before its acknowledgement or watchdog recovery window.
-    wake_sent: bool = False
-    wake_attempts: int = 0
-    wake_next_at: float = 0.0
-    wake_reason: str = ""
+    # The event cursor is dispatcher-owned state. A resume entry stays its established six-field
+    # document; this delivery machine carries the causal acknowledgement for its fixed batch.
+    delivery: ObserverDelivery = field(default_factory=ObserverDelivery)
     # Launch failures are retried on the same bounded schedule as terminal nudges.  They are
     # separate because a sprint can be headless without having a linked-card event to wake for.
     launch_attempts: int = 0
@@ -213,12 +338,7 @@ class ObserverRecord:
             "paused_at": self.paused_at,
             "idle_since": self.idle_since,
             "idle_reason": self.idle_reason,
-            "acknowledged_event_id": self.acknowledged_event_id,
-            "wake_event_id": self.wake_event_id,
-            "wake_sent": self.wake_sent,
-            "wake_attempts": self.wake_attempts,
-            "wake_next_at": self.wake_next_at,
-            "wake_reason": self.wake_reason,
+            "delivery": self.delivery.to_json(),
             "launch_attempts": self.launch_attempts,
             "launch_next_at": self.launch_next_at,
             "run": dict(self.run),
@@ -227,6 +347,12 @@ class ObserverRecord:
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "ObserverRecord":
         run = payload.get("run")
+        delivery_payload = payload.get("delivery")
+        delivery = (
+            ObserverDelivery.from_json(delivery_payload)
+            if isinstance(delivery_payload, dict)
+            else _legacy_delivery(payload)
+        )
         return cls(
             sprint=str(payload.get("sprint") or ""),
             generation=str(payload.get("generation") or "") or uuid.uuid4().hex[:12],
@@ -254,12 +380,7 @@ class ObserverRecord:
             paused_at=_float(payload.get("paused_at")),
             idle_since=_float(payload.get("idle_since")),
             idle_reason=str(payload.get("idle_reason") or ""),
-            acknowledged_event_id=str(payload.get("acknowledged_event_id") or ""),
-            wake_event_id=str(payload.get("wake_event_id") or ""),
-            wake_sent=bool(payload.get("wake_sent")),
-            wake_attempts=_int(payload.get("wake_attempts")),
-            wake_next_at=_float(payload.get("wake_next_at")),
-            wake_reason=str(payload.get("wake_reason") or ""),
+            delivery=delivery,
             launch_attempts=_int(payload.get("launch_attempts")),
             launch_next_at=_float(payload.get("launch_next_at")),
             run=dict(run) if isinstance(run, dict) else {},
@@ -324,12 +445,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "paused": record.paused_at > 0,
             "idle_since": record.idle_since,
             "idle_reason": record.idle_reason,
-            "acknowledged_event_id": record.acknowledged_event_id,
-            "wake_event_id": record.wake_event_id,
-            "wake_sent": record.wake_sent,
-            "wake_attempts": record.wake_attempts,
-            "wake_next_at": record.wake_next_at,
-            "wake_reason": record.wake_reason,
+            "delivery": record.delivery.to_json(),
             "launch_attempts": record.launch_attempts,
             "launch_next_at": record.launch_next_at,
         })
@@ -431,6 +547,7 @@ def _reconcile_open_sprint(
     # A terminal left over from an aborted bring-up is skipped here whatever its pid says: that
     # head never received its sprint, and reading it as the live observer would park the sprint
     # forever on a head that is doing nothing.
+    pending_event: dict[str, Any] | None = None
     if (
         record is not None
         and not unresolved_intent
@@ -500,6 +617,7 @@ def _reconcile_open_sprint(
                 "launches": record.launches,
                 "reason": event["reason"],
             }
+        pending_event = event
     if pause_mode == "drain":
         # A drain claims nothing new. A dead observer is a bring-up, so it waits for the resume
         # exactly like a Ready card does. The record is still written: an open sprint has to be
@@ -534,16 +652,30 @@ def _reconcile_open_sprint(
             "head": record.head,
             "reason": record.deferred_reason,
         }
-    return _launch_observer(runtime, payload, observers, ref, record)
+    if record is None:
+        # The first observer launch renders the current sprint board. Card history from before
+        # that head existed is therefore its baseline, not a second turn immediately after its
+        # own initial queue. Later transitions still enter the delivery machine normally.
+        record = ObserverRecord(sprint=ref)
+        baseline = _observer_event_state(runtime, ref, record)
+        if baseline.get("pending"):
+            record.delivery.acknowledged_through = str(baseline.get("event_id") or "")
+    return _launch_observer(
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        pending_event=pending_event,
+    )
 
 
 def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
-    """Return the latest meaningful linked-card event and advance a durable acknowledgement.
+    """Read linked-card work and acknowledge only the active delivery batch.
 
-    The audit is the same source used by sprint resume freshness.  The cursor lives with the
-    observer record because it describes dispatcher delivery, not a seventh field in the resume
-    document.  An acknowledgement is the append-order relationship between the card event and a
-    later durable `resume_recorded` event, not two wall-clock values with second precision.
+    Append order makes a resume causally later than the delivery intent's resume cursor. The
+    immutable `through_event` prevents a resume for A from accidentally crediting B, which may
+    have arrived while A's turn was already in flight.
     """
     try:
         sprint = runtime.sprints.show(ref)
@@ -552,38 +684,33 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         events = runtime.audit.events()
     except (TaskError, HostError, OSError, ValueError, TypeError):
         return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
-    latest: dict[str, Any] | None = None
-    acknowledged: dict[str, Any] | None = None
+    significant: list[dict[str, Any]] = []
+    resumes: list[dict[str, Any]] = []
     for event in events:
-        if str(event.get("ref") or "") not in refs or not _significant_card_event(event):
-            if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
-                # The audit is append-only.  The last linked-card event seen before this record is
-                # causally earlier than this resume even when their RFC3339 timestamps are equal.
-                if latest is not None:
-                    acknowledged = latest
-            continue
-        latest = event
-    if latest is None:
+        if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
+            resumes.append(event)
+        if str(event.get("ref") or "") in refs and _significant_card_event(event):
+            significant.append(event)
+    _acknowledge_delivery_from_resume(record.delivery, resumes)
+    if not significant:
         return {"known": True, "pending": False, "reason": "no significant linked-card event"}
-    event_id = str(latest.get("event_id") or latest.get("request_id") or "")
-    if not event_id:
+    latest = significant[-1]
+    latest_id = _event_id(latest)
+    if not latest_id:
         return {"known": False, "pending": False, "reason": "latest card event has no durable id"}
-    if acknowledged is not None:
-        acknowledged_id = str(acknowledged.get("event_id") or acknowledged.get("request_id") or "")
-        if acknowledged_id:
-            record.acknowledged_event_id = acknowledged_id
-            if record.wake_event_id == acknowledged_id:
-                record.wake_event_id = ""
-                record.wake_sent = False
-                record.wake_attempts = 0
-                record.wake_next_at = 0.0
-                record.wake_reason = ""
+    acknowledged_at = _event_index(significant, record.delivery.acknowledged_through)
+    pending_events = significant[acknowledged_at + 1:] if acknowledged_at >= 0 else significant
+    if not pending_events:
+        return {"known": True, "pending": False, "reason": "latest significant linked-card event is acknowledged"}
+    first = pending_events[0]
     return {
         "known": True,
-        "pending": record.acknowledged_event_id != event_id,
-        "event_id": event_id,
+        "pending": True,
+        "event_id": latest_id,
+        "pending_from": _event_id(first),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
+        "latest_resume_id": _event_id(resumes[-1]) if resumes else "",
         "reason": "latest significant linked-card event is not acknowledged",
     }
 
@@ -611,6 +738,150 @@ def _event_age_seconds(occurred_at: str) -> float:
     return max(0.0, time.time() - occurred.timestamp())
 
 
+def _event_id(event: dict[str, Any] | None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    return str(event.get("event_id") or event.get("request_id") or "")
+
+
+def _event_index(events: list[dict[str, Any]], event_id: str) -> int:
+    if not event_id:
+        return -1
+    for index, event in enumerate(events):
+        if _event_id(event) == event_id:
+            return index
+    return -1
+
+
+def _resume_after_cursor(resumes: list[dict[str, Any]], delivery: ObserverDelivery) -> str:
+    """The newest resume appended after this delivery's persisted baseline, if any."""
+
+    if not delivery.resume_cursor_known:
+        return ""
+    if not delivery.resume_cursor:
+        return _event_id(resumes[-1]) if resumes else ""
+    cursor = _event_index(resumes, delivery.resume_cursor)
+    return _event_id(resumes[-1]) if cursor >= 0 and cursor < len(resumes) - 1 else ""
+
+
+def _reset_delivery_to_idle(
+    delivery: ObserverDelivery,
+    *,
+    acknowledged_through: str,
+    acknowledged_delivery_id: str,
+    acknowledged_resume_id: str,
+) -> None:
+    delivery.stage = DeliveryStage.IDLE
+    delivery.acknowledged_through = acknowledged_through
+    delivery.acknowledged_delivery_id = acknowledged_delivery_id
+    delivery.acknowledged_resume_id = acknowledged_resume_id
+    delivery.pending_from = ""
+    delivery.delivery_id = ""
+    delivery.method = ""
+    delivery.through_event = ""
+    delivery.resume_cursor = ""
+    delivery.resume_cursor_known = True
+    delivery.sent_at = 0.0
+    delivery.deadline = 0.0
+    delivery.attempts = 0
+    delivery.next_at = 0.0
+    delivery.reason = ""
+
+
+def _acknowledge_delivery_from_resume(
+    delivery: ObserverDelivery, resumes: list[dict[str, Any]]
+) -> None:
+    """Advance only an active batch whose own delivery intent predates this resume."""
+
+    if delivery.stage not in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}:
+        return
+    if not delivery.delivery_id or not delivery.through_event:
+        return
+    resume_id = _resume_after_cursor(resumes, delivery)
+    if resume_id:
+        _reset_delivery_to_idle(
+            delivery,
+            acknowledged_through=delivery.through_event,
+            acknowledged_delivery_id=delivery.delivery_id,
+            acknowledged_resume_id=resume_id,
+        )
+
+
+def _new_delivery_intent(
+    delivery: ObserverDelivery,
+    *,
+    method: str,
+    through_event: str,
+    resume_cursor: str,
+    now: float,
+    delivery_id: str = "",
+) -> None:
+    """Fix a high-water mark before an external observer action."""
+
+    delivery.stage = DeliveryStage.DELIVERY_INTENT
+    delivery.pending_from = ""
+    delivery.delivery_id = delivery_id or "delivery-" + uuid.uuid4().hex
+    delivery.method = method
+    delivery.through_event = through_event
+    delivery.resume_cursor = resume_cursor
+    delivery.resume_cursor_known = True
+    delivery.sent_at = now
+    delivery.deadline = now + observer_event_watchdog_seconds()
+    delivery.next_at = delivery.deadline
+    delivery.reason = f"{method} delivery intent is persisted before external action"
+
+
+def _prepare_launch_delivery(record: ObserverRecord, event: dict[str, Any]) -> str:
+    """Put a replacement launch through the same state machine as a terminal nudge."""
+
+    delivery = record.delivery
+    now = time.time()
+    active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
+    retrying = delivery.stage == DeliveryStage.RETRY_DEFERRED
+    _new_delivery_intent(
+        delivery,
+        method="launch",
+        through_event=(delivery.through_event if active or retrying else str(event["event_id"])),
+        resume_cursor=str(event.get("latest_resume_id") or ""),
+        now=now,
+        delivery_id=delivery.delivery_id if active or retrying else "",
+    )
+    return delivery.through_event
+
+
+def _set_delivery_waiting(delivery: ObserverDelivery, event: dict[str, Any], *, reason: str) -> None:
+    if delivery.stage == DeliveryStage.IDLE:
+        delivery.stage = DeliveryStage.WAITING_FOR_IDLE
+        delivery.pending_from = str(event.get("pending_from") or event.get("event_id") or "")
+    delivery.reason = reason
+
+
+def _defer_delivery(record: ObserverRecord, ref: str, reason: str) -> dict[str, Any]:
+    """Persist bounded external-delivery retry state without creating a busy loop."""
+
+    delivery = record.delivery
+    delivery.stage = DeliveryStage.RETRY_DEFERRED
+    delivery.attempts += 1
+    delay = min(
+        OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (delivery.attempts - 1)),
+        OBSERVER_WAKE_RETRY_MAX_SECONDS,
+    )
+    delivery.next_at = time.time() + delay
+    delivery.deadline = 0.0
+    delivery.reason = f"{reason}; retry in {delay}s"
+    _set_observer_state(record, "wake-deferred", reason=delivery.reason)
+    return {
+        "status": "degraded",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-wake-deferred",
+        "head": record.head,
+        "delivery_id": delivery.delivery_id,
+        "event_id": delivery.through_event,
+        "reason": delivery.reason,
+    }
+
+
 def _wake_for_event(
     runtime: Any,
     payload: dict[str, Any],
@@ -619,102 +890,113 @@ def _wake_for_event(
     record: ObserverRecord,
     event: dict[str, Any],
 ) -> dict[str, Any]:
-    """Nudge one completed observer turn, with durable dedupe and bounded retry.
-
-    A burst is represented by the newest event id while the first nudge is outstanding.  The
-    observer rereads the board, so it consumes the whole burst in one turn instead of one turn per
-    event.  A failed nudge is externally visible and waits for an exponential retry window.
-    """
+    """Deliver one immutable event batch to a completed observer queue."""
     now = time.time()
+    delivery = record.delivery
     event_id = str(event["event_id"])
     overdue = event["age_seconds"] >= observer_event_watchdog_seconds()
-    if record.wake_sent and now < record.wake_next_at:
+    active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
+    if active and now < delivery.deadline:
         return {
             "status": "ok",
             "step": "observer-reconcile",
             "sprint": ref,
             "action": "observer-wake-pending",
             "head": record.head,
-            "event_id": event_id,
+            "delivery_id": delivery.delivery_id,
+            "event_id": delivery.through_event,
         }
-    if record.state == "wake-deferred" and now < record.wake_next_at:
-        record.wake_event_id = event_id
+    if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
         return {
             "status": "degraded",
             "step": "observer-reconcile",
             "sprint": ref,
             "action": "observer-wake-deferred",
             "head": record.head,
-            "event_id": event_id,
-            "reason": record.wake_reason,
+            "delivery_id": delivery.delivery_id,
+            "event_id": delivery.through_event,
+            "reason": delivery.reason,
         }
+    if delivery.stage == DeliveryStage.IDLE:
+        _set_delivery_waiting(
+            delivery, event, reason="observer has unacknowledged significant card work"
+        )
     try:
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError) as exc:
-        return _defer_event_wake(record, ref, event_id, f"observer terminal could not be read: {exc}")
+        if delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
+            _new_delivery_intent(
+                delivery,
+                method="nudge",
+                through_event=event_id,
+                resume_cursor=str(event.get("latest_resume_id") or ""),
+                now=now,
+            )
+        return _defer_delivery(record, ref, f"observer terminal could not be read: {exc}")
     if not isinstance(status, dict) or not status.get("queue_finished"):
-        record.wake_event_id = event_id
-        record.wake_sent = False
-        record.wake_reason = "observer has not confirmed a completed queue"
-        record.wake_next_at = now + observer_event_watchdog_seconds()
-        _set_observer_state(record, "waiting", reason=record.wake_reason)
+        if delivery.stage == DeliveryStage.IDLE:
+            _set_delivery_waiting(delivery, event, reason="observer has not confirmed a completed queue")
+        elif delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
+            delivery.reason = "observer has not confirmed a completed queue"
+        _set_observer_state(record, "waiting", reason=delivery.reason)
         return {
             "status": "ok",
             "step": "observer-reconcile",
             "sprint": ref,
             "action": "observer-wake-watchdog-waiting" if overdue else "observer-wake-waiting",
             "head": record.head,
-            "event_id": event_id,
-            "reason": record.wake_reason,
+            "event_id": delivery.through_event or event_id,
+            "reason": delivery.reason,
         }
-    # The pending wake is durable before the terminal receives it. A dispatcher crash after the
-    # send therefore conservatively waits for the watchdog instead of creating a duplicate turn.
-    record.wake_event_id = event_id
-    record.wake_sent = True
-    record.wake_next_at = now + observer_event_watchdog_seconds()
-    record.wake_reason = "event wake is pending confirmation"
+    watchdog_delivery = active and now >= delivery.deadline
+    if watchdog_delivery:
+        # A watchdog retry keeps the original high-water mark. A newer B may be visible to the
+        # observer, but a resume for this turn still acknowledges only the unconfirmed A batch.
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=delivery.through_event,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+        )
+    elif delivery.stage == DeliveryStage.RETRY_DEFERRED:
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=delivery.through_event or event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+            delivery_id=delivery.delivery_id,
+        )
+    else:
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+        )
     observers[ref] = record
     if not _persist_quietly(runtime, payload, observers):
-        return _defer_event_wake(record, ref, event_id, "observer wake intent could not be persisted")
+        return _defer_delivery(record, ref, "observer wake intent could not be persisted")
     try:
         runtime.host.nudge_observer(record)
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
-        return _defer_event_wake(record, ref, event_id, f"observer wake failed: {exc}")
-    record.wake_event_id = event_id
-    record.wake_sent = True
-    record.wake_attempts = 0
-    record.wake_next_at = now + observer_event_watchdog_seconds()
-    record.wake_reason = "observer was nudged for an unacknowledged card event"
+        return _defer_delivery(record, ref, f"observer wake failed: {exc}")
+    delivery.stage = DeliveryStage.AWAITING_ACK
+    delivery.sent_at = now
+    delivery.deadline = now + observer_event_watchdog_seconds()
+    delivery.next_at = delivery.deadline
+    delivery.reason = "observer was nudged for an unacknowledged card event"
     _set_observer_state(record, "running")
     return {
         "status": "ok",
         "step": "observer-reconcile",
         "sprint": ref,
-        "action": "observer-watchdog-woke" if overdue else "observer-nudged",
+        "action": "observer-watchdog-woke" if overdue or watchdog_delivery else "observer-nudged",
         "head": record.head,
-        "event_id": event_id,
-    }
-
-
-def _defer_event_wake(record: ObserverRecord, ref: str, event_id: str, reason: str) -> dict[str, Any]:
-    record.wake_event_id = event_id
-    record.wake_sent = False
-    record.wake_attempts += 1
-    delay = min(
-        OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (record.wake_attempts - 1)),
-        OBSERVER_WAKE_RETRY_MAX_SECONDS,
-    )
-    record.wake_next_at = time.time() + delay
-    record.wake_reason = f"{reason}; retry in {delay}s"
-    _set_observer_state(record, "wake-deferred", reason=record.wake_reason)
-    return {
-        "status": "degraded",
-        "step": "observer-reconcile",
-        "sprint": ref,
-        "action": "observer-wake-deferred",
-        "head": record.head,
-        "event_id": event_id,
-        "reason": record.wake_reason,
+        "delivery_id": delivery.delivery_id,
+        "event_id": delivery.through_event,
     }
 
 
@@ -932,6 +1214,8 @@ def _launch_observer(
     observers: dict[str, ObserverRecord],
     ref: str,
     record: ObserverRecord | None,
+    *,
+    pending_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
@@ -977,11 +1261,36 @@ def _launch_observer(
     kind = EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED
     attempt = record.launches + 1
     request_id = _bring_up_request_id(ref, record.generation, attempt)
+    delivery_event_id = ""
+    if pending_event is not None:
+        # The lifecycle launch is also this event's only permitted observer turn. The delivery
+        # intent is saved by `_write_launch_intent` before `prepare_observer` reaches the host.
+        delivery_event_id = _prepare_launch_delivery(record, pending_event)
     try:
         # Staged before the host is asked for anything, so a head that comes up while the process
         # dies mid-launch still has its event on disk for `TaskAudit.reconcile()` to pick up.
-        event = stage_event(runtime, kind, ref, request_id, {"head": head, "launches": attempt})
+        event = stage_event(
+            runtime,
+            kind,
+            ref,
+            request_id,
+            {
+                "head": head,
+                "launches": attempt,
+                **(
+                    {
+                        "delivery_id": record.delivery.delivery_id,
+                        "delivery_method": record.delivery.method,
+                        "through_event": delivery_event_id,
+                    }
+                    if delivery_event_id
+                    else {}
+                ),
+            },
+        )
     except OSError as exc:
+        if delivery_event_id:
+            _defer_delivery(record, ref, f"observer launch event could not be staged: {exc}")
         return _defer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer lifecycle event could not be staged: {exc}",
@@ -991,6 +1300,8 @@ def _launch_observer(
         # State that cannot be written means no head: a launch nobody can record is exactly how a
         # sprint ends up with two of them.
         discard_event(runtime, request_id)
+        if delivery_event_id:
+            _defer_delivery(record, ref, "observer launch delivery intent could not be persisted")
         return _defer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer launch intent could not be persisted: {intent}",
@@ -1007,6 +1318,8 @@ def _launch_observer(
         # first and only then opens the replacement.
         discard_event(runtime, request_id)
         _clear_launch_intent(record, head_possible=bool(exc.handle))
+        if delivery_event_id:
+            _defer_delivery(record, ref, f"observer replacement launch failed: {exc}")
         if exc.handle:
             record.handle = exc.handle
             record.workspace = exc.workspace or record.workspace
@@ -1023,6 +1336,12 @@ def _launch_observer(
         # nothing left to close here either.
         discard_event(runtime, request_id)
         _clear_launch_intent(record, head_possible=False)
+        if delivery_event_id:
+            _defer_delivery(
+                record,
+                ref,
+                f"observer replacement launch failed: {getattr(exc, 'message', str(exc))}",
+            )
         return _defer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
@@ -1053,6 +1372,12 @@ def _launch_observer(
     record.launch_next_at = 0.0
     record.stopped_reason = ""
     record.paused_at = 0.0
+    if delivery_event_id:
+        record.delivery.stage = DeliveryStage.AWAITING_ACK
+        record.delivery.sent_at = now
+        record.delivery.deadline = now + observer_event_watchdog_seconds()
+        record.delivery.next_at = record.delivery.deadline
+        record.delivery.reason = "replacement launch is pending confirmation for an unacknowledged card event"
     observers[ref] = record
     if event is not None:
         event["payload"]["workspace"] = record.workspace
@@ -1065,6 +1390,9 @@ def _launch_observer(
         "workspace": record.workspace,
         "launches": record.launches,
     }
+    if delivery_event_id:
+        outcome["delivery_id"] = record.delivery.delivery_id
+        outcome["event_id"] = delivery_event_id
     # A failure here is not a lost head: the intent on disk still names this launch, and the next
     # tick adopts the head it started instead of opening a second one.
     if not _persist_quietly(runtime, payload, observers):
@@ -1121,7 +1449,10 @@ def _write_launch_intent(
         runtime.production_state.save(payload)
     except Exception as exc:
         for name, value in previous.items():
-            setattr(record, name, value)
+            if name == "delivery":
+                record.delivery = ObserverDelivery.from_json(value)
+            else:
+                setattr(record, name, value)
         return f"{type(exc).__name__}: {exc}"
     return None
 

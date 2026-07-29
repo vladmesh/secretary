@@ -127,8 +127,8 @@ launched observer prompt but does not stop work. At the hard limit the dispatche
 normal comments and carries a `[sprint:resume]` marker. `show` and `status` compute freshness from card
 audit records: missing data is `resume_missing`; a resume may trail a non-routing card event for up to five
 minutes, then is `resume_stale`. Neither command reads an observer transcript. The dispatcher records a
-durable acknowledgement of the latest significant event after the observer's next resume entry, and uses an
-unacknowledged event to wake an idle observer. `secretary status --json` exposes the
+durable delivery batch before it wakes or replaces an observer, and a later resume acknowledges only that
+batch's fixed card-event high-water mark. `secretary status --json` exposes the
 same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.
