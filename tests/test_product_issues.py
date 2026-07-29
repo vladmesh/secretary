@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -429,8 +430,49 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.client.call = reject_comment  # type: ignore[method-assign]
         with self.assertRaises(TaskError):
             self.store.update_priority(reference=issue["ref"], priority="P1", reason="urgent", actor="po", request_id="pending-priority")
+        self.assertEqual(self.store.audit.reconcile(), (0, 1))
         self.assertEqual(TaskWriter(self.client, data_dir=self.root / "data").reconcile(), (0, 1))
         self.assertIsNotNone(self.store.audit.pending_event("pending-priority"))
+
+    def test_concurrent_conflicting_request_id_is_rejected_before_backend_writes(self) -> None:
+        first = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+        second = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+        claim = first.audit.claim
+        barrier = threading.Barrier(2)
+        results: list[object] = []
+
+        def synchronized_claim(request_id: str, event: dict) -> tuple[dict, bool, bool]:
+            barrier.wait(timeout=5)
+            return claim(request_id, event)
+
+        first.audit.claim = synchronized_claim  # type: ignore[method-assign]
+        second.audit.claim = synchronized_claim  # type: ignore[method-assign]
+
+        def create(store: ProductIssueStore, title: str) -> None:
+            try:
+                results.append(store.create_product(
+                    product_id="secretary", projects=["secretary"], title=title, description="",
+                    actor="po", request_id="concurrent-request",
+                ))
+            except TaskError as exc:
+                results.append(exc)
+
+        threads = [
+            threading.Thread(target=create, args=(first, "First")),
+            threading.Thread(target=create, args=(second, "Second")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(len([result for result in results if isinstance(result, dict)]), 1)
+        errors = [result for result in results if isinstance(result, TaskError)]
+        self.assertEqual([error.code for error in errors], ["validation"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+        self.assertEqual(
+            len([event for event in first.audit.events() if event["request_id"] == "concurrent-request"]), 1,
+        )
 
     def test_audit_append_failure_retries_without_a_second_comment_or_event(self) -> None:
         self.store.create_product(

@@ -179,18 +179,21 @@ class ProductIssueTransaction:
             "phase": "staged",
         }
 
+    def _validate_existing(self, event: dict[str, Any] | None) -> None:
+        if event is None:
+            return
+        if (
+            event.get("protocol") != "product_issue_transaction"
+            or event.get("operation") != self.operation
+            or event.get("intent") != self.intent
+        ):
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+
     def _existing(self) -> tuple[dict[str, Any] | None, bool, bool]:
         committed = self.store.audit.committed_event(self.request_id)
         pending = self.store.audit.pending_event(self.request_id)
         for event in (committed, pending):
-            if event is None:
-                continue
-            if (
-                event.get("protocol") != "product_issue_transaction"
-                or event.get("operation") != self.operation
-                or event.get("intent") != self.intent
-            ):
-                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+            self._validate_existing(event)
         if committed is not None:
             return committed, True, pending is not None
         return pending, False, False
@@ -205,36 +208,42 @@ class ProductIssueTransaction:
         event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
 
     def run(self, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        event, committed, pending = self._existing()
-        if committed:
-            if pending:
-                try:
-                    # TaskAudit.append is idempotent: when the event line reached
-                    # disk before its pending file could be removed, it only repairs
-                    # that cleanup. Product/Issue intents stay out of generic audit
-                    # reconciliation, so the owning retry must do this work.
-                    self.store.audit.append(self.request_id, event)
-                except (OSError, TaskError, KeyError, TypeError, ValueError):
-                    raise TaskError(
-                        "audit_pending",
-                        "Product/Issue operation is pending audit cleanup; retry with the same request id",
-                        4,
-                    ) from None
+        staged = self._event(context=context)
+        event, _, _ = self.store.audit.claim(self.request_id, staged)
+        self._validate_existing(event)
+        with self.store.audit.request_lock(self.request_id):
+            # Another retry with this same request may have completed while this
+            # caller waited for the operation lock. Read the durable result again
+            # before driving any backend sub-step.
+            event, committed, pending = self._existing()
+            if committed:
+                if pending:
+                    try:
+                        # TaskAudit.append is idempotent: when the event line reached
+                        # disk before its pending file could be removed, it only repairs
+                        # that cleanup. Product/Issue intents stay out of generic audit
+                        # reconciliation, so the owning retry must do this work.
+                        self.store.audit.append(self.request_id, event)
+                    except (OSError, TaskError, KeyError, TypeError, ValueError):
+                        raise TaskError(
+                            "audit_pending",
+                            "Product/Issue operation is pending audit cleanup; retry with the same request id",
+                            4,
+                        ) from None
+                return self.store._result(self.operation, event)
+            if event is None:
+                raise TaskError("backend_error", "pending Product/Issue operation is unavailable", 1)
+            try:
+                self._drive(event)
+                self._stage(event, "ready_to_commit")
+                event_id = self.store.audit.append(self.request_id, event)
+                if not isinstance(event_id, str) or not event_id:
+                    raise TaskError("backend_error", "Product/Issue audit append was rejected", 1)
+            except (OSError, TaskError, KeyError, TypeError, ValueError):
+                # The staged intent is the repair handle even when Kanboard accepted a
+                # write and its reply was lost.  Never discard it from this point on.
+                raise TaskError("audit_pending", "Product/Issue operation is pending repair; retry with the same request id", 4) from None
             return self.store._result(self.operation, event)
-        if event is None:
-            event = self._event(context=context)
-            self._stage(event, "staged")
-        try:
-            self._drive(event)
-            self._stage(event, "ready_to_commit")
-            event_id = self.store.audit.append(self.request_id, event)
-            if not isinstance(event_id, str) or not event_id:
-                raise TaskError("backend_error", "Product/Issue audit append was rejected", 1)
-        except (OSError, TaskError, KeyError, TypeError, ValueError):
-            # The staged intent is the repair handle even when Kanboard accepted a
-            # write and its reply was lost.  Never discard it from this point on.
-            raise TaskError("audit_pending", "Product/Issue operation is pending repair; retry with the same request id", 4) from None
-        return self.store._result(self.operation, event)
 
     def _drive(self, event: dict[str, Any]) -> None:
         if self.operation in {"product.create", "issue.create"}:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -304,6 +305,42 @@ class TaskAudit:
         os.makedirs(self.pending_dir, exist_ok=True)
         self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
 
+    def claim(self, request_id: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
+        """Atomically reserve a request id or return its durable record.
+
+        Product/Issue writes must establish request-id ownership before their
+        first backend call.  Holding the audit lock across the committed and
+        pending lookup plus the initial staged write makes that check-and-stage
+        sequence a single durable claim.
+        """
+        os.makedirs(self.pending_dir, exist_ok=True)
+        with open(self.lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                committed = self.committed_event(request_id)
+                pending = self.pending_event(request_id)
+                if committed is not None:
+                    return committed, True, pending is not None
+                if pending is not None:
+                    return pending, False, False
+                self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
+                return event, False, False
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def request_lock(self, request_id: str) -> Any:
+        """Serialize replay of one durable request without blocking other requests."""
+        os.makedirs(self.pending_dir, exist_ok=True)
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        path = os.path.join(self.pending_dir, f".request-{digest}.lock")
+        with open(path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def append(self, request_id: str, event: dict[str, Any]) -> str:
         os.makedirs(self.board_dir, exist_ok=True)
         with open(self.lock_path, "a+", encoding="utf-8") as lock:
@@ -340,6 +377,13 @@ class TaskAudit:
                 with open(path, encoding="utf-8") as source:
                     event = json.load(source)
                 request_id = str(event["request_id"])
+                if event.get("protocol") == "product_issue_transaction" or event.get("kind") in {
+                    "product_created", "issue_created", "issue_priority_changed", "issue_closed",
+                }:
+                    # Product/Issue writes record ordered backend progress in their
+                    # pending intent. Only the matching command can replay it.
+                    unresolved += 1
+                    continue
                 self.append(request_id, event)
                 repaired += 1
             except (OSError, ValueError, KeyError, TypeError):
