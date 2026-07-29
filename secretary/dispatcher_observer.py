@@ -138,6 +138,9 @@ class ObserverRecord:
     head: str = ""
     workspace: str = ""
     handle: str = ""
+    # Orca can reissue a handle for the same PTY.  Its leafId remains stable, so keep it beside
+    # the launch handle and use it to find the observer's current handle on later ticks.
+    leaf: str = ""
     pid_file: str = ""
     # How many times a head has been brought up for this sprint. 1 is the first launch, every
     # value above it is a respawn after a dead pid, which is what tells the two apart in the record.
@@ -177,6 +180,7 @@ class ObserverRecord:
             "head": self.head,
             "workspace": self.workspace,
             "handle": self.handle,
+            "leaf": self.leaf,
             "pid_file": self.pid_file,
             "launches": self.launches,
             "pending_launch": self.pending_launch,
@@ -204,6 +208,7 @@ class ObserverRecord:
             head=str(payload.get("head") or ""),
             workspace=str(payload.get("workspace") or ""),
             handle=str(payload.get("handle") or ""),
+            leaf=str(payload.get("leaf") or ""),
             pid_file=str(payload.get("pid_file") or ""),
             launches=_int(payload.get("launches")),
             pending_launch=_int(payload.get("pending_launch")),
@@ -271,6 +276,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "state": record.state,
             "workspace": record.workspace,
             "handle": record.handle,
+            "leaf": record.leaf,
             "launches": record.launches,
             "alive": liveness["alive"],
             "pid_known": liveness["pid_known"],
@@ -819,6 +825,12 @@ def _launch_observer(
     record.head = head
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
+    try:
+        record.leaf = str(runtime.host.pane_leaf(record.workspace, record.handle) or "")
+    except (HostError, OSError, TypeError, ValueError, AttributeError):
+        # The returned handle is still enough when an older host cannot expose a leaf.  Retaining
+        # the launch is safer than treating an identity lookup failure as a failed bring-up.
+        record.leaf = ""
     record.abandoned_handle = False
     record.pid_file = str(launched.get("pid_file") or observer_pid_file(ref))
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}

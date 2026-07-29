@@ -750,11 +750,16 @@ class CommandHostRuntime:
         heartbeat, and an unreadable terminal deliberately returns no queue-end signal rather than
         risking a replacement beside an observer that is merely invisible to Orca.
         """
-        if self.mode == "noop" or not record.workspace or not record.handle:
+        if self.mode == "noop" or not record.workspace or not (record.handle or record.leaf):
             return {}
         terminals = self._worktree_terminals(str(record.workspace))
         terminal = next(
-            (item for item in terminals if item.get("handle") == record.handle), None
+            (
+                item for item in terminals
+                if (record.handle and item.get("handle") == record.handle)
+                or (record.leaf and item.get("leafId") == record.leaf)
+            ),
+            None,
         )
         if terminal is None or terminal.get("connected") is False:
             return {}
@@ -763,7 +768,7 @@ class CommandHostRuntime:
         except (TypeError, ValueError):
             return {}
         try:
-            screen = _read_terminal_text(record.handle, run_json=self._run_json)
+            screen = _read_terminal_text(str(terminal.get("handle") or ""), run_json=self._run_json)
         except (HostError, OSError, ValueError, TypeError):
             return {"last_activity": last, "queue_finished": False}
         return {

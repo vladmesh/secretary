@@ -250,6 +250,43 @@ class ObserverLifecycleTests(unittest.TestCase):
         sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
         self.assertEqual(sprint_status["observer"]["state"], "idle-grace")
 
+    def test_rotated_observer_handle_still_recovers_a_finished_queue(self) -> None:
+        """Orca may rotate the handle while retaining leafId, so status must read the alias."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.leaf, "leaf:observer:sprint:1")
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        calls: list[list[str]] = []
+        stale_output = int((time.time() - 2) * 1000)
+
+        def run_json(args: list[str]) -> dict:
+            calls.append(args)
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": "observer:rotated", "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": stale_output,
+                }]}
+            if args[1:3] == ["terminal", "read"]:
+                return {"terminal": {"tail": ["Worked for 2h 00m 46s", "› "]}}
+            raise AssertionError(args)
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "3600"}):
+                grace = self.runtime.production_tick()
+            self.assertEqual([row["action"] for row in self.actions(grace)], ["observer-idle-grace"])
+            self.assertEqual(self.observers()["sprint:1"].state, "idle-grace")
+
+            with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_IDLE_SECONDS": "1"}):
+                recovered = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(recovered)], ["observer-idle-relaunched"])
+        self.assertEqual(self.observers()["sprint:1"].state, "idle-recovering")
+        reads = [args for args in calls if args[1:3] == ["terminal", "read"]]
+        self.assertTrue(reads)
+        self.assertEqual(reads[0][reads[0].index("--terminal") + 1], "observer:rotated")
+
     def test_active_card_keeps_a_finished_observer_queue_in_waiting_state(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
