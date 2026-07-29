@@ -129,6 +129,38 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
             self.assertEqual(len(client.tasks), 1)
 
+    def test_restore_parity_rejects_missing_issue_metadata(self):
+        class IssuesBoard(_EmptyWriteKanboard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return [
+                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                    ]
+                if method == "saveTaskMetadata" and "issue_priority" in params.get("values", {}):
+                    values = dict(params["values"])
+                    values.pop("issue_priority")
+                    return super().call(method, task_id=params["task_id"], values=values)
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(reference="issue:12", column="Issues")
+            card["fields"]["task_type"] = ""
+            card["fields"]["project"] = ""
+            card["metadata"] = {
+                "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+                "issue_priority": "P0",
+            }
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(RestoreError, "board parity check failed"):
+                import_normalized_board(data_dir, client=IssuesBoard())
+
     def test_empty_bootstrap_stays_outside_restore_doctor_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

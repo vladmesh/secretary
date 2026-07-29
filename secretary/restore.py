@@ -54,6 +54,15 @@ class RestoreError(RuntimeError):
 
 RESTORE_STATE_FILE = "restore-state.json"
 MEMORY_REINDEX_TIMEOUT_SECONDS = 300
+_PRODUCT_ISSUE_METADATA = (
+    "record_type",
+    "product_id",
+    "product_projects",
+    "issue_product",
+    "issue_kind",
+    "issue_priority",
+    "issue_closed_reason",
+)
 
 
 def restore_state(data_dir: Path) -> dict[str, Any]:
@@ -606,10 +615,12 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
             "position": _restore_position(card),
             "swimlane": str(card.get("swimlane") or "") or None,
             "comments": [{"body": body} for body in _restore_comments(card)],
+            "product_issue_metadata": _product_issue_metadata(card["metadata"]),
     }
 
 
 def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
+    extensions = card.get("extensions", {}).get("kanboard", {})
     return {
         "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),
         "state": card.get("state"), "closed": bool(card.get("closed", False)), "project": card.get("project"), "type": card.get("type"),
@@ -617,8 +628,17 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
         "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
         "workspace": card.get("workspace"),
         "position": card.get("position"),
-        "swimlane": card.get("extensions", {}).get("kanboard", {}).get("swimlane"),
+        "swimlane": extensions.get("swimlane"),
         "comments": [{"body": str(comment.get("body") or "")} for comment in card.get("comments", [])],
+        "product_issue_metadata": _product_issue_metadata(extensions),
+    }
+
+
+def _product_issue_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    return {
+        key: str(metadata[key])
+        for key in _PRODUCT_ISSUE_METADATA
+        if key in metadata
     }
 
 
