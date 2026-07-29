@@ -772,6 +772,74 @@ class ProductIssueStoreTests(unittest.TestCase):
             ],
         )
 
+    def test_legacy_pending_partial_backend_writes_restart_each_operation_once(self) -> None:
+        """A migrated legacy intent resumes after a persisted backend sub-step."""
+        for name, method in (
+            ("product", "createTask"),
+            ("issue", "createTask"),
+            ("priority", "createComment"),
+            ("close", "closeTask"),
+        ):
+            request_id = f"legacy-partial-{name}"
+            product_id = f"legacy-partial-{name}-product"
+            if name == "product":
+                invoke = lambda store, product_id=product_id, request_id=request_id: store.create_product(
+                    product_id=product_id, projects=["secretary"], title="Product", description="",
+                    actor="po", request_id=request_id,
+                )
+            else:
+                self.store.create_product(
+                    product_id=product_id, projects=["secretary"], title="Product", description="", actor="po",
+                )
+                issue = self.store.create_issue(
+                    product=product_id, issue_kind="bug", priority="P2", title="Issue", description="", actor="po",
+                )
+                if name == "issue":
+                    invoke = lambda store, product_id=product_id, request_id=request_id: store.create_issue(
+                        product=product_id, issue_kind="feature", priority="P2", title="New issue", description="",
+                        actor="po", request_id=request_id,
+                    )
+                elif name == "priority":
+                    invoke = lambda store, reference=issue["ref"], request_id=request_id: store.update_priority(
+                        reference=reference, priority="P1", reason="urgent", actor="po", request_id=request_id,
+                    )
+                else:
+                    invoke = lambda store, reference=issue["ref"], request_id=request_id: store.close_issue(
+                        reference=reference, reason="resolved", actor="po", request_id=request_id,
+                    )
+
+            original_call = self.client.call
+
+            def interrupted(write: str, **params: object) -> object:
+                result = original_call(write, **params)
+                if write == method:
+                    raise TaskError("backend_unavailable", "backend reply lost", 1)
+                return result
+
+            self.client.call = interrupted  # type: ignore[method-assign]
+            try:
+                with self.subTest(operation=name), self.assertRaises(TaskError) as raised:
+                    invoke(self.store)
+                self.assertEqual(raised.exception.code, "audit_pending")
+            finally:
+                self.client.call = original_call  # type: ignore[method-assign]
+
+            writes_before_restart = len([call for call in self.client.calls if call[0] == method])
+            pending = Path(self.store.audit._pending_path(request_id))
+            legacy = pending.with_name(f"legacy-partial-{name}.json")
+            pending.replace(legacy)
+            self.assertEqual(TaskWriter(self.client, data_dir=self.root / "data").reconcile(), (0, 1))
+
+            restarted = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+            invoke(restarted)
+            self.assertEqual(writes_before_restart, len([call for call in self.client.calls if call[0] == method]))
+            self.assertFalse(legacy.exists())
+            self.assertEqual(restarted.audit.status(), {"ok": True, "pending": 0})
+            self.assertEqual(
+                len([event for event in restarted.audit.events() if event["request_id"] == request_id]), 1,
+            )
+            self.store = restarted
+
     def test_legacy_pending_records_restart_each_product_issue_operation_once(self) -> None:
         """A pre-digest pending file keeps the parent transaction replay semantics."""
         operations: list[tuple[str, object]] = []

@@ -674,6 +674,65 @@ class TaskWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "conflicting pending audit records"):
             audit.append("collision", event)
 
+    def test_legacy_pending_cannot_be_overwritten_by_a_new_stage_intent(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        legacy = pending / "old-name.json"
+        legacy_event = {
+            "request_id": "same-request", "event_id": "evt_legacy", "kind": "comment",
+            "payload": {"body": "legacy"},
+        }
+        incoming = legacy_event | {"event_id": "evt_new", "payload": {"body": "new"}}
+        legacy.write_text(json.dumps(legacy_event), encoding="utf-8")
+
+        with self.assertRaisesRegex(TaskError, "conflicting audit intent"):
+            audit.stage("same-request", incoming)
+        with self.assertRaisesRegex(TaskError, "conflicting audit intent"):
+            audit.stage("same-request", legacy_event | {"event_id": "evt_kind", "kind": "moved"})
+
+        canonical = Path(audit._pending_path("same-request"))
+        self.assertFalse(legacy.exists())
+        self.assertEqual(json.loads(canonical.read_text(encoding="utf-8")), legacy_event)
+        self.assertEqual(audit.events(), [])
+
+    def test_committed_event_cannot_discard_a_conflicting_legacy_pending_intent(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        committed = {
+            "request_id": "same-request", "event_id": "evt_committed", "kind": "comment",
+            "payload": {"body": "committed"},
+        }
+        pending = committed | {"event_id": "evt_pending", "payload": {"body": "pending"}}
+        audit.append("same-request", committed)
+        legacy_dir = Path(audit.pending_dir)
+        legacy_dir.mkdir(exist_ok=True)
+        legacy = legacy_dir / "old-name.json"
+        legacy.write_text(json.dumps(pending), encoding="utf-8")
+
+        with self.assertRaisesRegex(TaskError, "conflicting audit intent"):
+            audit.append("same-request", pending)
+
+        self.assertEqual(audit.events(), [committed])
+        self.assertTrue(Path(audit._pending_path("same-request")).exists())
+        self.assertFalse(legacy.exists())
+        self.assertEqual(audit.reconcile(), (0, 1))
+
+    def test_lone_surrogate_legacy_request_id_fails_closed(self) -> None:
+        audit = TaskAudit(self.tmpdir.name)
+        pending = Path(audit.pending_dir)
+        pending.mkdir(parents=True)
+        legacy = pending / "malformed-unicode.json"
+        legacy.write_text(
+            json.dumps({"request_id": chr(0xD800), "event_id": "evt_bad", "kind": "comment"}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(audit.reconcile(), (0, 1))
+        with self.assertRaisesRegex(TaskError, "request id is invalid"):
+            audit.pending_events()
+        self.assertTrue(legacy.exists())
+
     def test_malformed_legacy_record_blocks_reconcile_without_an_audit_event(self) -> None:
         audit = TaskAudit(self.tmpdir.name)
         pending = Path(audit.pending_dir)

@@ -308,6 +308,7 @@ class TaskAudit:
         with self._locked():
             self._migrate_legacy_pending_locked(request_id)
             self._ensure_pending_target_owned_locked(request_id)
+            self._ensure_pending_intent_matches_locked(request_id, event)
             self._atomic_json(self._pending_path(request_id), event)
 
     def claim(self, request_id: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
@@ -318,6 +319,7 @@ class TaskAudit:
         pending lookup plus the initial staged write makes that check-and-stage
         sequence a single durable claim.
         """
+        self._validate_pending_event(event, request_id)
         os.makedirs(self.pending_dir, exist_ok=True)
         with self._locked():
             self._migrate_legacy_pending_locked(request_id)
@@ -325,10 +327,11 @@ class TaskAudit:
             committed = self.committed_event(request_id)
             pending = self._pending_event_locked(request_id)
             if committed is not None:
+                self._ensure_same_intent(committed, event)
                 return committed, True, pending is not None
             if pending is not None:
+                self._ensure_same_intent(pending, event)
                 return pending, False, False
-            self._validate_pending_event(event, request_id)
             self._ensure_pending_target_owned_locked(request_id)
             self._atomic_json(self._pending_path(request_id), event)
             return event, False, False
@@ -337,7 +340,7 @@ class TaskAudit:
     def request_lock(self, request_id: str) -> Any:
         """Serialize replay of one durable request without blocking other requests."""
         os.makedirs(self.pending_dir, exist_ok=True)
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        digest = self._request_digest(request_id)
         path = os.path.join(self.pending_dir, f".request-{digest}.lock")
         with open(path, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -365,7 +368,11 @@ class TaskAudit:
         with self._locked():
             self._migrate_legacy_pending_locked(request_id)
             self._ensure_pending_target_owned_locked(request_id)
-            if not self._has_request(request_id):
+            self._ensure_pending_intent_matches_locked(request_id, event)
+            committed = self.committed_event(request_id)
+            if committed is not None:
+                self._ensure_same_intent(committed, event)
+            else:
                 with open(self.events_path, "a", encoding="utf-8") as events:
                     events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
                     events.flush()
@@ -472,6 +479,7 @@ class TaskAudit:
         return None
 
     def pending_event(self, request_id: str) -> dict[str, Any] | None:
+        self._validate_request_id(request_id)
         with self._locked():
             return self._pending_event_locked(request_id)
 
@@ -542,6 +550,65 @@ class TaskAudit:
             or (request_id is not None and event["request_id"] != request_id)
         ):
             raise TaskError("audit_pending", "pending audit record is malformed", 4)
+        TaskAudit._validate_request_id(event["request_id"])
+        if request_id is not None:
+            TaskAudit._validate_request_id(request_id)
+
+    @staticmethod
+    def _validate_request_id(request_id: object) -> None:
+        if not isinstance(request_id, str) or not request_id:
+            raise TaskError("audit_pending", "pending audit request id is invalid", 4)
+        try:
+            request_id.encode("utf-8")
+        except UnicodeError:
+            raise TaskError("audit_pending", "pending audit request id is invalid", 4) from None
+
+    @staticmethod
+    def _ensure_same_intent(existing: dict[str, Any], incoming: dict[str, Any]) -> None:
+        """Reject a second meaning for an already-owned request id.
+
+        Product/Issue progress updates intentionally change their event payload as
+        the operation learns backend state, so their immutable operation intent is
+        the ownership key. Other audit writes use their stable kind and payload.
+        """
+        if existing.get("kind") != incoming.get("kind"):
+            raise TaskError("audit_pending", "request id has conflicting audit intent", 4)
+        if existing.get("protocol") == "product_issue_transaction" or incoming.get("protocol") == "product_issue_transaction":
+            if (
+                existing.get("protocol") != "product_issue_transaction"
+                or incoming.get("protocol") != "product_issue_transaction"
+                or existing.get("operation") != incoming.get("operation")
+                or existing.get("intent") != incoming.get("intent")
+            ):
+                raise TaskError("audit_pending", "request id has conflicting audit intent", 4)
+            return
+        existing_payload = existing.get("payload")
+        incoming_payload = incoming.get("payload")
+        if existing.get("kind") == "restored_comment":
+            existing_payload = TaskAudit._stable_restore_comment_payload(existing_payload)
+            incoming_payload = TaskAudit._stable_restore_comment_payload(incoming_payload)
+        if existing.get("kind") in {"observer_launched", "observer_relaunched"}:
+            existing_payload = TaskAudit._stable_observer_launch_payload(existing_payload)
+            incoming_payload = TaskAudit._stable_observer_launch_payload(incoming_payload)
+        if existing_payload != incoming_payload:
+            raise TaskError("audit_pending", "request id has conflicting audit intent", 4)
+
+    @staticmethod
+    def _stable_restore_comment_payload(payload: object) -> object:
+        if not isinstance(payload, dict):
+            return payload
+        return {key: value for key, value in payload.items() if key != "restore_body"}
+
+    @staticmethod
+    def _stable_observer_launch_payload(payload: object) -> object:
+        if not isinstance(payload, dict):
+            return payload
+        return {key: value for key, value in payload.items() if key != "workspace"}
+
+    def _ensure_pending_intent_matches_locked(self, request_id: str, event: dict[str, Any]) -> None:
+        pending = self._pending_event_locked(request_id)
+        if pending is not None:
+            self._ensure_same_intent(pending, event)
 
     def _matching_pending_locked(self, request_id: str) -> list[tuple[str, dict[str, Any]]]:
         result: list[tuple[str, dict[str, Any]]] = []
@@ -639,8 +706,12 @@ class TaskAudit:
 
     def _pending_path(self, request_id: str) -> str:
         """Keep a caller supplied request id out of filesystem path construction."""
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        digest = self._request_digest(request_id)
         return os.path.join(self.pending_dir, f"{digest}.json")
+
+    def _request_digest(self, request_id: str) -> str:
+        self._validate_request_id(request_id)
+        return hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _atomic_json(path: str, document: dict[str, Any]) -> None:
