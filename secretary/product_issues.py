@@ -197,13 +197,110 @@ class ProductIssueStore:
             view.update({"product": metadata.get(META_ISSUE_PRODUCT, ""), "kind": metadata.get(META_ISSUE_KIND, ""), "priority": metadata.get(META_ISSUE_PRIORITY, ""), "close_reason": metadata.get(META_ISSUE_CLOSED_REASON) or None})
         return view
 
-    def _event(self, *, kind: str, role: str, actor: str, reference: str, task_id: int, request_id: str, payload: dict[str, Any]) -> None:
-        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": f"task_kanboard_{task_id}", "ref": reference, "backend": {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}, "request_id": request_id, "payload": payload}
+    def _event(self, *, kind: str, role: str, actor: str, reference: str, task_id: int | None, request_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": f"task_kanboard_{task_id}" if task_id is not None else "", "ref": reference, "backend": {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}, "request_id": request_id, "payload": payload}
+
+    def _commit(self, event: dict[str, Any]) -> None:
+        request_id = str(event["request_id"])
         self.audit.stage(request_id, event)
         try:
             self.audit.append(request_id, event)
         except OSError:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+
+    def _pending(self, request_id: str, kind: str) -> dict[str, Any] | None:
+        committed = self.audit.committed_event(request_id)
+        if committed is not None:
+            if committed.get("kind") != kind:
+                raise TaskError("validation", "request id belongs to another operation", 2)
+            return committed
+        event = self.audit.pending_event(request_id)
+        if event is not None and event.get("kind") != kind:
+            raise TaskError("validation", "request id belongs to another operation", 2)
+        return event
+
+    def _pending_card(self, event: dict[str, Any]) -> dict[str, Any]:
+        ref = str(event.get("ref") or "")
+        if ref:
+            board_id, _ = self._board()
+            card = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
+            if isinstance(card, dict):
+                return card
+        backend = event.get("backend")
+        task_id = backend.get("task_id") if isinstance(backend, dict) else None
+        if not isinstance(task_id, int):
+            raise TaskError("backend_error", "pending Product/Issue write has no task id", 1)
+        for card in self._cards():
+            if card.get("id") == task_id:
+                return card
+        raise TaskError("backend_error", "pending Product/Issue row was not found", 1)
+
+    def _finish_pending_create(self, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise TaskError("backend_error", "pending Product/Issue create has no payload", 1)
+        card = self._pending_card(event)
+        task_id = card.get("id")
+        if not isinstance(task_id, int):
+            raise TaskError("backend_error", "Kanboard returned an invalid pending row", 1)
+        record_type = str(payload.get("record_type") or "")
+        if record_type == PRODUCT_TYPE:
+            product_id = str(payload.get("product_id") or "")
+            ref = f"product:{product_id}"
+            metadata = {
+                META_RECORD_TYPE: PRODUCT_TYPE,
+                META_PRODUCT_ID: product_id,
+                META_PRODUCT_PROJECTS: str(payload.get("product_projects") or ""),
+            }
+        elif record_type == ISSUE_TYPE:
+            ref = f"issue:{task_id}"
+            metadata = {
+                META_RECORD_TYPE: ISSUE_TYPE,
+                META_ISSUE_PRODUCT: str(payload.get("product") or ""),
+                META_ISSUE_KIND: str(payload.get("issue_kind") or ""),
+                META_ISSUE_PRIORITY: str(payload.get("priority") or ""),
+            }
+        else:
+            raise TaskError("backend_error", "pending Product/Issue create has an invalid type", 1)
+        if str(card.get("reference") or "") != ref:
+            if not self.client.call("updateTask", id=task_id, reference=ref):
+                raise TaskError("backend_error", "Kanboard rejected pending Product/Issue reference", 1)
+        event["ref"] = ref
+        event["task_id"] = f"task_kanboard_{task_id}"
+        event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
+        self.audit.stage(str(event["request_id"]), event)
+        if self.client.call("saveTaskMetadata", task_id=task_id, values=metadata) is not True:
+            raise TaskError("backend_error", "Kanboard rejected Product/Issue metadata", 1)
+        actual = self._metadata(self._pending_card(event))
+        if any(actual.get(key) != value for key, value in metadata.items()):
+            raise TaskError("backend_error", "pending Product/Issue metadata remains incomplete", 1)
+
+    def _finish_pending_close(self, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise TaskError("backend_error", "pending issue close has no payload", 1)
+        reason = str(payload.get("reason") or "")
+        if reason not in ISSUE_CLOSE_REASONS:
+            raise TaskError("backend_error", "pending issue close has an invalid reason", 1)
+        card, metadata = self._find(str(event.get("ref") or ""), ISSUE_TYPE)
+        task_id = int(card["id"])
+        existing_reason = metadata.get(META_ISSUE_CLOSED_REASON) or ""
+        if existing_reason not in {"", reason}:
+            raise TaskError("backend_error", "pending issue close reason no longer matches", 1)
+        if existing_reason != reason:
+            if self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason}) is not True:
+                raise TaskError("backend_error", "Kanboard rejected issue closure metadata", 1)
+        content = f"[issue:closed]\n{reason}"
+        comments = self.client.call("getAllComments", task_id=task_id) or []
+        if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
+            if not _comment_was_saved(self.client.call("createComment", task_id=task_id, user_id=0, content=content)):
+                raise TaskError("backend_error", "Kanboard rejected issue closure comment", 1)
+        if int(card.get("is_active", 1) or 0) != 0:
+            if not self.client.call("closeTask", task_id=task_id):
+                raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
+        closed, closed_meta = self._find(str(event["ref"]), ISSUE_TYPE)
+        if int(closed.get("is_active", 1) or 0) != 0 or closed_meta.get(META_ISSUE_CLOSED_REASON) != reason:
+            raise TaskError("backend_error", "pending issue closure remains incomplete", 1)
 
     def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not _ID.fullmatch(product_id):
@@ -213,18 +310,39 @@ class ProductIssueStore:
         unknown = sorted(set(projects) - registered_projects(self.instance))
         if unknown:
             raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
+        request_id = request_id or str(uuid.uuid4())
         ref = f"product:{product_id}"
+        pending = self._pending(request_id, "product_created")
+        if pending is not None:
+            if self.audit.committed_event(request_id) is None:
+                try:
+                    self._finish_pending_create(pending)
+                    self._commit(pending)
+                except (TaskError, OSError, KeyError, TypeError):
+                    raise TaskError("audit_pending", "Product creation is pending repair; retry with the same request id", 4) from None
+            return self.show_product(product_id)
         board_id, column_id = self._board()
         if self.client.call("getTaskByReference", project_id=board_id, reference=ref):
             raise TaskError("validation", f"product {product_id!r} already exists", 2)
+        event = self._event(
+            kind="product_created", role="po", actor=actor, reference=ref, task_id=None,
+            request_id=request_id,
+            payload={"record_type": PRODUCT_TYPE, "product_id": product_id,
+                     "product_projects": json.dumps(sorted(projects), separators=(",", ":"))},
+        )
+        self.audit.stage(request_id, event)
         task_id = self.client.call("createTask", project_id=board_id, title=title, description=description, column_id=column_id, swimlane_id=0)
         if not isinstance(task_id, int):
+            self.audit.discard(request_id)
             raise TaskError("backend_error", "Kanboard rejected the product", 1)
-        if not self.client.call("updateTask", id=task_id, reference=ref):
-            raise TaskError("backend_error", "Kanboard rejected the product reference", 1)
-        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_RECORD_TYPE: PRODUCT_TYPE, META_PRODUCT_ID: product_id, META_PRODUCT_PROJECTS: json.dumps(sorted(projects), separators=(",", ":"))}) is not True:
-            raise TaskError("backend_error", "Kanboard rejected product metadata", 1)
-        self._event(kind="product_created", role="po", actor=actor, reference=ref, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"product_id": product_id, "projects": sorted(projects)})
+        event["task_id"] = f"task_kanboard_{task_id}"
+        event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
+        self.audit.stage(request_id, event)
+        try:
+            self._finish_pending_create(event)
+            self._commit(event)
+        except (TaskError, OSError, KeyError, TypeError):
+            raise TaskError("audit_pending", "Product creation is pending repair; retry with the same request id", 4) from None
         return self.show_product(product_id)
 
     def list_products(self) -> list[dict[str, Any]]:
@@ -237,18 +355,38 @@ class ProductIssueStore:
     def create_issue(self, *, product: str, issue_kind: str, priority: str, title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not product.strip() or issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
             raise TaskError("validation", "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)", 2)
+        request_id = request_id or str(uuid.uuid4())
+        pending = self._pending(request_id, "issue_created")
+        if pending is not None:
+            if self.audit.committed_event(request_id) is None:
+                try:
+                    self._finish_pending_create(pending)
+                    self._commit(pending)
+                except (TaskError, OSError, KeyError, TypeError):
+                    raise TaskError("audit_pending", "Issue creation is pending repair; retry with the same request id", 4) from None
+            return self.show_issue(str(pending["ref"]))
         self.show_product(product)
         board_id, column_id = self._board()
+        event = self._event(
+            kind="issue_created", role="po", actor=actor, reference="", task_id=None,
+            request_id=request_id,
+            payload={"record_type": ISSUE_TYPE, "product": product, "issue_kind": issue_kind,
+                     "priority": priority},
+        )
+        self.audit.stage(request_id, event)
         task_id = self.client.call("createTask", project_id=board_id, title=title, description=description, column_id=column_id, swimlane_id=0)
         if not isinstance(task_id, int):
+            self.audit.discard(request_id)
             raise TaskError("backend_error", "Kanboard rejected the issue", 1)
-        ref = f"issue:{task_id}"
-        if not self.client.call("updateTask", id=task_id, reference=ref):
-            raise TaskError("backend_error", "Kanboard rejected the issue reference", 1)
-        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_RECORD_TYPE: ISSUE_TYPE, META_ISSUE_PRODUCT: product, META_ISSUE_KIND: issue_kind, META_ISSUE_PRIORITY: priority}) is not True:
-            raise TaskError("backend_error", "Kanboard rejected issue metadata", 1)
-        self._event(kind="issue_created", role="po", actor=actor, reference=ref, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"product": product, "kind": issue_kind, "priority": priority})
-        return self.show_issue(ref)
+        event["task_id"] = f"task_kanboard_{task_id}"
+        event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
+        self.audit.stage(request_id, event)
+        try:
+            self._finish_pending_create(event)
+            self._commit(event)
+        except (TaskError, OSError, KeyError, TypeError):
+            raise TaskError("audit_pending", "Issue creation is pending repair; retry with the same request id", 4) from None
+        return self.show_issue(str(event["ref"]))
 
     def list_issues(self, *, product: str | None = None, include_closed: bool = False) -> list[dict[str, Any]]:
         result = []
@@ -300,28 +438,38 @@ class ProductIssueStore:
                 "createComment", task_id=task_id, user_id=0, content=f"[issue:priority]\n{reason}"
             )
         except TaskError:
-            self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason})
+            self._commit(self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason}))
             raise
         if not _comment_was_saved(comment):
             # The priority is already canonical backend state.  Record its audit event so an
             # append failure remains repairable instead of silently losing provenance.
-            self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason})
+            self._commit(self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason}))
             raise TaskError("backend_error", "Kanboard rejected issue priority comment", 1)
-        self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason})
+        self._commit(self._event(kind="issue_priority_changed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"from": previous, "to": priority, "reason": reason}))
         return self.show_issue(reference)
 
     def close_issue(self, *, reference: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if reason not in ISSUE_CLOSE_REASONS:
             raise TaskError("validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2)
+        request_id = request_id or str(uuid.uuid4())
+        pending = self._pending(request_id, "issue_closed")
+        if pending is not None:
+            if self.audit.committed_event(request_id) is None:
+                try:
+                    self._finish_pending_close(pending)
+                    self._commit(pending)
+                except (TaskError, OSError, KeyError, TypeError):
+                    raise TaskError("audit_pending", "Issue closure is pending repair; retry with the same request id", 4) from None
+            return self.show_issue(reference)
         card, _ = self._find(reference, ISSUE_TYPE)
         task_id = int(card["id"])
         if int(card.get("is_active", 1) or 0) == 0:
             raise TaskError("closed", "issue is already closed", 3)
-        if self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason}) is not True:
-            raise TaskError("backend_error", "Kanboard rejected issue closure metadata", 1)
-        if not _comment_was_saved(self.client.call("createComment", task_id=task_id, user_id=0, content=f"[issue:closed]\n{reason}")):
-            raise TaskError("backend_error", "Kanboard rejected issue closure comment", 1)
-        if not self.client.call("closeTask", task_id=task_id):
-            raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
-        self._event(kind="issue_closed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"reason": reason})
+        event = self._event(kind="issue_closed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id, payload={"reason": reason})
+        self.audit.stage(request_id, event)
+        try:
+            self._finish_pending_close(event)
+            self._commit(event)
+        except (TaskError, OSError, KeyError, TypeError):
+            raise TaskError("audit_pending", "Issue closure is pending repair; retry with the same request id", 4) from None
         return self.show_issue(reference)

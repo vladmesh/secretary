@@ -1244,6 +1244,11 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
+                if event.get("kind") in {"product_created", "issue_created", "issue_closed"}:
+                    # Product/Issue writes have ordered backend cleanup.  Only their supported
+                    # command, retried with the original request id, can prove that cleanup.
+                    unresolved += 1
+                    continue
                 if str(event.get("ref") or "").startswith("sprint:"):
                     from secretary.sprints import SprintWriter
 

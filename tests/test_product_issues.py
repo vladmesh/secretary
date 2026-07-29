@@ -190,21 +190,60 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
-    def test_rejected_product_or_issue_metadata_never_reports_a_typed_write(self) -> None:
-        class RejectMetadata(ProductBoard):
+    def test_rejected_product_metadata_stays_pending_until_same_request_repairs_it(self) -> None:
+        class RejectMetadataOnce(ProductBoard):
+            rejected = False
+
             def call(self, method: str, **params: object) -> object:
-                if method == "saveTaskMetadata":
+                if method == "saveTaskMetadata" and not self.rejected:
+                    self.rejected = True
                     self.calls.append((method, params))
                     return False
                 return super().call(method, **params)
 
-        store = ProductIssueStore(RejectMetadata(), data_dir=self.root / "data", instance=self.root)
+        store = ProductIssueStore(RejectMetadataOnce(), data_dir=self.root / "data", instance=self.root)
         with self.assertRaises(TaskError) as raised:
             store.create_product(
-                product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+                product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="product",
             )
-        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(store.audit.events(), [])
+        self.assertEqual(store.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(TaskWriter(store.client, data_dir=self.root / "data").reconcile(), (0, 1))
+        product = store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="product",
+        )
+        self.assertEqual(product["id"], "secretary")
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual([event["kind"] for event in store.audit.events()], ["product_created"])
+
+    def test_rejected_issue_metadata_stays_pending_until_same_request_repairs_it(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        original_call = self.client.call
+        rejected = False
+
+        def reject_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "saveTaskMetadata" and not rejected:
+                rejected = True
+                self.client.calls.append((method, params))
+                return False
+            return original_call(method, **params)
+
+        self.client.call = reject_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_issue(
+                product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po", request_id="issue",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po", request_id="issue",
+        )
+        self.assertEqual(issue["kind"], "bug")
+        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
 
     def test_rejected_issue_metadata_does_not_claim_a_priority_or_close_change(self) -> None:
         self.store.create_product(
@@ -228,11 +267,40 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(self.store.show_issue(issue["ref"])["priority"], "P2")
         with self.assertRaises(TaskError) as raised:
             self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po")
-        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertEqual(raised.exception.code, "audit_pending")
         shown = self.store.show_issue(issue["ref"])
         self.assertFalse(shown["closed"])
         self.assertIsNone(shown["close_reason"])
         self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created"])
+
+    def test_rejected_close_comment_is_repaired_by_same_request(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original_call = self.client.call
+        rejected = False
+
+        def reject_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "createComment" and not rejected:
+                rejected = True
+                self.client.calls.append((method, params))
+                return 0
+            return original_call(method, **params)
+
+        self.client.call = reject_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
+        self.assertFalse(self.store.show_issue(issue["ref"])["closed"])
+        closed = self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+        self.assertTrue(closed["closed"])
+        self.assertEqual(closed["close_reason"], "resolved")
+        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
 
     def test_rejected_priority_comment_keeps_auditable_backend_change(self) -> None:
         self.store.create_product(
