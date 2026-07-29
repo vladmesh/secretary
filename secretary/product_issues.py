@@ -179,19 +179,21 @@ class ProductIssueTransaction:
             "phase": "staged",
         }
 
-    def _existing(self) -> tuple[dict[str, Any] | None, bool]:
+    def _existing(self) -> tuple[dict[str, Any] | None, bool, bool]:
         committed = self.store.audit.committed_event(self.request_id)
         pending = self.store.audit.pending_event(self.request_id)
-        event = committed or pending
-        if event is None:
-            return None, False
-        if (
-            event.get("protocol") != "product_issue_transaction"
-            or event.get("operation") != self.operation
-            or event.get("intent") != self.intent
-        ):
-            raise TaskError("validation", "request id belongs to another operation or payload", 2)
-        return event, committed is not None
+        for event in (committed, pending):
+            if event is None:
+                continue
+            if (
+                event.get("protocol") != "product_issue_transaction"
+                or event.get("operation") != self.operation
+                or event.get("intent") != self.intent
+            ):
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+        if committed is not None:
+            return committed, True, pending is not None
+        return pending, False, False
 
     def _stage(self, event: dict[str, Any], phase: str) -> None:
         event["phase"] = phase
@@ -203,8 +205,21 @@ class ProductIssueTransaction:
         event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
 
     def run(self, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        event, committed = self._existing()
+        event, committed, pending = self._existing()
         if committed:
+            if pending:
+                try:
+                    # TaskAudit.append is idempotent: when the event line reached
+                    # disk before its pending file could be removed, it only repairs
+                    # that cleanup. Product/Issue intents stay out of generic audit
+                    # reconciliation, so the owning retry must do this work.
+                    self.store.audit.append(self.request_id, event)
+                except (OSError, TaskError, KeyError, TypeError, ValueError):
+                    raise TaskError(
+                        "audit_pending",
+                        "Product/Issue operation is pending audit cleanup; retry with the same request id",
+                        4,
+                    ) from None
             return self.store._result(self.operation, event)
         if event is None:
             event = self._event(context=context)
@@ -212,7 +227,9 @@ class ProductIssueTransaction:
         try:
             self._drive(event)
             self._stage(event, "ready_to_commit")
-            self.store.audit.append(self.request_id, event)
+            event_id = self.store.audit.append(self.request_id, event)
+            if not isinstance(event_id, str) or not event_id:
+                raise TaskError("backend_error", "Product/Issue audit append was rejected", 1)
         except (OSError, TaskError, KeyError, TypeError, ValueError):
             # The staged intent is the repair handle even when Kanboard accepted a
             # write and its reply was lost.  Never discard it from this point on.
@@ -329,6 +346,10 @@ class ProductIssueTransaction:
             raise TaskError("backend_error", "required issue comment remains incomplete", 1)
         self._stage(event, phase)
 
+    def _comment(self, kind: str, reason: str) -> str:
+        """Make every required comment a durable sub-step of this request."""
+        return f"[issue:{kind}]\n{reason}\n[product-issue-request:{self.request_id}]"
+
     def _drive_priority(self, event: dict[str, Any]) -> None:
         card, metadata, task_id = self._card_for_issue(event)
         if int(card.get("is_active", 1) or 0) == 0:
@@ -340,7 +361,7 @@ class ProductIssueTransaction:
             context["previous_priority"] = previous
             self._stage(event, "target_read")
         event["payload"] = {"from": previous, "to": self.intent["priority"], "reason": self.intent["reason"]}
-        self._ensure_comment(event, task_id, f"[issue:priority]\n{self.intent['reason']}", "comment_written")
+        self._ensure_comment(event, task_id, self._comment("priority", str(self.intent["reason"])), "comment_written")
         target = str(self.intent["priority"])
         if metadata.get(META_ISSUE_PRIORITY) != target:
             if self.store.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_PRIORITY: target}) is not True:
@@ -358,7 +379,7 @@ class ProductIssueTransaction:
             raise TaskError("backend_error", "pending issue close reason no longer matches", 1)
         if int(card.get("is_active", 1) or 0) == 0 and existing_reason != reason:
             raise TaskError("closed", "issue is already closed", 3)
-        self._ensure_comment(event, task_id, f"[issue:closed]\n{reason}", "comment_written")
+        self._ensure_comment(event, task_id, self._comment("closed", reason), "comment_written")
         if existing_reason != reason:
             if self.store.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason}) is not True:
                 raise TaskError("backend_error", "Kanboard rejected issue closure metadata", 1)
@@ -467,7 +488,7 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"product_id": product_id, "projects": json.dumps(sorted(projects), separators=(",", ":")), "title": title, "description": description, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="product.create", intent=intent, request_id=request_id)
-        existing, _ = transaction._existing()
+        existing, _, _ = transaction._existing()
         if existing is not None:
             return transaction.run()
         ref = f"product:{product_id}"
@@ -489,7 +510,7 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"product": product, "issue_kind": issue_kind, "priority": priority, "title": title, "description": description, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="issue.create", intent=intent, request_id=request_id)
-        existing, _ = transaction._existing()
+        existing, _, _ = transaction._existing()
         if existing is not None:
             return transaction.run()
         self.show_product(product)
@@ -537,7 +558,7 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"reference": reference, "priority": priority, "reason": reason, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="issue.priority", intent=intent, request_id=request_id)
-        existing, _ = transaction._existing()
+        existing, _, _ = transaction._existing()
         if existing is not None:
             return transaction.run()
         card, metadata = self._find(reference, ISSUE_TYPE)
@@ -551,7 +572,7 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"reference": reference, "reason": reason, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="issue.close", intent=intent, request_id=request_id)
-        existing, _ = transaction._existing()
+        existing, _, _ = transaction._existing()
         if existing is not None:
             return transaction.run()
         card, _ = self._find(reference, ISSUE_TYPE)

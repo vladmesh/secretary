@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,7 +77,10 @@ class ProductIssueStoreTests(unittest.TestCase):
         shown = self.store.show_issue(issue["ref"])
         self.assertTrue(shown["closed"])
         self.assertEqual(shown["close_reason"], "resolved")
-        self.assertIn("[issue:priority]\nurgent", [entry["text"] for entry in shown["history"]["comments"]])
+        self.assertIn(
+            "[issue:priority]\nurgent\n[product-issue-request:priority]",
+            [entry["text"] for entry in shown["history"]["comments"]],
+        )
         self.assertEqual(
             [entry["kind"] for entry in shown["history"]["audit"]],
             ["issue_created", "issue_priority_changed", "issue_closed"],
@@ -456,8 +460,163 @@ class ProductIssueStoreTests(unittest.TestCase):
             reference=issue["ref"], priority="P1", reason="urgent", actor="po", request_id="append-failure",
         )
         task_id = int(issue["ref"].split(":")[1])
-        self.assertEqual([comment["comment"] for comment in self.client.comments[task_id]].count("[issue:priority]\nurgent"), 1)
+        self.assertEqual(
+            [comment["comment"] for comment in self.client.comments[task_id]].count(
+                "[issue:priority]\nurgent\n[product-issue-request:append-failure]"
+            ),
+            1,
+        )
         self.assertEqual(len([event for event in self.store.audit.events() if event["request_id"] == "append-failure"]), 1)
+
+    def test_retry_cleans_product_issue_pending_after_audit_append_commits(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original_unlink = os.unlink
+        failed = False
+
+        def fail_pending_unlink(path: str, *args: object, **kwargs: object) -> None:
+            nonlocal failed
+            if path.endswith("pending-audit/post-commit-cleanup.json") and not failed:
+                failed = True
+                raise OSError("pending cleanup interrupted")
+            original_unlink(path, *args, **kwargs)
+
+        with mock.patch("secretary.tasks.os.unlink", side_effect=fail_pending_unlink):
+            with self.assertRaises(TaskError) as raised:
+                self.store.update_priority(
+                    reference=issue["ref"], priority="P1", reason="urgent", actor="po",
+                    request_id="post-commit-cleanup",
+                )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(
+            len([event for event in self.store.audit.events() if event["request_id"] == "post-commit-cleanup"]),
+            1,
+        )
+
+        restarted = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+        repaired = restarted.update_priority(
+            reference=issue["ref"], priority="P1", reason="urgent", actor="po",
+            request_id="post-commit-cleanup",
+        )
+        self.assertEqual(repaired["priority"], "P1")
+        self.assertEqual(restarted.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            len([event for event in restarted.audit.events() if event["request_id"] == "post-commit-cleanup"]),
+            1,
+        )
+
+    def test_same_reason_priority_requests_write_distinct_comments(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        self.store.update_priority(
+            reference=issue["ref"], priority="P1", reason="urgent", actor="po", request_id="priority-one",
+        )
+        self.store.update_priority(
+            reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority-two",
+        )
+        task_id = int(issue["ref"].split(":")[1])
+        self.assertEqual(
+            [comment["comment"] for comment in self.client.comments[task_id]],
+            [
+                "[issue:priority]\nurgent\n[product-issue-request:priority-one]",
+                "[issue:priority]\nurgent\n[product-issue-request:priority-two]",
+            ],
+        )
+
+    def test_every_product_issue_write_boundary_is_repairable(self) -> None:
+        """False replies, exceptions and lost replies all leave one replayable intent."""
+        boundaries = {
+            "product": ("createTask", "updateTask", "saveTaskMetadata", "audit"),
+            "issue": ("createTask", "updateTask", "saveTaskMetadata", "audit"),
+            "priority": ("createComment", "saveTaskMetadata", "audit"),
+            "close": ("createComment", "saveTaskMetadata", "closeTask", "audit"),
+        }
+
+        def operation(name: str, number: int, request_id: str):
+            product_id = f"product-{number}"
+            if name == "product":
+                return lambda store: store.create_product(
+                    product_id=product_id, projects=["secretary"], title="Product", description="",
+                    actor="po", request_id=request_id,
+                )
+            self.store.create_product(
+                product_id=product_id, projects=["secretary"], title="Product", description="", actor="po",
+            )
+            issue = self.store.create_issue(
+                product=product_id, issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+            )
+            if name == "issue":
+                return lambda store: store.create_issue(
+                    product=product_id, issue_kind="feature", priority="P2", title="Feature", description="",
+                    actor="po", request_id=request_id,
+                )
+            if name == "priority":
+                return lambda store: store.update_priority(
+                    reference=issue["ref"], priority="P1", reason="urgent", actor="po", request_id=request_id,
+                )
+            return lambda store: store.close_issue(
+                reference=issue["ref"], reason="resolved", actor="po", request_id=request_id,
+            )
+
+        number = 0
+        for name, methods in boundaries.items():
+            for method in methods:
+                for mode in ("false", "exception", "interruption"):
+                    number += 1
+                    request_id = f"{name}-{method}-{mode}"
+                    invoke = operation(name, number, request_id)
+                    with self.subTest(operation=name, boundary=method, mode=mode):
+                        if method == "audit":
+                            original_append = self.store.audit.append
+
+                            def append(request: str, event: dict, *, mode: str = mode) -> object:
+                                if mode == "false":
+                                    return False
+                                if mode == "exception":
+                                    raise OSError("audit unavailable")
+                                original_append(request, event)
+                                raise OSError("audit reply lost")
+
+                            self.store.audit.append = append  # type: ignore[method-assign]
+                        else:
+                            original_call = self.client.call
+
+                            def call(write: str, **params: object) -> object:
+                                if write != method:
+                                    return original_call(write, **params)
+                                if mode == "false":
+                                    return 0 if write == "createComment" else False
+                                if mode == "exception":
+                                    raise TaskError("backend_unavailable", "backend unavailable", 1)
+                                original_call(write, **params)
+                                raise TaskError("backend_unavailable", "reply lost", 1)
+
+                            self.client.call = call  # type: ignore[method-assign]
+                        try:
+                            with self.assertRaises(TaskError) as raised:
+                                invoke(self.store)
+                            self.assertEqual(raised.exception.code, "audit_pending")
+                        finally:
+                            if method == "audit":
+                                self.store.audit.append = original_append  # type: ignore[method-assign]
+                            else:
+                                self.client.call = original_call  # type: ignore[method-assign]
+                        restarted = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+                        invoke(restarted)
+                        self.assertIsNone(restarted.audit.pending_event(request_id))
+                        self.assertEqual(
+                            len([event for event in restarted.audit.events() if event["request_id"] == request_id]),
+                            1,
+                        )
 
 
 if __name__ == "__main__":
