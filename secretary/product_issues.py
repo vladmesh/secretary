@@ -216,10 +216,11 @@ class ProductIssueStore:
             raise TaskError("validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2)
         card, _ = self._find(reference, ISSUE_TYPE)
         task_id = int(card["id"])
-        if int(card.get("is_active", 1) or 0) != 0:
-            self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason})
-            self.client.call("createComment", task_id=task_id, user_id=0, content=f"[issue:closed]\n{reason}")
-            if not self.client.call("closeTask", task_id=task_id):
-                raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
+        if int(card.get("is_active", 1) or 0) == 0:
+            raise TaskError("closed", "issue is already closed", 3)
+        self.client.call("saveTaskMetadata", task_id=task_id, values={META_ISSUE_CLOSED_REASON: reason})
+        self.client.call("createComment", task_id=task_id, user_id=0, content=f"[issue:closed]\n{reason}")
+        if not self.client.call("closeTask", task_id=task_id):
+            raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
         self._event(kind="issue_closed", role="po", actor=actor, reference=reference, task_id=task_id, request_id=request_id or str(uuid.uuid4()), payload={"reason": reason})
         return self.show_issue(reference)

@@ -104,6 +104,23 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertFalse(any(method == "closeTask" for method, _ in self.client.calls))
 
+    def test_issue_close_has_one_terminal_reason_and_audit_event(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P0", title="Crash", description="", actor="po",
+        )
+        self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+
+        with self.assertRaises(TaskError) as raised:
+            self.store.close_issue(reference=issue["ref"], reason="invalid", actor="po", request_id="retry")
+
+        self.assertEqual(raised.exception.code, "closed")
+        shown = self.store.show_issue(issue["ref"])
+        self.assertEqual(shown["close_reason"], "resolved")
+        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created", "issue_closed"])
+
     def test_issue_and_task_column_guards_are_fail_closed(self) -> None:
         self.store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
