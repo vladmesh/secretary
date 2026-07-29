@@ -2033,8 +2033,9 @@ class DispatcherRuntime:
         active = records.get(ref)
         requeued = (
             active is not None
-            and (active.attempt_id or attempt_id) == attempt_id
-            and self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
+            and self.audit.committed_event(
+                _attempt_request_id(active.attempt_id or attempt_id, "claim", ref)
+            ) is not None
         )
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
@@ -2056,6 +2057,9 @@ class DispatcherRuntime:
                 "review-inventory-blocked",
                 "review-wait-stall",
             )
+        )
+        claim_preexisting = (
+            self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
         )
         if requeued and active is not None:
             # The preempted head can still be sitting in the workspace the next round claims. The
@@ -2081,6 +2085,7 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
+        claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
@@ -2092,7 +2097,7 @@ class DispatcherRuntime:
             resolved_review_head=review_head,
             slug=task.get("workspace", {}).get("slug") or "",
             base_branch=task.get("workspace", {}).get("base_branch") or "",
-            request_id=_attempt_request_id(attempt_id, "claim", ref),
+            request_id=claim_request_id,
         )
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
@@ -2118,6 +2123,7 @@ class DispatcherRuntime:
             records,
             payload,
             require_existing_workspace=retry_after_block,
+            allow_existing_head=claim_preexisting and not retry_after_block and not requeued,
         )
 
     def _launch_worker_after_claim(
@@ -2128,6 +2134,7 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         *,
         require_existing_workspace: bool = False,
+        allow_existing_head: bool = False,
     ) -> dict[str, Any]:
         ref = claimed["ref"]
         mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
@@ -2155,6 +2162,32 @@ class DispatcherRuntime:
                 "reason": "claim live board mismatch",
                 "divergence_id": divergence["id"],
             }
+        live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
+        if live_head.get("known") and live_head.get("alive"):
+            if allow_existing_head:
+                record.workspace = self.host.restore_workspace(claimed, record.worker)
+                record.worker_pid_file = _launch_pid_file(WORKER_ROLE, ref)
+                record.worker_started_at = record.worker_progress_at = time.time()
+                record.comment_baseline = _report_adoption_baseline(claimed)
+                record.state = "claimed"
+                records[ref] = record
+                self.save_records(payload, records)
+                return {
+                    "status": "ok",
+                    "step": "claim",
+                    "action": "worker-launch-adopted",
+                    "pilot_ref": ref,
+                    "attempt_id": record.attempt_id,
+                    "worker": record.worker,
+                    "workspace": record.workspace,
+                }
+            return _head_stop_unconfirmed(
+                step="claim",
+                ref=ref,
+                attempt_id=record.attempt_id,
+                role=WORKER_ROLE,
+                reason="another worker process already owns this card's workspace",
+            )
         # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
         # resolves the same path itself, and the answer is exactly what a tick that dies mid-launch
         # never sees. With it and the pid file in the record, the next tick can read the head's
@@ -2454,6 +2487,9 @@ class DispatcherRuntime:
         is about to start, so an adoption resumes that round and not the one being left behind.
         Returns the failure, or None when the launch may proceed.
         """
+        live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
+        if live_head.get("known") and live_head.get("alive"):
+            return "another worker process already owns this card's workspace"
         return _write_launch_intent(
             self,
             payload,
@@ -2488,9 +2524,21 @@ class DispatcherRuntime:
                 if not mismatch:
                     record.state = "claim_verified"
                     self.save_records(payload, records)
-                    return self._launch_worker_after_claim(task, record, records, payload)
+                    return self._launch_worker_after_claim(
+                        task,
+                        record,
+                        records,
+                        payload,
+                        allow_existing_head=bool(record.workspace),
+                    )
         if record.state == "claim_verified":
-            return self._launch_worker_after_claim(task, record, records, payload)
+            return self._launch_worker_after_claim(
+                task,
+                record,
+                records,
+                payload,
+                allow_existing_head=bool(record.workspace),
+            )
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
         if marker == "report:done":
             try:

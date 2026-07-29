@@ -16,7 +16,13 @@ from secretary.dispatcher_observer import (
     reconcile_observers,
     retry_pending_observer_stops,
 )
-from secretary.dispatcher_launch import launch_intent, stop_launch_intent
+from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
+    WORKER_ROLE,
+    forget_role_head,
+    launch_intent,
+    stop_launch_intent,
+)
 from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -28,6 +34,7 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
+from secretary.dispatcher_types import HostError
 from secretary.tasks import TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
 
@@ -861,12 +868,11 @@ def _reconcile_production(
     `_advance_active` only ever looks at cards the board currently reports as
     in_progress/validate, so a record whose card left that cycle from outside the
     dispatcher (a PO move, an archive, a delete) is invisible to it forever. This
-    runs every tick, before the active cards are advanced, and is the only place
-    that removes a record without also touching the card, its workspace or its
-    terminal: reconciliation observes drift the dispatcher did not cause, it does
-    not correct it. A controlled divergence closes the same way: once the card
-    tied to it is no longer in the active cycle, whatever the reason it opened,
-    it does not need an operator's eyes anymore.
+    runs every tick, before the active cards are advanced. A record owns every
+    head launched for the card, so reconciliation must settle those heads before
+    it can remove the record. A controlled divergence closes the same way: once
+    the card tied to it is no longer in the active cycle, whatever the reason it
+    opened, it does not need an operator's eyes anymore.
     """
     outcomes: list[dict[str, Any]] = []
     state_cache: dict[str, str | None] = {}
@@ -884,26 +890,17 @@ def _reconcile_production(
         state = card_state(ref)
         if state is None or state in ("in_progress", "validate"):
             continue
+        # Ready is handled by `_claim`: it stops the previous attempt through this record before
+        # opening the next one. Removing the record here would turn a safe requeue into a second
+        # writer beside the worker or reviewer that survived the preemption.
+        if state == "ready":
+            continue
         record = records[ref]
-        intent = launch_intent(record)
-        if intent:
-            # An unresolved bring-up is the only pointer to a head that may be running right now,
-            # and this record is the only pointer to that intent. `_tick_task` never sees this card
-            # — the board has taken it out of the active cycle — so the intent is settled here or
-            # not at all: a record dropped over a live head leaves it in the workspace, and the
-            # requeue that follows opens a second one beside it.
-            failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
-            if failure is not None:
-                outcomes.append({
-                    "status": "degraded",
-                    "step": "production-reconcile",
-                    "ref": ref,
-                    "action": "launch-intent-stop-unconfirmed",
-                    "reason": f"the head of an unresolved launch could not be stopped: {failure}",
-                    "record_state": record.state,
-                    "card_state": state,
-                })
-                continue
+        intent_action = str(launch_intent(record).get("action") or "")
+        stopped = _stop_record_heads(runtime, record, ref, state)
+        if stopped is not None:
+            outcomes.append(stopped)
+            continue
         records.pop(ref)
         outcomes.append({
             "status": "ok",
@@ -913,7 +910,7 @@ def _reconcile_production(
             "reason": "card left the active dispatcher cycle",
             "record_state": record.state,
             "card_state": state,
-            **({"stopped_launch": str(intent.get("action") or "")} if intent else {}),
+            **({"stopped_launch": intent_action} if intent_action else {}),
         })
 
     divergences = payload.get("controlled_divergences")
@@ -938,6 +935,53 @@ def _reconcile_production(
                 "divergence_ids": closed_ids,
             })
     return outcomes
+
+
+def _stop_record_heads(
+    runtime: Any,
+    record: DispatcherRecord,
+    ref: str,
+    card_state: str,
+) -> dict[str, Any] | None:
+    """Stop every head owned by one record, or preserve the record and report the refusal."""
+    intent = launch_intent(record)
+    if intent:
+        failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
+        if failure is not None:
+            return {
+                "status": "degraded",
+                "step": "production-reconcile",
+                "ref": ref,
+                "action": "launch-intent-stop-unconfirmed",
+                "reason": f"the head of an unresolved launch could not be stopped: {failure}",
+                "record_state": record.state,
+                "card_state": card_state,
+            }
+    has_head = any((
+        record.handle,
+        record.worker_leaf,
+        record.worker_pid_file,
+        record.review_handle,
+        record.review_leaf,
+        record.review_pid_file,
+    ))
+    if not has_head:
+        return None
+    try:
+        runtime.host.stop_workspace(record)
+    except HostError as exc:
+        return {
+            "status": "degraded",
+            "step": "production-reconcile",
+            "ref": ref,
+            "action": "head-stop-unconfirmed",
+            "reason": f"the card left the active cycle, but its heads could not be stopped: {exc}",
+            "record_state": record.state,
+            "card_state": card_state,
+        }
+    forget_role_head(record, WORKER_ROLE)
+    forget_role_head(record, REVIEW_ROLE)
+    return None
 
 
 def _close_divergences_for_ref(payload: dict[str, Any], ref: str, card_state: str) -> list[str]:
@@ -1024,7 +1068,30 @@ def _production_tick_active(
     if mismatch is not None:
         return mismatch
     attempt_id = record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
-    return runtime._tick_task(task, records, payload, attempt_id)
+    outcome = runtime._tick_task(task, records, payload, attempt_id)
+    # A PO can move the card after the live read above and before `_tick_task` launches or
+    # respawns a head. Reconcile cannot prevent that race because this active pass already owns
+    # the stale task snapshot. Check the postcondition while the record still names the head that
+    # was just opened, and settle it before the tick can claim the card again.
+    state = _current_card_state(runtime, ref)
+    record = records.get(ref)
+    if state is None or state in ("in_progress", "validate") or record is None:
+        return outcome
+    stopped = _stop_record_heads(runtime, record, ref, state)
+    if stopped is not None:
+        return stopped
+    if state != "ready":
+        records.pop(ref, None)
+    return {
+        "status": "ok",
+        "step": "production-reconcile",
+        "ref": ref,
+        "action": "stale-head-stopped",
+        "reason": "card left the active dispatcher cycle while its tick was running",
+        "record_state": record.state,
+        "card_state": state,
+        "superseded_action": str(outcome.get("action") or outcome.get("step") or ""),
+    }
 
 
 def _production_active_mismatch(

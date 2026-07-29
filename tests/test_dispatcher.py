@@ -909,11 +909,111 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(action["card_state"], "ideas")
         payload = self.runtime.production_state.load()
         self.assertNotIn("secretary-510-pilot", payload["records"])
-        # Reconciliation only ever removes bookkeeping: the workspace and terminal it had are
-        # untouched (claiming a now-unblocked neighbor card is a separate, legitimate tick action).
-        self.assertEqual(self.host.stopped, [])
+        # The record owns the live head. It must be stopped before the record can disappear, or a
+        # later requeue will open another writer in the same workspace.
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
         self.assertEqual(self.host.torn_down, [])
         self.assertNotIn("secretary-510-pilot", self.host.prepared)
+
+    def test_production_reconcile_keeps_record_when_head_stop_is_unconfirmed(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="park it",
+            request_id="move-to-blocked-stop-refused",
+        )
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        self.assertEqual([a["action"] for a in actions], ["head-stop-unconfirmed"])
+        self.assertEqual(result["status"], "degraded")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_production_requeue_stops_previous_head_before_claiming_again(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="replace the active attempt",
+            request_id="production-fast-requeue",
+        )
+        self.host.calls.clear()
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual(len(claim), 1)
+        self.assertIn("stop_workspace", self.host.calls, result)
+        self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
+
+    def test_fresh_claim_refuses_to_launch_over_an_unowned_live_worker(self) -> None:
+        self.commit_cutover()
+        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a["action"] for a in claim], ["worker-stop-unconfirmed"])
+        self.assertEqual(self.host.prepared, [])
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+        retried = self.runtime.production_tick()
+
+        retry = [a for a in retried["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a["action"] for a in retry], ["worker-stop-unconfirmed"])
+        self.assertEqual(self.host.prepared, [])
+
+    def test_production_tick_stops_respawn_started_after_po_parked_the_card(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        stale = time.time() - stall_seconds("worker") - 60
+        record["worker_started_at"] = stale
+        record["worker_progress_at"] = stale
+        self.runtime.production_state.save(payload)
+        self.host.worker_status_result = {
+            "known": True,
+            "live": False,
+            "reason": "missing-terminal",
+        }
+        real_show = self.reader.show
+        raced = {"done": False}
+
+        def show_then_park(reference: str):
+            task = real_show(reference)
+            if reference == "secretary-510-pilot" and not raced["done"]:
+                raced["done"] = True
+                self.writer.move(
+                    role="po",
+                    actor="operator",
+                    reference=reference,
+                    target="blocked",
+                    reason="park after the active reread",
+                    request_id="park-during-active-tick",
+                )
+            return task
+
+        with mock.patch.object(self.reader, "show", side_effect=show_then_park):
+            result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
+        self.assertEqual([a["action"] for a in actions], ["stale-head-stopped"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn("restart_worker", self.host.calls)
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
         # secretary-755 reviewer finding: `active_refs` is a snapshot taken at the top of the
