@@ -870,7 +870,11 @@ class TaskWriter:
             record_type = task.get("record_type")
             if record_type in {"issue", "product"}:
                 raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
-            if source == "issues" and not record_type:
+            # An unclassified card in the current Issues column is a migrated legacy
+            # Ideas card.  A still-unmigrated Ideas board has the same requirement.
+            # Neither may take a normal task transition until a PO explicitly triages it.
+            legacy_unclassified = source in {"issues", "ideas"} and not record_type
+            if legacy_unclassified:
                 if role != "po" or target != "ready":
                     raise TaskError("transition_forbidden", "legacy Ideas require explicit PO triage to Ready", 3)
             if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
@@ -885,7 +889,7 @@ class TaskWriter:
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
-                if source == "issues" and not record_type:
+                if legacy_unclassified:
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"record_type": "task"})
                 if target == "ready":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)

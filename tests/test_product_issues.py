@@ -156,6 +156,32 @@ class ProductIssueStoreTests(unittest.TestCase):
         writer.move(role="po", actor="po", reference="secretary-468", target="ready", reason="")
         self.assertEqual(self.client.metadata[12]["record_type"], "task")
 
+    def test_unmigrated_ideas_board_requires_the_same_po_triage(self) -> None:
+        class LegacyIdeasBoard(ProductBoard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return [
+                        {"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                    ]
+                return super().call(method, **params)
+
+        client = LegacyIdeasBoard()
+        client.tasks[0]["column_id"] = 1
+        client.metadata[12] = {}
+        writer = TaskWriter(client, data_dir=self.root / "data")
+
+        with self.assertRaises(TaskError) as raised:
+            writer.move(
+                role="steward", actor="steward", reference="secretary-468", target="ready", reason="",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertNotIn("record_type", client.metadata[12])
+
+        writer.move(role="po", actor="po", reference="secretary-468", target="ready", reason="")
+        self.assertEqual(client.metadata[12]["record_type"], "task")
+
     def test_missing_issue_arguments_are_structured(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
