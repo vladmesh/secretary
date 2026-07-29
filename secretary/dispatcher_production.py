@@ -890,16 +890,15 @@ def _reconcile_production(
         state = card_state(ref)
         if state is None or state in ("in_progress", "validate"):
             continue
-        # Ready is handled by `_claim`: it stops the previous attempt through this record before
-        # opening the next one. Removing the record here would turn a safe requeue into a second
-        # writer beside the worker or reviewer that survived the preemption.
-        if state == "ready":
-            continue
         record = records[ref]
         intent_action = str(launch_intent(record).get("action") or "")
         stopped = _stop_record_heads(runtime, record, ref, state)
         if stopped is not None:
             outcomes.append(stopped)
+            continue
+        # Keep the settled record for `_claim`: its workspace is the checkout the next attempt
+        # must reuse, while every head and unresolved intent it used to own is now confirmed gone.
+        if state == "ready":
             continue
         records.pop(ref)
         outcomes.append({
@@ -957,18 +956,16 @@ def _stop_record_heads(
                 "record_state": record.state,
                 "card_state": card_state,
             }
-    has_head = any((
-        record.handle,
-        record.worker_leaf,
-        record.worker_pid_file,
-        record.review_handle,
-        record.review_leaf,
-        record.review_pid_file,
-    ))
-    if not has_head:
+    if not record.owns_head():
         return None
     try:
-        runtime.host.stop_workspace(record)
+        if record.workspace:
+            runtime.host.stop_workspace(record)
+        else:
+            if record.owns_head(REVIEW_ROLE):
+                runtime.host.stop_head(record, REVIEW_ROLE)
+            if record.owns_head(WORKER_ROLE):
+                runtime.host.stop_head(record, WORKER_ROLE)
     except HostError as exc:
         return {
             "status": "degraded",
@@ -1069,6 +1066,14 @@ def _production_tick_active(
         return mismatch
     attempt_id = record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
     outcome = runtime._tick_task(task, records, payload, attempt_id)
+    if outcome.get("action") not in {
+        "rework-started",
+        "review-started",
+        "review-respawned",
+        "worker-launch-adopted",
+        "worker-respawned",
+    }:
+        return outcome
     # A PO can move the card after the live read above and before `_tick_task` launches or
     # respawns a head. Reconcile cannot prevent that race because this active pass already owns
     # the stale task snapshot. Check the postcondition while the record still names the head that

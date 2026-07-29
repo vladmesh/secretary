@@ -381,9 +381,6 @@ class FakeHost:
         # that never wrote one would make every intent look like a head that never came up. None
         # models a runtime that writes no heartbeat at all.
         self.head_pid: int | None = os.getpid()
-        # Every heartbeat this fake has written, per role: a stop drops them, so a head the test
-        # stopped stops reading as alive.
-        self.head_pid_files: dict[str, set[str]] = {"worker": set(), "review": set()}
         # Stop refusals (secretary-820). A stop the host will not confirm must never be followed by
         # a replacement head, and these are how a test makes one refuse.
         self.fail_stop_workspace_reason = ""
@@ -397,7 +394,6 @@ class FakeHost:
         if self.head_pid is None:
             path.unlink(missing_ok=True)
             return
-        self.head_pid_files[kind].add(str(path))
         path.write_text(str(self.head_pid), encoding="utf-8")
 
     def prepare_worker(
@@ -603,9 +599,8 @@ class FakeHost:
         every later liveness read would answer that the head the test just stopped is running.
         """
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
-        for path in {pid_file, *self.head_pid_files.get(kind, set())}:
-            if path:
-                Path(path).unlink(missing_ok=True)
+        if pid_file:
+            Path(pid_file).unlink(missing_ok=True)
 
     def stop_review(self, record) -> None:
         self.calls.append("stop_review")
@@ -955,7 +950,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("stop_workspace", self.host.calls, result)
         self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
 
-    def test_fresh_claim_refuses_to_launch_over_an_unowned_live_worker(self) -> None:
+    def test_fresh_claim_stops_an_unowned_live_worker_before_launch(self) -> None:
         self.commit_cutover()
         pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
         pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -964,15 +959,24 @@ class DispatcherRuntimeTests(unittest.TestCase):
         result = self.runtime.production_tick()
 
         claim = [a for a in result["actions"] if a.get("step") == "claim"]
-        self.assertEqual([a["action"] for a in claim], ["worker-stop-unconfirmed"])
+        self.assertEqual([a.get("status") for a in claim], ["ok"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+
+    def test_fresh_claim_blocks_when_an_unowned_worker_will_not_stop(self) -> None:
+        self.commit_cutover()
+        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a["action"] for a in claim], ["orphan-worker-stop-unconfirmed"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(self.host.prepared, [])
         self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
-
-        retried = self.runtime.production_tick()
-
-        retry = [a for a in retried["actions"] if a.get("step") == "claim"]
-        self.assertEqual([a["action"] for a in retry], ["worker-stop-unconfirmed"])
-        self.assertEqual(self.host.prepared, [])
 
     def test_production_tick_stops_respawn_started_after_po_parked_the_card(self) -> None:
         self.commit_cutover()

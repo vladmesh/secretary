@@ -2031,12 +2031,7 @@ class DispatcherRuntime:
         # the old report, and the journal gets a second attempt instead of nothing. A committed
         # claim without a record is a genuine board divergence and still fails closed below.
         active = records.get(ref)
-        requeued = (
-            active is not None
-            and self.audit.committed_event(
-                _attempt_request_id(active.attempt_id or attempt_id, "claim", ref)
-            ) is not None
-        )
+        requeued = active is not None
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
@@ -2058,15 +2053,12 @@ class DispatcherRuntime:
                 "review-wait-stall",
             )
         )
-        claim_preexisting = (
-            self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
-        )
         if requeued and active is not None:
             # The preempted head can still be sitting in the workspace the next round claims. The
             # workspace is what it is stopped through, not the handle: a head adopted from a launch
             # intent is running with no handle on record, and skipping it here would leave it in
             # the checkout the new round is about to hand a second head.
-            if active.review_handle or active.review_leaf or active.review_pid_file:
+            if active.owns_head("review"):
                 # A preempt out of Validate leaves the worker pane already closed by
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
@@ -2075,7 +2067,7 @@ class DispatcherRuntime:
                 )
                 if unconfirmed is not None:
                     return unconfirmed
-            if active.handle or active.workspace or active.worker_pid_file:
+            if active.owns_head("worker"):
                 unconfirmed = self._stop_worker_confirmed(
                     active, ref, step="claim", attempt_id=attempt_id
                 )
@@ -2123,7 +2115,6 @@ class DispatcherRuntime:
             records,
             payload,
             require_existing_workspace=retry_after_block,
-            allow_existing_head=claim_preexisting and not retry_after_block and not requeued,
         )
 
     def _launch_worker_after_claim(
@@ -2134,7 +2125,6 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         *,
         require_existing_workspace: bool = False,
-        allow_existing_head: bool = False,
     ) -> dict[str, Any]:
         ref = claimed["ref"]
         mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
@@ -2164,30 +2154,35 @@ class DispatcherRuntime:
             }
         live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
         if live_head.get("known") and live_head.get("alive"):
-            if allow_existing_head:
-                record.workspace = self.host.restore_workspace(claimed, record.worker)
-                record.worker_pid_file = _launch_pid_file(WORKER_ROLE, ref)
-                record.worker_started_at = record.worker_progress_at = time.time()
-                record.comment_baseline = _report_adoption_baseline(claimed)
-                record.state = "claimed"
-                records[ref] = record
+            record.workspace = self.host.restore_workspace(claimed, record.worker)
+            record.worker_pid_file = _launch_pid_file(WORKER_ROLE, ref)
+            records[ref] = record
+            try:
+                self.host.stop_workspace(record)
+            except HostError as exc:
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=(
+                        "dispatcher found an unowned live worker and could not confirm its stop: "
+                        f"{scrub_host_output(str(exc))}"
+                    ),
+                    request_id=_attempt_request_id(
+                        record.attempt_id, "orphan-worker-stop-blocked", ref
+                    ),
+                )
                 self.save_records(payload, records)
                 return {
-                    "status": "ok",
+                    "status": "blocked",
                     "step": "claim",
-                    "action": "worker-launch-adopted",
+                    "action": "orphan-worker-stop-unconfirmed",
                     "pilot_ref": ref,
                     "attempt_id": record.attempt_id,
-                    "worker": record.worker,
-                    "workspace": record.workspace,
+                    "reason": "an unowned live worker could not be stopped",
                 }
-            return _head_stop_unconfirmed(
-                step="claim",
-                ref=ref,
-                attempt_id=record.attempt_id,
-                role=WORKER_ROLE,
-                reason="another worker process already owns this card's workspace",
-            )
+            _forget_role_head(record, WORKER_ROLE)
         # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
         # resolves the same path itself, and the answer is exactly what a tick that dies mid-launch
         # never sees. With it and the pid file in the record, the next tick can read the head's
@@ -2487,9 +2482,6 @@ class DispatcherRuntime:
         is about to start, so an adoption resumes that round and not the one being left behind.
         Returns the failure, or None when the launch may proceed.
         """
-        live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
-        if live_head.get("known") and live_head.get("alive"):
-            return "another worker process already owns this card's workspace"
         return _write_launch_intent(
             self,
             payload,
@@ -2524,21 +2516,9 @@ class DispatcherRuntime:
                 if not mismatch:
                     record.state = "claim_verified"
                     self.save_records(payload, records)
-                    return self._launch_worker_after_claim(
-                        task,
-                        record,
-                        records,
-                        payload,
-                        allow_existing_head=bool(record.workspace),
-                    )
+                    return self._launch_worker_after_claim(task, record, records, payload)
         if record.state == "claim_verified":
-            return self._launch_worker_after_claim(
-                task,
-                record,
-                records,
-                payload,
-                allow_existing_head=bool(record.workspace),
-            )
+            return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
         if marker == "report:done":
             try:

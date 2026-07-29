@@ -96,6 +96,16 @@ class DispatcherRecord:
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
     launch_intent: dict[str, Any] = field(default_factory=dict)
 
+    def owns_head(self, role: str | None = None) -> bool:
+        """Whether this record still carries an identity that must be settled before replacement."""
+        worker = bool(self.handle or self.worker_leaf or self.worker_pid_file)
+        review = bool(self.review_handle or self.review_leaf or self.review_pid_file)
+        if role == "worker":
+            return worker or bool(self.workspace)
+        if role == "review":
+            return review
+        return worker or review or bool(self.workspace)
+
     def to_json(self) -> dict[str, Any]:
         return {
             "claimed_at": self.claimed_at,
