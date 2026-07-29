@@ -2062,7 +2062,7 @@ class DispatcherRuntime:
             # workspace is what it is stopped through, not the handle: a head adopted from a launch
             # intent is running with no handle on record, and skipping it here would leave it in
             # the checkout the new round is about to hand a second head.
-            if active.needs_settling() and active.owns_head("review"):
+            if active.owns_head("review"):
                 # A preempt out of Validate leaves the worker pane already closed by
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
@@ -2071,7 +2071,7 @@ class DispatcherRuntime:
                 )
                 if unconfirmed is not None:
                     return unconfirmed
-            if active.needs_settling() and active.owns_head("worker"):
+            if active.needs_settling():
                 unconfirmed = self._stop_worker_confirmed(
                     active, ref, step="claim", attempt_id=attempt_id
                 )

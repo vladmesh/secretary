@@ -3299,6 +3299,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.start_pilot()
         self.runtime.tick(self.selector)
         first_attempt = self.runtime.state.load()["attempt_id"]
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = ""
+        self.runtime.state.save(payload)
+        Path(pid_file_path("worker", "secretary-510-pilot")).unlink(missing_ok=True)
         self.writer.move(
             role="po", actor="operator", reference="secretary-510-pilot",
             target="ready", reason="preempted", request_id="po-preempt-attempt-2",

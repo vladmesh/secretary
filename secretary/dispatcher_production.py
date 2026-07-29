@@ -978,7 +978,8 @@ def _stop_record_heads(
         }
     forget_role_head(record, WORKER_ROLE)
     forget_role_head(record, REVIEW_ROLE)
-    record.workspace_settled = True
+    if record.workspace:
+        record.workspace_settled = True
     return None
 
 
@@ -1082,26 +1083,16 @@ def _production_active_mismatch(
     actual_worker = task.get("claim", {}).get("worker")
     if actual_worker in (None, record.worker):
         return None
-    intent = launch_intent(record)
-    if intent:
-        # This record is dropped a few lines down, and while an unresolved bring-up sits on it, it
-        # is the only thing naming a head that may be running in that workspace. The mismatch runs
-        # before `_tick_task`, so nothing else will settle it: the head goes first, and a stop the
-        # host will not confirm leaves the card and its record exactly as they are for the next
-        # tick to retry. Blocking over a live worker is how the requeue opens a second one.
-        failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
-        if failure is not None:
-            return {
-                "status": "degraded",
-                "step": "production-recovery",
-                "ref": task["ref"],
-                "action": "launch-intent-stop-unconfirmed",
-                "reason": (
-                    "active task claim no longer matches production record, and the head of an "
-                    f"unresolved launch could not be stopped: {failure}"
-                ),
-            }
-        runtime.save_records(payload, records)
+    stopped = _stop_record_heads(
+        runtime, record, task["ref"], str(task.get("state") or "")
+    )
+    if stopped is not None:
+        stopped["step"] = "production-recovery"
+        stopped["reason"] = (
+            "active task claim no longer matches production record, and its heads could not be "
+            f"stopped: {stopped['reason']}"
+        )
+        return stopped
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,
