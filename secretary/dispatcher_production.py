@@ -956,7 +956,7 @@ def _stop_record_heads(
                 "record_state": record.state,
                 "card_state": card_state,
             }
-    if not record.owns_head():
+    if not record.needs_settling():
         return None
     try:
         if record.workspace:
@@ -978,6 +978,7 @@ def _stop_record_heads(
         }
     forget_role_head(record, WORKER_ROLE)
     forget_role_head(record, REVIEW_ROLE)
+    record.workspace_settled = True
     return None
 
 
@@ -1066,37 +1067,7 @@ def _production_tick_active(
         return mismatch
     attempt_id = record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
     outcome = runtime._tick_task(task, records, payload, attempt_id)
-    if outcome.get("action") not in {
-        "rework-started",
-        "review-started",
-        "review-respawned",
-        "worker-launch-adopted",
-        "worker-respawned",
-    }:
-        return outcome
-    # A PO can move the card after the live read above and before `_tick_task` launches or
-    # respawns a head. Reconcile cannot prevent that race because this active pass already owns
-    # the stale task snapshot. Check the postcondition while the record still names the head that
-    # was just opened, and settle it before the tick can claim the card again.
-    state = _current_card_state(runtime, ref)
-    record = records.get(ref)
-    if state is None or state in ("in_progress", "validate") or record is None:
-        return outcome
-    stopped = _stop_record_heads(runtime, record, ref, state)
-    if stopped is not None:
-        return stopped
-    if state != "ready":
-        records.pop(ref, None)
-    return {
-        "status": "ok",
-        "step": "production-reconcile",
-        "ref": ref,
-        "action": "stale-head-stopped",
-        "reason": "card left the active dispatcher cycle while its tick was running",
-        "record_state": record.state,
-        "card_state": state,
-        "superseded_action": str(outcome.get("action") or outcome.get("step") or ""),
-    }
+    return outcome
 
 
 def _production_active_mismatch(

@@ -1376,6 +1376,7 @@ class HostLaunchContourTests(unittest.TestCase):
         self.host.stop_head(record, "worker")
 
         self.assertIsNotNone(head.poll(), "the head must actually be gone")
+        self.assertFalse(Path(record.worker_pid_file).exists())
 
     def test_a_head_nothing_names_cannot_be_reported_as_stopped(self) -> None:
         record = DispatcherRecord(
@@ -1605,6 +1606,31 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.assertEqual([a["action"] for a in actions], ["record-removed"])
         self.assertIn("stop_workspace", self.host.calls)
         self.assertNotIn(REF, self.records())
+
+    def test_settled_ready_workspace_is_not_stopped_again_on_later_ticks(self) -> None:
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"][REF]
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = ""
+        self.runtime.production_state.save(payload)
+        self.move_card("ready", "park behind the other ready card", "park-workspace-record")
+        self.runtime.pause.save({"mode": "drain"})
+        self.host.calls.clear()
+
+        self.tick()
+        self.tick()
+
+        self.assertEqual(self.host.calls.count("stop_workspace"), 1)
+        record = self.records()[REF]
+        self.assertTrue(record["workspace_settled"])
+        restored = DispatcherRecord.from_json(record)
+        self.assertFalse(restored.owns_head())
+        self.assertFalse(restored.needs_settling())
 
     def test_role_identity_without_workspace_is_stopped_before_removal(self) -> None:
         self.tick()

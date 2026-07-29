@@ -1137,12 +1137,16 @@ class CommandHostRuntime:
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             status = _head_process_status(pid_file)
             if not status.get("known") or not status.get("alive"):
+                if status.get("known"):
+                    Path(pid_file).unlink(missing_ok=True)
                 return
             self._signal_head(pid_file, signal_number)
             self._await_head_exit(pid_file)
         status = _head_process_status(pid_file)
         if status.get("known") and status.get("alive"):
             raise HostError(f"head process from {pid_file} is still running after stop")
+        if status.get("known"):
+            Path(pid_file).unlink(missing_ok=True)
 
     def _signal_head(self, pid_file: str, signal_number: int) -> None:
         try:
@@ -2058,7 +2062,7 @@ class DispatcherRuntime:
             # workspace is what it is stopped through, not the handle: a head adopted from a launch
             # intent is running with no handle on record, and skipping it here would leave it in
             # the checkout the new round is about to hand a second head.
-            if active.owns_head("review"):
+            if active.needs_settling() and active.owns_head("review"):
                 # A preempt out of Validate leaves the worker pane already closed by
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
@@ -2067,7 +2071,7 @@ class DispatcherRuntime:
                 )
                 if unconfirmed is not None:
                     return unconfirmed
-            if active.owns_head("worker"):
+            if active.needs_settling() and active.owns_head("worker"):
                 unconfirmed = self._stop_worker_confirmed(
                     active, ref, step="claim", attempt_id=attempt_id
                 )

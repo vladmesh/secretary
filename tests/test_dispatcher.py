@@ -954,7 +954,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.commit_cutover()
         pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
         pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        process = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: process.poll() is None and (process.kill(), process.wait()))
+        pid_file.write_text(str(process.pid), encoding="utf-8")
 
         result = self.runtime.production_tick()
 
@@ -1013,9 +1015,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
             result = self.runtime.production_tick()
 
         actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
-        self.assertEqual([a["action"] for a in actions], ["stale-head-stopped"])
+        self.assertEqual(actions, [])
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
-        self.assertIn("restart_worker", self.host.calls)
+
+        result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
+        self.assertEqual([a["action"] for a in actions], ["record-removed"])
         self.assertIn("stop_workspace", self.host.calls)
         self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
