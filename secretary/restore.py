@@ -82,7 +82,7 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
             _, unresolved = writer.reconcile()
             if unresolved:
                 raise RestoreError("board audit repair is required before restore")
-            existing = {card["ref"]: card for card in reader.list()}
+            existing = _existing_board_cards(reader)
             unexpected = set(existing) - {card["reference"] for card in cards}
             if unexpected:
                 raise RestoreError("board is not empty or does not match normalized restore data")
@@ -157,6 +157,22 @@ def _existing_sprints(
         sprint["ref"]: sprint
         for sprint in SprintReader(client, data_dir=data_dir).export()
     }
+
+
+def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
+    """Read both active and closed Pipeline records before deciding a restore is empty."""
+    board_id, _, _ = reader._board()
+    raw_cards = reader.client.call("getAllTasks", project_id=board_id, status_id=2) or []
+    if not isinstance(raw_cards, list):
+        raise RestoreError("Kanboard returned an invalid restore task list")
+    result: dict[str, dict[str, Any]] = {}
+    for card in raw_cards:
+        if not isinstance(card, dict):
+            continue
+        reference = card.get("reference")
+        if isinstance(reference, str) and reference:
+            result[reference] = reader.show(reference)
+    return result
 
 
 def _import_sprints(
@@ -390,6 +406,11 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             raise RestoreError("normalized board export has an invalid column")
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
+        if (
+            card["metadata"].get("record_type") in {"issue", "product"}
+            and _state_for_column(card["column"]) != "issues"
+        ):
+            raise RestoreError("normalized Product or Issue record is outside the Issues column")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
         if "closed" in card and not isinstance(card["closed"], bool):
@@ -491,6 +512,11 @@ def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bo
 def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str) -> None:
     fields = _restore_fields(card)
     issue_column = _state_for_column(str(card.get("column") or "")) == "issues"
+    metadata = card.get("metadata")
+    record_type = metadata.get("record_type") if isinstance(metadata, dict) else None
+    if issue_column or record_type in {"issue", "product"}:
+        _create_restored_non_task(writer, card)
+        return
     writer.create(
         role="steward", actor="restore", project=fields["project"] or "product-backlog",
         task_type=fields["task_type"] or "research",
@@ -499,8 +525,29 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str)
         slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
         family_preference=fields["family_preference"], codex_launch_mode=fields["codex_launch_mode"],
         request_id=f"{prefix}create:{card['reference']}",
-        **({"target": "issues"} if issue_column else {}),
     )
+
+
+def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
+    """Recreate a Product, Issue, or unclassified legacy Ideas card without classifying it.
+
+    The following restore metadata write preserves the export exactly.  In particular an old
+    Ideas card that has no ``record_type`` remains unclassified and must later go through the
+    PO triage transition; it never passes through ``TaskWriter.create``, which stamps task.
+    """
+    board_id, columns, _ = writer.reader._board()
+    column = str(card.get("column") or "")
+    column_id = next((identifier for identifier, title in columns.items() if title == column), None)
+    if column_id is None:
+        raise RestoreError(f"restored card has an unknown column: {column}")
+    task_id = writer.client.call(
+        "createTask", project_id=board_id, title=card["title"], description=card["description"],
+        column_id=column_id, swimlane_id=0,
+    )
+    if not isinstance(task_id, int):
+        raise RestoreError("could not create restored Product or Issue record")
+    if writer.client.call("updateTask", id=task_id, reference=card["reference"]) is not True:
+        raise RestoreError("could not set restored Product or Issue reference")
 
 
 def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:

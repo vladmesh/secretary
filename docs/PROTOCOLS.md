@@ -72,12 +72,12 @@ which marks it as a task without inventing Product, issue kind or priority. `--c
 valid only for a worker profile on a `codex` adapter. Without an override, launch mode comes from the
 head profile.
 
-`archive` closes a card in the backend and removes it from ordinary active listings and exports without
+`archive` closes an execution task in the backend and removes it from ordinary active listings without
 deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
 supports idempotent retry through `--request-id`. Only a card with no live work can be archived:
 in-progress and validate cards, and cards with an active claim, are rejected. A card closed from Done
 stays a satisfied dependency; a card closed from any other column is not Done and does not unblock
-anything.
+anything. It cannot close a Product or Issue: use `secretary issue close` for the latter.
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (the full new text, not
 a diff), `--head`, `--review-head`. PO, dispatcher and observer may edit, but an ordinary card is only
@@ -108,7 +108,8 @@ Product, one kind (`bug`, `feature`, `question`, `improvement`) and one priority
 Priority changes require a non-empty reason, add an `[issue:priority]` board comment and append a
 durable audit event. Only the PO may close an issue, using exactly one of `resolved`, `invalid`,
 `duplicate` or `wont_do`; closure archives the backend record but leaves its comments and audit
-history available through `issue show --ref` and checkpoint recovery.
+history available through `issue show --ref` and checkpoint recovery. `issue list --closed` includes
+both open and closed issues; without it the list contains only open issues.
 
 ## Sprints
 

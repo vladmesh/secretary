@@ -483,6 +483,9 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
         raise model.GuardError("Product issues and products cannot enter execution task columns")
     if cur in model.LEGACY_ISSUE_COLUMNS:
         cur = "Issues"
+    if cur == "Issues" and not meta.get(model.META_RECORD_TYPE):
+        if role != "po" or to_column != "Ready":
+            raise model.GuardError("legacy Ideas require explicit PO triage to Ready")
     model.check_move(role, cur, to_column)
     move = (cur, to_column)
     reason_text = reason.strip()
@@ -504,6 +507,8 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
                 "(created via create_report_card); other cards go through Validate/review"
             )
     meta_updates = {}
+    if cur == "Issues" and not meta.get(model.META_RECORD_TYPE):
+        meta_updates[model.META_RECORD_TYPE] = "task"
     if to_column == "Ready":
         meta_updates.update({
             model.META_CLAIM: "",
@@ -795,7 +800,8 @@ def export_cards() -> list[dict]:
     pid = board_id()
     cols = {int(c["id"]): c["title"] for c in call("getColumns", project_id=pid) or []}
     lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
-    tasks = call("getAllTasks", project_id=pid, status_id=0) or []
+    # Kanboard status 2 includes both open and closed cards.  Status 0 is closed only.
+    tasks = call("getAllTasks", project_id=pid, status_id=2) or []
     batched = call_batch(
         [(method, {"task_id": int(t["id"])})
          for t in tasks

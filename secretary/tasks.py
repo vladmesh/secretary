@@ -257,7 +257,7 @@ class TaskReader:
         result: dict[str, Any] = {
             "id": f"task_kanboard_{task_id}", "ref": ref, "title": _text(card.get("title")),
             "description": _text(card.get("description")), "state": _STATE_BY_COLUMN[column],
-            "closed": _positive_int(card.get("is_active")) == 0,
+            "closed": _nonnegative_int(card.get("is_active", card.get("status", 1))) == 0,
             "position": _nonnegative_int(card.get("position")), "project": _text(meta.get("project")),
             "type": _text(meta.get("task_type")), "blocked_by": _null_if_empty(meta.get("blocked_by")),
             "claim": {"worker": _null_if_empty(meta.get("claim")), "claimed_at": None},
@@ -512,8 +512,8 @@ class TaskWriter:
         legacy_ideas = "Ideas" in columns.values() or LEGACY_IDEAS_COLUMN in columns.values()
         if target == "ideas" and not legacy_ideas:
             raise TaskError("legacy_layout", "execution tasks cannot be created in Issues; create a Ready task", 2)
-        if target == "issues" and role != "steward":
-            raise TaskError("role_forbidden", "execution tasks cannot be created in Issues", 3)
+        if target == "issues":
+            raise TaskError("transition_forbidden", "execution tasks cannot be created in Issues", 3)
         if role in {"worker", "reviewer", "retro"} and target != "ideas":
             raise TaskError("role_forbidden", f"{role} may create only ideas cards", 3)
         if complexity not in _COMPLEXITIES:
@@ -1092,6 +1092,12 @@ class TaskWriter:
             raise TaskError("validation", "archive requires a non-empty reason", 2)
 
         def mutation(task: dict[str, Any]) -> Any:
+            if task.get("record_type") in {"issue", "product"}:
+                raise TaskError(
+                    "transition_forbidden",
+                    "Product issues must be closed with secretary issue close; products cannot be archived",
+                    3,
+                )
             self._check_archivable(task)
             self._check_dispatcher_archivable(reference)
             try:

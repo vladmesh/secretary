@@ -126,10 +126,9 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             _rename_column(api, columns[0], PIPELINE_COLUMNS[0])
             titles[0] = PIPELINE_COLUMNS[0]
         if titles != list(PIPELINE_COLUMNS):
-            # Kanboard defaults getAllTasks to open cards.  status_id=0 asks
-            # for closed cards, which must count too: removing a column moves
-            # every card it contains to the trash.
-            tasks = api.call("getAllTasks", project_id=board_id, status_id=0) or []
+            # Kanboard status 2 includes open and closed cards. Removing a column moves
+            # every card it contains to the trash, so either status makes this incompatible.
+            tasks = api.call("getAllTasks", project_id=board_id, status_id=2) or []
             if tasks:
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):

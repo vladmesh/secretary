@@ -63,14 +63,15 @@ class ProductIssueStore:
         if not isinstance(board, dict) or not isinstance(board.get("id"), int):
             raise TaskError("backend_error", "Pipeline board is unavailable", 1)
         columns = self.client.call("getColumns", project_id=board["id"]) or []
-        for column in columns:
-            if isinstance(column, dict) and column.get("title") == ISSUES_COLUMN and isinstance(column.get("id"), int):
-                return board["id"], column["id"]
+        first = columns[0] if columns else None
+        if isinstance(first, dict) and first.get("title") == ISSUES_COLUMN and isinstance(first.get("id"), int):
+            return board["id"], first["id"]
         raise TaskError("legacy_layout", "Pipeline first column is not Issues; run the supported board migration", 2)
 
-    def _cards(self, *, active: int = 0) -> list[dict[str, Any]]:
+    def _cards(self) -> list[dict[str, Any]]:
         board_id, _ = self._board()
-        cards = self.client.call("getAllTasks", project_id=board_id, status_id=active) or []
+        # Kanboard status 2 is the complete set.  Status 0 means only closed cards.
+        cards = self.client.call("getAllTasks", project_id=board_id, status_id=2) or []
         if not isinstance(cards, list):
             raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
         return [card for card in cards if isinstance(card, dict)]
@@ -148,7 +149,7 @@ class ProductIssueStore:
         return self._view(card, meta)
 
     def create_issue(self, *, product: str, issue_kind: str, priority: str, title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
-        if issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
+        if not product.strip() or issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
             raise TaskError("validation", "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)", 2)
         self.show_product(product)
         board_id, column_id = self._board()
@@ -163,17 +164,39 @@ class ProductIssueStore:
         return self.show_issue(ref)
 
     def list_issues(self, *, product: str | None = None, include_closed: bool = False) -> list[dict[str, Any]]:
-        cards = self._cards(active=0 if include_closed else 1)
         result = []
-        for card in cards:
+        for card in self._cards():
             meta = self._metadata(card)
-            if meta.get(META_RECORD_TYPE) == ISSUE_TYPE and (product is None or meta.get(META_ISSUE_PRODUCT) == product):
+            closed = int(card.get("is_active", 1) or 0) == 0
+            if (
+                meta.get(META_RECORD_TYPE) == ISSUE_TYPE
+                and (product is None or meta.get(META_ISSUE_PRODUCT) == product)
+                and (include_closed or not closed)
+            ):
                 result.append(self._view(card, meta))
         return sorted(result, key=lambda item: (item["priority"], item["ref"]))
 
     def show_issue(self, reference: str) -> dict[str, Any]:
         card, meta = self._find(reference, ISSUE_TYPE)
-        return self._view(card, meta)
+        task_id = int(card["id"])
+        comments = self.client.call("getAllComments", task_id=task_id) or []
+        if not isinstance(comments, list):
+            raise TaskError("backend_error", "Kanboard returned invalid issue comments", 1)
+        history = [
+            {
+                "created_at": str(comment.get("date_creation") or ""),
+                "text": str(comment.get("comment") or ""),
+            }
+            for comment in comments
+            if isinstance(comment, dict)
+        ]
+        audit = [
+            event for event in self.audit.events()
+            if isinstance(event, dict) and event.get("ref") == reference
+        ]
+        view = self._view(card, meta)
+        view["history"] = {"comments": history, "audit": audit}
+        return view
 
     def update_priority(self, *, reference: str, priority: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if priority not in ISSUE_PRIORITIES or not reason.strip():

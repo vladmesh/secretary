@@ -121,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("--type", required=True, dest="task_type")
     p_create.add_argument("--title", required=True)
     p_create.add_argument("--ref")
-    p_create.add_argument("--column", default="Ideas")
+    p_create.add_argument("--column", default="Ready")
     p_create.add_argument("--blocked-by", dest="blocked_by")
     p_create.add_argument("--head", dest="head")
     p_create.add_argument(

@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from secretary.cli import main
+from secretary.product_issues import ProductIssueStore
+from secretary.tasks import TaskError, TaskWriter
+from tests.test_tasks import WriteKanboard
+
+
+class ProductBoard(WriteKanboard):
+    """Kanboard fixture with the Product/Issue layout and real status filtering."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks[0]["id"] = 12
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "getColumns":
+            return [
+                {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
+                {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+            ]
+        if method == "getAllTasks":
+            self.calls.append((method, params))
+            status = params.get("status_id")
+            if status == 1:
+                return [task for task in self.tasks if int(task.get("is_active", 1) or 0) != 0]
+            if status == 0:
+                return [task for task in self.tasks if int(task.get("is_active", 1) or 0) == 0]
+            if status == 2:
+                return list(self.tasks)
+        return super().call(method, **params)
+
+
+class ProductIssueStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmpdir.name)
+        (self.root / "projects").mkdir()
+        (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        self.client = ProductBoard()
+        self.store = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def test_product_and_issue_lists_use_complete_set_and_show_audit_history(self) -> None:
+        product = self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="product-create",
+        )
+        self.assertEqual(product["id"], "secretary")
+        self.assertEqual([item["id"] for item in self.store.list_products()], ["secretary"])
+
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="feature", priority="P2", title="Foundation",
+            description="", actor="po", request_id="issue-create",
+        )
+        self.store.update_priority(
+            reference=issue["ref"], priority="P1", reason="urgent", actor="po", request_id="priority",
+        )
+        self.store.close_issue(
+            reference=issue["ref"], reason="resolved", actor="po", request_id="close",
+        )
+
+        self.assertEqual(self.store.list_issues(), [])
+        self.assertEqual([item["ref"] for item in self.store.list_issues(include_closed=True)], [issue["ref"]])
+        shown = self.store.show_issue(issue["ref"])
+        self.assertTrue(shown["closed"])
+        self.assertEqual(shown["close_reason"], "resolved")
+        self.assertIn("[issue:priority]\nurgent", [entry["text"] for entry in shown["history"]["comments"]])
+        self.assertEqual(
+            [entry["kind"] for entry in shown["history"]["audit"]],
+            ["issue_created", "issue_priority_changed", "issue_closed"],
+        )
+        status_ids = [params.get("status_id") for method, params in self.client.calls if method == "getAllTasks"]
+        self.assertIn(2, status_ids)
+        self.assertNotIn(0, status_ids)
+
+    def test_issue_needs_all_required_values_and_archive_cannot_bypass_close(self) -> None:
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_issue(
+                product="", issue_kind="feature", priority="P2", title="x", description="", actor="po",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P0", title="Crash", description="", actor="po",
+        )
+        writer = TaskWriter(self.client, data_dir=self.root / "data")
+        with self.assertRaises(TaskError) as raised:
+            writer.archive(role="po", actor="po", reference=issue["ref"], reason="bypass")
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(method == "closeTask" for method, _ in self.client.calls))
+
+    def test_issue_and_task_column_guards_are_fail_closed(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="question", priority="P3", title="Question", description="", actor="po",
+        )
+        writer = TaskWriter(self.client, data_dir=self.root / "data")
+        for target in ("ready", "in_progress", "validate", "blocked", "done"):
+            with self.subTest(target=target), self.assertRaises(TaskError) as raised:
+                writer.move(role="po", actor="po", reference=issue["ref"], target=target, reason="")
+            self.assertEqual(raised.exception.code, "transition_forbidden")
+        with self.assertRaises(TaskError) as raised:
+            writer.create(
+                role="steward", actor="steward", project="secretary", task_type="research",
+                title="Wrong column", target="issues",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+
+    def test_missing_issue_arguments_are_structured(self) -> None:
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main(["issue", "create", "--role", "po"])
+        self.assertEqual(code, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
+
+
+if __name__ == "__main__":
+    unittest.main()

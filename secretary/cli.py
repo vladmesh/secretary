@@ -97,9 +97,19 @@ class DoctorInspection:
     diffs: dict[str, KindDiff] | None = None
 
 
+class StructuredArgumentParser(argparse.ArgumentParser):
+    """Keep public command validation in the same JSON envelope as handlers."""
+
+    def error(self, message: str) -> None:
+        self.exit(2, json.dumps({"error": {"code": "usage", "message": message}}) + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code)
     handler = getattr(args, "handler", None)
     if handler is None:
         parser.print_help()
@@ -114,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="secretary")
+    parser = StructuredArgumentParser(prog="secretary")
     subparsers = parser.add_subparsers(dest="command")
     add_dispatcher_subcommands(subparsers)
     add_pause_commands(subparsers)
