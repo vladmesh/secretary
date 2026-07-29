@@ -1244,7 +1244,9 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
-                if event.get("kind") in {"product_created", "issue_created", "issue_closed"}:
+                if event.get("protocol") == "product_issue_transaction" or event.get("kind") in {
+                    "product_created", "issue_created", "issue_priority_changed", "issue_closed",
+                }:
                     # Product/Issue writes have ordered backend cleanup.  Only their supported
                     # command, retried with the original request id, can prove that cleanup.
                     unresolved += 1
