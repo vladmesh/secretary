@@ -1,8 +1,20 @@
 # Operations
 
-This document describes product behaviour. The state of a particular installation — who owns which
-units, which components are up, whether the checkpoint is fresh — is read from `secretary status` and
-`secretary doctor`, not from this file.
+This is the detailed operator reference. Start with the install and recovery path in
+[Recovery](RECOVERY.md); use this document when operating or debugging a running installation. The
+state of a particular installation — who owns which units, which components are up, whether the
+checkpoint is fresh — comes from `secretary status` and `secretary doctor`, not from this file.
+
+The main areas are:
+
+- [installation and host requirements](#install-and-check-the-code);
+- [data, status and checkpoint operation](#data-plane);
+- [connecting a project](#connecting-a-project-gate-and-stale-input-recovery);
+- [sprints and observer heads](#starting-a-sprint);
+- [recovery and the optional cold archive](#recovery);
+- [dispatcher operation and watchdogs](#auto-merging-green-cards);
+- [background roles and units](#background-role-telemetry);
+- [upgrade and runtime health](#upgrade).
 
 ## Install and check the code
 
@@ -12,12 +24,12 @@ python3 -m pip install '.[memory]'
 python3 -m unittest
 ```
 
-The first form installs the CLI, the second adds the memory runtime. Bundled package transport for the
-board and session-manager runtimes is still an open question for the first milestone; an existing
-runtime is applied through `secretary install` / `secretary recover`, see [Recovery](RECOVERY.md).
+The first form installs the CLI, and the second adds the memory runtime. Host bootstrap currently
+supports Ubuntu 24.04. It installs the pinned board and session-manager runtimes; `secretary install`
+or `secretary recover` then applies the instance, as described in [Recovery](RECOVERY.md).
 
 `secretary status --instance <dir>` gives the current summary of an installation. Its `--json` form is a
-stable snapshot of services and timers, active attempts, checkpoint, memory and host resources, and
+structured snapshot of services and timers, active attempts, checkpoint, memory and host resources, and
 writes no state. `doctor` answers a different question: which invariants are broken. It stays a strict
 check and its `--json` form returns a structured list of findings. Changing the host still requires
 `reconcile plan` and a separate confirmed apply.
@@ -582,28 +594,15 @@ minutes (two missed windows).
 
 ## Recovery
 
-The only recovery contract is the Git-backed checkpoint in [Recovery](RECOVERY.md). A live restore comes from the
-private instance repository, with no mandatory object-store transport.
+The Git-backed checkpoint and the full recovery sequence are documented in
+[Recovery](RECOVERY.md#fresh-install-and-recovery). On a clean replacement host, bootstrap the pinned
+runtimes and use `recover` rather than `install`:
 
 ```bash
-secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
-secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
+sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
+sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
   --recovery-phrase-file PHRASE_FILE
 ```
-
-Both commands open the secret store, if this instance repository has one, before reading `runtime.env`: with the
-recovery phrase (`--recovery-phrase-file`, `--recovery-phrase-stdin`, or an interactive prompt on a TTY when the
-key is not yet on disk) the installation key is rebuilt and materialises `runtime.env` and the other targets from
-the catalog, including board credentials if they are in the store. Only if this instance repository has no store
-at all does `runtime.env` remain a manual operator file, as described in [Recovery](RECOVERY.md). Without the
-phrase, `recover` does not refuse: it restores everything that needs no credentials and prints a locked/missing
-report for the secrets that stayed unavailable.
-
-The first command clones the remote and stops short of host-only credentials if the store did not materialise
-them. The second, in one idempotent flow, materialises the checkpoint, restores the board — both Pipeline cards
-and sprint entities with their fields, budget, resume and entries — rebuilds the memory index, role worktrees and
-host resources, and then checks status. `restore-board` prints both counts, and a mismatch in either parity check
-leaves recovery unfinished and visible in `doctor`.
 
 The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
 commands remain diagnostic primitives, not the main runbook.

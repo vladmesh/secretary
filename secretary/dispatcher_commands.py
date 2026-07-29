@@ -19,7 +19,7 @@ from secretary.tasks import TaskError
 
 
 def add_dispatcher_subcommands(subparsers) -> None:
-    dispatcher = subparsers.add_parser("dispatcher", help="run the Phase 7 pilot dispatcher")
+    dispatcher = subparsers.add_parser("dispatcher", help="run the task and sprint dispatcher")
     commands = dispatcher.add_subparsers(dest="dispatcher_command")
 
     for name, handler in (

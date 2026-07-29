@@ -179,8 +179,8 @@ produce no findings.
 
 ## Fresh install and recovery
 
-Install the product with the memory extra first. `secretary bootstrap` installs the pinned board and
-session-manager runtimes on a supported host, generates `runtime.env` and creates the Pipeline board.
+Install the product with the memory extra first. On Ubuntu 24.04, `secretary bootstrap` installs the
+pinned board and session-manager runtimes, generates `runtime.env` and creates the Pipeline board.
 `secretary install` installs neither and fail-closed checks both runtimes before changing live state.
 
 On a clean host, bootstrap creates the checkout, a local `0600` `runtime.env` and the Pipeline board
@@ -260,7 +260,6 @@ offsite transfer and archive-age checks are not part of the product.
 
 ## Not covered
 
-- Bundled package transport and installing the board and session-manager runtimes on a bare host.
 - Moving configuration into a control-plane database.
-- Automating provider credentials, `.env` and head authorisation.
+- Automating provider credentials and head authorisation.
 - A mandatory object-store transport, a full archive of transcripts and artifacts, a public plugin API.

@@ -12,18 +12,19 @@ The first user profile is someone who:
 - works mainly on a remote VPS;
 - runs many projects in parallel;
 - uses subscriptions and models from several providers;
-- is stronger at product and architecture than at writing and reading code by hand;
+- wants to keep control of product and architecture while agents handle much of the implementation;
 - wants to watch agents and intervene without hand-operating an orchestrator.
 
-Early releases support one trusted owner on one machine. That is a deployment profile, not a licence
-to hard-code a specific user, host, account or directory into product code.
+The current implementation supports one trusted owner on one machine. That is a deployment profile,
+not a licence to hard-code a specific user, host, account or directory into product code.
 
-## Product promise
+## Target experience
 
-On a fresh VPS the owner runs one or two commands and gets a working appliance: board, session
-manager, memory, dispatcher, background roles, schedules and observability. On a from-scratch
-install, credentials and `.env` are filled in by hand once; agent heads are connected after
-bootstrap.
+The goal is for a fresh VPS to become a working appliance after a short bootstrap and install flow:
+board, session manager, memory, dispatcher, background roles, schedules and observability. Today the
+host bootstrap is supported on Ubuntu 24.04, while the clean-machine end-to-end gate and minimum host
+requirements are still being established. Agent heads and their provider logins are connected
+separately.
 
 The private installation Git repository is the durable recovery checkpoint. Installation credentials
 are recoverable with it: the canonical values live in an encrypted secret store and are rebuilt from
@@ -35,9 +36,9 @@ copying host-local debris.
 
 ## Several heads
 
-A head is not a model provider. Codex, Claude Code, Gemini CLI and Hermes are agent runtimes; each
-runtime can use the accounts, subscriptions, API keys and models available to it. A head profile
-binds a runtime, an account pool, a model, launch parameters and roles.
+A head is not a model provider. Codex, Claude Code and Hermes are the agent runtimes represented by
+the current adapters; each runtime can use the accounts, subscriptions, API keys and models available
+to it. A head profile binds a runtime, an account pool, a model, launch parameters and roles.
 
 Routing stays deterministic. A card states the capability it needs, and policy picks the profile,
 account and model given availability, limits and a preference for independent re-checking. The owner
@@ -80,8 +81,7 @@ The first appliance ships Kanboard and Orca out of the box. Their internals must
 product, so that replacing either stays a decision that can be taken later. Heads remain the owner's
 choice and are connected independently.
 
-The intended distribution model is open source: a public repository and measurable results, without a
-hosted SaaS.
+The project is developed as open source, with measurable results and without a hosted SaaS.
 
 ## Not now
 

@@ -20,29 +20,28 @@ python3 -m unittest
 ```
 
 The unit suite is hermetic: it does not need Kanboard, Orca, a network or a configured instance.
-Keep it that way. Anything that needs a live stack belongs in an operator runbook, not in the suite.
+Tests that need a live stack are better documented as operator runbooks than added to the unit suite.
 
-## Making a change
+## Preparing a change for merge
 
-- Keep the diff scoped to one problem. Unrelated cleanups make review slower, not faster.
-- Add or update tests with the change. Behaviour that is not covered will regress.
-- Update the affected document under `docs/` in the same pull request. Documentation describes
-  product behaviour, so a contract change that leaves the docs behind is incomplete.
-- Match the surrounding code: standard library first, no new runtime dependency without a reason
-  stated in the pull request.
+- A diff scoped to one problem is easier to understand and review.
+- Tests help preserve changed behaviour.
+- When product behaviour changes, updating the affected document under `docs/` keeps the description
+  and implementation together.
+- Prefer the standard library; if a new runtime dependency helps, note why.
 - Write commit messages and code comments in English.
 
 ## Pull requests
 
-Run the checks below before you open the pull request:
+If the change is ready for a full check, run:
 
 ```bash
 python3 -m unittest
 python3 -m secretary role-skills audit --check
 ```
 
-CI runs the unit suite on every pull request. Describe what you changed, why, and what you verified.
-If a change is not covered by the suite, say how you tested it.
+CI runs the unit suite on every pull request. A short note about what changed and what you verified
+helps with review; if the suite does not cover it, describe any manual testing that was useful.
 
 ## License
 

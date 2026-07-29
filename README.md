@@ -6,8 +6,8 @@ logic, schemas and generic skills.
 
 The product repository holds no installation data. Private installation configuration and the
 portable Git-backed recovery checkpoint live in a separate private instance repository; local mutable
-and derived runtime state lives in a local data directory. The supported Git-backed install and
-recovery path is documented in [Recovery](docs/RECOVERY.md).
+and derived runtime state lives in a local data directory. The current Git-backed install and recovery
+path is documented in [Recovery](docs/RECOVERY.md).
 
 ## Documentation
 
@@ -20,15 +20,29 @@ recovery path is documented in [Recovery](docs/RECOVERY.md).
 
 ## Install
 
-Install the CLI from a checkout with `python3 -m pip install .`; the memory runtime is available with
-`python3 -m pip install '.[memory]'`. On a supported host, bootstrap the derived board and session
-manager before install:
+The host bootstrap currently supports Ubuntu 24.04. Install the CLI and memory runtime from a checkout:
+
+```bash
+python3 -m pip install '.[memory]'
+```
+
+Bootstrap the host first:
 
 ```bash
 sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
+```
+
+For a new installation, continue with:
+
+```bash
 sudo secretary install --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
+```
+
+To rebuild an existing installation from its private checkpoint, use `recover` instead of `install`:
+
+```bash
 sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
@@ -38,9 +52,9 @@ Bootstrap pins the board and session-manager transports, generates the local boa
 
 ## Status
 
-The project is pre-1.0 and is developed against one opinionated deployment profile: a single trusted
-owner running one appliance on one host. See [SECURITY.md](SECURITY.md) for what that model does and
-does not promise.
+The project is pre-1.0 and moving quickly. It is developed against one opinionated deployment
+profile: a single trusted owner running one appliance on one host. See
+[SECURITY.md](SECURITY.md) for the boundaries of that model.
 
 ## Contributing
 
