@@ -6,6 +6,7 @@ import fcntl
 import json
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,6 +46,10 @@ BUDGET_EVENT_TYPES = (
 )
 DEFAULT_BUDGET_SIGNAL = 3
 DEFAULT_BUDGET_HARD = 6
+# An observer gets a short window to durably reflect a card transition.  Freshness is
+# based on the transition itself, rather than the time a status reader happens to run,
+# so a timely resume stays fresh until another meaningful transition occurs.
+RESUME_FRESHNESS_GRACE_SECONDS = 5 * 60
 RESUME_FIELDS = (
     "selected_step",
     "selected_why",
@@ -316,7 +321,11 @@ class SprintReader:
 
     def _resume_freshness(self, sprint: dict[str, Any], resume: dict[str, Any] | None) -> dict[str, Any]:
         if not resume:
-            return {"fresh": False, "error": "resume_missing", "last_event_at": None}
+            return {
+                "fresh": False, "error": "resume_missing", "recorded_at": None,
+                "last_event_at": None, "lag_seconds": None,
+                "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
+            }
         last_event = ""
         if self.data_dir is not None:
             refs = {str(card.get("ref") or "") for card in sprint.get("cards") or [] if isinstance(card, dict)}
@@ -324,12 +333,15 @@ class SprintReader:
                 if event.get("ref") in refs and event.get("kind") != "routing":
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")
-        stale = bool(last_event and recorded_at < last_event)
+        lag_seconds = _resume_lag_seconds(recorded_at, last_event)
+        stale = bool(last_event and (lag_seconds is None or lag_seconds > RESUME_FRESHNESS_GRACE_SECONDS))
         return {
             "fresh": not stale,
             "error": "resume_stale" if stale else None,
             "recorded_at": recorded_at or None,
             "last_event_at": last_event or None,
+            "lag_seconds": lag_seconds,
+            "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
         }
 
 
@@ -599,6 +611,18 @@ def _sprint_number(sprint: dict[str, Any] | None) -> int:
 
 def _repositories(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+def _resume_lag_seconds(recorded_at: str, last_event_at: str) -> int | None:
+    """Seconds a resume trails its latest linked-card event, or None for bad timestamps."""
+    if not recorded_at or not last_event_at:
+        return 0
+    try:
+        recorded = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+        event = datetime.fromisoformat(last_event_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, int((event - recorded).total_seconds()))
 
 
 def _json_list(value: str | None) -> list[str]:

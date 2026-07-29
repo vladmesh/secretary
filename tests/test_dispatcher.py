@@ -366,6 +366,7 @@ class FakeHost:
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
         # reads as alive; point it at a free pid to model a head that died.
         self.observers: list[str] = []
+        self.observer_nudges: list[str] = []
         self.stopped_observers: list[str] = []
         # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
         self.observer_terminals: dict[str, str] = {}
@@ -465,6 +466,12 @@ class FakeHost:
         if self.observer_status_result is not None:
             return dict(self.observer_status_result)
         return {"last_activity": time.time(), "queue_finished": False}
+
+    def nudge_observer(self, record) -> None:
+        self.calls.append("nudge_observer")
+        if self.fail_observer_reason:
+            raise HostError(self.fail_observer_reason)
+        self.observer_nudges.append(str(record.sprint))
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")

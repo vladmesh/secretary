@@ -391,14 +391,13 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-live` — the head is alive, the tick did nothing;
 - `observer-waiting` — an active card is in its normal Ready, In progress or Validate cycle, so the
   observer is deliberately not classified as idle;
-- `observer-idle-grace` — the live Codex TUI has confirmed that its queue finished. The observer
-  row immediately reads `idle-grace`, while automatic replacement waits for
-  `SECRETARY_OBSERVER_IDLE_SECONDS`; this is a terminal-completion signal, not ordinary work silence;
-- `observer-idle-relaunched` — a live Codex TUI had completed its queue, stayed quiet longer than
-  `SECRETARY_OBSERVER_IDLE_SECONDS` (20 minutes by default), and was replaced from the live board;
-- `observer-idle-restart-deferred` — that same completed queue needs replacement, but readiness or
-  teardown prevented it; the idle reason remains visible in the observer row;
-- `observer-relaunched` — the head's pid is dead, a new one was launched;
+- `observer-idle` — the live Codex TUI has completed its queue with no unacknowledged linked-card event;
+- `observer-nudged` — a committed linked-card event woke one idle observer turn;
+- `observer-wake-pending` — a wake is already outstanding, so a burst of card events coalesced into it;
+- `observer-watchdog-woke` — an event remained unacknowledged for
+  `SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS` (30 minutes by default), so the fallback woke the observer;
+- `observer-wake-deferred` — the event wake failed; the observer row carries its reason and bounded retry;
+- `observer-relaunched` — a head with unacknowledged work had a dead pid and was replaced;
 - `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
 - `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in
   `stop-pending` with its handle, no stop event is written, and the next tick retries. This also covers the
@@ -567,10 +566,10 @@ secretary dispatcher production-observe --instance INSTANCE    # .observers
 secretary pause-status --instance INSTANCE                     # .observers, .stopped_observer
 ```
 
-An observer row carries the sprint, the head profile, the state (`running`, `waiting`, `idle-grace`, `idle-recovering`,
+An observer row carries the sprint, the head profile, the state (`running`, `waiting`, `idle-grace`, `wake-deferred`,
 `launching`, `deferred`, `stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness,
 the launch count, the workspace, the handle-known and abandoned-handle flags, the time and kind of the last
-action, the reason for a deferred launch, and the timestamp and reason of the last completed-queue recovery.
+action, the reason for a deferred launch, the latest acknowledged card-event id, and wake retry state.
 
 ## Checkpoint push
 

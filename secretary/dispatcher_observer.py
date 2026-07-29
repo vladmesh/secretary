@@ -51,6 +51,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
@@ -74,11 +75,12 @@ OBSERVER_PROMPT_FILE = "SPRINT.md"
 # the dispatcher's: the prompt points at the file and never restates it.
 OBSERVER_SKILL = "observe-sprint"
 
-# A finished Codex TUI keeps its wrapper process alive.  Its screen is a much stronger signal than
-# silence alone, but wait a generous interval before replacing it: an observer can spend time
-# reading a repository or an external result without changing the board.  A card in Ready, In
-# progress or Validate is always treated as an ordinary wait, never as this kind of idle head.
-OBSERVER_IDLE_DEFAULT_SECONDS = 20 * 60
+# A finished Codex TUI keeps its wrapper process alive. Its screen is the positive signal needed
+# to nudge it for a new durable card event. A card in Ready, In progress or Validate is always an
+# ordinary wait, never an idle queue.
+OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS = 30 * 60
+OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
+OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
 _OBSERVER_QUEUE_FINISHED_RE = re.compile(r"\bWorked for\s+\d", re.IGNORECASE)
 
 # Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
@@ -167,10 +169,16 @@ class ObserverRecord:
     deferred_reason: str = ""
     stopped_reason: str = ""
     paused_at: float = 0.0
-    # The last confirmed queue-end is kept after its replacement launches.  `idle-recovering` in the
-    # state plus these fields tells an operator why a live pid is not reported as plain running.
+    # The last confirmed queue-end explains why a live head is waiting for a card event.
     idle_since: float = 0.0
     idle_reason: str = ""
+    # The event cursor is dispatcher-owned state.  A resume entry stays its established six-field
+    # document; the dispatcher advances this cursor only after that entry postdates the event.
+    acknowledged_event_id: str = ""
+    wake_event_id: str = ""
+    wake_attempts: int = 0
+    wake_next_at: float = 0.0
+    wake_reason: str = ""
     run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -196,6 +204,11 @@ class ObserverRecord:
             "paused_at": self.paused_at,
             "idle_since": self.idle_since,
             "idle_reason": self.idle_reason,
+            "acknowledged_event_id": self.acknowledged_event_id,
+            "wake_event_id": self.wake_event_id,
+            "wake_attempts": self.wake_attempts,
+            "wake_next_at": self.wake_next_at,
+            "wake_reason": self.wake_reason,
             "run": dict(self.run),
         }
 
@@ -229,6 +242,11 @@ class ObserverRecord:
             paused_at=_float(payload.get("paused_at")),
             idle_since=_float(payload.get("idle_since")),
             idle_reason=str(payload.get("idle_reason") or ""),
+            acknowledged_event_id=str(payload.get("acknowledged_event_id") or ""),
+            wake_event_id=str(payload.get("wake_event_id") or ""),
+            wake_attempts=_int(payload.get("wake_attempts")),
+            wake_next_at=_float(payload.get("wake_next_at")),
+            wake_reason=str(payload.get("wake_reason") or ""),
             run=dict(run) if isinstance(run, dict) else {},
         )
 
@@ -291,17 +309,25 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "paused": record.paused_at > 0,
             "idle_since": record.idle_since,
             "idle_reason": record.idle_reason,
+            "acknowledged_event_id": record.acknowledged_event_id,
+            "wake_event_id": record.wake_event_id,
+            "wake_attempts": record.wake_attempts,
+            "wake_next_at": record.wake_next_at,
+            "wake_reason": record.wake_reason,
         })
     return rows
 
 
-def observer_idle_seconds() -> int:
-    """Return the explicit, per-installation idle threshold for observer queue recovery."""
+def observer_event_watchdog_seconds() -> int:
+    """Return the explicit maximum age of an unacknowledged card event."""
     try:
-        value = int(os.environ.get("SECRETARY_OBSERVER_IDLE_SECONDS", "") or OBSERVER_IDLE_DEFAULT_SECONDS)
+        value = int(
+            os.environ.get("SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS", "")
+            or OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+        )
     except ValueError:
-        return OBSERVER_IDLE_DEFAULT_SECONDS
-    return value if value > 0 else OBSERVER_IDLE_DEFAULT_SECONDS
+        return OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+    return value if value > 0 else OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
 
 
 def observer_queue_finished(screen: str) -> bool:
@@ -400,18 +426,20 @@ def _reconcile_open_sprint(
             record.state = "running"
             record.stopped_reason = ""
             record.paused_at = 0.0
+        event = _observer_event_state(runtime, ref, record)
+        if event["pending"]:
+            return _wake_for_event(runtime, payload, observers, ref, record, event)
         work = _observer_work_state(runtime, ref, record)
         if work["state"] == "idle":
-            return _restart_idle_observer(runtime, payload, observers, ref, record, work["reason"])
-        if work["state"] == "idle-grace":
             _mark_idle_grace(record, since=work["since"], reason=work["reason"])
             return {
                 "status": "ok",
                 "step": "observer-reconcile",
                 "sprint": ref,
-                "action": "observer-idle-grace",
+                "action": "observer-idle",
                 "head": record.head,
                 "launches": record.launches,
+                "reason": work["reason"],
             }
         if work["state"] == "waiting":
             _set_observer_state(record, "waiting", reason=work["reason"])
@@ -433,6 +461,27 @@ def _reconcile_open_sprint(
             "head": record.head,
             "launches": record.launches,
         }
+    # A process recovery still happens, but only for work that an observer has not durably
+    # acknowledged.  A completed, quiet queue with no new card event is deliberately left alone.
+    if (
+        record is not None
+        and not unresolved_intent
+        and record.launches > 0
+        and record.state != STATE_STOPPED_BY_PAUSE
+        and record.state != "pending"
+    ):
+        event = _observer_event_state(runtime, ref, record)
+        if not event["pending"]:
+            _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-idle",
+                "head": record.head,
+                "launches": record.launches,
+                "reason": event["reason"],
+            }
     if pause_mode == "drain":
         # A drain claims nothing new. A dead observer is a bring-up, so it waits for the resume
         # exactly like a Ready card does. The record is still written: an open sprint has to be
@@ -455,12 +504,177 @@ def _reconcile_open_sprint(
     return _launch_observer(runtime, payload, observers, ref, record)
 
 
+def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
+    """Return the latest meaningful linked-card event and advance a durable acknowledgement.
+
+    The audit is the same source used by sprint resume freshness.  The cursor lives with the
+    observer record because it describes dispatcher delivery, not a seventh field in the resume
+    document.  An observer acknowledgement is accepted only when its durable resume timestamp is
+    at or after the event it is acknowledging.
+    """
+    try:
+        sprint = runtime.sprints.show(ref)
+        cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
+        refs = {str(card.get("ref") or "") for card in cards if isinstance(card, dict)}
+        events = runtime.audit.events()
+    except (TaskError, HostError, OSError, ValueError, TypeError):
+        return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
+    latest: dict[str, Any] | None = None
+    for event in events:
+        if str(event.get("ref") or "") not in refs or not _significant_card_event(event):
+            continue
+        latest = event
+    if latest is None:
+        return {"known": True, "pending": False, "reason": "no significant linked-card event"}
+    event_id = str(latest.get("event_id") or latest.get("request_id") or "")
+    if not event_id:
+        return {"known": False, "pending": False, "reason": "latest card event has no durable id"}
+    resume = sprint.get("resume") if isinstance(sprint.get("resume"), dict) else None
+    if _resume_acknowledges(resume, latest):
+        record.acknowledged_event_id = event_id
+        record.wake_event_id = ""
+        record.wake_attempts = 0
+        record.wake_next_at = 0.0
+        record.wake_reason = ""
+    return {
+        "known": True,
+        "pending": record.acknowledged_event_id != event_id,
+        "event_id": event_id,
+        "occurred_at": str(latest.get("occurred_at") or ""),
+        "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
+        "reason": "latest significant linked-card event is not acknowledged",
+    }
+
+
+def _significant_card_event(event: dict[str, Any]) -> bool:
+    """Routing records and failed guard writes do not ask the observer to make a new decision."""
+    return (
+        str(event.get("kind") or "") not in {"routing", "sprint_guard_denied"}
+        and str(event.get("outcome") or "success") == "success"
+    )
+
+
+def _resume_acknowledges(resume: dict[str, Any] | None, event: dict[str, Any]) -> bool:
+    if not resume:
+        return False
+    recorded = _timestamp(str(resume.get("recorded_at") or ""))
+    occurred = _timestamp(str(event.get("occurred_at") or ""))
+    return recorded is not None and occurred is not None and recorded >= occurred
+
+
+def _timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _event_age_seconds(occurred_at: str) -> float:
+    occurred = _timestamp(occurred_at)
+    if occurred is None:
+        return 0.0
+    return max(0.0, time.time() - occurred.timestamp())
+
+
+def _wake_for_event(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Nudge one completed observer turn, with durable dedupe and bounded retry.
+
+    A burst is represented by the newest event id while the first nudge is outstanding.  The
+    observer rereads the board, so it consumes the whole burst in one turn instead of one turn per
+    event.  A failed nudge is externally visible and waits for an exponential retry window.
+    """
+    now = time.time()
+    event_id = str(event["event_id"])
+    overdue = event["age_seconds"] >= observer_event_watchdog_seconds()
+    if record.wake_event_id and now < record.wake_next_at:
+        record.wake_event_id = event_id
+        return {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-pending",
+            "head": record.head,
+            "event_id": event_id,
+        }
+    try:
+        status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
+    except (HostError, OSError, TypeError, ValueError) as exc:
+        return _defer_event_wake(record, ref, event_id, f"observer terminal could not be read: {exc}")
+    if not isinstance(status, dict) or not status.get("queue_finished"):
+        record.wake_event_id = event_id
+        record.wake_reason = "observer has not confirmed a completed queue"
+        record.wake_next_at = now + observer_event_watchdog_seconds()
+        _set_observer_state(record, "waiting", reason=record.wake_reason)
+        return {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-watchdog-waiting" if overdue else "observer-wake-waiting",
+            "head": record.head,
+            "event_id": event_id,
+            "reason": record.wake_reason,
+        }
+    # The pending wake is durable before the terminal receives it. A dispatcher crash after the
+    # send therefore conservatively waits for the watchdog instead of creating a duplicate turn.
+    record.wake_event_id = event_id
+    record.wake_next_at = now + observer_event_watchdog_seconds()
+    record.wake_reason = "event wake is pending confirmation"
+    observers[ref] = record
+    if not _persist_quietly(runtime, payload, observers):
+        return _defer_event_wake(record, ref, event_id, "observer wake intent could not be persisted")
+    try:
+        runtime.host.nudge_observer(record)
+    except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
+        return _defer_event_wake(record, ref, event_id, f"observer wake failed: {exc}")
+    record.wake_event_id = event_id
+    record.wake_attempts = 0
+    record.wake_next_at = now + observer_event_watchdog_seconds()
+    record.wake_reason = "observer was nudged for an unacknowledged card event"
+    _set_observer_state(record, "running")
+    return {
+        "status": "ok",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-watchdog-woke" if overdue else "observer-nudged",
+        "head": record.head,
+        "event_id": event_id,
+    }
+
+
+def _defer_event_wake(record: ObserverRecord, ref: str, event_id: str, reason: str) -> dict[str, Any]:
+    record.wake_event_id = event_id
+    record.wake_attempts += 1
+    delay = min(
+        OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (record.wake_attempts - 1)),
+        OBSERVER_WAKE_RETRY_MAX_SECONDS,
+    )
+    record.wake_next_at = time.time() + delay
+    record.wake_reason = f"{reason}; retry in {delay}s"
+    _set_observer_state(record, "wake-deferred", reason=record.wake_reason)
+    return {
+        "status": "degraded",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-wake-deferred",
+        "head": record.head,
+        "event_id": event_id,
+        "reason": record.wake_reason,
+    }
+
+
 def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Classify the live observer without turning an ordinary card wait into a restart.
 
     The observer skill keeps watching a card in every active Pipeline state.  That durable board
-    fact wins over terminal silence.  Only an inactive sprint plus Codex's completed-turn footer
-    and a stale output timestamp is an idle queue that may safely be replaced.
+    fact wins over terminal silence.  An inactive sprint plus Codex's completed-turn footer is an
+    idle queue, but idle alone never causes another model turn.
     """
     try:
         sprint = runtime.sprints.show(ref)
@@ -481,21 +695,12 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
     except (TypeError, ValueError):
         return {"state": "unknown", "reason": "the observer terminal has no activity timestamp"}
     age = time.time() - last_activity
-    threshold = observer_idle_seconds()
-    if age < threshold:
-        return {
-            "state": "idle-grace",
-            "since": last_activity,
-            "reason": (
-                "Codex completed its queue and the observer terminal has been quiet for "
-                f"{int(age)}s; automatic relaunch waits for the {threshold}s idle threshold"
-            ),
-        }
     return {
         "state": "idle",
+        "since": last_activity,
         "reason": (
             "Codex completed its queue and the observer terminal has been quiet for "
-            f"{int(age)}s (threshold {threshold}s) with no active sprint card"
+            f"{int(age)}s with no unacknowledged significant card event"
         ),
     }
 
@@ -510,7 +715,7 @@ def _set_observer_state(record: ObserverRecord, state: str, *, reason: str = "")
 
 
 def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> None:
-    """Persist a completed queue immediately while its relaunch grace period runs."""
+    """Persist a completed queue while it waits for a new linked-card event."""
     if (
         record.state == "idle-grace"
         and record.idle_since == since
@@ -523,49 +728,6 @@ def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> No
     record.idle_reason = reason
     record.last_action = "idle-grace"
     record.last_action_at = now
-
-
-def _restart_idle_observer(
-    runtime: Any,
-    payload: dict[str, Any],
-    observers: dict[str, ObserverRecord],
-    ref: str,
-    record: ObserverRecord,
-    reason: str,
-) -> dict[str, Any]:
-    """Replace one demonstrably finished observer queue through the usual relaunch path.
-
-    The replacement starts from the live board, not the old terminal's transcript.  Thus a card
-    the previous head already created is visible as active during recovery and cannot be cut again.
-    """
-    now = time.time()
-    record.state = "idle"
-    record.idle_since = now
-    record.idle_reason = reason
-    record.last_action = "idle-detected"
-    record.last_action_at = now
-    observers[ref] = record
-    outcome = _launch_observer(runtime, payload, observers, ref, record)
-    replacement = observers.get(ref)
-    if outcome.get("action") != "observer-relaunched" or replacement is None:
-        # The reason survives a readiness or teardown failure, so status does not turn this back
-        # into a misleading healthy-looking deferred head.
-        if replacement is not None:
-            replacement.idle_since = now
-            replacement.idle_reason = reason
-            _persist_quietly(runtime, payload, observers)
-        outcome["action"] = "observer-idle-restart-deferred"
-        outcome["reason"] = reason
-        return outcome
-    replacement.state = "idle-recovering"
-    replacement.idle_since = now
-    replacement.idle_reason = reason
-    replacement.last_action = "idle-relaunched"
-    replacement.last_action_at = time.time()
-    _persist_quietly(runtime, payload, observers)
-    outcome["action"] = "observer-idle-relaunched"
-    outcome["reason"] = reason
-    return outcome
 
 
 def _head_may_be_running(record: ObserverRecord) -> bool:
