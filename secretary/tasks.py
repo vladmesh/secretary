@@ -303,7 +303,7 @@ class TaskAudit:
 
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
         os.makedirs(self.pending_dir, exist_ok=True)
-        self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
+        self._atomic_json(self._pending_path(request_id), event)
 
     def claim(self, request_id: str, event: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
         """Atomically reserve a request id or return its durable record.
@@ -323,7 +323,7 @@ class TaskAudit:
                     return committed, True, pending is not None
                 if pending is not None:
                     return pending, False, False
-                self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
+                self._atomic_json(self._pending_path(request_id), event)
                 return event, False, False
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -341,6 +341,19 @@ class TaskAudit:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def entity_lock(self, entity: str) -> Any:
+        """Serialize Product/Issue recovery and mutation for one durable entity."""
+        os.makedirs(self.pending_dir, exist_ok=True)
+        digest = hashlib.sha256(entity.encode("utf-8")).hexdigest()
+        path = os.path.join(self.pending_dir, f".entity-{digest}.lock")
+        with open(path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def append(self, request_id: str, event: dict[str, Any]) -> str:
         os.makedirs(self.board_dir, exist_ok=True)
         with open(self.lock_path, "a+", encoding="utf-8") as lock:
@@ -351,7 +364,7 @@ class TaskAudit:
                         events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
                         events.flush()
                         os.fsync(events.fileno())
-                pending = os.path.join(self.pending_dir, f"{request_id}.json")
+                pending = self._pending_path(request_id)
                 if os.path.exists(pending):
                     os.unlink(pending)
                 return str(event["event_id"])
@@ -360,7 +373,7 @@ class TaskAudit:
 
     def discard(self, request_id: str) -> None:
         try:
-            os.unlink(os.path.join(self.pending_dir, f"{request_id}.json"))
+            os.unlink(self._pending_path(request_id))
         except FileNotFoundError:
             pass
 
@@ -456,7 +469,7 @@ class TaskAudit:
         return None
 
     def pending_event(self, request_id: str) -> dict[str, Any] | None:
-        pending = os.path.join(self.pending_dir, f"{request_id}.json")
+        pending = self._pending_path(request_id)
         try:
             with open(pending, encoding="utf-8") as source:
                 return json.load(source)
@@ -469,6 +482,11 @@ class TaskAudit:
                 return any(json.loads(line).get("request_id") == request_id for line in events if line.strip())
         except FileNotFoundError:
             return False
+
+    def _pending_path(self, request_id: str) -> str:
+        """Keep a caller supplied request id out of filesystem path construction."""
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return os.path.join(self.pending_dir, f"{digest}.json")
 
     @staticmethod
     def _atomic_json(path: str, document: dict[str, Any]) -> None:

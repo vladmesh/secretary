@@ -10,7 +10,7 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -162,6 +162,14 @@ class ProductIssueTransaction:
     def kind(self) -> str:
         return self._KINDS[self.operation]
 
+    @property
+    def entity(self) -> str:
+        if self.operation == "product.create":
+            return f"product:{self.intent['product_id']}"
+        if self.operation == "issue.create":
+            return f"product:{self.intent['product']}"
+        return f"issue:{self.intent['reference']}"
+
     def _event(self, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.store._event(
             kind=self.kind,
@@ -175,6 +183,7 @@ class ProductIssueTransaction:
             "protocol": "product_issue_transaction",
             "operation": self.operation,
             "intent": self.intent,
+            "entity": self.entity,
             "context": context or {},
             "phase": "staged",
         }
@@ -484,7 +493,62 @@ class ProductIssueStore:
         return self.show_issue(str(event.get("ref") or event["intent"]["reference"]))
 
     def _transaction(self, operation: str, intent: dict[str, Any], request_id: str, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        return ProductIssueTransaction(self, operation=operation, intent=intent, request_id=request_id).run(context=context)
+        transaction = ProductIssueTransaction(self, operation=operation, intent=intent, request_id=request_id)
+        return self._run_entity_transaction(transaction, context=context)
+
+    @staticmethod
+    def _pending_entity(event: dict[str, Any]) -> str | None:
+        entity = event.get("entity")
+        if isinstance(entity, str):
+            return entity
+        operation = event.get("operation")
+        intent = event.get("intent")
+        if not isinstance(operation, str) or not isinstance(intent, dict):
+            return None
+        try:
+            return ProductIssueTransaction(
+                None, operation=operation, intent=intent, request_id=str(event["request_id"])
+            ).entity
+        except (KeyError, TypeError):
+            return None
+
+    def _repair_entity_pending(self, entity: str, *, except_request_id: str) -> None:
+        """Finish earlier work on an entity before a new mutation observes it."""
+        for event in self.audit.pending_events():
+            if event.get("protocol") != "product_issue_transaction":
+                continue
+            if event.get("request_id") == except_request_id or self._pending_entity(event) != entity:
+                continue
+            operation = event.get("operation")
+            intent = event.get("intent")
+            request_id = event.get("request_id")
+            context = event.get("context")
+            if not isinstance(operation, str) or not isinstance(intent, dict) or not isinstance(request_id, str):
+                raise TaskError("audit_pending", "Product/Issue operation is pending repair", 4)
+            if operation not in ProductIssueTransaction._KINDS:
+                raise TaskError("audit_pending", "Product/Issue operation is pending repair", 4)
+            ProductIssueTransaction(self, operation=operation, intent=intent, request_id=request_id).run(
+                context=context if isinstance(context, dict) else None
+            )
+
+    def _run_entity_transaction(
+        self,
+        transaction: ProductIssueTransaction,
+        *,
+        context: dict[str, Any] | None = None,
+        fresh: Callable[[], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        existing, _, _ = transaction._existing()
+        if existing is not None:
+            return transaction.run()
+        with self.audit.entity_lock(transaction.entity):
+            self._repair_entity_pending(transaction.entity, except_request_id=transaction.request_id)
+            existing, _, _ = transaction._existing()
+            if existing is not None:
+                return transaction.run()
+            if fresh is not None:
+                context = fresh()
+            return transaction.run(context=context)
 
     def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not _ID.fullmatch(product_id):
@@ -494,17 +558,18 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"product_id": product_id, "projects": json.dumps(sorted(projects), separators=(",", ":")), "title": title, "description": description, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="product.create", intent=intent, request_id=request_id)
-        existing, _, _ = transaction._existing()
-        if existing is not None:
-            return transaction.run()
-        unknown = sorted(set(projects) - registered_projects(self.instance))
-        if unknown:
-            raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
-        ref = f"product:{product_id}"
-        board_id, column_id = self._board()
-        if self.client.call("getTaskByReference", project_id=board_id, reference=ref):
-            raise TaskError("validation", f"product {product_id!r} already exists", 2)
-        return transaction.run(context={"board_id": board_id, "column_id": column_id})
+
+        def fresh() -> dict[str, Any]:
+            unknown = sorted(set(projects) - registered_projects(self.instance))
+            if unknown:
+                raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
+            ref = f"product:{product_id}"
+            board_id, column_id = self._board()
+            if self.client.call("getTaskByReference", project_id=board_id, reference=ref):
+                raise TaskError("validation", f"product {product_id!r} already exists", 2)
+            return {"board_id": board_id, "column_id": column_id}
+
+        return self._run_entity_transaction(transaction, fresh=fresh)
 
     def list_products(self) -> list[dict[str, Any]]:
         return sorted((self._view(card, meta) for card in self._cards() if (meta := self._metadata(card)).get(META_RECORD_TYPE) == PRODUCT_TYPE), key=lambda item: str(item["id"]))
@@ -519,12 +584,13 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"product": product, "issue_kind": issue_kind, "priority": priority, "title": title, "description": description, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="issue.create", intent=intent, request_id=request_id)
-        existing, _, _ = transaction._existing()
-        if existing is not None:
-            return transaction.run()
-        self.show_product(product)
-        board_id, column_id = self._board()
-        return transaction.run(context={"board_id": board_id, "column_id": column_id})
+
+        def fresh() -> dict[str, Any]:
+            self.show_product(product)
+            board_id, column_id = self._board()
+            return {"board_id": board_id, "column_id": column_id}
+
+        return self._run_entity_transaction(transaction, fresh=fresh)
 
     def list_issues(self, *, product: str | None = None, include_closed: bool = False) -> list[dict[str, Any]]:
         result = []
@@ -567,13 +633,14 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"reference": reference, "priority": priority, "reason": reason, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="issue.priority", intent=intent, request_id=request_id)
-        existing, _, _ = transaction._existing()
-        if existing is not None:
-            return transaction.run()
-        card, metadata = self._find(reference, ISSUE_TYPE)
-        if int(card.get("is_active", 1) or 0) == 0:
-            raise TaskError("closed", "cannot reprioritize a closed issue", 3)
-        return transaction.run(context={"previous_priority": metadata.get(META_ISSUE_PRIORITY, "")})
+
+        def fresh() -> dict[str, Any]:
+            card, metadata = self._find(reference, ISSUE_TYPE)
+            if int(card.get("is_active", 1) or 0) == 0:
+                raise TaskError("closed", "cannot reprioritize a closed issue", 3)
+            return {"previous_priority": metadata.get(META_ISSUE_PRIORITY, "")}
+
+        return self._run_entity_transaction(transaction, fresh=fresh)
 
     def close_issue(self, *, reference: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if reason not in ISSUE_CLOSE_REASONS:
@@ -581,10 +648,11 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         intent = {"reference": reference, "reason": reason, "actor": actor}
         transaction = ProductIssueTransaction(self, operation="issue.close", intent=intent, request_id=request_id)
-        existing, _, _ = transaction._existing()
-        if existing is not None:
-            return transaction.run()
-        card, _ = self._find(reference, ISSUE_TYPE)
-        if int(card.get("is_active", 1) or 0) == 0:
-            raise TaskError("closed", "issue is already closed", 3)
-        return transaction.run()
+
+        def fresh() -> dict[str, Any]:
+            card, _ = self._find(reference, ISSUE_TYPE)
+            if int(card.get("is_active", 1) or 0) == 0:
+                raise TaskError("closed", "issue is already closed", 3)
+            return {}
+
+        return self._run_entity_transaction(transaction, fresh=fresh)

@@ -481,18 +481,11 @@ class ProductIssueStoreTests(unittest.TestCase):
     def test_concurrent_conflicting_request_id_is_rejected_before_backend_writes(self) -> None:
         first = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
         second = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
-        claim = first.audit.claim
         barrier = threading.Barrier(2)
         results: list[object] = []
 
-        def synchronized_claim(request_id: str, event: dict) -> tuple[dict, bool, bool]:
-            barrier.wait(timeout=5)
-            return claim(request_id, event)
-
-        first.audit.claim = synchronized_claim  # type: ignore[method-assign]
-        second.audit.claim = synchronized_claim  # type: ignore[method-assign]
-
         def create(store: ProductIssueStore, title: str) -> None:
+            barrier.wait(timeout=5)
             try:
                 results.append(store.create_product(
                     product_id="secretary", projects=["secretary"], title=title, description="",
@@ -517,6 +510,167 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(
             len([event for event in first.audit.events() if event["request_id"] == "concurrent-request"]), 1,
         )
+
+    def test_concurrent_product_creates_serialize_by_product_id(self) -> None:
+        first = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+        second = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+        barrier = threading.Barrier(2)
+        results: list[object] = []
+
+        def create(store: ProductIssueStore, request_id: str) -> None:
+            barrier.wait(timeout=5)
+            try:
+                results.append(store.create_product(
+                    product_id="duplicate", projects=["secretary"], title="Duplicate", description="",
+                    actor="po", request_id=request_id,
+                ))
+            except TaskError as exc:
+                results.append(exc)
+
+        threads = [
+            threading.Thread(target=create, args=(first, "duplicate-one")),
+            threading.Thread(target=create, args=(second, "duplicate-two")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(len([result for result in results if isinstance(result, dict)]), 1)
+        self.assertEqual([result.code for result in results if isinstance(result, TaskError)], ["validation"])
+        products = [
+            card for card in self.client.tasks
+            if card.get("reference") == "product:duplicate"
+        ]
+        self.assertEqual(len(products), 1)
+
+    def test_new_product_request_repairs_an_earlier_pending_product_before_duplicate_check(self) -> None:
+        original = self.client.call
+        rejected = False
+
+        def reject_metadata_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "saveTaskMetadata" and not rejected:
+                rejected = True
+                return False
+            return original(method, **params)
+
+        self.client.call = reject_metadata_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="recovery", projects=["secretary"], title="Recovery", description="", actor="po",
+                request_id="first-product",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="recovery", projects=["secretary"], title="Recovery", description="", actor="po",
+                request_id="second-product",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            len([card for card in self.client.tasks if card.get("reference") == "product:recovery"]),
+            1,
+        )
+        self.assertEqual(
+            [event["request_id"] for event in self.store.audit.events() if event["kind"] == "product_created"],
+            ["first-product"],
+        )
+
+    def test_close_repairs_pending_priority_before_mutating_the_issue(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original = self.client.call
+        rejected = False
+
+        def reject_priority_metadata_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "saveTaskMetadata" and not rejected:
+                rejected = True
+                return False
+            return original(method, **params)
+
+        self.client.call = reject_priority_metadata_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.update_priority(
+                reference=issue["ref"], priority="P1", reason="urgent", actor="po", request_id="priority",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        closed = self.store.close_issue(
+            reference=issue["ref"], reason="resolved", actor="po", request_id="close",
+        )
+        self.assertTrue(closed["closed"])
+        self.assertEqual(closed["priority"], "P1")
+        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            [event["kind"] for event in self.store.show_issue(issue["ref"])["history"]["audit"]],
+            ["issue_created", "issue_priority_changed", "issue_closed"],
+        )
+
+    def test_competing_close_repairs_the_first_request_before_rejecting_the_second(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original = self.client.call
+        rejected = False
+
+        def reject_close_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "closeTask" and not rejected:
+                rejected = True
+                return False
+            return original(method, **params)
+
+        self.client.call = reject_close_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.close_issue(
+                reference=issue["ref"], reason="resolved", actor="po", request_id="first-close",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        with self.assertRaises(TaskError) as raised:
+            self.store.close_issue(
+                reference=issue["ref"], reason="invalid", actor="po", request_id="second-close",
+            )
+        self.assertEqual(raised.exception.code, "closed")
+        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            [
+                event["request_id"]
+                for event in self.store.show_issue(issue["ref"])["history"]["audit"]
+                if event["kind"] == "issue_closed"
+            ],
+            ["first-close"],
+        )
+
+    def test_traversal_request_id_keeps_partial_product_intent_in_pending_audit(self) -> None:
+        original = self.client.call
+
+        def reject_metadata(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata":
+                return False
+            return original(method, **params)
+
+        self.client.call = reject_metadata  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="escaped", projects=["secretary"], title="Escaped", description="", actor="po",
+                request_id="../escaped-pending",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
+        self.assertIsNotNone(self.store.audit.pending_event("../escaped-pending"))
+        self.assertFalse((self.root / "data" / "board" / "escaped-pending.json").exists())
+        pending_names = [path.name for path in (self.root / "data" / "board" / "pending-audit").glob("*.json")]
+        self.assertEqual(len(pending_names), 1)
+        self.assertRegex(pending_names[0], r"^[0-9a-f]{64}\.json$")
 
     def test_audit_append_failure_retries_without_a_second_comment_or_event(self) -> None:
         self.store.create_product(
@@ -566,7 +720,7 @@ class ProductIssueStoreTests(unittest.TestCase):
 
         def fail_pending_unlink(path: str, *args: object, **kwargs: object) -> None:
             nonlocal failed
-            if path.endswith("pending-audit/post-commit-cleanup.json") and not failed:
+            if path == self.store.audit._pending_path("post-commit-cleanup") and not failed:
                 failed = True
                 raise OSError("pending cleanup interrupted")
             original_unlink(path, *args, **kwargs)
