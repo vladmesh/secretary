@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import write_json
+from secretary.dispatcher_worker_lifecycle import WorkerContinuation
 
 
 class DispatcherStateError(Exception):
@@ -73,20 +74,9 @@ class DispatcherRecord:
     # from an unrelated shell in the same worktree must not keep a broken head alive.
     worker_started_at: float = 0.0
     worker_progress_at: float = 0.0
-    # A worker that has reported done is suspended while the mechanical gate owns the checkout.
-    # Unlike a pause, this is a short per-card handoff: a red gate can resume the same provider
-    # conversation, while a green gate confirms it stopped before review begins.
-    worker_retained_at: float = 0.0
-    # The red gate phase is saved before waking the retained worker. Recovery must keep the
-    # original phase instead of turning merge-gate or review-freeze retries into ordinary gates.
-    worker_resume_phase: str = ""
-    # `pending` is written before SIGCONT. `confirmed` is written only after the provider has
-    # visibly accepted the continuation. A crash may therefore retry an incomplete delivery, but
-    # never overwrite a continuation the prior tick already confirmed.
-    worker_resume_delivery: str = ""
-    # The delivery boundary is saved before SIGCONT. Recovery uses provider session JSONL after
-    # this point before it trusts a terminal repaint as proof that the continuation was accepted.
-    worker_resume_sent_at: float = 0.0
+    # Durable worker ownership while validation has the checkout. This is deliberately one typed
+    # state value rather than four optional fields whose combinations callers would have to infer.
+    worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -139,10 +129,7 @@ class DispatcherRecord:
             "worker_pid_file": self.worker_pid_file,
             "review_pid_file": self.review_pid_file,
             "worker_progress_at": self.worker_progress_at,
-            "worker_retained_at": self.worker_retained_at,
-            "worker_resume_phase": self.worker_resume_phase,
-            "worker_resume_delivery": self.worker_resume_delivery,
-            "worker_resume_sent_at": self.worker_resume_sent_at,
+            "worker_continuation": self.worker_continuation.to_json(),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
@@ -183,10 +170,11 @@ class DispatcherRecord:
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
-            worker_retained_at=float(payload.get("worker_retained_at") or 0.0),
-            worker_resume_phase=str(payload.get("worker_resume_phase") or ""),
-            worker_resume_delivery=str(payload.get("worker_resume_delivery") or ""),
-            worker_resume_sent_at=float(payload.get("worker_resume_sent_at") or 0.0),
+            worker_continuation=(
+                WorkerContinuation.from_json(payload.get("worker_continuation"))
+                if "worker_continuation" in payload
+                else WorkerContinuation.from_legacy_record(payload)
+            ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),

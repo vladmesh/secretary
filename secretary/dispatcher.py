@@ -1563,7 +1563,8 @@ class CommandHostRuntime:
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("retained worker workspace is missing")
-        if record.worker_resume_delivery == "confirmed":
+        continuation = record.worker_continuation
+        if continuation.delivery_confirmed:
             if status.get("stopped"):
                 raise HostError("confirmed retained continuation is no longer running")
             return
@@ -1571,7 +1572,7 @@ class CommandHostRuntime:
             record.handle,
             run_json=self._run_json,
             workspace=str(workspace),
-            since=record.worker_resume_sent_at,
+            since=continuation.sent_at,
             adapter=str(adapter or ""),
         ):
             # The dispatcher may have died after the provider started but before it recorded
@@ -2412,10 +2413,7 @@ class DispatcherRuntime:
                 reason=scrub_host_output(str(exc)),
             )
         _forget_role_head(record, WORKER_ROLE)
-        record.worker_retained_at = 0.0
-        record.worker_resume_phase = ""
-        record.worker_resume_delivery = ""
-        record.worker_resume_sent_at = 0.0
+        record.worker_continuation.clear()
         return None
 
     def _worker_launch_aborted(
@@ -2605,33 +2603,35 @@ class DispatcherRuntime:
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
-        if record.state == "worker_resuming":
+        continuation = record.worker_continuation
+        if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:
                 # A report after the resume phase opened proves the continuation reached the
                 # retained conversation. Do not rewrite TASK.md or replay the prompt over a
                 # completed turn after recovering from a crash before its delivery checkpoint.
-                record.worker_resume_delivery = "confirmed"
+                continuation.confirm_delivery()
                 records[ref] = record
                 self.save_records(payload, records)
                 return self._finish_retained_worker_resume(
                     task, record, records, payload, attempt_id,
-                    phase=record.worker_resume_phase or "gate",
+                    phase=continuation.phase or "gate",
                 )
             try:
                 self.host.resume_worker(task, record)
             except HostError as exc:
                 return self._restart_gate_red_worker(
                     task, record, records, payload, attempt_id,
-                    continuation_reason=scrub_host_output(str(exc)), phase=record.worker_resume_phase or "gate",
+                    continuation_reason=scrub_host_output(str(exc)),
+                    phase=continuation.phase or "gate",
                 )
-            record.worker_resume_delivery = "confirmed"
+            continuation.confirm_delivery()
             records[ref] = record
             self.save_records(payload, records)
             return self._finish_retained_worker_resume(
-                task, record, records, payload, attempt_id, phase=record.worker_resume_phase or "gate"
+                task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
         if marker == "report:done":
-            if record.state == "worker_retained":
+            if continuation.awaiting_continuation:
                 # The process was frozen and recorded before a tick died between retention and
                 # the board move. Replaying this idempotent move never wakes the worker.
                 self.writer.move(
@@ -2682,14 +2682,13 @@ class DispatcherRuntime:
             # while CI or a reviewer owns this checkout.
             try:
                 self.host.retain_worker(record)
-                record.worker_retained_at = time.time()
+                continuation.mark_retained(time.time())
             except HostError:
                 # A worker with no reusable conversation is still made safe. A red gate will use
                 # the normal replacement path, and an unconfirmed stop keeps this tick inert.
                 unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
-            record.state = "worker_retained"
             # Fresh code state: the mechanical gate must re-run before this report reaches review.
             record.gate_state = ""
             record.gate_pending_since = 0.0
@@ -2948,7 +2947,7 @@ class DispatcherRuntime:
         if record.state == "review_starting":
             return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
         if record.state != "reviewing":
-            if record.worker_retained_at:
+            if record.worker_continuation.retained:
                 # The gate is green, but a reviewer must still be the only writer. This stop is
                 # deliberately confirmed before the reviewer launch intent is written.
                 unconfirmed = self._stop_worker_confirmed(
@@ -3296,7 +3295,8 @@ class DispatcherRuntime:
         # the card: a refusal then leaves the card in Validate, where the next tick can retry
         # instead of waiting in In progress for a report from a worker that was already stopped.
         worker_stopped = False
-        if not record.worker_retained_at:
+        continuation = record.worker_continuation
+        if not continuation.retained:
             unconfirmed = self._stop_worker_confirmed(record, ref, step="gate", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
@@ -3323,14 +3323,11 @@ class DispatcherRuntime:
         # `review_baseline` is part of the worker report identity. The retained conversation gets
         # a new TASK.md, so its next report must not dedupe against the completed round.
         record.review_baseline = len(moved.get("comments") or [])
-        if record.worker_retained_at:
+        if continuation.retained:
             # Persist the red delivery boundary before waking the worker.  If this tick dies after
             # delivery, replay stays on this branch instead of treating the old done marker as a
             # completion from the new rework round.
-            record.state = "worker_resuming"
-            record.worker_resume_phase = phase
-            record.worker_resume_delivery = "pending"
-            record.worker_resume_sent_at = time.time()
+            continuation.begin_delivery(phase, time.time())
             records[ref] = record
             self.save_records(payload, records)
             try:
@@ -3341,7 +3338,7 @@ class DispatcherRuntime:
                     continuation_reason=scrub_host_output(str(exc)), phase=phase,
                 )
             else:
-                record.worker_resume_delivery = "confirmed"
+                continuation.confirm_delivery()
                 records[ref] = record
                 self.save_records(payload, records)
                 return self._finish_retained_worker_resume(
@@ -3361,10 +3358,7 @@ class DispatcherRuntime:
         payload: dict[str, Any], attempt_id: str, *, phase: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
-        record.worker_retained_at = 0.0
-        record.worker_resume_phase = ""
-        record.worker_resume_delivery = ""
-        record.worker_resume_sent_at = 0.0
+        record.worker_continuation.clear()
         record.state = "claimed"
         rework_round = record.attempt_round + 1
         retained_run = dict(record.worker_run)

@@ -64,6 +64,7 @@ from secretary.dispatcher_watchdog import (
     stall_seconds,
     wait_outcome,
 )
+from secretary.dispatcher_worker_lifecycle import WorkerContinuationStage
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
@@ -2579,7 +2580,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         retained = self.runtime.state.load()["records"]["secretary-510-pilot"]
-        self.assertTrue(retained["worker_retained_at"])
+        self.assertEqual(
+            retained["worker_continuation"]["stage"],
+            WorkerContinuationStage.RETAINED.value,
+        )
 
         gated = self.runtime.tick(self.selector)
 
@@ -2614,7 +2618,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
         self._run_worker_to_validate()
         payload = self.runtime.state.load()
-        payload["records"]["secretary-510-pilot"]["worker_retained_at"] = 0.0
+        payload["records"]["secretary-510-pilot"]["worker_continuation"] = {}
         self.runtime.state.save(payload)
         self.host.calls.clear()
 
@@ -2633,7 +2637,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         ]
         self._run_worker_to_validate()
         payload = self.runtime.state.load()
-        payload["records"]["secretary-510-pilot"]["worker_retained_at"] = 0.0
+        payload["records"]["secretary-510-pilot"]["worker_continuation"] = {}
         self.runtime.state.save(payload)
         self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
 

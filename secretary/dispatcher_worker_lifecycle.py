@@ -1,0 +1,116 @@
+"""Durable state for handing a worker across mechanical validation.
+
+The board state and the head state are separate machines.  A card can still be In progress while
+its completed worker is already suspended, or already be back In progress while a retained worker
+is accepting its continuation.  Keeping those facts in one typed value avoids invalid combinations
+of timestamps and string flags on ``DispatcherRecord``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+
+class WorkerContinuationStage(StrEnum):
+    NONE = "none"
+    RETAINED = "retained"
+    DELIVERY_PENDING = "delivery_pending"
+    DELIVERY_CONFIRMED = "delivery_confirmed"
+
+
+@dataclass
+class WorkerContinuation:
+    stage: WorkerContinuationStage = WorkerContinuationStage.NONE
+    phase: str = ""
+    retained_at: float = 0.0
+    sent_at: float = 0.0
+
+    @property
+    def retained(self) -> bool:
+        return self.stage != WorkerContinuationStage.NONE
+
+    @property
+    def awaiting_continuation(self) -> bool:
+        return self.stage == WorkerContinuationStage.RETAINED
+
+    @property
+    def delivery_pending(self) -> bool:
+        return self.stage == WorkerContinuationStage.DELIVERY_PENDING
+
+    @property
+    def delivery_confirmed(self) -> bool:
+        return self.stage == WorkerContinuationStage.DELIVERY_CONFIRMED
+
+    def mark_retained(self, now: float) -> None:
+        self.stage = WorkerContinuationStage.RETAINED
+        self.phase = ""
+        self.retained_at = now
+        self.sent_at = 0.0
+
+    def begin_delivery(self, phase: str, now: float) -> None:
+        if self.stage != WorkerContinuationStage.RETAINED:
+            raise ValueError(f"cannot resume worker from {self.stage}")
+        self.stage = WorkerContinuationStage.DELIVERY_PENDING
+        self.phase = phase
+        self.sent_at = now
+
+    def confirm_delivery(self) -> None:
+        if self.stage not in {
+            WorkerContinuationStage.DELIVERY_PENDING,
+            WorkerContinuationStage.DELIVERY_CONFIRMED,
+        }:
+            raise ValueError(f"cannot confirm worker delivery from {self.stage}")
+        self.stage = WorkerContinuationStage.DELIVERY_CONFIRMED
+
+    def clear(self) -> None:
+        self.stage = WorkerContinuationStage.NONE
+        self.phase = ""
+        self.retained_at = 0.0
+        self.sent_at = 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        if self.stage == WorkerContinuationStage.NONE:
+            return {}
+        return {
+            "stage": self.stage.value,
+            "phase": self.phase,
+            "retained_at": self.retained_at,
+            "sent_at": self.sent_at,
+        }
+
+    @classmethod
+    def from_json(cls, value: Any) -> "WorkerContinuation":
+        if not isinstance(value, dict) or not value:
+            return cls()
+        try:
+            stage = WorkerContinuationStage(str(value.get("stage") or "none"))
+        except ValueError:
+            stage = WorkerContinuationStage.NONE
+        return cls(
+            stage=stage,
+            phase=str(value.get("phase") or ""),
+            retained_at=float(value.get("retained_at") or 0.0),
+            sent_at=float(value.get("sent_at") or 0.0),
+        )
+
+    @classmethod
+    def from_legacy_record(cls, payload: dict[str, Any]) -> "WorkerContinuation":
+        """Read records written by the abandoned flat-field implementation."""
+        retained_at = float(payload.get("worker_retained_at") or 0.0)
+        delivery = str(payload.get("worker_resume_delivery") or "")
+        if delivery == "confirmed":
+            stage = WorkerContinuationStage.DELIVERY_CONFIRMED
+        elif delivery == "pending":
+            stage = WorkerContinuationStage.DELIVERY_PENDING
+        elif retained_at:
+            stage = WorkerContinuationStage.RETAINED
+        else:
+            stage = WorkerContinuationStage.NONE
+        return cls(
+            stage=stage,
+            phase=str(payload.get("worker_resume_phase") or ""),
+            retained_at=retained_at,
+            sent_at=float(payload.get("worker_resume_sent_at") or 0.0),
+        )

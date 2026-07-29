@@ -36,6 +36,7 @@ from secretary.dispatcher_launch import launch_intent_liveness
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HeadLaunchAborted, HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
+from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
@@ -489,8 +490,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         retained = self.record()
         assert retained is not None
-        self.assertEqual(retained.state, "worker_resuming")
-        self.assertEqual(retained.worker_resume_delivery, "pending")
+        self.assertEqual(retained.worker_continuation.stage, WorkerContinuationStage.DELIVERY_PENDING)
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
         recovered = self.tick()
@@ -535,9 +535,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()
         record = self.record()
         assert record is not None
-        record.state = "worker_resuming"
-        record.worker_retained_at = time.time()
-        record.worker_resume_phase = "merge-gate"
+        record.worker_continuation.mark_retained(time.time())
+        record.worker_continuation.begin_delivery("merge-gate", time.time())
         payload = self.runtime.state.load()
         payload["records"][REF] = record.to_json()
         self.runtime.state.save(payload)
@@ -563,7 +562,10 @@ class LaunchIntentTests(unittest.TestCase):
 
         retained = self.record()
         assert retained is not None
-        self.assertEqual(retained.state, "worker_retained")
+        self.assertEqual(
+            retained.worker_continuation.stage,
+            WorkerContinuationStage.RETAINED,
+        )
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
 
         recovered = self.tick()
@@ -590,7 +592,10 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.reader.show(REF)["state"], "validate")
         retained = self.record()
         assert retained is not None
-        self.assertEqual(retained.state, "worker_retained")
+        self.assertEqual(
+            retained.worker_continuation.stage,
+            WorkerContinuationStage.RETAINED,
+        )
         self.host.gate_results = [GateResult("green", "passed")]
 
         recovered = self.tick()
@@ -1508,7 +1513,11 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir), handle="", head="codex",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="worker_retained", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.RETAINED,
+                retained_at=time.time(),
+            ),
         )
         os.kill(head.pid, signal.SIGSTOP)
 
@@ -1557,8 +1566,14 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="gate",
+                retained_at=time.time(),
+                sent_at=time.time(),
+            ),
         )
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
@@ -1592,8 +1607,14 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="gate",
+                retained_at=time.time(),
+                sent_at=time.time(),
+            ),
         )
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
@@ -1622,8 +1643,14 @@ class HostLaunchContourTests(unittest.TestCase):
                 return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"] if sent else [""]}}
             return {}
 
+        def latest_turn(_workspace: Path, _since: float) -> float | None:
+            return 1.0 if sent else None
+
         with mock.patch.object(self.host, "_run_json", run_json), \
-             mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0):
+             mock.patch(
+                 "secretary.dispatcher_tui.latest_claude_user_turn_for",
+                 side_effect=latest_turn,
+             ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
@@ -1638,8 +1665,14 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
-            worker_run={"adapter": "claude", "head": "claude-opus"}, worker_resume_sent_at=sent_at,
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude", "head": "claude-opus"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="gate",
+                retained_at=sent_at,
+                sent_at=sent_at,
+            ),
         )
         projects = self.data_dir / "claude-projects"
         session = projects / str(self.data_dir.resolve()).replace("/", "-") / "session.jsonl"
@@ -1663,9 +1696,14 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
-            worker_resume_delivery="confirmed",
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_CONFIRMED,
+                phase="gate",
+                retained_at=time.time(),
+                sent_at=time.time(),
+            ),
         )
         calls: list[list[str]] = []
 
@@ -1678,8 +1716,14 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir / "missing"), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(DEAD_PID)),
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(DEAD_PID)),
             worker_run={"adapter": "claude"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="gate",
+                retained_at=time.time(),
+                sent_at=time.time(),
+            ),
         )
 
         with self.assertRaisesRegex(HostError, "session exited"):
@@ -1691,8 +1735,14 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir / "missing"), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="worker_resuming", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="gate",
+                retained_at=time.time(),
+                sent_at=time.time(),
+            ),
         )
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
