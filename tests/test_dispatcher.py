@@ -2180,9 +2180,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(neighbor["state"], "ready")
         self.assertIsNone(neighbor["claim"]["worker"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
-        self.assertEqual(self.host.torn_down, ["secretary-510-pilot-pilot"])
+        self.assertEqual(self.host.torn_down, self.host.stopped)
         self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
     def _run_worker_to_validate(self, request_id: str = "worker-done") -> None:
@@ -3514,8 +3513,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(card["state"], "in_progress")
         self.assertEqual(card["routing"]["resolved_worker_head"], "claude-opus")
         # The preempted head is not left running in the workspace the new round claims.
-        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
-        self.assertEqual(self.host.stopped, [])
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
         history = self.routing_history()
         self.assertEqual([attempt.attempt for attempt in history], [1, 2])
         self.assertEqual([attempt.worker.head for attempt in history], ["codex", "claude-opus"])
@@ -3548,6 +3546,30 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual([attempt.attempt for attempt in history], [1, 2])
         self.assertEqual(history[0].reviewer.head, "codex-reviewer")
         self.assertIsNone(history[1].reviewer)
+
+    def test_a_preempt_out_of_validate_drops_the_retained_session(self) -> None:
+        """Retention follows the attempt, not the workspace. A preempt back to Ready ends the
+        attempt, so the suspended worker is stopped and the next round gets a fresh head rather
+        than the conversation that was frozen for the gate."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        retained = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            retained["worker_continuation"]["stage"], WorkerContinuationStage.RETAINED.value
+        )
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot",
+            target="ready", reason="preempted while validating", request_id="po-preempt-retained",
+        )
+
+        claimed = self.runtime.tick(self.selector)
+
+        self.assertEqual(claimed["step"], "claim")
+        self.assertEqual(self.host.resumed_workers, [])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(record["worker_continuation"], {})
 
     def test_worker_respawn_on_an_unchanged_head_stays_one_record(self) -> None:
         """A respawn inside a round is the same head coming back, not a second worker: the round
@@ -6176,9 +6198,10 @@ class PidHeartbeatTests(unittest.TestCase):
     def test_heartbeat_writes_the_shells_own_pid_then_execs_the_head(self) -> None:
         wrapped = with_pid_heartbeat("codex exec --dangerously-bypass-approvals-and-sandbox", "/tmp/x.pid")
 
-        self.assertTrue(wrapped.startswith('echo "$$" > '))
-        self.assertIn('echo "$$" > /tmp/x.pid; exec env codex exec', wrapped)
-        self.assertNotIn("setsid", wrapped)
+        self.assertEqual(
+            wrapped,
+            'echo "$$" > /tmp/x.pid; exec env codex exec --dangerously-bypass-approvals-and-sandbox',
+        )
 
     def test_heartbeat_survives_a_leading_environment_assignment(self) -> None:
         """secretary-751 review: catalog commands from `head_launch` start with `NAME=value`, which

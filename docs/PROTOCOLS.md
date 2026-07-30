@@ -339,18 +339,24 @@ A red gate first returns the card to In progress and updates `TASK.md` with the 
 next report identity. The dispatcher persists a pending-delivery boundary before SIGCONT, then
 checkpoints confirmation only after the provider durably records the continuation user turn.
 Terminal activity is a recovery hint for records without that boundary, not the delivery proof.
-Recovery after a crash cannot mistake the previous `done` report for a new completion, replay an incomplete
-delivery as if it were confirmed, or overwrite a confirmed continuation. A crash after SIGCONT but
-before delivery replays the prompt, while a turn already underway is checkpointed and not sent
-again. When the retained
-provider session is still live and accepts delivery, the same terminal and session continue the
-rework. Codex TUI and Claude interactive workers support this path; one-shot Codex exec workers
-do not. The routing record and card comment name this as a reused continuation with the worker
-profile, model, effort, reason and timestamp. A dead session, an unavailable continuation
-transport, or a lost handle is an explicit fallback: the dispatcher confirms the old worker has
-stopped, writes a durable launch intent, and starts exactly one replacement. Retention and stop
-signal the head's private process group, so its helpers are frozen too. An unconfirmed stop never
-permits a second writer in the workspace.
+Recovery after a crash cannot mistake the previous `done` report for a new completion, replay an
+incomplete delivery as if it were confirmed, or overwrite a confirmed continuation. A crash after
+SIGCONT but before delivery replays the prompt, while a turn already underway is checkpointed and
+not sent again. When the retained provider session is still live and accepts delivery, the same
+terminal and session continue the rework. Codex TUI and Claude interactive workers support this
+path; one-shot Codex exec workers do not. The routing record and card comment name this as a reused
+continuation with the worker profile, model, effort, reason and timestamp. A dead session, an
+unavailable continuation transport, or a lost handle is an explicit fallback: the dispatcher
+confirms the old worker has stopped, writes a durable launch intent, and starts exactly one
+replacement. Retention and stop signal the head's private process group, so its helpers are frozen
+too. An unconfirmed stop never permits a second writer in the workspace.
+
+Retention is scoped to the round that reported `done` and to the red mechanical gate that bounces
+it back. Nothing else keeps a worker session. A preempt or requeue back to Ready, a `report:blocked`,
+a move to Blocked, a reconciliation onto another card and a red review verdict all stop the worker
+head and clear the retained state, so the next round starts from a replacement head. A preempt is
+an instruction to end the current attempt, not to pause it; a red review verdict arrives after the
+green gate already stopped the worker for the reviewer.
 
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {

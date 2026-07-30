@@ -86,7 +86,7 @@ def terminal_turn_started(
             return bool(latest_claude_user_turn_for(workspace, since))
         if adapter == "codex":
             return bool(latest_user_turn_for(workspace, since))
-    return _screen_started_turn(read_terminal_text(handle, run_json=run_json))
+    return _screen_started_turn(read_terminal_text(handle, run_json=run_json), adapter=adapter)
 
 
 def deliver_interactive_prompt(
@@ -184,7 +184,7 @@ def _confirm_interactive_turn(handle: str, workspace: str, sent_at: float, *, ru
     while time.monotonic() < deadline:
         if latest_claude_user_turn_for(workspace, sent_at):
             return
-        turn_visible = terminal_turn_started(handle, run_json=run_json)
+        turn_visible = terminal_turn_started(handle, run_json=run_json, adapter="claude")
         if turn_visible:
             last_reason = "turn-visible-awaiting-user-turn"
         else:
@@ -394,8 +394,9 @@ def _prompt_still_in_codex_composer(screen: str, prompt: str) -> bool:
     return bool(signature and signature in screen[marker:])
 
 
-def _screen_started_turn(screen: str) -> bool:
+def _screen_started_turn(screen: str, *, adapter: str = "") -> bool:
+    if adapter == "claude":
+        return bool(_CLAUDE_TURN_RE.search(screen))
     marker = screen.rfind("\u203a")
-    if marker >= 0:
-        return bool(_CODEX_WORKING_RE.search(screen[:marker]))
-    return bool(_CLAUDE_TURN_RE.search(screen))
+    status_area = screen[:marker] if marker >= 0 else screen
+    return bool(_CODEX_WORKING_RE.search(status_area))
