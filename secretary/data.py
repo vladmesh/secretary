@@ -173,6 +173,15 @@ def export_board(
     audit = TaskAudit(data_dir).status()
     if not audit["ok"]:
         raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
+    # Product/Issue writes own their private staged journals.  They cannot be
+    # reconstructed from an untyped partial backend row, so no checkpoint may
+    # export the board while one remains.
+    from secretary.product_issues import ProductIssueTransaction
+    product_issue = ProductIssueTransaction(data_dir, TaskAudit(data_dir)).status()
+    if not product_issue["ok"]:
+        raise RuntimeError(
+            f"board export blocked by {product_issue['pending']} unresolved Product/Issue transaction(s)"
+        )
 
     # One `pipeline export` instead of a `show` per card: the checkpoint writer runs this on
     # every dispatcher tick under `tick_lock`, and the per-card path cost a subprocess and five

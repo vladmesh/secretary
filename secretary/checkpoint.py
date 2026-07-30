@@ -45,7 +45,12 @@ from secretary.data import (
 from secretary import state_repo
 from secretary.state_repo import BOARD_RUNS_PATHSPEC
 from secretary.tasks import TaskAudit, TaskError
-from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
+from secretary.product_issues import (
+    ProductIssueTransaction,
+    ProductIssueValidationError,
+    registered_projects,
+    validate_product_issue_records,
+)
 
 from triggered_agents.runtime.redact import redact
 
@@ -126,6 +131,11 @@ class CheckpointWriter:
         if not audit["ok"]:
             raise CheckpointBlocked(
                 f"task audit has {audit['pending']} unresolved pending record(s)"
+            )
+        product_issue = ProductIssueTransaction(self.data_dir, TaskAudit(self.data_dir)).status()
+        if not product_issue["ok"]:
+            raise CheckpointBlocked(
+                f"Product/Issue transactions have {product_issue['pending']} unresolved pending record(s)"
             )
 
         board, runs = self._regenerate()

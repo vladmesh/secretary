@@ -307,6 +307,16 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("pending", result.reason)
         self.assertNotIn("state/board/cards.ndjson", self.head_files())
 
+    def test_product_issue_transaction_blocks_the_commit(self):
+        journal = self.data_dir / "board" / "product-issue-transactions"
+        journal.mkdir(parents=True)
+        (journal / "v1-pending.json").write_text("{}", encoding="utf-8")
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Product/Issue", result.reason)
+
     def test_count_mismatch_blocks_the_commit(self):
         self.seed_board([CARD], card_count=4)
 
