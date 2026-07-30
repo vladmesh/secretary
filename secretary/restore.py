@@ -35,6 +35,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    all_project_cards,
 )
 from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
 
@@ -174,9 +175,7 @@ def _existing_sprints(
 def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
     """Read both active and closed Pipeline records before deciding a restore is empty."""
     board_id, _, _ = reader._board()
-    raw_cards = reader.client.call("getAllTasks", project_id=board_id, status_id=2) or []
-    if not isinstance(raw_cards, list):
-        raise RestoreError("Kanboard returned an invalid restore task list")
+    raw_cards = all_project_cards(reader.client, board_id)
     result: dict[str, dict[str, Any]] = {}
     for card in raw_cards:
         if not isinstance(card, dict):

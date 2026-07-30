@@ -58,9 +58,13 @@ class SprintKanboard:
         if method == "getActiveSwimlanes":
             return []
         if method == "getAllTasks":
+            status = params.get("status_id")
+            if status not in {0, 1}:
+                return []
             return [
                 task for task in self.tasks
-                if task["project_id"] == params["project_id"] and int(task.get("is_active", 1)) != 0
+                if task["project_id"] == params["project_id"]
+                and (int(task.get("is_active", 1) or 0) != 0) == (status == 1)
             ]
         if method == "getTaskByReference":
             return next((task for task in self.tasks if task["project_id"] == params["project_id"] and task["reference"] == params["reference"]), None)
@@ -158,10 +162,12 @@ class ProductSprintKanboard(SprintKanboard):
         if method == "getAllTasks":
             self.calls.append((method, params))
             status = params.get("status_id")
+            if status not in {0, 1}:
+                return []
             return [
                 task for task in self.tasks
                 if task["project_id"] == params["project_id"]
-                and (status == 2 or (int(task.get("is_active", 1) or 0) != 0) == (status == 1))
+                and (int(task.get("is_active", 1) or 0) != 0) == (status == 1)
             ]
         return super().call(method, **params)
 

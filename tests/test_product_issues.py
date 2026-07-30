@@ -35,8 +35,7 @@ class ProductBoard(WriteKanboard):
                 return [task for task in self.tasks if int(task.get("is_active", 1) or 0) != 0]
             if status == 0:
                 return [task for task in self.tasks if int(task.get("is_active", 1) or 0) == 0]
-            if status == 2:
-                return list(self.tasks)
+            return []
         return super().call(method, **params)
 
 
@@ -296,8 +295,9 @@ class ProductIssueStoreTests(unittest.TestCase):
             ["issue_created", "issue_priority_changed", "issue_closed"],
         )
         status_ids = [params.get("status_id") for method, params in self.client.calls if method == "getAllTasks"]
-        self.assertIn(2, status_ids)
-        self.assertNotIn(0, status_ids)
+        self.assertIn(1, status_ids)
+        self.assertIn(0, status_ids)
+        self.assertNotIn(2, status_ids)
 
     def test_issue_needs_all_required_values_and_archive_cannot_bypass_close(self) -> None:
         with self.assertRaises(TaskError) as raised:
