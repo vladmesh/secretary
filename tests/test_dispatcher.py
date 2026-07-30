@@ -4837,6 +4837,70 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertFalse(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
+    def test_complete_green_refreshes_checkout_from_default_branch_for_stacked_base(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            host.complete_green(
+                {
+                    "ref": "secretary-510-pilot",
+                    "project": "codegen_orchestrator",
+                    "workspace": {"base_branch": "pipeline/secretary-890"},
+                },
+                record,
+            )
+        cmds = [" ".join(run) for run in host.runs]
+        self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds), cmds)
+        # The checkout tracks main, so the stacked base is never what it is fast-forwarded to.
+        self.assertFalse(any("origin/pipeline/secretary-890" in c for c in cmds), cmds)
+        self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
+
+    def test_complete_green_survives_stacked_base_diverged_from_default_branch(self) -> None:
+        """secretary-899: a stacked card's PR merges on GitHub, and an unrelated card has landed on
+        the default branch since the base branch was cut. The post-merge refresh of the project
+        checkout must not report that merge as failed, and must leave the checkout on the default
+        branch at the remote tip."""
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            repo = root / "checkout"
+            workspace = root / "workspace"
+            git(root, "init", "--quiet", "--bare", "--initial-branch", "main", str(remote))
+            git(root, "clone", "--quiet", str(remote), str(repo))
+            _configure_git_user(repo)
+            _commit_file(repo, "README.md", "seed\n", "seed")
+            git(repo, "push", "--quiet", "origin", "main")
+            # The stacked base, cut from the seed and already carrying the parent card.
+            git(repo, "checkout", "--quiet", "-b", "pipeline/secretary-890")
+            _commit_file(repo, "parent.txt", "parent card\n", "parent card")
+            git(repo, "push", "--quiet", "origin", "pipeline/secretary-890")
+            # An unrelated card lands on the default branch while the stack is in flight, so
+            # origin/main and origin/pipeline/secretary-890 diverge.
+            git(repo, "checkout", "--quiet", "main")
+            unrelated = _commit_file(repo, "other.txt", "unrelated card\n", "unrelated card")
+            git(repo, "push", "--quiet", "origin", "main")
+            git(root, "clone", "--quiet", str(remote), str(workspace))
+            _configure_git_user(workspace)
+            git(workspace, "checkout", "--quiet", "-b", _legacy_worker_branch("secretary-899"), "origin/pipeline/secretary-890")
+            _commit_file(workspace, "child.txt", "child card\n", "child card")
+
+            host = _FakeGhMergeHost(_StackedBaseCatalog(repo), root, mode="real")
+            host.complete_green(
+                {
+                    "ref": "secretary-899",
+                    "project": "secretary",
+                    "workspace": {"base_branch": "pipeline/secretary-890"},
+                },
+                SimpleNamespace(workspace=str(workspace)),
+            )
+
+            self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+            self.assertEqual(git(repo, "rev-parse", "HEAD"), unrelated)
+
     def test_instance_repo_merge_preserves_local_checkpoint_commit(self) -> None:
         from types import SimpleNamespace
 
@@ -5184,6 +5248,30 @@ class _RecordingMergeHost(CommandHostRuntime):
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
         return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class _StackedBaseCatalog:
+    def __init__(self, repo: Path) -> None:
+        self.instance_dir = Path("/nonexistent-instance")
+        self._repo = repo
+
+    def binding(self, project: str) -> dict:
+        return {"repo": str(self._repo), "default_branch": "main"}
+
+    def default_branch(self, project: str, override: str | None) -> str:
+        return override or "main"
+
+    def adapter(self, project: str) -> dict:
+        return {"validation": {"ci": "github"}}
+
+
+class _FakeGhMergeHost(CommandHostRuntime):
+    """Real git over real repos, with `gh pr merge` stubbed: the PR merge is GitHub's side."""
+
+    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+        if args and args[0] == "gh":
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+        return super()._run(args, label, cwd=cwd)
 
 
 class GitBranchHost(CommandHostRuntime):
