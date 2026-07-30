@@ -65,6 +65,16 @@ class CanonicalRegistryTests(unittest.TestCase):
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
+    def test_observer_skill_contains_the_minimal_supported_change_guardrails(self) -> None:
+        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn("Before creating a `code` card, work through this decision sequence", text)
+        self.assertIn("standard library or a native platform capability", text)
+        self.assertIn("not supported legacy by default", text)
+        self.assertIn("fail-closed upgrade precondition", text)
+        self.assertIn("Before an ordinary RED goes back for another worker round", text)
+
     def test_the_observer_skill_reaches_the_shell_its_head_runs_in(self) -> None:
         """`role_defaults.observer` is a codex profile, so the codex shell must carry the skill."""
         shells = {

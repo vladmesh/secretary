@@ -1611,6 +1611,9 @@ class CommandHostRuntime:
         # reuses the same attempt_id, so without it the second done-report collides with
         # the first and is idempotently deduped, leaving the dispatcher waiting forever.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
+        blocked_request = _attempt_request_id(
+            attempt_id, "worker-report-blocked", task["ref"], str(review_round)
+        )
         body_file = _body_file_path("report", task["ref"], review_round)
         sections = [
             f"# Task {task['ref']}",
@@ -1642,6 +1645,14 @@ class CommandHostRuntime:
                 "",
             ]
         sections += [
+            "## Scope of a rework",
+            "",
+            "Address a reviewer finding when its repair is local to this card. Use `report:blocked`",
+            "instead only for an obvious wrong cut: the requested fix contradicts this card, crosses",
+            "its explicit Out of scope, or requires a new durable protocol, product contract, or trust",
+            "boundary. Difficulty or size alone is not a reason to stop. In a blocked report, name the",
+            "conflict and the observer decision needed. Do not silently expand the supported boundary.",
+            "",
             "Before reporting done, stage AND commit everything on the worker branch: run",
             "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
             "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
@@ -1650,6 +1661,7 @@ class CommandHostRuntime:
             "Report through the secretary task protocol only:",
             *_body_file_instructions(body_file),
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --request-id {blocked_request} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -1675,6 +1687,12 @@ class CommandHostRuntime:
             # sprint a budget event.
             "A red verdict must list every blocker you have found in this round. Do not hold "
             "blockers back for a later round and do not widen the scope on the next one.",
+            "",
+            "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
+            "criterion or operational invariant, material assumptions, whether this branch introduced",
+            "the defect or it was pre-existing, and whether the repair appears local or would change",
+            "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
+            "evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),

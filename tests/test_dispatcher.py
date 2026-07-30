@@ -3920,9 +3920,27 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
         commands = self._command_lines(doc)
 
-        self.assertEqual(len(commands), 1)
-        self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot-0.md", commands[0])
-        self.assertNotIn("<file>", commands[0])
+        self.assertEqual(len(commands), 2, "one done and one blocked command")
+        for command in commands:
+            self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot-0.md", command)
+            self.assertNotIn("<file>", command)
+
+    def test_worker_prompt_limits_blocked_reports_to_an_obvious_wrong_cut(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("only for an obvious wrong cut", doc)
+        self.assertIn("requires a new durable protocol, product contract, or trust", doc)
+        self.assertIn("Difficulty or size alone is not a reason to stop", doc)
+        self.assertIn("conflict and the observer decision needed", doc)
+
+    def test_review_prompt_requires_evidence_for_every_red_blocker(self) -> None:
+        doc = self.host._review_prompt(self.task, "attempt-1", 3)
+
+        self.assertIn("concrete reachable scenario", doc)
+        self.assertIn("violated acceptance", doc)
+        self.assertIn("whether this branch introduced", doc)
+        self.assertIn("compatibility promise", doc)
+        self.assertIn("do not silently widen the supported boundary or decide sprint scope", doc)
 
     def test_body_file_lives_outside_the_workspace(self) -> None:
         """A body file inside the worktree would make `git status` dirty, and the done-report
