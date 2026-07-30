@@ -288,6 +288,20 @@ class ProductIssueTransaction:
         except FileNotFoundError:
             pass
 
+    def discard(self, document: dict[str, Any]) -> None:
+        """Remove an unstarted transaction that failed a terminal precondition."""
+        request_id = document.get("request_id")
+        if not isinstance(request_id, str):
+            raise TaskError("audit_pending", "Product/Issue transaction has no request id", 4)
+        if document.get("progress"):
+            raise TaskError("audit_pending", "Product/Issue transaction has recorded progress", 4)
+        try:
+            self._path(request_id).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise TaskError("audit_pending", "Product/Issue audit cleanup is pending repair", 4) from None
+
 
 class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:

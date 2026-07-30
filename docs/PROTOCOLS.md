@@ -66,11 +66,14 @@ python3 -m secretary task create --role po --project PROJECT --type code --title
 ```
 
 `create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
-Execution tasks are created in Ready, never in Issues. Old task-shaped Ideas remain readable after
-the supported board migration but are fail-closed: only the PO may explicitly triage one to Ready,
-which marks it as a task without inventing Product, issue kind or priority. `--codex-mode` is
-valid only for a worker profile on a `codex` adapter. Without an override, launch mode comes from the
-head profile.
+On a Pipeline with the Issues column, a new execution task requires `--sprint`: the sprint must be
+open and the task project must be one of its reservations. A closed sprint and an unreserved project
+are separate errors, both before the first backend write. Tasks never accept product priority;
+`--priority` is rejected rather than ignored. Execution tasks are created in Ready, never in Issues.
+Old task-shaped Ideas remain readable after the supported board migration but are fail-closed: only
+the PO may explicitly triage one to Ready, which marks it as a task without inventing Product, issue
+kind or priority. `--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
+override, launch mode comes from the head profile.
 
 `archive` closes an execution task in the backend and removes it from ordinary active listings without
 deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
@@ -196,6 +199,16 @@ export and the checkpoint record leave the three fields out rather than answerin
 above, so such a sprint is refused with a message that names what it lacks; the supported move is to open
 a new sprint that owns its issues. `reopen` is refused the same way when the sprint's own issues have
 since been closed or its projects are held elsewhere.
+
+`sprint close` freezes the active cards linked to that sprint. It archives its terminal Done tasks with
+the normal task archive audit, leaves linked non-terminal cards on the board, and returns both lists.
+The Done transition clears the completed worker claim and its resolved routing fields, so that stale
+ownership does not prevent normal terminal archival; `archive` still refuses a live claim.
+Cards without that `sprint_ref` are not considered. Product and Issue records are never closure targets,
+including if malformed metadata links one to the sprint, so an Issue remains open until the PO calls
+`issue close`. The close request is staged: retrying the same request id after a lost archive or status
+reply resumes the same task set, does not archive a task twice, and records one sprint close event.
+Legacy sprints without reservations are closed without retroactively archiving cards.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.

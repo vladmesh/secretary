@@ -105,6 +105,10 @@ class SprintKanboard:
         if method == "createComment":
             self.comments[int(params["task_id"])].append({"date_creation": "1720000003", "comment": params["content"]})
             return 1
+        if method == "closeTask":
+            task = next(task for task in self.tasks if task["id"] == int(params["task_id"]))
+            task["is_active"] = 0
+            return True
         raise AssertionError(method)
 
 
@@ -835,6 +839,136 @@ class SprintTests(SprintFixture):
         with self.assertRaisesRegex(TaskError, "closed"):
             task_writer.create(role="po", actor="operator", project="secretary", task_type="code", title="late", target="ready", sprint=ref)
 
+    def test_task_creation_requires_an_open_reserved_sprint_and_rejects_priority_before_writes(self) -> None:
+        ref = self._create(goal="binding") ["sprint"]["ref"]
+        writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+        for kwargs, code in (
+            ({}, "validation"),
+            ({"sprint": ref, "project": "other"}, "sprint_project_unreserved"),
+            ({"sprint": ref, "priority": "P1"}, "validation"),
+        ):
+            before = len(self.client.calls)
+            arguments = {
+                "role": "po", "actor": "operator", "project": "secretary",
+                "task_type": "code", "title": "rejected", "target": "ready",
+                **kwargs,
+            }
+            with self.assertRaises(TaskError) as raised:
+                writer.create(**arguments)
+            self.assertEqual(raised.exception.code, code)
+            self.assertFalse(any(
+                method in {"createTask", "updateTask", "saveTaskMetadata"}
+                for method, _params in self.client.calls[before:]
+            ))
+
+    def test_close_archives_only_its_done_tasks_and_leaves_issues_and_unlinked_cards(self) -> None:
+        ref = self._create(goal="close") ["sprint"]["ref"]
+        writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        done = writer.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            target="ready", sprint=ref, request_id="close-done",
+        )["task"]
+        open_task = writer.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="open",
+            target="ready", sprint=ref, request_id="close-open",
+        )["task"]
+        writer.claim(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker",
+            request_id="close-claim",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="validate", reason="",
+            request_id="close-validate",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="done", reason="",
+            request_id="close-done-move",
+        )
+        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
+        self.assertIsNone(TaskReader(self.client).show(done["ref"])["claim"]["worker"])  # type: ignore[arg-type]
+        # Even malformed metadata cannot turn an Issue into a close target.
+        self.client.metadata[22]["sprint_ref"] = ref
+
+        first = self.writer.close(role="po", actor="operator", reference=ref, request_id="close-once")
+        second = self.writer.close(role="po", actor="operator", reference=ref, request_id="close-once")
+
+        self.assertEqual(first["archived_tasks"], [done["ref"]])
+        self.assertEqual(first["remaining_tasks"], [open_task["ref"]])
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(next(task for task in self.client.tasks if task["reference"] == done["ref"])["is_active"], 0)
+        self.assertNotEqual(next(task for task in self.client.tasks if task["reference"] == open_task["ref"]).get("is_active", 1), 0)
+        self.assertNotEqual(next(task for task in self.client.tasks if task["reference"] == "secretary-12").get("is_active", 1), 0)
+        self.assertNotEqual(next(task for task in self.client.tasks if task["reference"] == "issue:open").get("is_active", 1), 0)
+        close_calls = [params["task_id"] for method, params in self.client.calls if method == "closeTask"]
+        self.assertEqual(close_calls, [done_row["id"]])
+        self.assertEqual(
+            len([event for event in TaskAudit(self.tmp.name).events(reference=ref) if event["kind"] == "closed"]), 1,
+        )
+
+    def test_close_repairs_an_archive_that_lost_its_backend_reply(self) -> None:
+        ref = self._create(goal="repair") ["sprint"]["ref"]
+        writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        done = writer.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            target="ready", sprint=ref, request_id="repair-done",
+        )["task"]
+        writer.claim(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker",
+            request_id="repair-claim",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="validate", reason="",
+            request_id="repair-validate",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="done", reason="",
+            request_id="repair-done-move",
+        )
+        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
+        original_call = self.client.call
+        lost = False
+
+        def close_then_lose(method: str, **params: object) -> object:
+            nonlocal lost
+            result = original_call(method, **params)
+            if method == "closeTask" and not lost:
+                lost = True
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+            return result
+
+        with mock.patch.object(self.client, "call", side_effect=close_then_lose):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                self.writer.close(role="po", actor="operator", reference=ref, request_id="repair-close")
+            repaired = self.writer.close(role="po", actor="operator", reference=ref, request_id="repair-close")
+
+        self.assertEqual(repaired["archived_tasks"], [done["ref"]])
+        self.assertEqual(repaired["remaining_tasks"], [])
+        self.assertEqual(len([params for method, params in self.client.calls if method == "closeTask"]), 1)
+        self.assertEqual(
+            len([event for event in TaskAudit(self.tmp.name).events(reference=ref) if event["kind"] == "closed"]), 1,
+        )
+
+    def test_close_propagates_a_terminal_archive_refusal_without_leaving_a_transaction(self) -> None:
+        ref = self._create(goal="terminal refusal")["sprint"]["ref"]
+        writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        done = writer.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            target="ready", sprint=ref, request_id="terminal-done",
+        )["task"]
+        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
+        done_row["column_id"] = 6
+
+        with mock.patch.object(TaskWriter, "archive", side_effect=TaskError("live_work", "live worker", 3)):
+            with self.assertRaises(TaskError) as raised:
+                self.writer.close(role="po", actor="operator", reference=ref, request_id="terminal-close")
+
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=ref)], ["created"],
+        )
+
     def test_cli_create_and_list_return_stable_json(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
         with mock.patch("secretary.sprint_commands.KanboardClient", return_value=self.client), \
@@ -997,6 +1131,8 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             reference="sprint:guard", goal="single writer", repositories=["secretary", "other"],
             request_id="seed-guard-sprint",
         )["sprint"]["ref"]
+        sprint = next(task for task in self.client.tasks if task["reference"] == self.ref)
+        self.client.metadata[int(sprint["id"])]["sprint_reservations"] = json.dumps(["secretary", "other"])
 
     def test_observer_must_link_to_its_open_sprint_and_other_roles_are_denied(self) -> None:
         card = self.tasks.create(
@@ -1038,6 +1174,29 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.assertEqual(first["event_id"], second["event_id"])
         event = next(event for event in TaskAudit(self.tmp.name).events() if event["request_id"] == "override-once")
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
+
+    def test_linked_task_still_obeys_the_held_project_guard(self) -> None:
+        for role, actor, request_id in (
+            ("po", "operator", "linked-po-denied"),
+            ("steward", "steward", "linked-steward-denied"),
+        ):
+            with self.assertRaises(TaskError) as raised:
+                self.tasks.create(
+                    role=role, actor=actor, project="secretary", task_type="code", title="guarded",
+                    sprint=self.ref, request_id=request_id,
+                )
+            self.assertEqual(raised.exception.code, "sprint_write_forbidden")
+
+        created = self.tasks.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="overridden",
+            sprint=self.ref, sprint_override=True, sprint_override_reason="production incident",
+            request_id="linked-po-override",
+        )
+        event = next(event for event in TaskAudit(self.tmp.name).events() if event["request_id"] == "linked-po-override")
+        self.assertEqual(created["task"]["sprint"], self.ref)
+        self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
+        denied = [event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"]
+        self.assertEqual([event["payload"]["operation_request_id"] for event in denied], ["linked-po-denied", "linked-steward-denied"])
 
     def test_po_cannot_edit_a_held_card_without_an_audited_override(self) -> None:
         card = self.tasks.create(
@@ -1184,6 +1343,8 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             reference="sprint:overlap", goal="overlap", repositories=["secretary"],
             request_id="seed-overlap-sprint",
         )["sprint"]["ref"]
+        other = next(task for task in self.client.tasks if task["reference"] == other_ref)
+        self.client.metadata[int(other["id"])]["sprint_reservations"] = json.dumps(["secretary"])
         card = self.tasks.create(
             role="observer", actor="second-observer", project="secretary", task_type="code",
             title="second sprint", sprint=other_ref,
