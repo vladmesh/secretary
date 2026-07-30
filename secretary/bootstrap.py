@@ -38,7 +38,7 @@ ORCA_APPIMAGE_URL = (
     "https://github.com/stablyai/orca/releases/download/"
     f"{ORCA_VERSION}/orca-linux.AppImage"
 )
-PIPELINE_COLUMNS = ("Ideas", "Ready", "In progress", "Validate", "Blocked", "Done")
+PIPELINE_COLUMNS = ("Issues", "Ready", "In progress", "Validate", "Blocked", "Done")
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
@@ -115,7 +115,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
         if (
-            titles[:1] == [LEGACY_IDEAS_COLUMN]
+            titles[:1] in ([LEGACY_IDEAS_COLUMN], ["Ideas"])
             and titles[1:] == list(PIPELINE_COLUMNS[1:])
             and isinstance(columns[0], dict)
             and columns[0].get("id")
@@ -126,10 +126,9 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             _rename_column(api, columns[0], PIPELINE_COLUMNS[0])
             titles[0] = PIPELINE_COLUMNS[0]
         if titles != list(PIPELINE_COLUMNS):
-            # Kanboard defaults getAllTasks to open cards.  status_id=0 asks
-            # for closed cards, which must count too: removing a column moves
-            # every card it contains to the trash.
-            tasks = api.call("getAllTasks", project_id=board_id, status_id=0) or []
+            # Kanboard status 2 includes open and closed cards. Removing a column moves
+            # every card it contains to the trash, so either status makes this incompatible.
+            tasks = api.call("getAllTasks", project_id=board_id, status_id=2) or []
             if tasks:
                 raise BootstrapError("Pipeline board has cards but an incompatible column schema")
             for index, title in enumerate(PIPELINE_COLUMNS):

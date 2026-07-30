@@ -90,8 +90,8 @@ def run_restore(args: argparse.Namespace) -> int:
 
 def run_restore_board(args: argparse.Namespace) -> int:
     try:
-        _, data_dir, _ = _target(Path(args.instance))
-        count = import_normalized_board(data_dir)
+        instance_path, data_dir, _ = _target(Path(args.instance))
+        count = import_normalized_board(data_dir, instance=instance_path.parent)
     except RestoreError as exc:
         _print_json({"ok": False, "action": "restore-board", "error": str(exc)})
         return 2

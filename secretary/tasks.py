@@ -75,12 +75,12 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
-# Installations created before the board titles were translated carry the former first-column
-# title.  Reads keep accepting it so an existing board stays usable until bootstrap/upgrade runs
-# ensure_pipeline_board, which renames the column in place.  Spelled as escapes to keep the
-# tracked tree ASCII.
+# Installations created before Product/Issue used Ideas (or its translated form) as the first
+# column.  Reads keep accepting both names until the supported bootstrap migration renames the
+# column in place.  Spelled as escapes to keep the tracked tree ASCII.
 LEGACY_IDEAS_COLUMN = "\u0418\u0434\u0435\u0438"  # "Ideas" in the pre-translation board schema
 _STATE_BY_COLUMN = {
+    "Issues": "issues",
     "Ideas": "ideas",
     LEGACY_IDEAS_COLUMN: "ideas",
     "Ready": "ready",
@@ -105,7 +105,7 @@ _COMMENT_ROLES = _ROLES
 _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
 _EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ideas", "ready", "blocked"}
-_STATES = ("ideas", "ready", "in_progress", "validate", "blocked", "done")
+_STATES = ("issues", "ideas", "ready", "in_progress", "validate", "blocked", "done")
 _TRANSITIONS = {
     # PO is the human operator and may move a card between any two states.
     "po": {(source, target) for source in _STATES for target in _STATES if source != target},
@@ -117,8 +117,8 @@ _TRANSITIONS = {
     "observer": {(source, target) for source in _STATES for target in _STATES if source != target},
     "worker": set(), "reviewer": set(), "retro": set(),
     "steward": {
-        ("ideas", "ready"), ("blocked", "ready"), ("blocked", "done"),
-        ("in_progress", "done"), ("ideas", "blocked"), ("ready", "blocked"),
+        ("blocked", "ready"), ("blocked", "done"),
+        ("in_progress", "done"), ("ready", "blocked"),
         ("in_progress", "blocked"), ("validate", "blocked"),
     },
 }
@@ -132,6 +132,19 @@ _READY_RESET_METADATA = {
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
+# A Product or an Issue is not an execution task: it never takes a claim or a task transition,
+# whatever column it currently sits in.
+_TYPED_RECORD_TYPES = {"issue", "product"}
+
+
+def _check_execution_record(task: dict[str, Any]) -> None:
+    """Reject a Product or an Issue on an execution-task path, before any write."""
+    if task.get("record_type") in _TYPED_RECORD_TYPES:
+        raise TaskError(
+            "transition_forbidden",
+            "Product issues and products cannot enter execution task columns",
+            3,
+        )
 
 
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
@@ -257,6 +270,7 @@ class TaskReader:
         result: dict[str, Any] = {
             "id": f"task_kanboard_{task_id}", "ref": ref, "title": _text(card.get("title")),
             "description": _text(card.get("description")), "state": _STATE_BY_COLUMN[column],
+            "closed": _nonnegative_int(card.get("is_active", card.get("status", 1))) == 0,
             "position": _nonnegative_int(card.get("position")), "project": _text(meta.get("project")),
             "type": _text(meta.get("task_type")), "blocked_by": _null_if_empty(meta.get("blocked_by")),
             "claim": {"worker": _null_if_empty(meta.get("claim")), "claimed_at": None},
@@ -276,6 +290,7 @@ class TaskReader:
             "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
             "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
             "sprint": _null_if_empty(meta.get("sprint_ref")),
+            "record_type": _null_if_empty(meta.get("record_type")),
             "audit": {"created_at": _rfc3339(card.get("date_creation")), "updated_at": _rfc3339(card.get("date_modification")), "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name}},
         }
         extensions = {key: value for key, value in meta.items() if key not in _KNOWN_METADATA}
@@ -298,21 +313,54 @@ class TaskAudit:
         self.pending_dir = os.path.join(self.board_dir, "pending-audit")
         self.lock_path = os.path.join(self.board_dir, ".audit.lock")
 
+    def _pending_path(self, request_id: str) -> str:
+        """Keep untrusted request ids out of the installation filesystem layout."""
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return os.path.join(self.pending_dir, f"v2-{digest}.json")
+
+    def _require_v2_pending_layout(self) -> None:
+        """Do not guess how a released generic transient record maps to v2."""
+        if not os.path.isdir(self.pending_dir):
+            return
+        legacy = [name for name in os.listdir(self.pending_dir) if name.endswith(".json") and not name.startswith("v2-")]
+        if legacy:
+            raise TaskError(
+                "upgrade_required",
+                "generic pending audit records use the pre-v2 filename layout; reconcile them with the previous Secretary version before upgrading",
+                4,
+            )
+
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
         os.makedirs(self.pending_dir, exist_ok=True)
-        self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
-
-    def append(self, request_id: str, event: dict[str, Any]) -> str:
-        os.makedirs(self.board_dir, exist_ok=True)
+        self._require_v2_pending_layout()
         with open(self.lock_path, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                if not self._has_request(request_id):
+                committed = self.committed_event(request_id)
+                if committed is not None:
+                    self._require_same_event(committed, event)
+                    return
+                if self._product_issue_pending(request_id):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                self._atomic_json(self._pending_path(request_id), event)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def append(self, request_id: str, event: dict[str, Any]) -> str:
+        os.makedirs(self.board_dir, exist_ok=True)
+        self._require_v2_pending_layout()
+        with open(self.lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                committed = self.committed_event(request_id)
+                if committed is None:
                     with open(self.events_path, "a", encoding="utf-8") as events:
                         events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
                         events.flush()
                         os.fsync(events.fileno())
-                pending = os.path.join(self.pending_dir, f"{request_id}.json")
+                else:
+                    self._require_same_event(committed, event)
+                pending = self._pending_path(request_id)
                 if os.path.exists(pending):
                     os.unlink(pending)
                 return str(event["event_id"])
@@ -321,13 +369,15 @@ class TaskAudit:
 
     def discard(self, request_id: str) -> None:
         try:
-            os.unlink(os.path.join(self.pending_dir, f"{request_id}.json"))
+            self._require_v2_pending_layout()
+            os.unlink(self._pending_path(request_id))
         except FileNotFoundError:
             pass
 
     def reconcile(self) -> tuple[int, int]:
         if not os.path.isdir(self.pending_dir):
             return 0, 0
+        self._require_v2_pending_layout()
         repaired = 0
         unresolved = 0
         for name in sorted(os.listdir(self.pending_dir)):
@@ -347,6 +397,7 @@ class TaskAudit:
     def pending_events(self) -> list[dict[str, Any]]:
         if not os.path.isdir(self.pending_dir):
             return []
+        self._require_v2_pending_layout()
         result = []
         for name in sorted(os.listdir(self.pending_dir)):
             if not name.endswith(".json"):
@@ -359,6 +410,7 @@ class TaskAudit:
         return result
 
     def status(self) -> dict[str, int | bool]:
+        self._require_v2_pending_layout()
         pending = 0
         if os.path.isdir(self.pending_dir):
             pending = sum(name.endswith(".json") for name in os.listdir(self.pending_dir))
@@ -410,7 +462,8 @@ class TaskAudit:
         return None
 
     def pending_event(self, request_id: str) -> dict[str, Any] | None:
-        pending = os.path.join(self.pending_dir, f"{request_id}.json")
+        self._require_v2_pending_layout()
+        pending = self._pending_path(request_id)
         try:
             with open(pending, encoding="utf-8") as source:
                 return json.load(source)
@@ -423,6 +476,20 @@ class TaskAudit:
                 return any(json.loads(line).get("request_id") == request_id for line in events if line.strip())
         except FileNotFoundError:
             return False
+
+    def _product_issue_pending(self, request_id: str) -> bool:
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return os.path.exists(os.path.join(self.board_dir, "product-issue-transactions", f"v1-{digest}.json"))
+
+    @staticmethod
+    def _require_same_event(existing: dict[str, Any], event: dict[str, Any]) -> None:
+        """A request id is an ownership claim, not merely an append de-duplication key."""
+        if existing != event:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+
+    def require_pending_layout(self) -> None:
+        """Run the released generic-pending upgrade gate before a new mutation starts."""
+        self._require_v2_pending_layout()
 
     @staticmethod
     def _atomic_json(path: str, document: dict[str, Any]) -> None:
@@ -504,8 +571,14 @@ class TaskWriter:
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
-        if target not in {"ideas", "ready"}:
-            raise TaskError("validation", "create target must be ideas or ready", 2)
+        if target not in {"ideas", "ready", "issues"}:
+            raise TaskError("validation", "create target must be ready (Ideas is legacy-only)", 2)
+        _board_id, columns, _ = self.reader._board()
+        legacy_ideas = "Ideas" in columns.values() or LEGACY_IDEAS_COLUMN in columns.values()
+        if target == "ideas" and not legacy_ideas:
+            raise TaskError("legacy_layout", "execution tasks cannot be created in Issues; create a Ready task", 2)
+        if target == "issues":
+            raise TaskError("transition_forbidden", "execution tasks cannot be created in Issues", 3)
         if role in {"worker", "reviewer", "retro"} and target != "ideas":
             raise TaskError("role_forbidden", f"{role} may create only ideas cards", 3)
         if complexity not in _COMPLEXITIES:
@@ -650,7 +723,7 @@ class TaskWriter:
         board_id, columns, swimlanes = self.reader._board()
         if reference and self.client.call("getTaskByReference", project_id=board_id, reference=reference):
             raise TaskError("validation", "task reference already exists", 2)
-        column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+        column_id = _target_column_id(columns, target)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         swimlane_id = _matching_swimlane(swimlanes, project)
@@ -674,6 +747,7 @@ class TaskWriter:
             if not ok:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
             values = {
+                "record_type": "task",
                 "task_type": task_type,
                 "project": project,
                 "complexity": complexity,
@@ -787,8 +861,14 @@ class TaskWriter:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
         if cap < 1:
             raise TaskError("validation", "claim cap must be positive", 2)
+        # Same guard as move: a product or an issue is not an execution task, so it never takes a
+        # claim even if someone dragged it into Ready by hand. It runs before _write, not only in
+        # the mutation, because a retry with a pending or committed claim request id replays
+        # through _finish_pending_claim and never reaches the mutation at all.
+        _check_execution_record(self.reader.show(reference))
 
         def mutation(task: dict[str, Any]) -> Any:
+            _check_execution_record(task)
             if task["state"] != "ready":
                 raise TaskError("claim_conflict", "claim requires a Ready task", 3)
             if task["claim"]["worker"] is not None:
@@ -858,14 +938,30 @@ class TaskWriter:
         )
         def mutation(task: dict[str, Any]) -> Any:
             source = task["state"]
+            record_type = task.get("record_type")
+            if record_type in {"issue", "product"}:
+                raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
+            # An unclassified card in the current Issues column is a migrated legacy
+            # Ideas card.  A still-unmigrated Ideas board has the same requirement.
+            # Neither may take a normal task transition until a PO explicitly triages it.
+            legacy_unclassified = source in {"issues", "ideas"} and not record_type
+            if legacy_unclassified:
+                if role != "po" or target != "ready":
+                    raise TaskError("transition_forbidden", "legacy Ideas require explicit PO triage to Ready", 3)
             if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
                 raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-            if (source, target) not in _TRANSITIONS[role]:
+            _board_id, columns, _lanes = self.reader._board()
+            legacy_ideas_target = target == "ideas" and any(
+                title in {"Ideas", LEGACY_IDEAS_COLUMN} for title in columns.values()
+            )
+            if (source, target) not in _TRANSITIONS[role] and not (role == "po" and legacy_ideas_target):
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
+                if legacy_unclassified:
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"record_type": "task"})
                 if target == "ready":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
                 elif source == "validate":
@@ -1071,6 +1167,12 @@ class TaskWriter:
             raise TaskError("validation", "archive requires a non-empty reason", 2)
 
         def mutation(task: dict[str, Any]) -> Any:
+            if task.get("record_type") in {"issue", "product"}:
+                raise TaskError(
+                    "transition_forbidden",
+                    "Product issues must be closed with secretary issue close; products cannot be archived",
+                    3,
+                )
             self._check_archivable(task)
             self._check_dispatcher_archivable(reference)
             try:
@@ -1121,7 +1223,7 @@ class TaskWriter:
         self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int
     ) -> None:
         board_id, columns, _ = self.reader._board()
-        column_id = next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+        column_id = _target_column_id(columns, target)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         ok = self.client.call(
@@ -1213,6 +1315,11 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
+                if event.get("kind") in {"product_created", "issue_created", "issue_closed"}:
+                    # Product/Issue writes have ordered backend cleanup.  Only their supported
+                    # command, retried with the original request id, can prove that cleanup.
+                    unresolved += 1
+                    continue
                 if str(event.get("ref") or "").startswith("sprint:"):
                     from secretary.sprints import SprintWriter
 
@@ -1284,6 +1391,10 @@ class TaskWriter:
         if not worker:
             raise TaskError("backend_error", "pending claim is missing its worker id", 1)
         task = self.reader.show(ref)
+        # A pending claim on a typed record can only come from before the claim guard existed (or
+        # from a card typed after the claim). Finishing it would move a Product or an Issue into
+        # In progress, so cleanup fails closed here as well and leaves the event for a PO.
+        _check_execution_record(task)
         if task["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim no longer matches task claim", 1)
         if not _matches_optional(payload.get("resolved_head"), task["routing"]["resolved_worker_head"]):
@@ -1419,6 +1530,13 @@ class TaskWriter:
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else "" if value is None else str(value)
+
+
+def _target_column_id(columns: dict[int, str], target: str) -> int | None:
+    """Resolve a write target without making the legacy Ideas column a current state."""
+    if target == "ideas":
+        return next((identifier for identifier, name in columns.items() if name in {"Ideas", LEGACY_IDEAS_COLUMN}), None)
+    return next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
 
 
 def _has_archive_reason(task: dict[str, Any], reason_sha256: str) -> bool:

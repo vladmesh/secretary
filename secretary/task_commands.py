@@ -70,7 +70,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--description", default="")
     task_create.add_argument("--body-file")
     task_create.add_argument("--ref", default="")
-    task_create.add_argument("--state", choices=("ideas", "ready"), default="ideas")
+    task_create.add_argument("--state", choices=("ideas", "ready"), default="ready")
     task_create.add_argument("--blocked-by", default="")
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")

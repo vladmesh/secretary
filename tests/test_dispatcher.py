@@ -897,7 +897,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.commit_cutover()
         self.runtime.production_tick()
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
-
         self.writer.move(
             role="po",
             actor="operator",
@@ -1049,6 +1048,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.commit_cutover()
         self.runtime.production_tick()
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        # This race concerns an execution card already in the dispatcher cycle. It is not an
+        # unclassified legacy Ideas card, whose only supported exit is PO triage to Ready.
+        self.board.metadata[12]["record_type"] = "task"
 
         self.writer.move(
             role="po",

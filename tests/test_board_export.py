@@ -127,8 +127,8 @@ class ExportCardsTests(unittest.TestCase):
     def test_one_batched_request_covers_every_card(self):
         calls = []
         fake_call, fake_batch = _fake_board(calls)
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "call_batch", side_effect=fake_batch):
+        with mock.patch.object(ops, "call", side_effect=fake_call) as board_call, \
+            mock.patch.object(ops, "call_batch", side_effect=fake_batch):
             cards = ops.export_cards()
 
         self.assertEqual(len(calls), 1)
@@ -142,6 +142,7 @@ class ExportCardsTests(unittest.TestCase):
             ],
         )
         self.assertEqual([card["reference"] for card in cards], ["secretary-637", "secretary-638"])
+        self.assertIn(mock.call("getAllTasks", project_id=2, status_id=2), board_call.call_args_list)
 
     def test_card_carries_both_the_list_and_the_show_surface(self):
         calls = []

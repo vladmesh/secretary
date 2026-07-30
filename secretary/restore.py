@@ -36,6 +36,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
 )
+from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,15 @@ class RestoreError(RuntimeError):
 
 RESTORE_STATE_FILE = "restore-state.json"
 MEMORY_REINDEX_TIMEOUT_SECONDS = 300
+_PRODUCT_ISSUE_METADATA = (
+    "record_type",
+    "product_id",
+    "product_projects",
+    "issue_product",
+    "issue_kind",
+    "issue_priority",
+    "issue_closed_reason",
+)
 
 
 def restore_state(data_dir: Path) -> dict[str, Any]:
@@ -65,7 +75,9 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = None) -> int:
+def import_normalized_board(
+    data_dir: Path, *, client: KanboardClient | None = None, instance: Path | None = None
+) -> int:
     """Populate an empty board from the normalized export and prove parity on every retry.
 
     Returns the number of restored Pipeline cards; the sprint entities restored
@@ -74,7 +86,7 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
     data_dir = data_dir.expanduser().resolve()
     with file_lock(data_dir / "board" / ".restore.lock"):
         try:
-            cards = _normalized_cards(data_dir)
+            cards = _normalized_cards(data_dir, registered_project_ids=(registered_projects(instance) if instance else None))
             sprints = _normalized_sprints(data_dir)
             client = client or KanboardClient()
             reader = TaskReader(client)
@@ -82,7 +94,7 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
             _, unresolved = writer.reconcile()
             if unresolved:
                 raise RestoreError("board audit repair is required before restore")
-            existing = {card["ref"]: card for card in reader.list()}
+            existing = _existing_board_cards(reader)
             unexpected = set(existing) - {card["reference"] for card in cards}
             if unexpected:
                 raise RestoreError("board is not empty or does not match normalized restore data")
@@ -117,6 +129,11 @@ def import_normalized_board(data_dir: Path, *, client: KanboardClient | None = N
                         reference=card["reference"], body=comment, occurrence=occurrence,
                         request_id=f"{prefix}comment:{card['reference']}:{index}",
                     )
+                if card.get("closed"):
+                    restored = reader.show(card["reference"])
+                    task_id = int(restored["id"].removeprefix("task_kanboard_"))
+                    if client.call("closeTask", task_id=task_id) is not True:
+                        raise RestoreError("could not close restored card")
             actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
@@ -152,6 +169,22 @@ def _existing_sprints(
         sprint["ref"]: sprint
         for sprint in SprintReader(client, data_dir=data_dir).export()
     }
+
+
+def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
+    """Read both active and closed Pipeline records before deciding a restore is empty."""
+    board_id, _, _ = reader._board()
+    raw_cards = reader.client.call("getAllTasks", project_id=board_id, status_id=2) or []
+    if not isinstance(raw_cards, list):
+        raise RestoreError("Kanboard returned an invalid restore task list")
+    result: dict[str, dict[str, Any]] = {}
+    for card in raw_cards:
+        if not isinstance(card, dict):
+            continue
+        reference = card.get("reference")
+        if isinstance(reference, str) and reference:
+            result[reference] = reader.show(reference)
+    return result
 
 
 def _import_sprints(
@@ -369,7 +402,9 @@ def mark_reconcile_applied(data_dir: Path) -> None:
     _update_restore_state(data_dir, reconcile="complete")
 
 
-def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
+def _normalized_cards(
+    data_dir: Path, *, registered_project_ids: set[str] | None = None
+) -> list[dict[str, Any]]:
     try:
         payload = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
         cards = payload["cards"]
@@ -387,11 +422,17 @@ def _normalized_cards(data_dir: Path) -> list[dict[str, Any]]:
             raise RestoreError("normalized board export has invalid task data")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
+        if "closed" in card and not isinstance(card["closed"], bool):
+            raise RestoreError("normalized board export has an invalid closed state")
         if not isinstance(card.get("comments", []), list) or any(
             not isinstance(comment, dict) or not isinstance(comment.get("text"), str)
             for comment in card.get("comments", [])
         ):
             raise RestoreError("normalized board export has invalid comments")
+    try:
+        validate_product_issue_records(cards, registered_project_ids=registered_project_ids)
+    except ProductIssueValidationError as exc:
+        raise RestoreError(f"normalized Product/Issue record is invalid: {exc}") from None
     return sorted(cards, key=lambda card: str(card["reference"]))
 
 
@@ -483,14 +524,43 @@ def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bo
 
 def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str) -> None:
     fields = _restore_fields(card)
+    issue_column = _state_for_column(str(card.get("column") or "")) == "issues"
+    metadata = card.get("metadata")
+    record_type = metadata.get("record_type") if isinstance(metadata, dict) else None
+    if issue_column or record_type in {"issue", "product"}:
+        _create_restored_non_task(writer, card)
+        return
     writer.create(
-        role="steward", actor="restore", project=fields["project"], task_type=fields["task_type"],
+        role="steward", actor="restore", project=fields["project"] or "product-backlog",
+        task_type=fields["task_type"] or "research",
         title=card["title"], description=card["description"], reference=card["reference"],
         blocked_by=fields["blocked_by"], head=fields["head"], review_head=fields["review_head"],
         slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
         family_preference=fields["family_preference"], codex_launch_mode=fields["codex_launch_mode"],
         request_id=f"{prefix}create:{card['reference']}",
     )
+
+
+def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
+    """Recreate a Product, Issue, or unclassified legacy Ideas card without classifying it.
+
+    The following restore metadata write preserves the export exactly.  In particular an old
+    Ideas card that has no ``record_type`` remains unclassified and must later go through the
+    PO triage transition; it never passes through ``TaskWriter.create``, which stamps task.
+    """
+    board_id, columns, _ = writer.reader._board()
+    column = str(card.get("column") or "")
+    column_id = next((identifier for identifier, title in columns.items() if title == column), None)
+    if column_id is None:
+        raise RestoreError(f"restored card has an unknown column: {column}")
+    task_id = writer.client.call(
+        "createTask", project_id=board_id, title=card["title"], description=card["description"],
+        column_id=column_id, swimlane_id=0,
+    )
+    if not isinstance(task_id, int):
+        raise RestoreError("could not create restored Product or Issue record")
+    if writer.client.call("updateTask", id=task_id, reference=card["reference"]) is not True:
+        raise RestoreError("could not set restored Product or Issue reference")
 
 
 def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
@@ -541,7 +611,7 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
     metadata = card["metadata"]
     return {
             "ref": card["reference"], "title": card["title"], "description": card["description"],
-            "state": _state_for_column(card["column"]), "project": fields["project"],
+            "state": _state_for_column(card["column"]), "closed": bool(card.get("closed", False)), "project": fields["project"],
             "type": fields["task_type"], "blocked_by": fields["blocked_by"] or None,
             "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
             "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
@@ -549,19 +619,33 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
             "position": _restore_position(card),
             "swimlane": str(card.get("swimlane") or "") or None,
             "comments": [{"body": body} for body in _restore_comments(card)],
+            "product_issue_metadata": _product_issue_metadata(card["metadata"]),
     }
 
 
 def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
+    extensions = card.get("extensions", {}).get("kanboard", {})
     return {
         "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),
-        "state": card.get("state"), "project": card.get("project"), "type": card.get("type"),
+        "state": card.get("state"), "closed": bool(card.get("closed", False)), "project": card.get("project"), "type": card.get("type"),
         "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
         "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
         "workspace": card.get("workspace"),
         "position": card.get("position"),
-        "swimlane": card.get("extensions", {}).get("kanboard", {}).get("swimlane"),
+        "swimlane": extensions.get("swimlane"),
         "comments": [{"body": str(comment.get("body") or "")} for comment in card.get("comments", [])],
+        "product_issue_metadata": _product_issue_metadata(extensions),
+    }
+
+
+def _product_issue_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    record_type = metadata.get("record_type")
+    if record_type not in {"issue", "product"}:
+        return {}
+    return {
+        key: str(metadata[key])
+        for key in _PRODUCT_ISSUE_METADATA
+        if key in metadata
     }
 
 

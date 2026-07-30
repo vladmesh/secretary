@@ -33,6 +33,8 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
+from secretary.restore import _normalized_cards
+from secretary.product_issues import ProductIssueValidationError, validate_product_issue_records
 from tests.test_tasks import WriteKanboard
 
 
@@ -70,6 +72,163 @@ def _seed_legacy_facts(data_dir: Path) -> Path:
 
 
 class RestoreTests(unittest.TestCase):
+    @staticmethod
+    def _product_card(*, projects: str = '["secretary"]') -> dict[str, object]:
+        card = _restore_card(reference="product:secretary", title="Secretary", column="Issues", position=1)
+        card["fields"]["task_type"] = ""
+        card["fields"]["project"] = ""
+        card["metadata"] = {
+            "record_type": "product", "product_id": "secretary", "product_projects": projects,
+        }
+        return card
+
+    def test_restore_keeps_unclassified_legacy_ideas_unclassified(self):
+        class IssuesBoard(_EmptyWriteKanboard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return [
+                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                    ]
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(column="Issues")
+            card["metadata"] = {}
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = IssuesBoard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertNotIn("record_type", client.metadata[12])
+            self.assertEqual(client.tasks[0]["column_id"], 1)
+
+    def test_restore_preserves_closed_issue_metadata_and_history(self):
+        class IssuesBoard(_EmptyWriteKanboard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return [
+                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                    ]
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(reference="issue:12", column="Issues", position=2, comments=[{"text": "[issue:closed]\nresolved"}])
+            card["closed"] = True
+            card["fields"]["task_type"] = ""
+            card["fields"]["project"] = ""
+            card["metadata"] = {
+                "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+                "issue_priority": "P0", "issue_closed_reason": "resolved",
+            }
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [self._product_card(), card]}), encoding="utf-8"
+            )
+            client = IssuesBoard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 2)
+            self.assertEqual(client.metadata[13]["record_type"], "issue")
+            self.assertEqual(client.metadata[13]["issue_closed_reason"], "resolved")
+            self.assertEqual(client.comments[13][0]["comment"], "[issue:closed]\nresolved")
+            self.assertEqual(import_normalized_board(data_dir, client=client), 2)
+            self.assertEqual(len(client.tasks), 2)
+
+    def test_restore_parity_rejects_missing_issue_metadata(self):
+        class IssuesBoard(_EmptyWriteKanboard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return [
+                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                    ]
+                if method == "saveTaskMetadata" and "issue_priority" in params.get("values", {}):
+                    values = dict(params["values"])
+                    values.pop("issue_priority")
+                    return super().call(method, task_id=params["task_id"], values=values)
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(reference="issue:12", column="Issues", position=2)
+            card["fields"]["task_type"] = ""
+            card["fields"]["project"] = ""
+            card["metadata"] = {
+                "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+                "issue_priority": "P0",
+            }
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [self._product_card(), card]}), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(RestoreError, "board parity check failed"):
+                import_normalized_board(data_dir, client=IssuesBoard())
+
+    def test_normalized_records_reject_duplicate_or_unknown_product_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            duplicate = self._product_card()
+            duplicate["reference"] = "product:other"
+            duplicate["metadata"] = {
+                "record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]',
+            }
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [self._product_card(projects='["unknown"]'), duplicate]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RestoreError, "unknown registered project"):
+                _normalized_cards(data_dir, registered_project_ids={"secretary"})
+
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [self._product_card(), duplicate]}), encoding="utf-8"
+            )
+            duplicate["reference"] = "product:secretary"
+            with self.assertRaisesRegex(ProductIssueValidationError, "duplicate Product id"):
+                validate_product_issue_records(
+                    [self._product_card(), duplicate], registered_project_ids={"secretary"}
+                )
+
+    def test_normalized_records_reject_missing_product_kind_and_priority(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            issue = _restore_card(reference="issue:12", column="Issues")
+            issue["metadata"] = {
+                "record_type": "issue", "issue_product": "missing", "issue_kind": "invalid", "issue_priority": "P4",
+            }
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [issue]}), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(RestoreError, "no registered Product"):
+                _normalized_cards(data_dir)
+
+            issue["metadata"]["issue_product"] = "secretary"
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [self._product_card(), issue]}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RestoreError, "invalid kind"):
+                _normalized_cards(data_dir)
+
+            issue["metadata"]["issue_kind"] = "bug"
+            issue["metadata"]["issue_priority"] = "P4"
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [self._product_card(), issue]}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RestoreError, "invalid priority"):
+                _normalized_cards(data_dir)
+
     def test_empty_bootstrap_stays_outside_restore_doctor_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

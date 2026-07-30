@@ -47,7 +47,7 @@ The public path to the board is `secretary task`. A card carries a `ref`, projec
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
-ideas → ready → in_progress → validate → done
+Issues → ready → in_progress → validate → done
                          └────────────→ blocked
 ```
 
@@ -66,16 +66,18 @@ python3 -m secretary task create --role po --project PROJECT --type code --title
 ```
 
 `create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
-Worker, reviewer and retro roles may only create Ideas; the PO may choose Ready. `--codex-mode` is
+Execution tasks are created in Ready, never in Issues. Old task-shaped Ideas remain readable after
+the supported board migration but are fail-closed: only the PO may explicitly triage one to Ready,
+which marks it as a task without inventing Product, issue kind or priority. `--codex-mode` is
 valid only for a worker profile on a `codex` adapter. Without an override, launch mode comes from the
 head profile.
 
-`archive` closes a card in the backend and removes it from ordinary active listings and exports without
+`archive` closes an execution task in the backend and removes it from ordinary active listings without
 deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
 supports idempotent retry through `--request-id`. Only a card with no live work can be archived:
 in-progress and validate cards, and cards with an active claim, are rejected. A card closed from Done
 stays a satisfied dependency; a card closed from any other column is not Done and does not unblock
-anything.
+anything. It cannot close a Product or Issue: use `secretary issue close` for the latter.
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (the full new text, not
 a diff), `--head`, `--review-head`. PO, dispatcher and observer may edit, but an ordinary card is only
@@ -84,6 +86,34 @@ task document, so an edit goes through preempt and requeue rather than a silent 
 event records the old and new digests; the full text of past versions is recoverable from the Git history
 of the board export in the checkpoint. Comments stay the dialogue of an attempt; the spec lives only in
 the description.
+
+## Products and issues
+
+`secretary product` and `secretary issue` use typed records in the existing Pipeline backend. They do
+not introduce a file or a second board as a competing source of truth, so normal board export,
+checkpoint and restore carry their metadata and comments.
+
+```bash
+python3 -m secretary product create --role po --id secretary --project secretary --title Secretary
+python3 -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
+python3 -m secretary issue list --product secretary
+python3 -m secretary issue show --ref issue:123
+python3 -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
+python3 -m secretary issue close --role po --ref issue:123 --reason resolved
+```
+
+A Product id is stable and its non-empty project set must contain only ids registered under the
+instance `projects/` directory. Product ids cannot be duplicated. Every new issue requires its
+Product, one kind (`bug`, `feature`, `question`, `improvement`) and one priority (`P0` through `P3`).
+Priority changes require a non-empty reason, add an `[issue:priority]` board comment and append a
+durable audit event. Only the PO may close an issue, using exactly one of `resolved`, `invalid`,
+`duplicate` or `wont_do`; closure archives the backend record but leaves its comments and audit
+history available through `issue show --ref` and checkpoint recovery. `issue list --closed` includes
+both open and closed issues; without it the list contains only open issues.
+
+A Product and an Issue are not execution tasks and never enter the execution columns: `move` and `claim`
+both reject one before any write, whatever column it currently sits in. Work on an issue is a separate
+card the PO creates in Ready.
 
 ## Sprints
 
