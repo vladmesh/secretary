@@ -84,9 +84,10 @@ pointer to them in Context, or split them into a separate card in the right proj
 
 - The task came out of a conversation with the owner and they agreed ("yes, go ahead", or any explicit
   approval) → create it directly in `Ready` (`--column Ready`).
-- The idea came from an agent (a retro finding, a research result, a worker's suggestion) → the `Ideas`
-  column only (the `create` default). Do not promote it to `Ready` yourself; a person or a separate
-  conversation does that.
+- The idea came from an agent (a retro finding, a research result, a worker's suggestion) → create it in
+  the legacy `Ideas` column explicitly (`--column Ideas`). Do not promote it to `Ready` yourself; a person
+  or a separate conversation does that. On a migrated board, this command fails closed because `Issues` is
+  the Product backlog, so bring the finding to the owner instead.
 
 ## Concurrency
 
@@ -118,8 +119,8 @@ pipeline --role po create \
   --column Ready --head claude-sonnet --slug "short-slug" --description-file "$spec"
 ```
 
-For an idea (the `Ideas` column) simply do not pass `--column`. Always pass the spec through
-`--description-file`; do not inline markdown into an argument.
+For an agent idea, pass `--column Ideas` explicitly. `create` otherwise defaults to `Ready`. Always pass
+the spec through `--description-file`; do not inline markdown into an argument.
 
 If you need per-card no-review:
 

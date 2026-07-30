@@ -229,9 +229,9 @@ Investigation gives three outcomes, one per signal:
   process, workspace debris. Commit and push to this repository's default branch directly (see
   "Permissions" above) with an ordinary `git push`, no force, no secrets in the diff. Each such fix is
   its own meaningful commit.
-- **File a card.** An improvement that does not block the pipeline now → the **Ideas** column
-  (`pipeline --role steward create --project <project> --type <code|research|debug> --title <...>
-  --column Ideas --description <...>`). An urgent infrastructure task you cannot or should not fix in the
+- **File a card.** An improvement that does not block the pipeline now → an **Ideas** proposal
+  (`pipeline --role steward idea --project <project> --type <code|research> --title <...>
+  --description <...>`). An urgent infrastructure task you cannot or should not fix in the
   moment (it needs a bigger refactor, or the risk is higher than is reasonable to take without review) →
   the **Ready** column with the same `create --column Ready`, straight into the workers' queue.
 - **Escalate.** You cannot find the cause, or the fix needs a human decision (an architectural choice, a
@@ -239,7 +239,8 @@ Investigation gives three outcomes, one per signal:
   is needed from a human. If the card already exists on the board (the Blocked card from the signal, or any
   other active one) use `pipeline --role steward move --ref <ref> --to Blocked` and put the analysis in a
   separate comment (step 3). If there is no card yet (you found the anomaly yourself), use
-  `create --column Ideas --title <...> --description <analysis>` and then the same `move --to Blocked`.
+  `idea --project <project> --title <...> --description <analysis>` and then
+  `move --to Blocked --reason "<why a human decision is needed>"`.
   Pulling an active in-progress or validate card out from under a live worker is a last resort (the
   dispatcher usually resolves it through its watchdog), but it is safe: the next dispatcher tick sees that
   the card went another way, stops the worker's terminal itself and cleans up its own record, while the
