@@ -91,13 +91,225 @@ class SprintKanboard:
         raise AssertionError(method)
 
 
-class SprintTests(unittest.TestCase):
+class ProductSprintKanboard(SprintKanboard):
+    """The same two boards, with the Pipeline carrying Product and Issue records.
+
+    A sprint now names the Product it belongs to and the Issues it serves, so the
+    fixture holds one product with an open and a closed issue, plus a second product
+    to prove a foreign issue is refused.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.columns[7] = [{"id": 1, "title": "Issues"}] + self.columns[7][1:]
+        self._record(20, "product:secretary", "Secretary", {
+            "record_type": "product", "product_id": "secretary",
+            "product_projects": json.dumps(["secretary", "secretary-instance"]),
+        })
+        self._record(21, "product:other", "Other", {
+            "record_type": "product", "product_id": "other",
+            "product_projects": json.dumps(["other"]),
+        })
+        self._record(22, "issue:open", "Open issue", {
+            "record_type": "issue", "issue_product": "secretary", "issue_kind": "feature",
+            "issue_priority": "P1",
+        })
+        self._record(23, "issue:done", "Closed issue", {
+            "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+            "issue_priority": "P2", "issue_closed_reason": "resolved",
+        }, closed=True)
+        self._record(24, "issue:foreign", "Issue of another product", {
+            "record_type": "issue", "issue_product": "other", "issue_kind": "bug",
+            "issue_priority": "P1",
+        })
+
+    def _record(self, task_id: int, reference: str, title: str, metadata: dict, *, closed: bool = False) -> None:
+        self.tasks.append({
+            "id": task_id, "project_id": 7, "reference": reference, "title": title,
+            "description": "", "column_id": 1, "position": task_id, "swimlane_id": 0,
+            "is_active": 0 if closed else 1,
+            "date_creation": "1720000000", "date_modification": "1720000000",
+        })
+        self.metadata[task_id] = dict(metadata)
+        self.comments[task_id] = []
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "getAllTasks":
+            self.calls.append((method, params))
+            status = params.get("status_id")
+            return [
+                task for task in self.tasks
+                if task["project_id"] == params["project_id"]
+                and (status == 2 or (int(task.get("is_active", 1) or 0) != 0) == (status == 1))
+            ]
+        return super().call(method, **params)
+
+
+def _write_project_registry(root: Path, *projects: str) -> Path:
+    instance = root / "instance"
+    (instance / "projects").mkdir(parents=True, exist_ok=True)
+    for project in projects:
+        (instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+    return instance
+
+
+class SprintFixture(unittest.TestCase):
+    """One Product/Issue Pipeline, one sprint board and a real project registry."""
+
     def setUp(self) -> None:
-        self.client = SprintKanboard()
+        self.client = ProductSprintKanboard()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.writer = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.instance = _write_project_registry(
+            Path(self.tmp.name), "secretary", "secretary-instance", "other",
+        )
+        self.writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+        )
 
+    def _create(self, **kwargs) -> dict:
+        """Open a sprint that owns the fixture's product, open issue and project."""
+        for field, value in (
+            ("role", "po"), ("actor", "operator"), ("product", "secretary"),
+            ("issues", ["issue:open"]), ("projects", ["secretary"]),
+        ):
+            kwargs.setdefault(field, value)
+        return self.writer.create(**kwargs)
+
+
+class SprintOwnershipTests(SprintFixture):
+    """A sprint belongs to a Product, serves its open Issues and reserves projects."""
+
+    def _events(self) -> list[dict]:
+        return TaskAudit(self.tmp.name).events()
+
+    def _assert_nothing_was_written(self) -> None:
+        self.assertEqual(self._events(), [])
+        self.assertFalse(any(
+            method in {"createTask", "saveTaskMetadata", "createProject"}
+            for method, _params in self.client.calls
+        ))
+
+    def test_create_requires_product_issue_and_reservation_before_any_write(self) -> None:
+        for kwargs, message in (
+            ({"product": ""}, "owning product"),
+            ({"issues": []}, "at least one open issue"),
+            ({"projects": []}, "at least one reserved project"),
+            ({"product": "ghost"}, "was not found"),
+            ({"issues": ["issue:missing"]}, "was not found"),
+            ({"projects": ["unregistered"]}, "unknown registered project"),
+        ):
+            self.client.calls.clear()
+            with self.assertRaisesRegex(TaskError, message):
+                self._create(goal="rejected", **kwargs)
+            self._assert_nothing_was_written()
+
+    def test_foreign_and_closed_issues_are_refused_separately(self) -> None:
+        with self.assertRaisesRegex(TaskError, "belongs to product 'other'") as foreign:
+            self._create(goal="foreign issue", issues=["issue:foreign"])
+        self.assertEqual(foreign.exception.code, "validation")
+
+        with self.assertRaisesRegex(TaskError, "is closed") as closed:
+            self._create(goal="closed issue", issues=["issue:done"])
+        self.assertEqual(closed.exception.code, "validation")
+        self._assert_nothing_was_written()
+
+    def test_second_open_sprint_is_refused_and_names_the_open_one(self) -> None:
+        first = self._create(goal="first", reference="sprint:first")["sprint"]["ref"]
+
+        with self.assertRaisesRegex(TaskError, first) as raised:
+            self._create(
+                goal="second", reference="sprint:second", projects=["secretary-instance"],
+            )
+
+        self.assertEqual(raised.exception.code, "sprint_conflict")
+        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [first])  # type: ignore[arg-type]
+
+    def test_a_reserved_project_is_a_resource_conflict_of_its_own(self) -> None:
+        first = self._create(goal="first", reference="sprint:first")["sprint"]["ref"]
+
+        with self.assertRaisesRegex(TaskError, "already reserved") as raised:
+            self._create(goal="second", reference="sprint:second", projects=["secretary"])
+
+        self.assertEqual(raised.exception.code, "resource_conflict")
+        self.assertIn("secretary held by " + first, raised.exception.message)
+
+    def test_a_closed_sprint_releases_its_reservation(self) -> None:
+        first = self._create(goal="first", reference="sprint:first")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=first)
+
+        second = self._create(goal="second", reference="sprint:second")["sprint"]
+
+        self.assertEqual(second["reservations"], ["secretary"])
+
+    def test_create_replay_returns_the_same_event_instead_of_conflicting_with_itself(self) -> None:
+        first = self._create(goal="replayed", request_id="create-once")
+        second = self._create(goal="replayed", request_id="create-once")
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(first["sprint"]["ref"], second["sprint"]["ref"])
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
+
+    def test_show_status_and_export_carry_the_new_links(self) -> None:
+        ref = self._create(goal="linked", projects=["secretary", "secretary-instance"])["sprint"]["ref"]
+        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+        shown = reader.show(ref)
+        status = reader.status(ref)
+        exported = reader.export()[0]
+
+        for view in (shown, status, exported):
+            self.assertEqual(view["product"], "secretary")
+            self.assertEqual(view["issues"], ["issue:open"])
+            self.assertEqual(view["reservations"], ["secretary", "secretary-instance"])
+
+    def test_reopen_of_a_legacy_sprint_fails_closed_without_filling_fields(self) -> None:
+        legacy = self.writer.restore_create(
+            reference="sprint:legacy", goal="legacy", request_id="legacy-create",
+        )["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=legacy)
+
+        with self.assertRaisesRegex(TaskError, "predates sprint ownership") as raised:
+            self.writer.reopen(role="po", actor="operator", reference=legacy)
+
+        self.assertEqual(raised.exception.code, "validation")
+        reread = SprintReader(self.client).show(legacy, include_cards=False)  # type: ignore[arg-type]
+        self.assertEqual(reread["status"], "closed")
+        self.assertEqual(reread["product"], "")
+        self.assertEqual(reread["issues"], [])
+        self.assertEqual(reread["reservations"], [])
+
+    def test_reopen_rechecks_ownership_and_stays_idempotent(self) -> None:
+        ref = self._create(goal="reopened", reference="sprint:reopened")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+
+        first = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-once")
+        second = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-once")
+
+        self.assertEqual(first["sprint"]["status"], "open")
+        self.assertEqual(first["event_id"], second["event_id"])
+
+    def test_reopen_is_refused_when_its_only_issue_has_been_closed(self) -> None:
+        ref = self._create(goal="issue closed later", reference="sprint:stale")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+        issue = next(task for task in self.client.tasks if task["reference"] == "issue:open")
+        issue["is_active"] = 0
+        self.client.metadata[issue["id"]]["issue_closed_reason"] = "resolved"
+
+        with self.assertRaisesRegex(TaskError, "is closed"):
+            self.writer.reopen(role="po", actor="operator", reference=ref)
+
+    def test_board_layout_without_issues_column_fails_closed(self) -> None:
+        self.client.columns[7][0] = {"id": 1, "title": "Ideas"}
+
+        with self.assertRaises(TaskError) as raised:
+            self._create(goal="legacy layout")
+
+        self.assertEqual(raised.exception.code, "legacy_layout")
+        self._assert_nothing_was_written()
+
+
+class SprintTests(SprintFixture):
     def test_board_creation_is_idempotent(self) -> None:
         first = ensure_sprint_board(self.client)  # type: ignore[arg-type]
         second = ensure_sprint_board(self.client)  # type: ignore[arg-type]
@@ -109,26 +321,32 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(reader.list(create=False), [])
         self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
 
-        created = self.writer.create(role="po", actor="operator", goal="list")
+        created = self._create(goal="list")
         listed = reader.list()
         self.assertEqual(listed[0]["ref"], created["sprint"]["ref"])
         self.assertNotIn("resume_freshness", listed[0])
 
     def test_create_has_only_contract_fields_and_rejects_duplicate_reference(self) -> None:
-        created = self.writer.create(
-            role="po", actor="operator", goal="Ship sprint entity", definition_of_done="tests pass",
-            repositories=["secretary", "secretary"], reference="sprint:entity", request_id="create",
+        created = self._create(
+            goal="Ship sprint entity", definition_of_done="tests pass",
+            repositories=["secretary", "secretary"], projects=["secretary", "secretary"],
+            reference="sprint:entity", request_id="create",
         )
         sprint = created["sprint"]
         self.assertEqual(sprint["repositories"], ["secretary"])
+        self.assertEqual(sprint["product"], "secretary")
+        self.assertEqual(sprint["issues"], ["issue:open"])
+        self.assertEqual(sprint["reservations"], ["secretary"])
         self.assertEqual(sprint["status"], "open")
         self.assertEqual(sprint["budget"]["total"], 0)
         self.assertEqual(sprint["budget"]["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
         self.assertFalse(sprint["budget"]["signal_reached"])
         self.assertIsNone(sprint["current_task"])
         self.assertNotIn("title", sprint)
+        # The reference is only reachable once the installation is free to open a sprint.
+        self.writer.close(role="po", actor="operator", reference=sprint["ref"])
         with self.assertRaisesRegex(TaskError, "already exists") as raised:
-            self.writer.create(role="po", actor="operator", goal="another", reference="sprint:entity")
+            self._create(goal="another", reference="sprint:entity")
         self.assertEqual(raised.exception.code, "validation")
 
     def test_missing_metadata_reads_as_empty_contract_values(self) -> None:
@@ -153,7 +371,7 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(reader.export(), [])
         self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
 
-        ref = self.writer.create(role="po", actor="operator", goal="export")["sprint"]["ref"]
+        ref = self._create(goal="export")["sprint"]["ref"]
         self.writer.comment(role="po", actor="operator", reference=ref, body="note")
         self.client.calls.clear()
         exported = reader.export()
@@ -167,7 +385,7 @@ class SprintTests(unittest.TestCase):
         )
 
     def test_restore_rewrites_a_closed_entity_and_refuses_foreign_fields(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="restore")["sprint"]["ref"]
+        ref = self._create(goal="restore")["sprint"]["ref"]
         self.writer.close(role="po", actor="operator", reference=ref)
 
         with self.assertRaisesRegex(TaskError, "unknown sprint fields"):
@@ -190,7 +408,7 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(result["event_id"], replay["event_id"])
 
     def test_budget_is_validated_and_retry_is_one_event(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="budget")["sprint"]["ref"]
+        ref = self._create(goal="budget")["sprint"]["ref"]
         with self.assertRaisesRegex(TaskError, "unknown budget"):
             self.writer.record_budget(role="po", actor="operator", reference=ref, event_type="green")
         first = self.writer.record_budget(role="po", actor="operator", reference=ref, event_type="red_ci", request_id="budget-once")
@@ -202,8 +420,14 @@ class SprintTests(unittest.TestCase):
         self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded"])
 
     def test_hard_budget_stop_has_its_own_durable_event(self) -> None:
-        writer = SprintWriter(self.client, data_dir=self.tmp.name, thresholds={"signal": 1, "hard": 1})  # type: ignore[arg-type]
-        ref = writer.create(role="po", actor="operator", goal="hard limit")["sprint"]["ref"]
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="hard limit", product="secretary",
+            issues=["issue:open"], projects=["secretary"],
+        )["sprint"]["ref"]
 
         writer.record_budget(
             role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked",
@@ -224,20 +448,20 @@ class SprintTests(unittest.TestCase):
             budget_thresholds({"sprint_budget": {"signal": 3, "hard": 2}})
 
     def test_task_link_is_live_metadata_and_closed_sprint_rejects_writes(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="link")["sprint"]["ref"]
+        ref = self._create(goal="link")["sprint"]["ref"]
         task_writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         task_writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="linked-card",
         )
         self.assertEqual(TaskReader(self.client).list(sprint=ref)[0]["sprint"], ref)  # type: ignore[arg-type]
         shown = SprintReader(self.client).show(ref)  # type: ignore[arg-type]
-        self.assertEqual([card["ref"] for card in shown["cards"]], ["secretary-14"])
+        self.assertEqual([card["ref"] for card in shown["cards"]], ["secretary-26"])
         self.writer.close(role="po", actor="operator", reference=ref)
         with self.assertRaisesRegex(TaskError, "closed"):
             self.writer.comment(role="worker", actor="worker", reference=ref, body="late")
         with self.assertRaisesRegex(TaskError, "closed"):
-            task_writer.create(role="po", actor="operator", project="secretary", task_type="code", title="late", sprint=ref)
+            task_writer.create(role="po", actor="operator", project="secretary", task_type="code", title="late", target="ready", sprint=ref)
 
     def test_cli_create_and_list_return_stable_json(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
@@ -245,18 +469,23 @@ class SprintTests(unittest.TestCase):
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main([
                 "sprint", "create", "--role", "po", "--data-dir", self.tmp.name,
-                "--goal", "CLI sprint", "--repository", "secretary", "--request-id", "cli-create",
+                "--instance", str(self.instance), "--goal", "CLI sprint",
+                "--repository", "secretary", "--product", "secretary", "--issue", "issue:open",
+                "--project", "secretary", "--request-id", "cli-create",
             ])
         self.assertEqual(code, 0)
         self.assertEqual(errors.getvalue(), "")
         result = json.loads(output.getvalue())
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["sprint"]["repositories"], ["secretary"])
+        self.assertEqual(result["sprint"]["product"], "secretary")
+        self.assertEqual(result["sprint"]["issues"], ["issue:open"])
+        self.assertEqual(result["sprint"]["reservations"], ["secretary"])
 
     def test_cli_observer_can_set_current_task(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="observer current task")["sprint"]["ref"]
+        ref = self._create(goal="observer current task")["sprint"]["ref"]
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref,
         )["task"]
         output, errors = io.StringIO(), io.StringIO()
@@ -273,7 +502,7 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["sprint"]["current_task"], task["ref"])
 
     def test_resume_requires_all_fields_and_staleness_uses_card_audit(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="resume") ["sprint"]["ref"]
+        ref = self._create(goal="resume") ["sprint"]["ref"]
         with self.assertRaisesRegex(TaskError, "missing required fields"):
             self.writer.resume(role="po", actor="operator", reference=ref, entry={"selected_step": "x"})
         entry = {
@@ -286,7 +515,7 @@ class SprintTests(unittest.TestCase):
         self.assertTrue(fresh["resume_freshness"]["fresh"])
         task_writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         task = task_writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="resume-card",
         )["task"]
         task_writer.comment(role="po", actor="operator", reference=task["ref"], body="meaningful", request_id="later")
@@ -295,7 +524,7 @@ class SprintTests(unittest.TestCase):
         self.assertEqual(stale["resume_freshness"]["error"], "resume_stale")
 
     def test_naive_resume_timestamp_is_rejected_and_legacy_data_fails_closed(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="naive resume") ["sprint"]["ref"]
+        ref = self._create(goal="naive resume") ["sprint"]["ref"]
         entry = {
             "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
             "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
@@ -307,7 +536,7 @@ class SprintTests(unittest.TestCase):
         sprint = next(item for item in self.client.tasks if item["reference"] == ref)
         self.client.metadata[int(sprint["id"])] ["sprint_resume"] = json.dumps(entry)
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="naive-card",
         )["task"]
         TaskWriter(self.client, data_dir=self.tmp.name).comment(
@@ -321,7 +550,7 @@ class SprintTests(unittest.TestCase):
         self.assertIsNone(shown["resume_freshness"]["lag_seconds"])
 
     def test_observer_can_record_a_complete_resume_entry(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="observer resume")["sprint"]["ref"]
+        ref = self._create(goal="observer resume")["sprint"]["ref"]
         entry = {
             "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
             "current_task": "secretary-14", "dod_state": "tests pending", "next_safe_step": "run tests",
@@ -350,9 +579,9 @@ class SprintTests(unittest.TestCase):
             )
 
     def test_resume_freshness_ignores_denied_and_failed_card_events(self) -> None:
-        ref = self.writer.create(role="po", actor="operator", goal="event predicate")["sprint"]["ref"]
+        ref = self._create(goal="event predicate")["sprint"]["ref"]
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
-            role="po", actor="operator", project="secretary", task_type="code", title="linked",
+            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="predicate-card",
         )["task"]
         entry = {
@@ -390,8 +619,11 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-        self.ref = self.sprints.create(
-            role="po", actor="operator", goal="single writer", repositories=["secretary", "other"],
+        # The guard is about card writes against an open sprint, not about opening one,
+        # and this board still has the legacy Ideas layout that ownership cannot read.
+        self.ref = self.sprints.restore_create(
+            reference="sprint:guard", goal="single writer", repositories=["secretary", "other"],
+            request_id="seed-guard-sprint",
         )["sprint"]["ref"]
 
     def test_observer_must_link_to_its_open_sprint_and_other_roles_are_denied(self) -> None:
@@ -538,8 +770,8 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
     def test_pending_sprint_recovery_rebuilds_its_repository_index(self) -> None:
         with mock.patch.object(self.sprints.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                self.sprints.create(
-                    role="po", actor="operator", goal="recovered", repositories=["recovered"],
+                self.sprints.restore_create(
+                    goal="recovered", repositories=["recovered"],
                     reference="sprint:recovered", request_id="recover-sprint-index",
                 )
 
@@ -559,8 +791,11 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.assertFalse(any(method == "getAllComments" for method, _params in self.client.calls))
 
     def test_observer_can_write_when_another_open_sprint_shares_the_repository(self) -> None:
-        other_ref = self.sprints.create(
-            role="po", actor="operator", goal="overlap", repositories=["secretary"],
+        # Two open sprints are no longer reachable through `create`; recovery can still
+        # rebuild a backend that holds them, and the guard has to keep working there.
+        other_ref = self.sprints.restore_create(
+            reference="sprint:overlap", goal="overlap", repositories=["secretary"],
+            request_id="seed-overlap-sprint",
         )["sprint"]["ref"]
         card = self.tasks.create(
             role="observer", actor="second-observer", project="secretary", task_type="code",

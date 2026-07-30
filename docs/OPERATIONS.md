@@ -332,13 +332,17 @@ the Codex target of the secretary role, so behaviour does not depend on which se
 The skill walks the secretary through preparation: live context (open and closed sprints, deferred items
 from their resume entries and comments, roadmap, Ideas in the affected repositories), a check that no other
 open sprint is holding the repositories needed, an interview on unresolved product forks, and a Definition of
-Done phrased as checkable items. Choosing the goal stays with the person and is not delegated.
+Done phrased as checkable items. Choosing the goal stays with the person and is not delegated. A sprint also
+needs the Product it belongs to, at least one of its open Issues and at least one reserved registered
+project; an installation holds one open sprint at a time, and a project another open sprint reserves is
+refused as a resource conflict.
 
 The entity is created by the product command, as the `po` role:
 
 ```bash
 python3 -m secretary sprint create --role po --actor <actor> \
   --goal "<one sentence>" --dod-file DOD.md \
+  --product <product-id> --issue issue:<ID> --project <project-id> \
   --repository <repo> [--repository <repo>]
 python3 -m secretary sprint show --ref sprint:<ID>
 python3 -m secretary sprint status --ref sprint:<ID>

@@ -30,6 +30,9 @@ SPRINT_METADATA = {
     "sprint_goal",
     "sprint_definition_of_done",
     "sprint_repositories",
+    "sprint_product",
+    "sprint_issues",
+    "sprint_reservations",
     "sprint_status",
     "sprint_budget",
     "sprint_current_task",
@@ -285,6 +288,11 @@ class SprintReader:
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
             "repositories": repositories,
+            # A sprint created before ownership existed carries none of these keys.  They
+            # read as absent rather than as a default an operator never chose.
+            "product": meta.get("sprint_product", ""),
+            "issues": _json_list(meta.get("sprint_issues")),
+            "reservations": _json_list(meta.get("sprint_reservations")),
             "status": meta.get("sprint_status") if meta.get("sprint_status") in {"open", "closed", "stopped"} else "open",
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
@@ -314,6 +322,7 @@ class SprintReader:
                 states.setdefault(str(card.get("state") or "unknown"), []).append(str(card.get("ref") or ""))
         return {
             "ref": sprint["ref"], "goal": sprint["goal"], "status": sprint["status"],
+            "product": sprint["product"], "issues": sprint["issues"], "reservations": sprint["reservations"],
             "current_task": sprint["current_task"], "cards": {key: sorted(value) for key, value in sorted(states.items())},
             "budget": sprint["budget"], "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
@@ -356,24 +365,74 @@ class SprintReader:
 class SprintWriter:
     """Sprint mutations with the task protocol's durable audit semantics."""
 
-    def __init__(self, client: KanboardClient, *, data_dir: str | Path, thresholds: dict[str, int] | None = None) -> None:
+    def __init__(
+        self, client: KanboardClient, *, data_dir: str | Path, thresholds: dict[str, int] | None = None,
+        instance: str | Path | None = None,
+    ) -> None:
         self.client = client
         self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
         self.audit = TaskAudit(data_dir)
+        self.data_dir = Path(data_dir)
+        self.instance = Path(instance) if instance is not None else None
 
     def create(
         self, *, role: str, actor: str, goal: str, definition_of_done: str = "",
-        repositories: list[str] | None = None, reference: str = "", request_id: str | None = None,
+        repositories: list[str] | None = None, product: str = "", issues: list[str] | None = None,
+        projects: list[str] | None = None, reference: str = "", request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
+        # Ownership is read from live Product, Issue and registry state, so a replay has to
+        # short-circuit before it: the sprint this request already opened would otherwise
+        # collide with itself.
+        request_id = request_id or str(uuid.uuid4())
+        replayed = self._replayed("created", request_id)
+        if replayed is not None:
+            return replayed
+        if not goal.strip():
+            raise TaskError("validation", "create requires a non-empty goal", 2)
+        product = product.strip()
+        issue_refs = _unique_strings(issues or [])
+        reservations = _unique_strings(projects or [])
+        self._check_ownership(product, issue_refs, reservations)
+        self._check_conflicts(reservations, excluding="")
+        return self._create_entity(
+            role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
+            repositories=repositories or [], product=product, issues=issue_refs,
+            reservations=reservations, reference=reference, request_id=request_id,
+        )
+
+    def restore_create(
+        self, *, reference: str, goal: str, definition_of_done: str = "",
+        repositories: list[str] | None = None, request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Recreate one exported sprint row, without the rules for opening a sprint.
+
+        Recovery reproduces entities the installation already had, including sprints
+        closed before a sprint owned a product.  `restore` writes their real fields
+        immediately after, so this must not check or invent ownership.
+        """
+        return self._create_entity(
+            role="steward", actor="restore", goal=goal, definition_of_done=definition_of_done,
+            repositories=repositories or [], product="", issues=[], reservations=[],
+            reference=reference, request_id=request_id or str(uuid.uuid4()),
+        )
+
+    def _create_entity(
+        self, *, role: str, actor: str, goal: str, definition_of_done: str,
+        repositories: list[str], product: str, issues: list[str], reservations: list[str],
+        reference: str, request_id: str,
+    ) -> dict[str, Any]:
         goal = goal.strip()
         reference = reference.strip()
-        repos = _repositories(repositories or [])
+        repos = _unique_strings(repositories)
         if not goal:
             raise TaskError("validation", "create requires a non-empty goal", 2)
         if reference and not reference.startswith(SPRINT_REFERENCE_PREFIX):
             raise TaskError("validation", f"sprint reference must start with {SPRINT_REFERENCE_PREFIX}", 2)
+        replayed = self._replayed("created", request_id)
+        if replayed is not None:
+            return replayed
         board_id = ensure_sprint_board(self.client)
         if reference and self.client.call("getTaskByReference", project_id=board_id, reference=reference):
             raise TaskError("validation", "sprint reference already exists", 2)
@@ -386,16 +445,9 @@ class SprintWriter:
             else:
                 raise TaskError("validation", "sprint reference already belongs to a Pipeline card", 2)
 
-        request_id = request_id or str(uuid.uuid4())
-        committed = self.audit.committed_event(request_id)
-        if committed is not None:
-            return self._committed("created", committed)
-        pending = self.audit.pending_event(request_id)
-        if pending is not None:
-            return self._pending("created", pending)
         event = self._event("created", role, actor, reference, request_id, {
             "goal_sha256": _digest(goal), "definition_of_done_sha256": _digest(definition_of_done),
-            "repositories": repos,
+            "repositories": repos, "product": product, "issues": issues, "reservations": reservations,
         })
         self.audit.stage(request_id, event)
         try:
@@ -414,7 +466,7 @@ class SprintWriter:
             self.audit.stage(request_id, event)
             if not self.client.call("updateTask", id=task_id, reference=created_ref):
                 raise TaskError("backend_error", "Kanboard rejected the sprint write", 1)
-            self.client.call("saveTaskMetadata", task_id=task_id, values={
+            values = {
                 "sprint_goal": goal,
                 "sprint_definition_of_done": definition_of_done,
                 "sprint_repositories": json.dumps(repos, separators=(",", ":")),
@@ -422,7 +474,16 @@ class SprintWriter:
                 "sprint_budget": json.dumps(_budget(thresholds=self.thresholds), separators=(",", ":")),
                 "sprint_current_task": "",
                 "sprint_resume": "",
-            })
+            }
+            # A restored legacy row gets no ownership keys at all; `restore` then writes
+            # back exactly the fields its own export carried.
+            if product:
+                values["sprint_product"] = product
+            if issues:
+                values["sprint_issues"] = json.dumps(issues, separators=(",", ":"))
+            if reservations:
+                values["sprint_reservations"] = json.dumps(reservations, separators=(",", ":"))
+            self.client.call("saveTaskMetadata", task_id=task_id, values=values)
         except Exception:
             # A created Kanboard task is recoverable from the staged event, so retain it.
             if event.get("backend", {}).get("task_id"):
@@ -430,6 +491,96 @@ class SprintWriter:
             self.audit.discard(request_id)
             raise
         return self._record("created", event)
+
+    def _replayed(self, kind: str, request_id: str) -> dict[str, Any] | None:
+        committed = self.audit.committed_event(request_id)
+        if committed is not None:
+            return self._committed(kind, committed)
+        pending = self.audit.pending_event(request_id)
+        if pending is not None:
+            return self._pending(kind, pending)
+        return None
+
+    def _check_ownership(self, product: str, issues: list[str], reservations: list[str]) -> None:
+        """Prove the sprint owns a product, an open issue and registered projects.
+
+        Every step is a read of durable Product/Issue records and of the project
+        registry, so a rejected sprint leaves no row, no metadata and no audit event.
+        """
+        if not product:
+            raise TaskError("validation", "sprint requires an owning product; pass --product", 2)
+        if not issues:
+            raise TaskError(
+                "validation", "sprint requires at least one open issue of its product; pass --issue", 2
+            )
+        if not reservations:
+            raise TaskError("validation", "sprint requires at least one reserved project; pass --project", 2)
+        if self.instance is None:
+            raise TaskError(
+                "validation", "sprint ownership needs the instance directory; pass --instance", 2
+            )
+        from secretary.product_issues import ProductIssueStore, registered_projects
+
+        store = ProductIssueStore(self.client, data_dir=self.data_dir, instance=self.instance)
+        try:
+            store.show_product(product)
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            raise TaskError("not_found", f"sprint product {product!r} was not found", 2) from None
+        known = {str(issue.get("ref") or ""): issue for issue in store.list_issues(include_closed=True)}
+        for reference in issues:
+            issue = known.get(reference)
+            if issue is None:
+                raise TaskError("not_found", f"issue {reference!r} was not found", 2)
+            owner = str(issue.get("product") or "")
+            if owner != product:
+                raise TaskError(
+                    "validation",
+                    f"issue {reference!r} belongs to product {owner!r}, not to {product!r}",
+                    2,
+                )
+            if issue.get("closed"):
+                raise TaskError(
+                    "validation", f"issue {reference!r} is closed; a sprint needs an open issue", 2
+                )
+        unknown = sorted(set(reservations) - registered_projects(self.instance))
+        if unknown:
+            raise TaskError(
+                "validation", "unknown registered project(s): " + ", ".join(unknown), 2
+            )
+
+    def _check_conflicts(self, reservations: list[str], *, excluding: str) -> None:
+        """Refuse a second open sprint, and a project another open sprint already holds.
+
+        The resource conflict is reported first: the two rules describe different
+        problems, and the caller of a colliding reservation has to see which project
+        it is, not only that some sprint is open.
+        """
+        others = [
+            sprint for sprint in self.reader.list(statuses={"open"}, create=False)
+            if sprint["ref"] != excluding
+        ]
+        held: dict[str, str] = {}
+        for sprint in others:
+            for project in sprint.get("reservations") or []:
+                held.setdefault(str(project), str(sprint["ref"]))
+        clashes = [(project, held[project]) for project in reservations if project in held]
+        if clashes:
+            raise TaskError(
+                "resource_conflict",
+                "project(s) already reserved by an open sprint: "
+                + ", ".join(f"{project} held by {ref}" for project, ref in sorted(clashes)),
+                2,
+            )
+        if others:
+            raise TaskError(
+                "sprint_conflict",
+                "installation already has an open sprint: "
+                + ", ".join(sorted(str(sprint["ref"]) for sprint in others))
+                + "; close it before opening another",
+                2,
+            )
 
     def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "worker", "reviewer", "steward", "retro"})
@@ -542,7 +693,37 @@ class SprintWriter:
         return self._write("closed", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "closed"}))
 
     def reopen(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
+        """Reopen a sprint that still satisfies every rule for an open sprint.
+
+        A sprint predating ownership is not completed here: recovery keeps it readable,
+        and an operator who needs the work opens a new sprint that owns its issues.
+        """
         self._role(role, {"po"})
+        request_id = request_id or str(uuid.uuid4())
+        if self.audit.committed_event(request_id) is None and self.audit.pending_event(request_id) is None:
+            sprint = self.reader.show(reference, include_cards=False)
+            missing = [
+                name for name, value in (
+                    ("product", sprint.get("product")),
+                    ("issues", sprint.get("issues")),
+                    ("reservations", sprint.get("reservations")),
+                ) if not value
+            ]
+            if missing:
+                raise TaskError(
+                    "validation",
+                    f"sprint {reference} predates sprint ownership and has no "
+                    + ", ".join(missing)
+                    + "; open a new sprint that owns its issues instead of reopening it",
+                    2,
+                )
+            reservations = [str(project) for project in sprint.get("reservations") or []]
+            self._check_ownership(
+                str(sprint.get("product") or ""),
+                [str(issue) for issue in sprint.get("issues") or []],
+                reservations,
+            )
+            self._check_conflicts(reservations, excluding=reference)
         return self._write("reopened", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"}))
 
     def restore(self, *, reference: str, values: dict[str, str], request_id: str | None = None) -> dict[str, Any]:
@@ -640,8 +821,8 @@ def _sprint_number(sprint: dict[str, Any] | None) -> int:
     return number
 
 
-def _repositories(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+def _unique_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
 
 
 def _resume_lag_seconds(recorded_at: str, last_event_at: str) -> int | None:
@@ -668,7 +849,7 @@ def _json_list(value: str | None) -> list[str]:
         raw = json.loads(value or "[]")
     except ValueError:
         return []
-    return _repositories(raw) if isinstance(raw, list) else []
+    return _unique_strings(raw) if isinstance(raw, list) else []
 
 
 def _budget(value: Any = None, thresholds: dict[str, int] | None = None) -> dict[str, Any]:

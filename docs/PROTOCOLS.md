@@ -123,6 +123,7 @@ reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` ca
 
 ```bash
 python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
+  --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --repository REPO --request-id REQUEST_ID
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint show --ref sprint:ID
@@ -135,13 +136,30 @@ python3 -m secretary sprint reopen --role po --ref sprint:ID
 python3 -m secretary sprint close --role po --ref sprint:ID
 ```
 
-Stored fields are the goal, the Definition of Done text, repositories, open/closed/stopped status, a
+Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
+the reserved projects, open/closed/stopped status, a
 budget counter by event type, the current card and a structured resume entry. The six valid budget event
 types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
 them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
 an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
 budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity have no
 matching event and do not move the counter.
+
+A new sprint belongs to a Product, serves at least one of its open Issues and reserves at least one
+registered project. `--product` names an existing Product, every `--issue` is an open Issue of that
+Product, and every `--project` is an id from the instance project registry; `--repository` keeps its own
+meaning as the write-guard scope. An Issue of another Product and a closed Issue are refused with their
+own messages. One installation holds at most one open sprint: a second `create` is refused as
+`sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
+that, as `resource_conflict` naming the project and its holder. Every one of these checks is a read, so a
+refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
+returns the first event instead of colliding with the sprint it already opened.
+
+Sprints created before ownership existed carry none of these fields. They stay readable, exportable and
+restorable exactly as they are, and nothing fills the fields in for them. `reopen` re-checks every rule
+above, so such a sprint is refused with a message that names what it lacks; the supported move is to open
+a new sprint that owns its issues. `reopen` is refused the same way when the sprint's own issues have
+since been closed or its projects are held elsewhere.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
