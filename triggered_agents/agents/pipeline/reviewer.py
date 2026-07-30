@@ -308,6 +308,9 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
         f"python3 -m triggered_agents pipeline --role reviewer idea --project {project} "
         "--title '<short>' --description-file <file>",
         "```",
+        "The command picks the column itself. A board that no longer has an Ideas column has nowhere "
+        "to put a proposal, so the call fails with that explanation: then keep the non-blocker in the "
+        "verdict body as a remark and create nothing.",
         "",
         "You post EXACTLY ONE verdict. Do not move the card and do not write code: on a red verdict "
         "the dispatcher returns it itself.",

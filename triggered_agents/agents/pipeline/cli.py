@@ -10,8 +10,9 @@ update accepts any role at this layer but is PO-only in ops (GuardError otherwis
 move's per-role matrix. `move --reason` records a comment on the moved card. steward gets every po
 transition (via move/ready) plus one more: Blocked -> Done, which additionally needs a non-empty
 reason in the same call, see model.STEWARD_OVERRIDE and ops.move_card. steward escalations to
-Blocked also need a non-empty reason. idea is reviewer- or retro-only (both file an Ideas-only card,
-never move anything, model.TRANSITIONS leaves each an empty set).
+Blocked also need a non-empty reason. idea is reviewer- or retro-only (both file a proposal into the
+board's legacy Ideas column and never move anything, model.TRANSITIONS leaves each an empty set); on
+a board without that column the call fails closed, see ops._proposal_column.
 setup/list/show/probe need no role. Guards live in model/ops; this layer only wires argv to them
 and maps failures to exit codes.
 
@@ -295,8 +296,8 @@ def main(argv=None) -> int:
             if not _need_role(role, ("reviewer", "retro")):
                 return 2
             # The reviewer's one code-creation exception: findings out of the card's scope go to
-            # Ideas (never Ready) so they enter the queue only via a human, not the reviewer.
-            # retro's only board write is the same shape: a fail-pattern proposal, Ideas-only.
+            # the legacy Ideas column (never Ready) so they enter the queue only via a human, not
+            # the reviewer. retro's only board write is the same shape: a fail-pattern proposal.
             desc = _text_arg(args.description, args.description_file)
             fn = ops.reviewer_idea if role == "reviewer" else ops.retro_idea
             return _emit(fn(

@@ -850,6 +850,11 @@ class TaskWriter:
             raise TaskError("validation", "claim cap must be positive", 2)
 
         def mutation(task: dict[str, Any]) -> Any:
+            # Same guard as move: a product or an issue is not an execution task, so it never
+            # takes a claim even if someone dragged it into Ready by hand. It runs before the Ready
+            # check and before any backend call, so a rejected claim writes nothing.
+            if task.get("record_type") in {"issue", "product"}:
+                raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
             if task["state"] != "ready":
                 raise TaskError("claim_conflict", "claim requires a Ready task", 3)
             if task["claim"]["worker"] is not None:

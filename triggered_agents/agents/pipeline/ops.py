@@ -76,6 +76,27 @@ def _column_title(pid: int, column_id: int) -> str:
     return ""
 
 
+def _proposal_column(pid: int) -> str:
+    """Return the column a reviewer/retro proposal goes into, or raise if the board has none.
+
+    A proposal is not a Product issue: an agent cannot pick product, kind and priority, so it may
+    not create one, and the Issues column takes nothing else. The route therefore survives only on
+    a board that still carries the legacy Ideas column (the same tolerance `secretary task create
+    --state ideas` keeps), and fails closed on a migrated board until a PO decides where an agent
+    proposal lands there.
+    """
+    columns = sorted(call("getColumns", project_id=pid) or [], key=lambda c: int(c.get("position") or 0))
+    for column in columns:
+        if column["title"] in model.LEGACY_ISSUE_COLUMNS:
+            return str(column["title"])
+    raise model.GuardError(
+        "this board has no legacy 'Ideas' column, so a reviewer/retro proposal has nowhere to go: "
+        "'Issues' is the Product backlog and an agent may not create a Product issue (it cannot "
+        "choose product, kind and priority). A PO has to decide where an agent proposal lands on a "
+        "migrated board; until then, report the proposal in the verdict or the retro output instead."
+    )
+
+
 def _ensure_swimlane(pid: int, name: str) -> int:
     """Return the active swimlane id for `name`, creating it if absent."""
     for s in call("getActiveSwimlanes", project_id=pid) or []:
@@ -298,13 +319,17 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
                 blocked_by: str | None = None, head: str | None = None,
                 slug: str | None = None, base_branch: str | None = None,
                 review_head: str | None = None, role: str | None = None,
-                own_ref: str | None = None) -> dict:
-    """PO/steward/worker: create a spec card in Ideas or Ready, keyed by reference, with metadata.
+                own_ref: str | None = None, proposal: bool = False) -> dict:
+    """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
+
+    Ready is the only column an execution card is created in; `Issues` is the Product backlog.
+    `proposal=True` is the one exception, reserved for reviewer_idea/retro_idea: on a board that
+    still has the legacy Ideas column, those two file into it (see _proposal_column) and the card
+    is stamped record_type=task so it is not mistaken for an unclassified legacy leftover.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
-    (triggered-agents-261); an Ideas card from a worker is otherwise ungated, matching the
-    general agent-idea policy (reviewer_idea/retro_idea). `own_ref` is the worker's own card
-    reference, required (and only meaningful) for that Ready path.
+    (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
+    meaningful) for that Ready path.
 
     `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); when
     omitted, claim falls back to a transliterated slug of the title (naming.fallback_slug) so an
@@ -324,7 +349,7 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     verbatim, unchanged from before."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
-    if column != "Ready":
+    if column != "Ready" and not (proposal and column in model.LEGACY_ISSUE_COLUMNS):
         raise model.GuardError("execution cards are created only in 'Ready'; Issues is Product backlog")
     if slug is not None and not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
@@ -349,6 +374,8 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
         ref = f"{project}-{task_id}"
         call("updateTask", id=task_id, reference=ref)
     values = {model.META_TASK_TYPE: task_type, model.META_PROJECT: project}
+    if proposal:
+        values[model.META_RECORD_TYPE] = model.RECORD_TASK
     if blocked_by:
         values[model.META_BLOCKED_BY] = blocked_by
     if head:
@@ -709,11 +736,14 @@ def reviewer_idea(project: str, title: str, description: str = "", task_type: st
                   ref: str | None = None, head: str | None = None,
                   slug: str | None = None) -> dict:
     """Reviewer-only: file an out-of-scope finding as an Ideas card (the reviewer's single
-    code-creation exception). Title and description are scrubbed for the same reason as a verdict."""
+    code-creation exception). Title and description are scrubbed for the same reason as a verdict.
+    Needs the board's legacy Ideas column; _proposal_column explains why and what happens without
+    it."""
     return create_card(project=project, task_type=task_type,
                        title=worker.scrub_secrets(title),
                        description=worker.scrub_secrets(description),
-                       ref=ref, column="Ideas", head=head, slug=slug)
+                       ref=ref, column=_proposal_column(board_id()), head=head, slug=slug,
+                       proposal=True)
 
 
 def retro_idea(project: str, title: str, description: str = "", task_type: str = "code",
@@ -726,7 +756,8 @@ def retro_idea(project: str, title: str, description: str = "", task_type: str =
     return create_card(project=project, task_type=task_type,
                        title=worker.scrub_secrets(title),
                        description=worker.scrub_secrets(description),
-                       ref=ref, column="Ideas", head=head, slug=slug)
+                       ref=ref, column=_proposal_column(board_id()), head=head, slug=slug,
+                       proposal=True)
 
 
 def feedback(reference: str, body: str) -> dict:

@@ -141,6 +141,33 @@ class ProductIssueStoreTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
 
+    def test_claim_rejects_a_product_or_issue_record_without_any_write(self) -> None:
+        # A record dragged into Ready by hand still is not an execution task: claim has to reject
+        # it the way move does, before the claim metadata, the move and the audit row.
+        writer = TaskWriter(self.client, data_dir=self.root / "data")
+        for record_type in ("product", "issue"):
+            with self.subTest(record_type=record_type):
+                self.client.tasks[0]["column_id"] = 2
+                self.client.metadata[12] = {
+                    "record_type": record_type, "project": "secretary", "task_type": "code", "claim": "",
+                }
+                self.client.calls.clear()
+
+                with self.assertRaises(TaskError) as raised:
+                    writer.claim(
+                        role="dispatcher", actor="d", reference="secretary-468",
+                        worker="secretary-468-runtime", request_id=f"claim-{record_type}",
+                    )
+
+                self.assertEqual(raised.exception.code, "transition_forbidden")
+                self.assertIn("cannot enter execution task columns", str(raised.exception))
+                self.assertEqual(self.client.metadata[12]["claim"], "")
+                self.assertFalse(any(
+                    method in {"saveTaskMetadata", "moveTaskPosition"} for method, _ in self.client.calls
+                ))
+                self.assertEqual(writer.audit.status(), {"ok": True, "pending": 0})
+                self.assertFalse(Path(writer.audit.events_path).exists())
+
     def test_legacy_ideas_require_po_triage_and_mark_the_execution_task(self) -> None:
         self.client.tasks[0]["column_id"] = 1
         self.client.metadata[12] = {}
