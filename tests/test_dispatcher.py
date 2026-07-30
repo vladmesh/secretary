@@ -156,7 +156,14 @@ class FakeKanboard:
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
-            return self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
+            status = params.get("status_id")
+            if status not in {0, 1}:
+                return []
+            pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
+            return [
+                task for task in pool
+                if (int(task.get("is_active", task.get("status", 1)) or 0) != 0) == (status == 1)
+            ]
         if method == "getTaskByReference":
             pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
             return next((task for task in pool if task["reference"] == params["reference"]), None)

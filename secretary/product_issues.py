@@ -22,6 +22,7 @@ from secretary.tasks import (
     KanboardClient,
     TaskAudit,
     TaskError,
+    all_project_cards,
     _nonnegative_int,
     _now,
     _positive_int,
@@ -430,11 +431,7 @@ class ProductIssueStore:
 
     def _cards(self) -> list[dict[str, Any]]:
         board_id, _ = self._board()
-        # Kanboard status 2 is the complete set.  Status 0 means only closed cards.
-        cards = self.client.call("getAllTasks", project_id=board_id, status_id=2) or []
-        if not isinstance(cards, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
-        return [card for card in cards if isinstance(card, dict)]
+        return all_project_cards(self.client, board_id)
 
     def _metadata(self, card: dict[str, Any]) -> dict[str, str]:
         number = card.get("id")

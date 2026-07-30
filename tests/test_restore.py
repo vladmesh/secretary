@@ -173,6 +173,32 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(RestoreError, "board parity check failed"):
                 import_normalized_board(data_dir, client=IssuesBoard())
 
+    def test_restore_rejects_a_closed_card_missing_from_the_export(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(reference="secretary-1")
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            client.tasks.append({
+                "id": 99, "reference": "secretary-closed", "title": "Old closed card",
+                "description": "", "column_id": 2, "position": 1, "swimlane_id": 0,
+                "is_active": 0, "date_creation": "1720000000", "date_modification": "1720000000",
+            })
+            client.metadata[99] = {"project": "secretary", "task_type": "code"}
+            client.comments[99] = []
+
+            with self.assertRaisesRegex(RestoreError, "board is not empty"):
+                import_normalized_board(data_dir, client=client)
+
+            status_ids = [
+                params.get("status_id") for method, params in client.calls if method == "getAllTasks"
+            ]
+            self.assertEqual(status_ids, [1, 0])
+            self.assertFalse(any(method == "createTask" for method, _params in client.calls))
+
     def test_normalized_records_reject_duplicate_or_unknown_product_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"

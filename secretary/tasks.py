@@ -192,6 +192,32 @@ class KanboardClient:
         return document.get("result")
 
 
+def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str, Any]]:
+    """Return every Kanboard card by combining its open and closed status sets.
+
+    Kanboard 1.2.52 uses status 1 for open cards and 0 for closed cards. It does
+    not support a complete-set status, so retain the first copy of each task id in
+    case a backend returns a row in both responses.
+    """
+    cards: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for status_id in (1, 0):
+        response = client.call("getAllTasks", project_id=project_id, status_id=status_id) or []
+        if not isinstance(response, list):
+            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        for card in response:
+            if not isinstance(card, dict):
+                continue
+            identifier = card.get("id")
+            if identifier is not None:
+                key = str(identifier)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+            cards.append(card)
+    return cards
+
+
 class TaskReader:
     def __init__(self, client: KanboardClient, board_name: str = "Pipeline") -> None:
         self.client = client

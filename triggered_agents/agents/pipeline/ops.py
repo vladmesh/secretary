@@ -27,6 +27,24 @@ from .state import STATE
 DONE_RETENTION_DAYS = 5
 
 
+def _all_cards(pid: int) -> list[dict]:
+    """Collect Kanboard's open and closed sets, keeping one row per task id."""
+    cards = []
+    seen_ids = set()
+    for status_id in (1, 0):
+        for task in call("getAllTasks", project_id=pid, status_id=status_id) or []:
+            if not isinstance(task, dict):
+                continue
+            identifier = task.get("id")
+            if identifier is not None:
+                key = str(identifier)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+            cards.append(task)
+    return cards
+
+
 def board_id() -> int:
     """Kanboard project id of the board, creating it if absent.
 
@@ -876,8 +894,7 @@ def export_cards() -> list[dict]:
     pid = board_id()
     cols = {int(c["id"]): c["title"] for c in call("getColumns", project_id=pid) or []}
     lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
-    # Kanboard status 2 includes both open and closed cards.  Status 0 is closed only.
-    tasks = call("getAllTasks", project_id=pid, status_id=2) or []
+    tasks = _all_cards(pid)
     batched = call_batch(
         [(method, {"task_id": int(t["id"])})
          for t in tasks

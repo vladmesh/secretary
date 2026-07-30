@@ -23,6 +23,7 @@ class Board:
         self.project: dict[str, object] | None = None
         self.columns: list[dict[str, object]] = []
         self.lanes: list[dict[str, object]] = []
+        self.tasks: list[dict[str, object]] = []
         self.calls: list[str] = []
 
     def call(self, method: str, **params: object) -> object:
@@ -39,8 +40,13 @@ class Board:
         if method == "getColumns":
             return self.columns
         if method == "getAllTasks":
-            # Kanboard status 2 selects the complete set.
-            return []
+            status = params.get("status_id")
+            if status not in {0, 1}:
+                return []
+            return [
+                task for task in self.tasks
+                if (int(task.get("is_active", 1) or 0) != 0) == (status == 1)
+            ]
         if method == "updateColumn":
             for column in self.columns:
                 if column["id"] == params["column_id"]:
@@ -171,8 +177,8 @@ class BootstrapBoardTests(unittest.TestCase):
 
             def closed_cards(method: str, **params: object) -> object:
                 if method == "getAllTasks":
-                    self.assertEqual(params.get("status_id"), 2)
-                    return [{"id": 3, "is_active": 0}]
+                    self.assertIn(params.get("status_id"), {0, 1})
+                    return [{"id": 3, "is_active": 0}] if params.get("status_id") == 0 else []
                 return Board.call(board, method, **params)
 
             board.call = closed_cards  # type: ignore[method-assign]
