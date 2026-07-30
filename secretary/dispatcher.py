@@ -1142,11 +1142,33 @@ class CommandHostRuntime:
         merge while required checks are unsatisfied, so a non-green CI never lands even though the
         dispatcher has already re-run the gate on this same tick. Then fast-forward the project's
         own checkout (from the worker workspace's origin) so the next worktree bases on the merged
-        tree, matching the local-merge path."""
+        tree, matching the local-merge path.
+
+        The checkout tracks the project's default branch, not the card's base: a stacked card bases
+        on another `pipeline/<ref>` branch, and `_create_workspace` fetches that base itself. So the
+        refresh follows the default branch even when the PR landed on a stacked base, where
+        `origin/<base>` is a sibling of the checkout's branch and any unrelated card that merged
+        meanwhile makes it unmergeable. The card is already merged at this point, so the refresh
+        failing there is not the card's failure either; it stays best-effort and the deliverable
+        does not get reported as a merge that did not happen."""
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
-        self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+        default_branch = self.catalog.default_branch(task["project"], None)
+        if base == default_branch:
+            self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+            self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+            return
+        try:
+            self._run(
+                ["git", "-C", str(repo), "fetch", "origin", default_branch],
+                "post-merge fetch",
+            )
+            self._run(
+                ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{default_branch}"],
+                "post-merge fast-forward",
+            )
+        except HostError:
+            pass
 
     def stop(self, record: DispatcherRecord) -> None:
         if self.mode == "noop" or not record.workspace:
