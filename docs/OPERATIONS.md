@@ -606,6 +606,24 @@ the diverged state. The lag in minutes is the age of the oldest unpushed commit,
 loss if the machine dies. `doctor` raises a finding on divergence, on a blocked gate, and on a lag above 60
 minutes (two missed windows).
 
+### A checkpoint blocked by a Product/Issue transaction
+
+The checkpoint gate and the board export both refuse to run while a Product or Issue write is staged and
+unfinished, naming the number of pending records. The staged writes are listed and repaired by their own
+commands, and no file under `board/product-issue-transactions/` is ever moved by hand:
+
+```bash
+secretary product transaction list --data-dir DATA_DIR
+secretary product transaction retry --request-id REQUEST_ID --data-dir DATA_DIR
+secretary product transaction discard --request-id REQUEST_ID --data-dir DATA_DIR
+```
+
+`retry` is the first move: it resumes the operation where it stopped and commits its audit event. `discard`
+is for a transaction the backend never accepted; it reads the board first and refuses with `live_write` when
+the row or the board comment of that request already exists. A document that is already outside the journal
+comes back with `secretary product transaction adopt --path FILE`, which files it under its own request id
+and removes the copy, after which `retry` and `discard` see it again.
+
 ## Recovery
 
 The Git-backed checkpoint and the full recovery sequence are documented in

@@ -18,7 +18,14 @@ from typing import Any
 
 import yaml
 
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, _now
+from secretary.tasks import (
+    KanboardClient,
+    TaskAudit,
+    TaskError,
+    _nonnegative_int,
+    _now,
+    _positive_int,
+)
 
 
 ISSUES_COLUMN = "Issues"
@@ -35,6 +42,9 @@ ISSUE_KINDS = {"bug", "feature", "question", "improvement"}
 ISSUE_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ISSUE_CLOSE_REASONS = {"resolved", "invalid", "duplicate", "wont_do"}
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+# Failure codes a repeat of the same request cannot turn into a success.
+_TERMINAL_CODES = {"validation", "closed", "backend_rejected"}
+_TRANSACTION_KINDS = {"product_created", "issue_created", "issue_priority_changed", "issue_closed"}
 
 
 class ProductIssueValidationError(ValueError):
@@ -295,12 +305,88 @@ class ProductIssueTransaction:
             raise TaskError("audit_pending", "Product/Issue transaction has no request id", 4)
         if document.get("progress"):
             raise TaskError("audit_pending", "Product/Issue transaction has recorded progress", 4)
+        self.drop(request_id)
+
+    def drop(self, request_id: str) -> None:
+        """Remove a transaction whose caller has established that the backend is untouched."""
         try:
             self._path(request_id).unlink()
         except FileNotFoundError:
             pass
         except OSError:
             raise TaskError("audit_pending", "Product/Issue audit cleanup is pending repair", 4) from None
+
+    def documents(self) -> list[dict[str, Any]]:
+        try:
+            paths = sorted(self.directory.glob("v1-*.json"))
+        except OSError:
+            raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+        result = []
+        for path in paths:
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+            if isinstance(document, dict):
+                result.append(document)
+        return result
+
+    def load(self, request_id: str) -> dict[str, Any]:
+        try:
+            document = json.loads(self._path(request_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise TaskError("not_found", "no staged Product/Issue transaction has that request id", 2) from None
+        except (OSError, ValueError):
+            raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+        if not isinstance(document, dict):
+            raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4)
+        return document
+
+    def adopt(self, path: str | Path) -> dict[str, Any]:
+        """Take a transaction document that lives outside the journal back into it.
+
+        This is the supported way back for a document an operator had to carry out of the
+        journal by hand: the file is validated as a transaction of this journal, filed under
+        its own request id and removed from where it was, so `retry` and `discard` can see it.
+        """
+        source = Path(path).expanduser()
+        try:
+            document = json.loads(source.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise TaskError("not_found", f"{source} does not exist", 2) from None
+        except (OSError, ValueError):
+            raise TaskError("validation", f"{source} is not a readable transaction document", 2) from None
+        request_id = document.get("request_id") if isinstance(document, dict) else None
+        if (
+            not isinstance(document, dict)
+            or document.get("version") != 1
+            or not isinstance(request_id, str)
+            or not request_id
+            or document.get("kind") not in _TRANSACTION_KINDS
+            or not isinstance(document.get("intent"), dict)
+            or not isinstance(document.get("event"), dict)
+        ):
+            raise TaskError("validation", f"{source} is not a Product/Issue transaction document", 2)
+        with self._lock() as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                target = self._path(request_id)
+                if target.exists():
+                    raise TaskError("validation", "that request id is already staged in the journal", 2)
+                self._atomic(target, document)
+                try:
+                    source.unlink()
+                except OSError:
+                    raise TaskError(
+                        "audit_pending",
+                        f"the transaction is back in the journal but {source} could not be removed",
+                        4,
+                    ) from None
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return document
 
 
 class ProductIssueStore:
@@ -319,6 +405,28 @@ class ProductIssueStore:
         if isinstance(first, dict) and first.get("title") == ISSUES_COLUMN and isinstance(first.get("id"), int):
             return board["id"], first["id"]
         raise TaskError("legacy_layout", "Pipeline first column is not Issues; run the supported board migration", 2)
+
+    def _swimlane(self, board_id: int) -> int:
+        """The lane a new Product or Issue row is created in.
+
+        A record belongs to the board, not to one project, so all records share a single lane
+        instead of being spread over the per-project lanes.  A board may have no default lane at
+        all, and Kanboard then refuses `swimlane_id=0`, so the lane is the board's first active
+        one in the board's own order: position first, task id as the tie-break.  That order is a
+        property of the board rather than of this call, so every writer and every retry pick the
+        same lane.  A board with no named lane keeps 0, its implicit default.
+        """
+        lanes = self.client.call("getActiveSwimlanes", project_id=board_id) or []
+        if not isinstance(lanes, list):
+            raise TaskError("backend_error", "Kanboard returned invalid swimlanes", 1)
+        candidates = []
+        for lane in lanes:
+            if not isinstance(lane, dict):
+                continue
+            identifier = _positive_int(lane.get("id"))
+            if identifier is not None:
+                candidates.append((_nonnegative_int(lane.get("position")), identifier))
+        return min(candidates)[1] if candidates else 0
 
     def _cards(self) -> list[dict[str, Any]]:
         board_id, _ = self._board()
@@ -470,14 +578,25 @@ class ProductIssueStore:
             if not reference:
                 raise
             board_id, column_id = self._board()
+            swimlane_id = self._swimlane(board_id)
             document.setdefault("progress", {})["create_started"] = True
             self.transactions.save(document)
-            task_id = self.client.call(
+            task_id = _positive_int(self.client.call(
                 "createTask", project_id=board_id, title=title, description=self._create_marker(document),
-                column_id=column_id, swimlane_id=0, reference=reference,
-            )
-            if not isinstance(task_id, int):
-                raise TaskError("backend_error", "Kanboard rejected the Product/Issue row", 1)
+                column_id=column_id, swimlane_id=swimlane_id, reference=reference,
+            ))
+            if task_id is None:
+                # Kanboard answers a refused create with `false`, and that refusal is
+                # deterministic: the same call is refused again, so a retry can never finish this
+                # transaction.  Once the board shows no row of this request, the attempt wrote
+                # nothing, its progress marker is taken back and the failure is terminal, which
+                # lets the caller drop the transaction instead of blocking checkpoint with it.
+                marker = self._create_marker(document)
+                if any(row.get("description") == marker for row in self._cards()):
+                    raise TaskError("backend_error", "Kanboard rejected the Product/Issue row", 1)
+                document["progress"].pop("create_started", None)
+                self.transactions.save(document)
+                raise TaskError("backend_rejected", "Kanboard refused the Product/Issue row", 1)
             self._remember_task_id(document, task_id)
             self.transactions.save(document)
             card = next((row for row in self._cards() if row.get("id") == task_id), None)
@@ -577,7 +696,11 @@ class ProductIssueStore:
             finish(document)
             self.transactions.complete(document)
         except TaskError as exc:
-            if exc.code in {"validation", "closed"} and not document.get("progress"):
+            if exc.code in _TERMINAL_CODES and not document.get("progress"):
+                # A refusal that a retry cannot turn into a success, with nothing written to the
+                # backend: keeping the staged document would block checkpoint and board export
+                # for a call that already reported its own failure code.
+                self.transactions.discard(document)
                 raise
             raise TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4) from None
         except (OSError, KeyError, TypeError):
@@ -593,6 +716,115 @@ class ProductIssueStore:
                 "Product/Issue operation is pending repair; retry it with its original request id first",
                 4,
             )
+
+    def _finish_for(self, kind: str):
+        if kind in {"product_created", "issue_created"}:
+            return self._finish_create
+        if kind == "issue_priority_changed":
+            return self._finish_priority
+        if kind == "issue_closed":
+            return self._finish_close
+        raise TaskError("validation", f"unsupported Product/Issue transaction kind: {kind!r}", 2)
+
+    @staticmethod
+    def _transaction_view(document: dict[str, Any]) -> dict[str, Any]:
+        event = document.get("event")
+        return {
+            "request_id": str(document.get("request_id") or ""),
+            "kind": str(document.get("kind") or ""),
+            "ref": str(event.get("ref") or "") if isinstance(event, dict) else "",
+            "progress": sorted(str(key) for key in (document.get("progress") or {})),
+        }
+
+    def _record_view(self, document: dict[str, Any]) -> dict[str, Any]:
+        if document.get("kind") == "product_created":
+            return self.show_product(str(document["intent"]["product_id"]))
+        return self.show_issue(str(document["event"]["ref"]))
+
+    def _backend_trace(self, document: dict[str, Any]) -> str:
+        """What this staged transaction has already written, as an operator-readable phrase.
+
+        Every transaction writes its own recognisable mark first: a create writes the row (with
+        the request marker in the description), a priority or close change writes the comment
+        that carries the request id.  An empty answer therefore means the backend has not been
+        touched by this request at all.
+        """
+        event = document.get("event") if isinstance(document.get("event"), dict) else {}
+        reference = str(event.get("ref") or "")
+        if document.get("kind") in {"product_created", "issue_created"}:
+            staged = (document.get("progress") or {}).get("task_id")
+            if isinstance(staged, int) and any(card.get("id") == staged for card in self._cards()):
+                return "the staged row is on the board"
+            board_id, _ = self._board()
+            if reference and isinstance(
+                self.client.call("getTaskByReference", project_id=board_id, reference=reference), dict
+            ):
+                return "a row already carries the reference of this request"
+            marker = self._create_marker(document)
+            if any(card.get("description") == marker for card in self._cards()):
+                return "a row already carries the create marker of this request"
+            return ""
+        try:
+            card, _ = self._find(reference, ISSUE_TYPE)
+        except TaskError as exc:
+            if exc.code in {"not_found", "validation"}:
+                return ""
+            raise
+        stamp = f"[request-id:{document.get('request_id')}]"
+        comments = self.client.call("getAllComments", task_id=int(card["id"])) or []
+        if any(isinstance(comment, dict) and stamp in str(comment.get("comment") or "") for comment in comments):
+            return "the board comment of this request is on the issue"
+        return ""
+
+    def list_transactions(self) -> list[dict[str, Any]]:
+        return sorted(
+            (self._transaction_view(document) for document in self.transactions.documents()),
+            key=lambda item: item["request_id"],
+        )
+
+    def adopt_transaction(self, path: str | Path) -> dict[str, Any]:
+        return self._transaction_view(self.transactions.adopt(path))
+
+    def retry_transaction(self, request_id: str) -> dict[str, Any]:
+        staged = self.transactions.load(request_id)
+        kind = str(staged.get("kind") or "")
+        finish = self._finish_for(kind)
+        intent = staged["intent"]
+        self.audit.require_pending_layout()
+        event = staged.get("event") if isinstance(staged.get("event"), dict) else {}
+        with self.transactions.reference_lock(str(event.get("ref") or "")) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                document, completed = self.transactions.existing(request_id, kind=kind, intent=intent)
+                if completed is not None:
+                    return self._record_view(staged)
+                if document is None:
+                    raise TaskError("not_found", "no staged Product/Issue transaction has that request id", 2)
+                self._complete_transaction(document, finish)
+                return self._record_view(document)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def discard_transaction(self, request_id: str) -> dict[str, Any]:
+        document = self.transactions.load(request_id)
+        self._finish_for(str(document.get("kind") or ""))
+        event = document.get("event") if isinstance(document.get("event"), dict) else {}
+        with self.transactions.reference_lock(str(event.get("ref") or "")) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                if self.audit.committed_event(request_id) is not None:
+                    raise TaskError("validation", "that request is already committed; retry it instead", 2)
+                trace = self._backend_trace(document)
+                if trace:
+                    raise TaskError(
+                        "live_write",
+                        f"{trace}; retry the transaction with its request id instead of discarding it",
+                        3,
+                    )
+                self.transactions.drop(request_id)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return {"request_id": request_id, "discarded": True}
 
     def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not _ID.fullmatch(product_id) or not title.strip() or not projects or len(set(projects)) != len(projects):

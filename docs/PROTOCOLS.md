@@ -118,6 +118,33 @@ A Product and an Issue are not execution tasks and never enter the execution col
 both reject one before any write, whatever column it currently sits in. Work on an issue is a separate
 card the PO creates in Ready.
 
+A record belongs to the board rather than to one project, so every Product and Issue row is created in a
+single lane: the board's first active swimlane in the board's own order, position first and the swimlane
+id as the tie-break. The order is a property of the board, so concurrent writers and retries choose the
+same lane, and a board without named swimlanes keeps Kanboard's implicit default lane.
+
+Every Product and Issue write is staged before it touches the backend, and a staged write that is neither
+finished nor dropped blocks checkpoint and board export. A refusal that a retry cannot turn into a success
+therefore has to end the transaction rather than leave it: a `createTask` the backend declines is reported
+as `backend_rejected`, and once the board shows no row of that request the staged document is dropped with
+it. `validation` and `closed` refusals before the first backend write end the same way.
+
+A staged write that did reach the backend stays, and belongs to its own request id. Its supported repair is:
+
+```bash
+python3 -m secretary product transaction list
+python3 -m secretary product transaction retry --request-id REQUEST_ID
+python3 -m secretary product transaction discard --request-id REQUEST_ID
+python3 -m secretary product transaction adopt --path FILE
+```
+
+`retry` finishes the staged operation exactly where it stopped and commits its one audit event; a request
+already committed is answered with its record. `discard` drops a transaction only after reading the board:
+a create whose row exists and a priority or close change whose board comment exists are refused as
+`live_write` and have to be retried instead. `adopt` files a transaction document that lives outside the
+journal back under its own request id, which is how a document carried out of the journal comes back into
+`retry` or `discard`. The commands cover Product and Issue writes alike; the journal is one.
+
 ## Sprints
 
 A sprint is a data entity on a separate `Secretary sprints` board, not a Pipeline card. One board task
