@@ -185,6 +185,39 @@ class SprintRestoreTests(unittest.TestCase):
         for field in ("product", "issues", "reservations"):
             self.assertNotIn(field, again["sprints"][0])
 
+    def test_ownership_a_legacy_entity_never_had_fails_the_parity_gate(self) -> None:
+        """Parity compares whether a field is there, not only what it holds.
+
+        A target that writes `sprint_product=""` for an entity whose export carries no
+        product is a lossy metadata write. Reading both sides back as `""` would let it
+        through, and the legacy entity would silently gain fields nobody wrote.
+        """
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        legacy = payload["sprints"][0]
+        for field in ("product", "issues", "reservations"):
+            legacy.pop(field)
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps({"version": 1, "sprints": [legacy]}), encoding="utf-8"
+        )
+        client = _EmptyBoardsKanboard()
+        original = client.call
+
+        def gains_empty_ownership(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata" and "sprint_source_audit" in dict(params["values"]):  # type: ignore[arg-type]
+                values = dict(params["values"]) | {  # type: ignore[arg-type]
+                    "sprint_product": "", "sprint_issues": "[]", "sprint_reservations": "[]",
+                }
+                return original(method, task_id=params["task_id"], values=values)
+            return original(method, **params)
+
+        with mock.patch.object(client, "call", side_effect=gains_empty_ownership):
+            with self.assertRaisesRegex(RestoreError, "sprint parity check failed"):
+                import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
+
+        state = restore_state(self.target_data)
+        self.assertEqual(state["sprint_parity"], "failed")
+        self.assertEqual(state["sprints"], "failed")
+
     def test_pipeline_cards_still_restore_alongside_the_entities(self) -> None:
         client, cards = self._restore()
 
@@ -254,7 +287,9 @@ class SprintRestoreTests(unittest.TestCase):
         original = client.call
 
         def lossy(method: str, **params: object) -> object:
-            if method == "saveTaskMetadata" and "sprint_status" in dict(params["values"]):  # type: ignore[arg-type]
+            # Only the rewrite of the exported fields is lossy: the create of the row
+            # verifies its own metadata and would refuse before parity is ever reached.
+            if method == "saveTaskMetadata" and "sprint_source_audit" in dict(params["values"]):  # type: ignore[arg-type]
                 values = {k: v for k, v in dict(params["values"]).items() if k != "sprint_status"}  # type: ignore[arg-type]
                 return original(method, task_id=params["task_id"], values=values)
             return original(method, **params)

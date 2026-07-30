@@ -226,8 +226,9 @@ install, prints no values and adds it to no commit.
    sprint after recovery. A restored entity occupies a new board row, so its own dates describe the
    restore while the source dates are read from its audit metadata. Recovery rewrites what the export
    holds and never validates a sprint the way opening one is validated: an entity without a product, its
-   issues or its reservations comes back without those metadata keys rather than with empty ones, and the
-   parity check compares it as absent on both sides.
+   issues or its reservations comes back without those metadata keys rather than with empty ones. Parity
+   compares whether each of the three fields is there at all, not only what it holds: a restored entity
+   that gained an empty `product` its export never carried is a lossy write and fails the check.
 5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
    runtime-home files for the agent CLIs. Provider authentication stays manual.
 6. Runs the same materialiser as `secretary upgrade`: recreates role worktrees, installs units,

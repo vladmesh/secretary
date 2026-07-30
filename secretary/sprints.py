@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import uuid
 from contextlib import contextmanager
@@ -64,6 +65,7 @@ RESUME_FIELDS = (
 )
 _GUARD_INDEX = "sprints/active-repositories.json"
 _ADMISSION_LOCK = "sprints/admission.lock"
+SPRINT_CREATED = "created"
 
 
 def active_sprint_repositories(data_dir: str | Path) -> dict[str, list[str]]:
@@ -226,7 +228,7 @@ class SprintReader:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
         result = []
         for raw in raw_sprints:
-            if not isinstance(raw, dict):
+            if not _is_sprint_row(raw):
                 continue
             sprint = self._normalize(raw, comments=None)
             # Without live cards this value would claim freshness based on incomplete data.  `show`
@@ -251,7 +253,7 @@ class SprintReader:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
         result = []
         for raw in raw_sprints:
-            if not isinstance(raw, dict):
+            if not _is_sprint_row(raw):
                 continue
             task_id = _positive_int(raw.get("id"))
             if task_id is None:
@@ -385,10 +387,17 @@ class SprintWriter:
         self, client: KanboardClient, *, data_dir: str | Path, thresholds: dict[str, int] | None = None,
         instance: str | Path | None = None,
     ) -> None:
+        from secretary.product_issues import ProductIssueTransaction
+
         self.client = client
         self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
         self.audit = TaskAudit(data_dir)
+        # Opening a sprint has the semantics the Product/Issue transaction already
+        # carries: one staged intent per request id, sub-steps that recognise their own
+        # earlier attempt, and one audit event however often the delivery repeats.  The
+        # primitive is reused as it stands rather than reproduced beside it.
+        self.transactions = ProductIssueTransaction(data_dir, self.audit)
         self.data_dir = Path(data_dir)
         self.instance = Path(instance) if instance is not None else None
 
@@ -398,28 +407,31 @@ class SprintWriter:
         projects: list[str] | None = None, reference: str = "", request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
-        # Ownership is read from live Product, Issue and registry state, so a replay has to
-        # short-circuit before it: the sprint this request already opened would otherwise
-        # collide with itself.
         request_id = request_id or str(uuid.uuid4())
-        replayed = self._replayed("created", request_id)
-        if replayed is not None:
-            return replayed
-        if not goal.strip():
-            raise TaskError("validation", "create requires a non-empty goal", 2)
-        product = product.strip()
-        issue_refs = _unique_strings(issues or [])
-        reservations = _unique_strings(projects or [])
-        # The checks and the row they admit are one transition: a concurrent create that
-        # only read before this one wrote would open a second sprint on the installation.
+        self.audit.require_pending_layout()
+        intent = self._create_intent(
+            role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
+            repositories=repositories or [], product=product, issues=issues or [],
+            reservations=projects or [], reference=reference,
+        )
+        # Admission and the row it admits are one transition on this installation: a
+        # concurrent create that only read before this one wrote would open a second
+        # sprint.  Request ownership is settled first and under the same lock, because
+        # ownership and conflicts are reads of live state and a repeat of one delivery
+        # would otherwise collide with the sprint it opened itself.
         with sprint_admission_lock(self.data_dir):
-            self._check_ownership(product, issue_refs, reservations)
-            self._check_conflicts(reservations, excluding="")
-            return self._create_entity(
-                role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
-                repositories=repositories or [], product=product, issues=issue_refs,
-                reservations=reservations, reference=reference, request_id=request_id,
+            document, committed = self.transactions.existing(
+                request_id, kind=SPRINT_CREATED, intent=intent
             )
+            if committed is not None:
+                return self._committed_create(committed)
+            if document is None:
+                self._check_ownership(intent["product"], intent["issues"], intent["reservations"])
+                self._check_conflicts(intent["reservations"], excluding="")
+                document, committed = self._begin_create(request_id, intent)
+                if committed is not None:
+                    return self._committed_create(committed)
+            return self._run_create(document)
 
     def restore_create(
         self, *, reference: str, goal: str, definition_of_done: str = "",
@@ -431,31 +443,56 @@ class SprintWriter:
         closed before a sprint owned a product.  `restore` writes their real fields
         immediately after, so this must not check or invent ownership.
         """
-        return self._create_entity(
+        request_id = request_id or str(uuid.uuid4())
+        self.audit.require_pending_layout()
+        intent = self._create_intent(
             role="steward", actor="restore", goal=goal, definition_of_done=definition_of_done,
             repositories=repositories or [], product="", issues=[], reservations=[],
-            reference=reference, request_id=request_id or str(uuid.uuid4()),
+            reference=reference,
         )
+        document, committed = self.transactions.existing(
+            request_id, kind=SPRINT_CREATED, intent=intent
+        )
+        if committed is not None:
+            return self._committed_create(committed)
+        if document is None:
+            document, committed = self._begin_create(request_id, intent)
+            if committed is not None:
+                return self._committed_create(committed)
+        return self._run_create(document)
 
-    def _create_entity(
+    def _create_intent(
         self, *, role: str, actor: str, goal: str, definition_of_done: str,
         repositories: list[str], product: str, issues: list[str], reservations: list[str],
-        reference: str, request_id: str,
+        reference: str,
     ) -> dict[str, Any]:
+        """The normalized request, which is both the replay key and the repair recipe.
+
+        A repeat of the same request id carrying a different intent is another
+        operation, and the transaction refuses it before any side effect.
+        """
         goal = goal.strip()
         reference = reference.strip()
-        repos = _unique_strings(repositories)
         if not goal:
             raise TaskError("validation", "create requires a non-empty goal", 2)
         if reference and not reference.startswith(SPRINT_REFERENCE_PREFIX):
             raise TaskError("validation", f"sprint reference must start with {SPRINT_REFERENCE_PREFIX}", 2)
-        replayed = self._replayed("created", request_id)
-        if replayed is not None:
-            return replayed
-        board_id = ensure_sprint_board(self.client)
-        if reference and self.client.call("getTaskByReference", project_id=board_id, reference=reference):
-            raise TaskError("validation", "sprint reference already exists", 2)
+        return {
+            "role": role, "actor": actor, "goal": goal, "definition_of_done": definition_of_done,
+            "repositories": _unique_strings(repositories), "product": product.strip(),
+            "issues": _unique_strings(issues), "reservations": _unique_strings(reservations),
+            "reference": reference,
+        }
+
+    def _begin_create(self, request_id: str, intent: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Claim the request id after the mutable preconditions have passed."""
+        reference = str(intent["reference"])
         if reference:
+            board_id = _sprint_board(self.client, create=False)
+            if board_id is not None and self.client.call(
+                "getTaskByReference", project_id=board_id, reference=reference
+            ):
+                raise TaskError("validation", "sprint reference already exists", 2)
             try:
                 TaskReader(self.client).show(reference)
             except TaskError as exc:
@@ -463,62 +500,175 @@ class SprintWriter:
                     raise
             else:
                 raise TaskError("validation", "sprint reference already belongs to a Pipeline card", 2)
+        event = self._event(
+            SPRINT_CREATED, str(intent["role"]), str(intent["actor"]), reference, request_id,
+            {"intent": intent},
+        )
+        document, committed = self.transactions.begin(
+            request_id, kind=SPRINT_CREATED, intent=intent, event=event
+        )
+        if document is None and committed is None:
+            raise TaskError("audit_pending", "sprint transaction claim is unavailable", 4)
+        return document, committed  # type: ignore[return-value]
 
-        event = self._event("created", role, actor, reference, request_id, {
-            "goal_sha256": _digest(goal), "definition_of_done_sha256": _digest(definition_of_done),
-            "repositories": repos, "product": product, "issues": issues, "reservations": reservations,
-        })
-        self.audit.stage(request_id, event)
+    def _run_create(self, document: dict[str, Any]) -> dict[str, Any]:
+        """Drive the staged create to its single audit event, or leave it repairable."""
         try:
-            columns = self.client.call("getColumns", project_id=board_id) or []
-            column_id = next((_positive_int(column.get("id")) for column in columns if isinstance(column, dict)), None)
-            if column_id is None:
-                raise TaskError("backend_error", "sprint board has no column", 1)
-            task_id = _positive_int(self.client.call(
-                "createTask", project_id=board_id, title=goal, description="", column_id=column_id,
-            ))
-            if task_id is None:
-                raise TaskError("backend_error", "Kanboard rejected the sprint write", 1)
-            created_ref = reference or f"{SPRINT_REFERENCE_PREFIX}{task_id}"
-            event.update({"ref": created_ref, "task_id": f"sprint_kanboard_{task_id}"})
-            event["backend"]["task_id"] = task_id
-            self.audit.stage(request_id, event)
-            if not self.client.call("updateTask", id=task_id, reference=created_ref):
-                raise TaskError("backend_error", "Kanboard rejected the sprint write", 1)
-            values = {
-                "sprint_goal": goal,
-                "sprint_definition_of_done": definition_of_done,
-                "sprint_repositories": json.dumps(repos, separators=(",", ":")),
-                "sprint_status": "open",
-                "sprint_budget": json.dumps(_budget(thresholds=self.thresholds), separators=(",", ":")),
-                "sprint_current_task": "",
-                "sprint_resume": "",
-            }
-            # A restored legacy row gets no ownership keys at all; `restore` then writes
-            # back exactly the fields its own export carried.
-            if product:
-                values["sprint_product"] = product
-            if issues:
-                values["sprint_issues"] = json.dumps(issues, separators=(",", ":"))
-            if reservations:
-                values["sprint_reservations"] = json.dumps(reservations, separators=(",", ":"))
-            self.client.call("saveTaskMetadata", task_id=task_id, values=values)
-        except Exception:
-            # A created Kanboard task is recoverable from the staged event, so retain it.
-            if event.get("backend", {}).get("task_id"):
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            self.audit.discard(request_id)
-            raise
-        return self._record("created", event)
+            reference = self._finish_create(document)
+            sprint = self.reader.show(reference)
+            event = document["event"]
+            event["task_id"] = sprint["id"]
+            event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
+            self.transactions.save(document)
+            self.transactions.complete(document)
+            update_active_sprint_repositories(self.data_dir, sprint)
+            return {"action": SPRINT_CREATED, "sprint": sprint, "event_id": str(event["event_id"])}
+        except TaskError as exc:
+            if exc.code in {"validation", "role_forbidden"} and not document.get("progress"):
+                raise
+            raise TaskError(
+                "audit_pending", "sprint create is pending repair; retry with the same request id", 4,
+            ) from None
+        except (OSError, KeyError, TypeError):
+            raise TaskError(
+                "audit_pending", "sprint create is pending repair; retry with the same request id", 4,
+            ) from None
 
-    def _replayed(self, kind: str, request_id: str) -> dict[str, Any] | None:
-        committed = self.audit.committed_event(request_id)
-        if committed is not None:
-            return self._committed(kind, committed)
-        pending = self.audit.pending_event(request_id)
-        if pending is not None:
-            return self._pending(kind, pending)
-        return None
+    def _finish_create(self, document: dict[str, Any]) -> str:
+        """Apply every backend sub-step, recognising the ones an earlier attempt did."""
+        intent = document["intent"]
+        event = document["event"]
+        board_id = ensure_sprint_board(self.client)
+        row = self._create_row(document, board_id)
+        task_id = _positive_int(row.get("id"))
+        if task_id is None:
+            raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+        created_ref = str(intent["reference"]) or f"{SPRINT_REFERENCE_PREFIX}{task_id}"
+        event.update({"ref": created_ref, "task_id": f"sprint_kanboard_{task_id}"})
+        event["backend"]["task_id"] = task_id
+        document.setdefault("progress", {})["task_id"] = task_id
+        self.transactions.save(document)
+        self._ensure_metadata(document, task_id, self._create_values(intent))
+        # The reference is the last step: until it is written the row carries no sprint
+        # reference and no reader counts it as a sprint, so nothing observes a sprint
+        # open without the product, issues and reservations it was admitted with.
+        if str(row.get("reference") or "") != created_ref:
+            document["progress"]["reference_started"] = True
+            self.transactions.save(document)
+            if not self.client.call(
+                "updateTask", id=task_id, reference=created_ref, description="",
+            ):
+                raise TaskError("backend_error", "Kanboard rejected the sprint reference", 1)
+            row = self._create_row(document, board_id)
+            if str(row.get("reference") or "") != created_ref:
+                raise TaskError("backend_error", "sprint reference remains incomplete", 1)
+        document["progress"]["reference_done"] = True
+        self.transactions.save(document)
+        return created_ref
+
+    def _create_row(self, document: dict[str, Any], board_id: int) -> dict[str, Any]:
+        """The row this request created, creating it once when it has none yet."""
+        rows = [
+            row for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
+            if isinstance(row, dict)
+        ]
+        staged = (document.get("progress") or {}).get("task_id")
+        if isinstance(staged, int):
+            row = next((row for row in rows if _positive_int(row.get("id")) == staged), None)
+            if row is None:
+                raise TaskError("backend_error", "the sprint row of this request was not found", 1)
+            return row
+        reference = str(document["intent"].get("reference") or "")
+        if reference:
+            row = next((row for row in rows if str(row.get("reference") or "") == reference), None)
+            if row is not None:
+                return row
+        # A sprint whose reference is derived from its own task id has no identifier
+        # before the row exists, so the request id travels in the description until the
+        # reference is written.
+        marker = _create_marker(str(document["request_id"]))
+        matches = [row for row in rows if str(row.get("description") or "") == marker]
+        if len(matches) > 1:
+            raise TaskError("backend_error", "pending sprint create correlation is ambiguous", 1)
+        if matches:
+            return matches[0]
+        columns = self.client.call("getColumns", project_id=board_id) or []
+        column_id = next(
+            (_positive_int(column.get("id")) for column in columns if isinstance(column, dict)), None
+        )
+        if column_id is None:
+            raise TaskError("backend_error", "sprint board has no column", 1)
+        document.setdefault("progress", {})["create_started"] = True
+        self.transactions.save(document)
+        created = _positive_int(self.client.call(
+            "createTask", project_id=board_id, title=str(document["intent"]["goal"]),
+            description=marker, column_id=column_id,
+        ))
+        if created is None:
+            raise TaskError("backend_error", "Kanboard rejected the sprint write", 1)
+        document["progress"]["task_id"] = created
+        self.transactions.save(document)
+        rows = [
+            row for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
+            if isinstance(row, dict)
+        ]
+        row = next((row for row in rows if _positive_int(row.get("id")) == created), None)
+        if row is None:
+            raise TaskError("backend_error", "the created sprint row was not found", 1)
+        return row
+
+    def _create_values(self, intent: dict[str, Any]) -> dict[str, str]:
+        values = {
+            "sprint_goal": str(intent["goal"]),
+            "sprint_definition_of_done": str(intent["definition_of_done"]),
+            "sprint_repositories": json.dumps(list(intent["repositories"]), separators=(",", ":")),
+            "sprint_status": "open",
+            "sprint_budget": json.dumps(_budget(thresholds=self.thresholds), separators=(",", ":")),
+            "sprint_current_task": "",
+            "sprint_resume": "",
+        }
+        # A restored legacy row gets no ownership keys at all; `restore` then writes
+        # back exactly the fields its own export carried.
+        if intent["product"]:
+            values["sprint_product"] = str(intent["product"])
+        if intent["issues"]:
+            values["sprint_issues"] = json.dumps(list(intent["issues"]), separators=(",", ":"))
+        if intent["reservations"]:
+            values["sprint_reservations"] = json.dumps(
+                list(intent["reservations"]), separators=(",", ":")
+            )
+        return values
+
+    def _ensure_metadata(self, document: dict[str, Any], task_id: int, values: dict[str, str]) -> None:
+        """Write the sprint's fields once, and prove the backend kept them.
+
+        Kanboard answers its metadata API with a boolean; anything other than `True`
+        is a refusal, and reporting the sprint created on it would leave an open sprint
+        without the ownership it was admitted with.
+        """
+        if self._metadata_matches(task_id, values):
+            return
+        document.setdefault("progress", {})["metadata_started"] = True
+        self.transactions.save(document)
+        if self.client.call("saveTaskMetadata", task_id=task_id, values=values) is not True:
+            raise TaskError("backend_error", "Kanboard rejected the sprint metadata", 1)
+        if not self._metadata_matches(task_id, values):
+            raise TaskError("backend_error", "sprint metadata remains incomplete", 1)
+        document["progress"]["metadata_done"] = True
+        self.transactions.save(document)
+
+    def _metadata_matches(self, task_id: int, values: dict[str, str]) -> bool:
+        actual = self.client.call("getTaskMetadata", task_id=task_id) or {}
+        if not isinstance(actual, dict):
+            raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
+        stored = {str(key): _text(value) for key, value in actual.items()}
+        return all(stored.get(key) == value for key, value in values.items())
+
+    def _committed_create(self, committed: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action": SPRINT_CREATED, "sprint": self.reader.show(str(committed["ref"])),
+            "event_id": str(committed["event_id"]),
+        }
 
     def _check_ownership(self, product: str, issues: list[str], reservations: list[str]) -> None:
         """Prove the sprint owns a product, an open issue and registered projects.
@@ -745,7 +895,19 @@ class SprintWriter:
                     reservations,
                 )
                 self._check_conflicts(reservations, excluding=reference)
-            return self._write("reopened", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"}))
+            return self._write("reopened", role, actor, reference, request_id, {}, self._reopen_row)
+
+    def _reopen_row(self, sprint: dict[str, Any]) -> None:
+        """A refused metadata write must not report a sprint back open.
+
+        `reopen` is the other transition into `open`, so it holds the same rule the
+        create path holds: any metadata answer other than `True` is a backend refusal,
+        the staged event is dropped, and the retry does the same transition again.
+        """
+        if self.client.call(
+            "saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"},
+        ) is not True:
+            raise TaskError("backend_error", "Kanboard rejected the sprint reopen", 1)
 
     def restore(self, *, reference: str, values: dict[str, str], request_id: str | None = None) -> dict[str, Any]:
         """Rewrite one sprint entity's fields verbatim from a checkpoint export.
@@ -840,6 +1002,20 @@ def _sprint_number(sprint: dict[str, Any] | None) -> int:
     if number is None:
         raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
     return number
+
+
+def _is_sprint_row(raw: Any) -> bool:
+    """A row on the sprint board becomes a sprint when it carries a sprint reference.
+
+    A create writes the reference after the fields the sprint was admitted with, so a
+    row still without one is an unfinished create its own staged transaction repairs.
+    Counting it would show a sprint open without its product, issues and reservations.
+    """
+    return isinstance(raw, dict) and str(raw.get("reference") or "").startswith(SPRINT_REFERENCE_PREFIX)
+
+
+def _create_marker(request_id: str) -> str:
+    return "[secretary-sprint-transaction:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest() + "]"
 
 
 def _unique_strings(values: list[str]) -> list[str]:

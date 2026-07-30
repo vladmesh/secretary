@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -258,6 +259,102 @@ class SprintOwnershipTests(SprintFixture):
 
         self.assertEqual(first["event_id"], second["event_id"])
         self.assertEqual(first["sprint"]["ref"], second["sprint"]["ref"])
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
+
+    def test_a_concurrent_repeat_of_one_request_is_replayed_not_refused(self) -> None:
+        """At-least-once delivery may overlap with the request it repeats.
+
+        Both callers are held at the admission gate before either can look at live
+        state, so neither could have seen the other's sprint. The repeat has to come
+        back with the first event instead of colliding with the sprint it opened.
+        """
+        ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        started = threading.Barrier(3)
+        outcomes: dict[str, Any] = {}
+
+        def deliver(name: str) -> None:
+            writer = SprintWriter(  # type: ignore[arg-type]
+                self.client, data_dir=self.tmp.name, instance=self.instance,
+            )
+            started.wait(timeout=5)
+            try:
+                outcomes[name] = writer.create(
+                    role="po", actor="operator", goal="one delivery", reference="sprint:once",
+                    product="secretary", issues=["issue:open"], projects=["secretary"],
+                    request_id="same-delivery",
+                )
+            except TaskError as exc:
+                outcomes[name] = exc
+
+        threads = [threading.Thread(target=deliver, args=(name,)) for name in ("first", "second")]
+        with sprint_admission_lock(self.tmp.name):
+            for thread in threads:
+                thread.start()
+            # Both are inside `create` and waiting for the gate before it is released.
+            started.wait(timeout=5)
+            time.sleep(0.2)
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual([type(value) for value in outcomes.values()], [dict, dict], outcomes)
+        self.assertEqual(
+            len({result["event_id"] for result in outcomes.values()}), 1, outcomes
+        )
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
+        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], ["sprint:once"])  # type: ignore[arg-type]
+
+    def test_a_refused_metadata_write_does_not_report_a_created_sprint(self) -> None:
+        """Kanboard may refuse the metadata write that carries the whole ownership.
+
+        Reporting `created` on it would leave an open sprint with no product, issues or
+        reservations. The staged intent stays repairable instead, and the repeat with the
+        same request id finishes that very operation.
+        """
+        original = self.client.call
+        refused: list[str] = []
+
+        def refuse_first_metadata(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata" and "sprint_status" in dict(params["values"]) and not refused:  # type: ignore[arg-type]
+                refused.append(method)
+                return False
+            return original(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=refuse_first_metadata):
+            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
+                self._create(goal="rejected metadata", request_id="metadata-once")
+
+        self.assertEqual(pending.exception.code, "audit_pending")
+        self.assertEqual(self._events(), [])
+        # Nothing observes a sprint open without what it was admitted with.
+        self.assertEqual(SprintReader(self.client).list(create=False), [])  # type: ignore[arg-type]
+
+        repaired = self._create(goal="rejected metadata", request_id="metadata-once")
+
+        self.assertEqual(repaired["action"], "created")
+        self.assertEqual(repaired["sprint"]["product"], "secretary")
+        self.assertEqual(repaired["sprint"]["issues"], ["issue:open"])
+        self.assertEqual(repaired["sprint"]["reservations"], ["secretary"])
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
+        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        self.assertEqual(len([task for task in self.client.tasks if task["project_id"] == board]), 1)
+
+    def test_a_repeated_create_records_exactly_one_audit_event(self) -> None:
+        first = self._create(goal="repeated", request_id="repeat-once")
+        results = [self._create(goal="repeated", request_id="repeat-once") for _ in range(3)]
+
+        self.assertEqual({result["event_id"] for result in results}, {first["event_id"]})
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
+
+    def test_a_repeat_with_another_payload_is_refused_before_any_side_effect(self) -> None:
+        self._create(goal="original", reference="sprint:original", request_id="claimed")
+        self.client.calls.clear()
+
+        with self.assertRaisesRegex(TaskError, "request id belongs to another operation") as raised:
+            self._create(goal="different", reference="sprint:other", request_id="claimed")
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
 
     def test_concurrent_creates_admit_exactly_one_open_sprint(self) -> None:
@@ -857,14 +954,29 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
     def test_pending_sprint_recovery_rebuilds_its_repository_index(self) -> None:
+        """A create that could not commit its audit is finished by its own request id."""
+        create = dict(
+            goal="recovered", repositories=["recovered"], reference="sprint:recovered",
+            request_id="recover-sprint-index",
+        )
         with mock.patch.object(self.sprints.audit, "append", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                self.sprints.restore_create(
-                    goal="recovered", repositories=["recovered"],
-                    reference="sprint:recovered", request_id="recover-sprint-index",
-                )
+            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
+                self.sprints.restore_create(**create)
+        self.assertEqual(pending.exception.code, "audit_pending")
 
-        self.assertEqual(self.tasks.reconcile(), (1, 0))
+        repaired = self.sprints.restore_create(**create)
+
+        self.assertEqual(repaired["sprint"]["ref"], "sprint:recovered")
+        self.assertEqual(
+            len([task for task in self.client.tasks if task["reference"] == "sprint:recovered"]), 1
+        )
+        self.assertEqual(
+            len([
+                event for event in TaskAudit(self.tmp.name).events()
+                if event["request_id"] == "recover-sprint-index"
+            ]),
+            1,
+        )
         with self.assertRaisesRegex(TaskError, "sprint:recovered") as denied:
             self.tasks.create(
                 role="po", actor="operator", project="recovered", task_type="code", title="blocked",

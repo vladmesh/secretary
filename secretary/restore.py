@@ -245,9 +245,11 @@ SPRINT_PARITY_FIELDS = (
     "reference", "goal", "definition_of_done", "repositories", "product", "issues",
     "reservations", "status", "budget", "current_task", "resume", "audit",
 )
-# A checkpoint written before a sprint owned a product carries none of these keys; the
-# live entity reads them back as absent, and the two have to compare equal.
-SPRINT_PARITY_ABSENT = {"product": "", "issues": [], "reservations": []}
+# A checkpoint written before a sprint owned a product carries none of the ownership
+# keys, and the restored entity has to read back with none of them either.  Absence is
+# its own value here: a target that gained an empty `product` the source never had is a
+# lossy metadata write, not a match.
+_ABSENT = object()
 
 
 def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
@@ -258,7 +260,7 @@ def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
     do compare exactly.
     """
     core: dict[str, Any] = {
-        field: sprint.get(field, SPRINT_PARITY_ABSENT.get(field)) for field in SPRINT_PARITY_FIELDS
+        field: sprint[field] if field in sprint else _ABSENT for field in SPRINT_PARITY_FIELDS
     }
     core["comments"] = [
         str(comment.get("text") or "")
