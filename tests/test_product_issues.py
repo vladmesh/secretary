@@ -40,6 +40,220 @@ class ProductBoard(WriteKanboard):
         return super().call(method, **params)
 
 
+class LiveSwimlaneBoard(ProductBoard):
+    """The live Pipeline layout: named project lanes, no default lane.
+
+    Kanboard refuses a create into a lane the board does not have and answers that refusal with
+    `false` instead of an error, which is what the live board does for `swimlane_id=0`.
+    """
+
+    LANES = [
+        {"id": 9, "name": "service-template", "position": 3},
+        {"id": 4, "name": "secretary", "position": 1},
+        {"id": 7, "name": "codegen-orchestrator", "position": 2},
+    ]
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "getActiveSwimlanes":
+            return [dict(lane) for lane in self.LANES]
+        if method == "createTask" and params.get("swimlane_id") not in {lane["id"] for lane in self.LANES}:
+            self.calls.append((method, params))
+            return False
+        return super().call(method, **params)
+
+
+class NoSwimlaneBoard(ProductBoard):
+    """A board with no swimlane at all, the layout the earlier fixtures describe."""
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "getActiveSwimlanes":
+            return []
+        return super().call(method, **params)
+
+
+class ProductIssueSwimlaneTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmpdir.name)
+        (self.root / "projects").mkdir()
+        (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def _store(self, client) -> ProductIssueStore:
+        return ProductIssueStore(client, data_dir=self.root / "data", instance=self.root)
+
+    def _created(self, client, reference: str) -> dict:
+        return next(task for task in client.tasks if task.get("reference") == reference)
+
+    def test_named_swimlanes_without_a_default_take_the_first_lane_in_board_order(self) -> None:
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+
+        product = store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="live-product",
+        )
+        issue = store.create_issue(
+            product="secretary", issue_kind="bug", priority="P1", title="Crash", description="",
+            actor="po", request_id="live-issue",
+        )
+
+        self.assertEqual(product["id"], "secretary")
+        # Lane 4 is first by position, not by id or by list order, and both records take it.
+        lanes = [params["swimlane_id"] for method, params in client.calls if method == "createTask"]
+        self.assertEqual(lanes, [4, 4])
+        self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 4)
+        self.assertEqual(self._created(client, issue["ref"])["swimlane_id"], 4)
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+
+    def test_board_without_swimlanes_keeps_the_implicit_default_lane(self) -> None:
+        client = NoSwimlaneBoard()
+        store = self._store(client)
+
+        store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="plain-product",
+        )
+
+        lanes = [params["swimlane_id"] for method, params in client.calls if method == "createTask"]
+        self.assertEqual(lanes, [0])
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+
+    def test_refused_create_is_terminal_and_leaves_no_transaction_behind(self) -> None:
+        class RefusingBoard(ProductBoard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "createTask":
+                    self.calls.append((method, params))
+                    return False
+                return super().call(method, **params)
+
+        client = RefusingBoard()
+        store = self._store(client)
+
+        for attempt in ("first", "second"):
+            with self.subTest(attempt=attempt), self.assertRaises(TaskError) as raised:
+                store.create_product(
+                    product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                    actor="po", request_id="refused",
+                )
+            self.assertEqual(raised.exception.code, "backend_rejected")
+
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(store.list_transactions(), [])
+        self.assertEqual(store.audit.events(), [])
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
+    def test_staged_transaction_without_a_backend_row_is_discarded_by_the_operator(self) -> None:
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        intent = {
+            "record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]',
+            "title": "Secretary", "description": "", "actor": "po",
+        }
+        event = store._transaction_event(
+            kind="product_created", actor="po", reference="product:secretary",
+            request_id="stuck", intent=intent,
+        )
+        document, _ = store.transactions.begin("stuck", kind="product_created", intent=intent, event=event)
+        document["progress"] = {"create_started": True}
+        store.transactions.save(document)
+        self.assertEqual(store.transactions.status(), {"ok": False, "pending": 1})
+        self.assertEqual(
+            store.list_transactions(),
+            [{"request_id": "stuck", "kind": "product_created", "ref": "product:secretary",
+              "progress": ["create_started"]}],
+        )
+
+        self.assertEqual(store.discard_transaction("stuck"), {"request_id": "stuck", "discarded": True})
+
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(store.audit.events(), [])
+
+    def test_discard_refuses_a_transaction_that_already_wrote_to_the_board(self) -> None:
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        original_call = client.call
+        rejected = False
+
+        def reject_metadata_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "saveTaskMetadata" and not rejected:
+                rejected = True
+                client.calls.append((method, params))
+                return False
+            return original_call(method, **params)
+
+        client.call = reject_metadata_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="half-written",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+
+        with self.assertRaises(TaskError) as refused:
+            store.discard_transaction("half-written")
+        self.assertEqual(refused.exception.code, "live_write")
+        self.assertEqual(store.transactions.status(), {"ok": False, "pending": 1})
+
+        product = store.retry_transaction("half-written")
+
+        self.assertEqual(product["id"], "secretary")
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual([entry["kind"] for entry in store.audit.events()], ["product_created"])
+
+    def test_quarantined_document_returns_through_adopt_and_retry(self) -> None:
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        intent = {
+            "record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]',
+            "title": "Secretary", "description": "", "actor": "po",
+        }
+        event = store._transaction_event(
+            kind="product_created", actor="po", reference="product:secretary",
+            request_id="quarantined", intent=intent,
+        )
+        store.transactions.begin("quarantined", kind="product_created", intent=intent, event=event)
+        staged = next((self.root / "data" / "board" / "product-issue-transactions").glob("v1-*.json"))
+        quarantine = self.root / "quarantine"
+        quarantine.mkdir()
+        carried = quarantine / staged.name
+        carried.write_text(staged.read_text(encoding="utf-8"), encoding="utf-8")
+        staged.unlink()
+
+        with mock.patch("secretary.product_issue_commands.KanboardClient", return_value=client):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                adopted = main([
+                    "product", "transaction", "adopt", "--instance", str(self.root),
+                    "--data-dir", str(self.root / "data"), "--path", str(carried),
+                ])
+            self.assertEqual(adopted, 0)
+            self.assertEqual(json.loads(output.getvalue())["request_id"], "quarantined")
+            self.assertFalse(carried.exists())
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                retried = main([
+                    "product", "transaction", "retry", "--instance", str(self.root),
+                    "--data-dir", str(self.root / "data"), "--request-id", "quarantined",
+                ])
+            self.assertEqual(retried, 0)
+            self.assertEqual(json.loads(output.getvalue())["id"], "secretary")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main([
+                    "product", "transaction", "list", "--instance", str(self.root),
+                    "--data-dir", str(self.root / "data"),
+                ]), 0)
+            self.assertEqual(json.loads(output.getvalue()), [])
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual([entry["kind"] for entry in store.audit.events()], ["product_created"])
+
+
 class ProductIssueStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
