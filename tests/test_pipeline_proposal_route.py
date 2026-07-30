@@ -1,9 +1,9 @@
-"""Reviewer and retro proposal route (secretary-900).
+"""Agent proposal route (secretary-900, secretary-901).
 
-Both roles have exactly one board write: a proposal card. It survives only on the legacy board
-layout, where the first column is still `Ideas`. On a migrated board `Issues` is the Product
-backlog and neither role may create a Product issue, so the route fails closed instead of guessing
-a column, and the `Ready`-only guard on every other create path stays untouched.
+Reviewer, retro, and steward file proposal cards only on the legacy board layout, where the first
+column is still `Ideas`. On a migrated board `Issues` is the Product backlog and no agent may
+create a Product issue, so the route fails closed instead of guessing a column. The `Ready`-only
+guard on every other create path stays untouched.
 """
 from __future__ import annotations
 
@@ -56,9 +56,9 @@ MIGRATED_WITH_LATER_IDEAS = [
 
 
 class ProposalRouteTests(unittest.TestCase):
-    def test_legacy_board_takes_a_reviewer_or_retro_proposal_typed_as_a_task(self):
+    def test_legacy_board_takes_agent_proposals_typed_as_tasks(self):
         for columns in (LEGACY_COLUMNS, UNTRANSLATED_COLUMNS):
-            for file_proposal in (ops.reviewer_idea, ops.retro_idea):
+            for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
                 with self.subTest(column=columns[0]["title"], route=file_proposal.__name__):
                     calls = []
                     with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)), \
@@ -80,7 +80,7 @@ class ProposalRouteTests(unittest.TestCase):
         # Including the hand-extended layout: an `Ideas` column that is no longer the first one is
         # not the legacy layout, so the route stays closed there too.
         for columns in (MIGRATED_COLUMNS, MIGRATED_WITH_LATER_IDEAS):
-            for file_proposal in (ops.reviewer_idea, ops.retro_idea):
+            for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
                 with self.subTest(layout=[c["title"] for c in columns], route=file_proposal.__name__):
                     calls = []
                     with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)):
@@ -120,7 +120,7 @@ class ProposalRouteTests(unittest.TestCase):
 
 
     def test_cli_idea_reports_success_on_legacy_and_a_guard_exit_on_a_migrated_board(self):
-        for role in ("reviewer", "retro"):
+        for role in ("reviewer", "retro", "steward"):
             with self.subTest(role=role):
                 argv = [
                     "--role", role, "idea", "--project", "secretary",

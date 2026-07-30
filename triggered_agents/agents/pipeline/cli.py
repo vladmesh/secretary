@@ -3,17 +3,17 @@ binary).
 
 Role is a global `--role` (or env BOARD_ROLE) checked before the command runs: create is
 PO-, steward-, or worker-only (a worker's own create is further gated in ops — straight to Ready
-only as a continuation of its own chain, see ops._check_worker_continuation, otherwise Ideas like
-any other agent idea), claim is dispatcher-only, report/feedback are worker-only, move/ready defer
+only as a continuation of its own chain, see ops._check_worker_continuation), claim is dispatcher-only,
+report/feedback are worker-only, move/ready defer
 to the transition matrix for the role, comment is open to any role (the role becomes the marker).
 update accepts any role at this layer but is PO-only in ops (GuardError otherwise), same as
 move's per-role matrix. `move --reason` records a comment on the moved card. steward gets every po
 transition (via move/ready) plus one more: Blocked -> Done, which additionally needs a non-empty
 reason in the same call, see model.STEWARD_OVERRIDE and ops.move_card. steward escalations to
-Blocked also need a non-empty reason. idea is reviewer- or retro-only (both file a proposal into the
-board's first column while it is still the legacy Ideas, and never move anything, model.TRANSITIONS
-leaves each an empty set); on a board whose first column is already Issues the call fails closed, see
-ops._proposal_column.
+Blocked also need a non-empty reason. idea is reviewer-, retro-, or steward-only: it files a proposal
+into the board's first column while it is still the legacy Ideas. Steward may then move its new card to
+Blocked; reviewer and retro never move anything. On a board whose first column is already Issues the call
+fails closed, see ops._proposal_column.
 setup/list/show/probe need no role. Guards live in model/ops; this layer only wires argv to them
 and maps failures to exit codes.
 
@@ -294,13 +294,16 @@ def main(argv=None) -> int:
                 return 2
             return _emit(ops.verdict(args.ref, args.kind, _text_arg(args.body, args.body_file)))
         if args.cmd == "idea":
-            if not _need_role(role, ("reviewer", "retro")):
+            if not _need_role(role, ("reviewer", "retro", "steward")):
                 return 2
-            # The reviewer's one code-creation exception: findings out of the card's scope go to
-            # the legacy Ideas column (never Ready) so they enter the queue only via a human, not
-            # the reviewer. retro's only board write is the same shape: a fail-pattern proposal.
+            # Agent proposals always use the legacy Ideas column, never Ready or Issues. Steward
+            # may move its own newly created proposal to Blocked as an escalation.
             desc = _text_arg(args.description, args.description_file)
-            fn = ops.reviewer_idea if role == "reviewer" else ops.retro_idea
+            fn = {
+                "reviewer": ops.reviewer_idea,
+                "retro": ops.retro_idea,
+                "steward": ops.steward_idea,
+            }[role]
             return _emit(fn(
                 project=args.project, task_type=args.task_type, title=args.title,
                 description=desc, ref=args.ref, head=args.head, slug=args.slug))
