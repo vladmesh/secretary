@@ -172,8 +172,8 @@ depends on it, and whether it can safely be removed, drained or rejected at an u
 branches, abandoned prototypes and never-deployed intermediate formats are not supported legacy by default;
 retaining them needs an explicit product reason. If old transient state can safely be drained or repaired by
 the old version, consider a fail-closed upgrade precondition instead of an in-place migration layer. If you
-cannot establish whether removal can lose user data or break a supported installation path, ask the user for
-a decision rather than preserving every historical branch.
+know or cannot establish that removal may lose real user data or break a supported installation path, ask
+the user for a decision rather than preserving every historical branch.
 
 The card or resume entry records the selected route, evidence for any retained compatibility, and why any
 new abstraction, dependency, shim or fallback is necessary. Do not impose a one-card-per-DoD mapping or a
@@ -215,15 +215,16 @@ Do not end the step while the card is in Ready, In progress or Validate, while c
 running, or before the pull request reaches a terminal result. Watch the card's state, its comments,
 reports, verdicts, pull request and CI.
 
-Before an ordinary RED goes back for another worker round, classify it from the report evidence:
+When you see RED or Blocked evidence, classify the finding from the report evidence:
 
-- a local defect inside the card may return for rework;
+- a local defect inside the card may return for supported rework or retry;
 - evidence that the planned architecture or card cut is wrong closes or preempts this attempt and is recut
   differently; the next cut may be smaller, larger or a different approach;
 - hardening or compatibility outside the sprint is deferred or taken to the user.
 
-You make the final classification because you have the sprint context. A reviewer provides evidence; it
-does not decide sprint scope. Record the classification and evidence in the card or resume entry.
+The dispatcher may already have started the first automatic rework before you wake. Do not promise or
+assume otherwise. You make the final classification because you have the sprint context. A reviewer provides
+evidence; it does not decide sprint scope. Record the classification and evidence in the card or resume entry.
 
 An ordinary red review and rework are neither a failure of the card nor a reason to intervene when the
 finding is a local defect. For a wrong cut, intervention is required when the work has observably gone
@@ -255,10 +256,14 @@ actual contribution. Record the conclusion in a resume entry and return to step 
 
 ## 8. Work through a Blocked card
 
+Apply the same classification to the Blocked evidence before identifying the immediate cause. Do not treat
+hardening or compatibility outside the sprint as a local implementation defect.
+
 Identify the class of cause and act accordingly:
 
 - an implementation defect — return the card to a supported rework or retry;
 - a bad spec or a wrong cut — preempt, rewrite the spec or create a fresh card;
+- hardening or compatibility outside the sprint — defer it or take it to the user;
 - a pipeline or runtime bug — follow the hotfix rules below;
 - missing access — record exactly what is missing and stop;
 - a product fork listed in the stop conditions — record the options and stop;
