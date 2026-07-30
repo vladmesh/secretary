@@ -421,6 +421,37 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(len(self._sprint_rows()), 1)
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
 
+    def test_a_staged_create_never_takes_over_a_sprint_sharing_its_reference(self) -> None:
+        """Compensation frees the reference too, so another request may take it.
+
+        The repeat of the stalled create is not the owner of that sprint: it must be
+        refused naming the reference, and leave the winner's goal, reservations and
+        audit provenance untouched.
+        """
+        self._stall_create("shared-loser", reference="sprint:shared")
+        self.assertEqual(self._sprint_rows(), [])
+
+        winner = self._create(
+            goal="second payload", reference="sprint:shared", projects=["secretary-instance"],
+            request_id="shared-winner",
+        )["sprint"]
+
+        with self.assertRaisesRegex(TaskError, "sprint:shared") as raised:
+            self._create(
+                goal="rejected metadata", reference="sprint:shared", request_id="shared-loser",
+            )
+
+        self.assertEqual(raised.exception.code, "sprint_conflict")
+        live = SprintReader(self.client).show("sprint:shared")  # type: ignore[arg-type]
+        self.assertEqual(live["goal"], "second payload")
+        self.assertEqual(live["reservations"], ["secretary-instance"])
+        self.assertEqual(len(self._sprint_rows()), 1)
+        self.assertEqual(
+            [(event["kind"], event["request_id"], event["ref"]) for event in self._events()],
+            [("created", "shared-winner", "sprint:shared")],
+        )
+        self.assertEqual(winner["ref"], "sprint:shared")
+
     def test_a_repeated_create_records_exactly_one_audit_event(self) -> None:
         first = self._create(goal="repeated", request_id="repeat-once")
         results = [self._create(goal="repeated", request_id="repeat-once") for _ in range(3)]

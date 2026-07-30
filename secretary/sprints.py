@@ -580,9 +580,12 @@ class SprintWriter:
         # here, before anything of this sprint is published, so a repeat that lost the
         # slot to another sprint is refused instead of opening a second one.
         if admitted and not progress.get("reference_done"):
-            self._check_conflicts(list(intent["reservations"]), excluding=str(intent["reference"]))
+            staged = progress.get("task_id")
+            staged_id = staged if isinstance(staged, int) else None
+            self._check_reference_claim(str(intent["reference"]), staged_id)
+            self._check_conflicts(list(intent["reservations"]), excluding_id=staged_id)
         board_id = ensure_sprint_board(self.client)
-        row = self._create_row(document, board_id)
+        row = self._create_row(document, board_id, admitted=admitted)
         task_id = _positive_int(row.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
@@ -603,15 +606,21 @@ class SprintWriter:
                 "updateTask", id=task_id, reference=created_ref, description="",
             ):
                 raise TaskError("backend_error", "Kanboard rejected the sprint reference", 1)
-            row = self._create_row(document, board_id)
+            row = self._create_row(document, board_id, admitted=admitted)
             if str(row.get("reference") or "") != created_ref:
                 raise TaskError("backend_error", "sprint reference remains incomplete", 1)
         progress["reference_done"] = True
         self.transactions.save(document)
         return created_ref
 
-    def _create_row(self, document: dict[str, Any], board_id: int) -> dict[str, Any]:
-        """The row this request created, creating it once when it has none yet."""
+    def _create_row(self, document: dict[str, Any], board_id: int, *, admitted: bool) -> dict[str, Any]:
+        """The row this request created, creating it once when it has none yet.
+
+        A row counts as this request's own only when the staged progress names its task
+        id, or, for recovery, when nothing has been written for this reference yet.  An
+        admitted create never adopts a row it merely shares a reference with: that row
+        may belong to another sprint that took the slot while this one was stalled.
+        """
         rows = [
             row for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
             if isinstance(row, dict)
@@ -623,7 +632,7 @@ class SprintWriter:
                 raise TaskError("backend_error", "the sprint row of this request was not found", 1)
             return row
         reference = str(document["intent"].get("reference") or "")
-        if reference:
+        if reference and not admitted:
             row = next((row for row in rows if str(row.get("reference") or "") == reference), None)
             if row is not None:
                 return row
@@ -768,16 +777,48 @@ class SprintWriter:
                 "validation", "unknown registered project(s): " + ", ".join(unknown), 2
             )
 
-    def _check_conflicts(self, reservations: list[str], *, excluding: str) -> None:
+    def _check_reference_claim(self, reference: str, staged_id: int | None) -> None:
+        """Refuse a caller-supplied reference another sprint has taken meanwhile.
+
+        A stalled create holds nothing, including its reference, so between its refusal
+        and its repeat another sprint may legitimately open under that very reference.
+        The repeat is not its owner and must not write over it.
+        """
+        if not reference:
+            return
+        board_id = _sprint_board(self.client, create=False)
+        if board_id is None:
+            return
+        row = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
+        owner = _positive_int(row.get("id")) if isinstance(row, dict) else None
+        if owner is None or owner == staged_id:
+            return
+        raise TaskError(
+            "sprint_conflict",
+            f"sprint reference {reference} now belongs to another sprint; "
+            "open this sprint again with a new request",
+            2,
+        )
+
+    def _check_conflicts(
+        self, reservations: list[str], *, excluding: str = "", excluding_id: int | None = None,
+    ) -> None:
         """Refuse a second open sprint, and a project another open sprint already holds.
 
         The resource conflict comes before the singleton rule, because the caller of a
         colliding reservation has to see which project it is, not only that some sprint
         is open.
+
+        A sprint is left out of the scan only when it is proven to be the very row this
+        transition is about: the row `reopen` reads by reference, or the row a staged
+        create recorded its task id for.  A matching reference alone proves nothing.
         """
         others = [
             sprint for sprint in self.reader.list(statuses={"open"}, create=False)
-            if sprint["ref"] != excluding
+            if not (
+                (excluding and sprint["ref"] == excluding)
+                or (excluding_id is not None and _sprint_number(sprint) == excluding_id)
+            )
         ]
         held: dict[str, str] = {}
         for sprint in others:
