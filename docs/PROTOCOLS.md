@@ -155,8 +155,15 @@ that, as `resource_conflict` naming the project and its holder. Every one of the
 refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
 returns the first event instead of colliding with the sprint it already opened.
 
+Because the rules are reads of live state, `create` and `reopen` hold one exclusive lock on the data
+directory (`sprints/admission.lock`) across the check and the write it admits. Two writers on the same
+installation are serialized by it, so the second sees the sprint the first opened rather than a state
+from before it. The lock is an admission gate only: it holds no sprint state and is released with the
+write.
+
 Sprints created before ownership existed carry none of these fields. They stay readable, exportable and
-restorable exactly as they are, and nothing fills the fields in for them. `reopen` re-checks every rule
+restorable exactly as they are, and nothing fills the fields in for them: `show`, `status`, the board
+export and the checkpoint record leave the three fields out rather than answering `""` and `[]`. `reopen` re-checks every rule
 above, so such a sprint is refused with a message that names what it lacks; the supported move is to open
 a new sprint that owns its issues. `reopen` is refused the same way when the sprint's own issues have
 since been closed or its projects are held elsewhere.

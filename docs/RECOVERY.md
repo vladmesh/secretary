@@ -60,9 +60,11 @@ board and are not part of the card export, so the writer reads them in its own p
 deriving them from cards that reference a sprint. A sprint record carries its reference, goal,
 Definition of Done, repositories, owning product, issues, reserved projects, status, budget by event
 type, current card, resume entry, all entries
-on the entity and the source's audit metadata. A sprint closed before a sprint owned a product carries
-those three fields empty, and a checkpoint written before they existed omits them; both read as absent. Derived values (budget totals, installation thresholds,
-resume freshness) are not stored: they are recomputed from the record and configuration.
+on the entity and the source's audit metadata. A sprint closed before a sprint owned a product has none
+of those three fields on its row, so its record omits them instead of storing an empty value, and a
+checkpoint written before they existed omits them the same way. Derived values (budget totals,
+installation thresholds, resume freshness) are not stored: they are recomputed from the record and
+configuration.
 
 ## Layout
 

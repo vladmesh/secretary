@@ -4,12 +4,22 @@ import contextlib
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from secretary.cli import main
-from secretary.sprints import BUDGET_EVENT_TYPES, SprintReader, SprintWriter, budget_thresholds, ensure_sprint_board
+from secretary.data import normalize_sprint_entity
+from secretary.sprints import (
+    BUDGET_EVENT_TYPES,
+    SprintReader,
+    SprintWriter,
+    budget_thresholds,
+    ensure_sprint_board,
+    sprint_admission_lock,
+)
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -250,6 +260,86 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(first["sprint"]["ref"], second["sprint"]["ref"])
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
 
+    def test_concurrent_creates_admit_exactly_one_open_sprint(self) -> None:
+        """Two writers that check at the same time still open one sprint between them.
+
+        The rules are reads of live state, so without a shared gate both would see an
+        installation with no open sprint and both would create a row.
+        """
+        ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        start = threading.Barrier(2)
+        outcomes: dict[str, Any] = {}
+
+        def open_sprint(name: str, project: str) -> None:
+            writer = SprintWriter(  # type: ignore[arg-type]
+                self.client, data_dir=self.tmp.name, instance=self.instance,
+            )
+            start.wait(timeout=5)
+            try:
+                outcomes[name] = writer.create(
+                    role="po", actor="operator", goal=name, reference=f"sprint:{name}",
+                    product="secretary", issues=["issue:open"], projects=[project],
+                )
+            except TaskError as exc:
+                outcomes[name] = exc
+
+        threads = [
+            threading.Thread(target=open_sprint, args=("left", "secretary")),
+            threading.Thread(target=open_sprint, args=("right", "secretary-instance")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+
+        refused = [value for value in outcomes.values() if isinstance(value, TaskError)]
+        self.assertEqual(len(refused), 1, outcomes)
+        self.assertEqual(refused[0].code, "sprint_conflict")
+        open_sprints = SprintReader(self.client).list(statuses={"open"})  # type: ignore[arg-type]
+        self.assertEqual(len(open_sprints), 1, [sprint["ref"] for sprint in open_sprints])
+
+    def test_opening_a_sprint_waits_for_the_installation_admission_gate(self) -> None:
+        """Both ways into `open` take the gate, so neither can slip past a holder."""
+        ref = self._create(goal="gated", reference="sprint:gated")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+
+        for name, call in (
+            ("reopen", lambda: self.writer.reopen(role="po", actor="operator", reference=ref)),
+            ("create", lambda: self._create(goal="second", reference="sprint:second")),
+        ):
+            done = threading.Event()
+            worker = threading.Thread(target=lambda: (call(), done.set()))
+            with sprint_admission_lock(self.tmp.name):
+                worker.start()
+                self.assertFalse(done.wait(timeout=0.3), name)
+            worker.join(timeout=10)
+            self.assertTrue(done.is_set(), name)
+            self.writer.close(role="po", actor="operator", reference=ref)
+
+    def test_a_sprint_without_ownership_gains_none_in_show_status_or_export(self) -> None:
+        """The 13 sprints closed before ownership existed keep the fields they had."""
+        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        self.writer.restore_create(reference="sprint:legacy", goal="legacy", request_id="legacy")
+        row = next(task for task in self.client.tasks if task["reference"] == "sprint:legacy")
+        self.assertEqual(
+            [key for key in self.client.metadata[row["id"]] if key in
+             {"sprint_product", "sprint_issues", "sprint_reservations"}],
+            [],
+        )
+        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+        views = [
+            reader.show("sprint:legacy"), reader.status("sprint:legacy"),
+            reader.export()[0], reader.list()[0],
+            normalize_sprint_entity(reader.export()[0]),
+        ]
+
+        self.assertEqual(board, row["project_id"])
+        for view in views:
+            for field in ("product", "issues", "reservations"):
+                self.assertNotIn(field, view)
+
     def test_show_status_and_export_carry_the_new_links(self) -> None:
         ref = self._create(goal="linked", projects=["secretary", "secretary-instance"])["sprint"]["ref"]
         reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
@@ -275,9 +365,8 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(raised.exception.code, "validation")
         reread = SprintReader(self.client).show(legacy, include_cards=False)  # type: ignore[arg-type]
         self.assertEqual(reread["status"], "closed")
-        self.assertEqual(reread["product"], "")
-        self.assertEqual(reread["issues"], [])
-        self.assertEqual(reread["reservations"], [])
+        for field in ("product", "issues", "reservations"):
+            self.assertNotIn(field, reread)
 
     def test_reopen_rechecks_ownership_and_stays_idempotent(self) -> None:
         ref = self._create(goal="reopened", reference="sprint:reopened")["sprint"]["ref"]

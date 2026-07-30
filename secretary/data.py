@@ -317,9 +317,14 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         "goal": str(sprint.get("goal") or ""),
         "definition_of_done": str(sprint.get("definition_of_done") or ""),
         "repositories": [str(repo) for repo in sprint.get("repositories") or []],
-        "product": str(sprint.get("product") or ""),
-        "issues": [str(issue) for issue in sprint.get("issues") or []],
-        "reservations": [str(project) for project in sprint.get("reservations") or []],
+        # A sprint that predates ownership has none of the three fields, and the record
+        # keeps them absent rather than storing an empty value it was never given.
+        **({"product": str(sprint["product"])} if "product" in sprint else {}),
+        **({"issues": [str(issue) for issue in sprint["issues"] or []]} if "issues" in sprint else {}),
+        **(
+            {"reservations": [str(project) for project in sprint["reservations"] or []]}
+            if "reservations" in sprint else {}
+        ),
         "status": str(sprint.get("status") or ""),
         "budget": {"by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())}},
         "current_task": str(sprint.get("current_task") or ""),

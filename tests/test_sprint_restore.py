@@ -160,9 +160,11 @@ class SprintRestoreTests(unittest.TestCase):
         client, _ = self._restore()
 
         live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
-        self.assertEqual(live["product"], "")
-        self.assertEqual(live["issues"], [])
-        self.assertEqual(live["reservations"], [])
+        # Neither the row, nor the view of it, nor the next checkpoint of it gains a
+        # field the entity never had.
+        for field in ("product", "issues", "reservations"):
+            self.assertNotIn(field, live)
+            self.assertNotIn(field, normalize_sprint_entity(live))
         self.assertEqual(live["goal"], legacy["goal"])
         self.assertEqual(live["status"], "closed")
         self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
@@ -180,8 +182,8 @@ class SprintRestoreTests(unittest.TestCase):
         # carries no ownership, so the next recovery compares equal again.
         export_board(self.target_data, command=self._pipeline_command(), sprint_client=client)
         again = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        self.assertEqual(again["sprints"][0]["product"], "")
-        self.assertEqual(again["sprints"][0]["issues"], [])
+        for field in ("product", "issues", "reservations"):
+            self.assertNotIn(field, again["sprints"][0])
 
     def test_pipeline_cards_still_restore_alongside_the_entities(self) -> None:
         client, cards = self._restore()

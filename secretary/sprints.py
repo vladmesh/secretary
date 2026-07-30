@@ -63,6 +63,7 @@ RESUME_FIELDS = (
     "next_safe_step",
 )
 _GUARD_INDEX = "sprints/active-repositories.json"
+_ADMISSION_LOCK = "sprints/admission.lock"
 
 
 def active_sprint_repositories(data_dir: str | Path) -> dict[str, list[str]]:
@@ -141,9 +142,28 @@ def update_active_sprint_repositories(data_dir: str | Path, sprint: dict[str, An
 
 @contextmanager
 def _sprint_guard_index_lock(data_dir: str | Path):
-    path = Path(data_dir) / _GUARD_INDEX
+    with _exclusive_lock((Path(data_dir) / _GUARD_INDEX).with_suffix(".lock")):
+        yield
+
+
+@contextmanager
+def sprint_admission_lock(data_dir: str | Path):
+    """Serialize every admission of an open sprint on this installation.
+
+    The rules for opening a sprint are reads of live state, so two writers that both
+    check before either writes would each see no open sprint and both create one.
+    Holding this lock across the check and the backend write makes the admission one
+    transition per installation; it is a gate on the data directory, not a second
+    sprint model, and it holds nothing after the write.
+    """
+    with _exclusive_lock(Path(data_dir) / _ADMISSION_LOCK):
+        yield
+
+
+@contextmanager
+def _exclusive_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
+    with path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -288,11 +308,7 @@ class SprintReader:
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
             "repositories": repositories,
-            # A sprint created before ownership existed carries none of these keys.  They
-            # read as absent rather than as a default an operator never chose.
-            "product": meta.get("sprint_product", ""),
-            "issues": _json_list(meta.get("sprint_issues")),
-            "reservations": _json_list(meta.get("sprint_reservations")),
+            **_ownership(meta),
             "status": meta.get("sprint_status") if meta.get("sprint_status") in {"open", "closed", "stopped"} else "open",
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
@@ -322,7 +338,7 @@ class SprintReader:
                 states.setdefault(str(card.get("state") or "unknown"), []).append(str(card.get("ref") or ""))
         return {
             "ref": sprint["ref"], "goal": sprint["goal"], "status": sprint["status"],
-            "product": sprint["product"], "issues": sprint["issues"], "reservations": sprint["reservations"],
+            **{field: sprint[field] for field in ("product", "issues", "reservations") if field in sprint},
             "current_task": sprint["current_task"], "cards": {key: sorted(value) for key, value in sorted(states.items())},
             "budget": sprint["budget"], "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
@@ -394,13 +410,16 @@ class SprintWriter:
         product = product.strip()
         issue_refs = _unique_strings(issues or [])
         reservations = _unique_strings(projects or [])
-        self._check_ownership(product, issue_refs, reservations)
-        self._check_conflicts(reservations, excluding="")
-        return self._create_entity(
-            role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
-            repositories=repositories or [], product=product, issues=issue_refs,
-            reservations=reservations, reference=reference, request_id=request_id,
-        )
+        # The checks and the row they admit are one transition: a concurrent create that
+        # only read before this one wrote would open a second sprint on the installation.
+        with sprint_admission_lock(self.data_dir):
+            self._check_ownership(product, issue_refs, reservations)
+            self._check_conflicts(reservations, excluding="")
+            return self._create_entity(
+                role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
+                repositories=repositories or [], product=product, issues=issue_refs,
+                reservations=reservations, reference=reference, request_id=request_id,
+            )
 
     def restore_create(
         self, *, reference: str, goal: str, definition_of_done: str = "",
@@ -700,31 +719,33 @@ class SprintWriter:
         """
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
-        if self.audit.committed_event(request_id) is None and self.audit.pending_event(request_id) is None:
-            sprint = self.reader.show(reference, include_cards=False)
-            missing = [
-                name for name, value in (
-                    ("product", sprint.get("product")),
-                    ("issues", sprint.get("issues")),
-                    ("reservations", sprint.get("reservations")),
-                ) if not value
-            ]
-            if missing:
-                raise TaskError(
-                    "validation",
-                    f"sprint {reference} predates sprint ownership and has no "
-                    + ", ".join(missing)
-                    + "; open a new sprint that owns its issues instead of reopening it",
-                    2,
+        # Reopening is the other way a sprint becomes open, so it passes the same gate.
+        with sprint_admission_lock(self.data_dir):
+            if self.audit.committed_event(request_id) is None and self.audit.pending_event(request_id) is None:
+                sprint = self.reader.show(reference, include_cards=False)
+                missing = [
+                    name for name, value in (
+                        ("product", sprint.get("product")),
+                        ("issues", sprint.get("issues")),
+                        ("reservations", sprint.get("reservations")),
+                    ) if not value
+                ]
+                if missing:
+                    raise TaskError(
+                        "validation",
+                        f"sprint {reference} predates sprint ownership and has no "
+                        + ", ".join(missing)
+                        + "; open a new sprint that owns its issues instead of reopening it",
+                        2,
+                    )
+                reservations = [str(project) for project in sprint.get("reservations") or []]
+                self._check_ownership(
+                    str(sprint.get("product") or ""),
+                    [str(issue) for issue in sprint.get("issues") or []],
+                    reservations,
                 )
-            reservations = [str(project) for project in sprint.get("reservations") or []]
-            self._check_ownership(
-                str(sprint.get("product") or ""),
-                [str(issue) for issue in sprint.get("issues") or []],
-                reservations,
-            )
-            self._check_conflicts(reservations, excluding=reference)
-        return self._write("reopened", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"}))
+                self._check_conflicts(reservations, excluding=reference)
+            return self._write("reopened", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "open"}))
 
     def restore(self, *, reference: str, values: dict[str, str], request_id: str | None = None) -> dict[str, Any]:
         """Rewrite one sprint entity's fields verbatim from a checkpoint export.
@@ -842,6 +863,23 @@ def _timestamp(value: str) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def _ownership(meta: dict[str, str]) -> dict[str, Any]:
+    """The sprint's product, issues and reservations, only where the row has them.
+
+    A sprint created before ownership existed carries none of the three keys.  A
+    reader that answered `""` and `[]` for it would put values on the entity that
+    nobody wrote, and the next checkpoint would store them as if they were chosen.
+    """
+    result: dict[str, Any] = {}
+    if "sprint_product" in meta:
+        result["product"] = meta["sprint_product"]
+    if "sprint_issues" in meta:
+        result["issues"] = _json_list(meta["sprint_issues"])
+    if "sprint_reservations" in meta:
+        result["reservations"] = _json_list(meta["sprint_reservations"])
+    return result
 
 
 def _json_list(value: str | None) -> list[str]:
