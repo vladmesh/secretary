@@ -465,7 +465,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(TaskAudit(self.root / "data").pending_event("shared"), generic)
         self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
 
-    def test_create_reply_loss_never_retries_an_unidentified_row(self) -> None:
+    def test_create_reply_loss_is_correlated_and_repaired_without_a_duplicate_row(self) -> None:
         original_call = self.client.call
         failed = False
 
@@ -484,14 +484,14 @@ class ProductIssueStoreTests(unittest.TestCase):
                 actor="po", request_id="lost-create",
             )
         self.assertEqual(raised.exception.code, "audit_pending")
-        with self.assertRaises(TaskError):
-            self.store.create_product(
-                product_id="secretary", projects=["secretary"], title="Secretary", description="",
-                actor="po", request_id="lost-create",
-            )
+        product = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root).create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="lost-create",
+        )
+        self.assertEqual(product["id"], "secretary")
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
 
-    def test_close_repairs_an_older_pending_priority_before_terminal_write(self) -> None:
+    def test_new_issue_operation_rejects_until_an_older_pending_priority_is_repaired(self) -> None:
         self.store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
         )
@@ -514,15 +514,109 @@ class ProductIssueStoreTests(unittest.TestCase):
             self.store.update_priority(
                 reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority",
             )
-        closed = self.store.close_issue(
-            reference=issue["ref"], reason="resolved", actor="po", request_id="close",
+        with self.assertRaises(TaskError) as raised:
+            self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.store.update_priority(
+            reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority",
         )
+        closed = self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
         self.assertTrue(closed["closed"])
         self.assertEqual(closed["priority"], "P0")
         self.assertEqual(
             [event["kind"] for event in self.store.audit.events() if event.get("ref") == issue["ref"]],
             ["issue_created", "issue_priority_changed", "issue_closed"],
         )
+
+    def test_reference_repair_after_create_reply_persists_the_backend_id_first(self) -> None:
+        original_call = self.client.call
+        rejected: set[str] = set()
+
+        def reject_reference_once(method: str, **params: object) -> object:
+            reference = params.get("reference")
+            if method == "updateTask" and isinstance(reference, str) and reference not in rejected:
+                rejected.add(reference)
+                self.client.calls.append((method, params))
+                return False
+            return original_call(method, **params)
+
+        self.client.call = reject_reference_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+                request_id="product-reference-repair",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        product = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root).create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+            request_id="product-reference-repair",
+        )
+        self.assertEqual(product["id"], "secretary")
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_issue(
+                product="secretary", issue_kind="bug", priority="P2", title="Crash", description="",
+                actor="po", request_id="reference-repair",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        issue = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root).create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="",
+            actor="po", request_id="reference-repair",
+        )
+        self.assertEqual(issue["kind"], "bug")
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 2)
+
+    def test_pending_product_identity_blocks_a_second_request_before_create(self) -> None:
+        request_id = "first-product"
+        intent = {
+            "record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]',
+            "title": "Secretary", "description": "", "actor": "po",
+        }
+        event = self.store._transaction_event(
+            kind="product_created", actor="po", reference="product:secretary", request_id=request_id, intent=intent,
+        )
+        self.store.transactions.begin(request_id, kind="product_created", intent=intent, event=event)
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Other", description="", actor="po",
+                request_id="second-product",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
+
+    def test_pending_priority_blocks_a_second_priority_before_backend_mutation(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original_call = self.client.call
+        failed = False
+
+        def reject_comment_once(method: str, **params: object) -> object:
+            nonlocal failed
+            if method == "createComment" and not failed:
+                failed = True
+                self.client.calls.append((method, params))
+                return 0
+            return original_call(method, **params)
+
+        self.client.call = reject_comment_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError):
+            self.store.update_priority(
+                reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="first-priority",
+            )
+        comments = len([call for call in self.client.calls if call[0] == "createComment"])
+        with self.assertRaises(TaskError) as raised:
+            self.store.update_priority(
+                reference=issue["ref"], priority="P3", reason="later", actor="po", request_id="second-priority",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createComment"]), comments)
+        self.store.update_priority(
+            reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="first-priority",
+        )
+        self.assertEqual(self.store.show_issue(issue["ref"])["priority"], "P0")
 
     def test_generic_upgrade_gate_runs_before_product_mutation(self) -> None:
         pending = self.root / "data" / "board" / "pending-audit"

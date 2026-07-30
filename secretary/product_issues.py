@@ -248,7 +248,9 @@ class ProductIssueTransaction:
                 document = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
-            if document.get("request_id") != excluding and document.get("intent", {}).get("reference") == reference:
+            event = document.get("event")
+            event_reference = event.get("ref") if isinstance(event, dict) else None
+            if document.get("request_id") != excluding and event_reference == reference:
                 result.append(document)
         return result
 
@@ -259,10 +261,10 @@ class ProductIssueTransaction:
             pending = 1
         return {"ok": pending == 0, "pending": pending}
 
-    def issue_lock(self, reference: str):
+    def reference_lock(self, reference: str):
         self.directory.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
-        return open(self.directory / f".issue-{digest}.lock", "a+", encoding="utf-8")
+        return open(self.directory / f".reference-{digest}.lock", "a+", encoding="utf-8")
 
     def save(self, document: dict[str, Any]) -> None:
         request_id = document.get("request_id")
@@ -413,27 +415,42 @@ class ProductIssueStore:
             card = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
             if isinstance(card, dict):
                 return card
+        marker = self._create_marker(document)
+        matches = [card for card in self._cards() if card.get("description") == marker]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise TaskError("backend_error", "pending Product/Issue create correlation is ambiguous", 1)
         raise TaskError("backend_error", "pending Product/Issue row was not found", 1)
+
+    @staticmethod
+    def _remember_task_id(document: dict[str, Any], task_id: int) -> int:
+        event = document["event"]
+        event["task_id"] = f"task_kanboard_{task_id}"
+        event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
+        document.setdefault("progress", {})["task_id"] = task_id
+        return task_id
 
     def _remember_card(self, document: dict[str, Any], card: dict[str, Any]) -> int:
         task_id = card.get("id")
         if not isinstance(task_id, int):
             raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
-        event = document["event"]
-        event["task_id"] = f"task_kanboard_{task_id}"
-        event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
-        document.setdefault("progress", {})["task_id"] = task_id
+        self._remember_task_id(document, task_id)
         self.transactions.save(document)
         return task_id
+
+    @staticmethod
+    def _create_marker(document: dict[str, Any]) -> str:
+        request_id = document.get("request_id")
+        if not isinstance(request_id, str):
+            raise TaskError("audit_pending", "Product/Issue transaction has no request id", 4)
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return f"[secretary-product-issue-transaction:{digest}]"
 
     def _ensure_created(self, document: dict[str, Any], *, title: str, description: str) -> tuple[dict[str, Any], int]:
         try:
             card = self._transaction_card(document)
         except TaskError:
-            if document.get("progress", {}).get("create_started"):
-                # The backend may have committed before losing its reply.  Without a
-                # durable card id or reference, another create would be a duplicate.
-                raise TaskError("audit_pending", "Product/Issue create reply is unresolved; locate the staged row before retrying", 4)
             event = document["event"]
             reference = str(event.get("ref") or "")
             if not reference:
@@ -442,24 +459,24 @@ class ProductIssueStore:
             document.setdefault("progress", {})["create_started"] = True
             self.transactions.save(document)
             task_id = self.client.call(
-                "createTask", project_id=board_id, title=title, description=description,
+                "createTask", project_id=board_id, title=title, description=self._create_marker(document),
                 column_id=column_id, swimlane_id=0, reference=reference,
             )
             if not isinstance(task_id, int):
                 raise TaskError("backend_error", "Kanboard rejected the Product/Issue row", 1)
+            self._remember_task_id(document, task_id)
+            self.transactions.save(document)
             card = next((row for row in self._cards() if row.get("id") == task_id), None)
             if not isinstance(card, dict):
                 raise TaskError("backend_error", "created Product/Issue row was not found", 1)
         reference = str(document["event"].get("ref") or "")
-        if str(card.get("reference") or "") != reference:
+        if str(card.get("reference") or "") != reference or card.get("description") != description:
             document.setdefault("progress", {})["reference_started"] = True
             self.transactions.save(document)
-            if not self.client.call("updateTask", id=int(card["id"]), reference=reference):
+            if not self.client.call("updateTask", id=int(card["id"]), reference=reference, description=description):
                 raise TaskError("backend_error", "Kanboard rejected Product/Issue reference", 1)
-            card = self._transaction_card(document) if document.get("progress", {}).get("task_id") else next(
-                (row for row in self._cards() if row.get("id") == task_id), None
-            )
-            if not isinstance(card, dict) or str(card.get("reference") or "") != reference:
+            card = self._transaction_card(document)
+            if not isinstance(card, dict) or str(card.get("reference") or "") != reference or card.get("description") != description:
                 raise TaskError("backend_error", "Product/Issue reference remains incomplete", 1)
         return card, self._remember_card(document, card)
 
@@ -510,16 +527,14 @@ class ProductIssueStore:
 
     def _finish_priority(self, document: dict[str, Any]) -> None:
         intent = document["intent"]
-        card, metadata = self._find(str(intent["reference"]), ISSUE_TYPE)
+        card, _ = self._find(str(intent["reference"]), ISSUE_TYPE)
         if int(card.get("is_active", 1) or 0) == 0:
             raise TaskError("closed", "cannot reprioritize a closed issue", 3)
         task_id = self._remember_card(document, card)
-        previous = document.setdefault("progress", {}).get("previous")
+        payload = document.get("event", {}).get("payload")
+        previous = payload.get("from") if isinstance(payload, dict) else None
         if not isinstance(previous, str):
-            previous = metadata.get(META_ISSUE_PRIORITY, "")
-            document["progress"]["previous"] = previous
-            document["event"]["payload"] = {"intent": intent, "from": previous, "to": intent["priority"], "reason": intent["reason"]}
-            self.transactions.save(document)
+            raise TaskError("audit_pending", "Product/Issue priority transaction has no staged previous priority", 4)
         content = f"[issue:priority]\n{intent['reason']}\n[request-id:{document['request_id']}]"
         self._ensure_comment(document, task_id, content, "priority")
         self._ensure_metadata(document, task_id, {META_ISSUE_PRIORITY: str(intent["priority"])})
@@ -557,11 +572,13 @@ class ProductIssueStore:
     def _begin(self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         return self.transactions.begin(request_id, kind=kind, intent=intent, event=event)
 
-    def _finish_priorities_before_close(self, reference: str, request_id: str) -> None:
-        """A terminal close may not strand a previously staged priority change."""
-        for document in self.transactions.pending_for_reference(reference, excluding=request_id):
-            if document.get("kind") == "issue_priority_changed":
-                self._complete_transaction(document, self._finish_priority)
+    def _reject_other_pending_reference_operation(self, reference: str, request_id: str) -> None:
+        if self.transactions.pending_for_reference(reference, excluding=request_id):
+            raise TaskError(
+                "audit_pending",
+                "Product/Issue operation is pending repair; retry it with its original request id first",
+                4,
+            )
 
     def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not _ID.fullmatch(product_id) or not title.strip() or not projects or len(set(projects)) != len(projects):
@@ -569,25 +586,31 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = {"record_type": PRODUCT_TYPE, "product_id": product_id, "product_projects": json.dumps(sorted(projects), separators=(",", ":")), "title": title, "description": description, "actor": actor}
-        document, completed = self.transactions.existing(request_id, kind="product_created", intent=intent)
-        if completed is not None:
-            return self.show_product(product_id)
-        if document is None:
-            unknown = sorted(set(projects) - registered_projects(self.instance))
-            if unknown:
-                raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
-            board_id, _ = self._board()
-            reference = f"product:{product_id}"
-            if self.client.call("getTaskByReference", project_id=board_id, reference=reference):
-                raise TaskError("validation", f"product {product_id!r} already exists", 2)
-            event = self._transaction_event(kind="product_created", actor=actor, reference=reference, request_id=request_id, intent=intent)
-            document, completed = self._begin(request_id, kind="product_created", intent=intent, event=event)
-            if completed is not None:
+        reference = f"product:{product_id}"
+        with self.transactions.reference_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                document, completed = self.transactions.existing(request_id, kind="product_created", intent=intent)
+                if completed is not None:
+                    return self.show_product(product_id)
+                if document is None:
+                    self._reject_other_pending_reference_operation(reference, request_id)
+                    unknown = sorted(set(projects) - registered_projects(self.instance))
+                    if unknown:
+                        raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
+                    board_id, _ = self._board()
+                    if self.client.call("getTaskByReference", project_id=board_id, reference=reference):
+                        raise TaskError("validation", f"product {product_id!r} already exists", 2)
+                    event = self._transaction_event(kind="product_created", actor=actor, reference=reference, request_id=request_id, intent=intent)
+                    document, completed = self._begin(request_id, kind="product_created", intent=intent, event=event)
+                    if completed is not None:
+                        return self.show_product(product_id)
+                    if document is None:
+                        raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
+                self._complete_transaction(document, self._finish_create)
                 return self.show_product(product_id)
-            if document is None:
-                raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
-        self._complete_transaction(document, self._finish_create)
-        return self.show_product(product_id)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def create_issue(self, *, product: str, issue_kind: str, priority: str, title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not product.strip() or issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
@@ -618,13 +641,14 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = {"reference": reference, "priority": priority, "reason": reason, "actor": actor}
-        with self.transactions.issue_lock(reference) as lock:
+        with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 document, completed = self.transactions.existing(request_id, kind="issue_priority_changed", intent=intent)
                 if completed is not None:
                     return self.show_issue(reference)
                 if document is None:
+                    self._reject_other_pending_reference_operation(reference, request_id)
                     card, metadata = self._find(reference, ISSUE_TYPE)
                     if int(card.get("is_active", 1) or 0) == 0:
                         raise TaskError("closed", "cannot reprioritize a closed issue", 3)
@@ -646,14 +670,14 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = {"reference": reference, "reason": reason, "actor": actor}
-        with self.transactions.issue_lock(reference) as lock:
+        with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 document, completed = self.transactions.existing(request_id, kind="issue_closed", intent=intent)
                 if completed is not None:
                     return self.show_issue(reference)
-                self._finish_priorities_before_close(reference, request_id)
                 if document is None:
+                    self._reject_other_pending_reference_operation(reference, request_id)
                     card, _ = self._find(reference, ISSUE_TYPE)
                     if int(card.get("is_active", 1) or 0) == 0:
                         raise TaskError("closed", "issue is already closed", 3)
