@@ -42,7 +42,8 @@ import os
 # Env override exists so the e2e can drive a throwaway board without touching the real one.
 BOARD_NAME = os.environ.get("TA_PIPELINE_BOARD", "Pipeline")
 
-COLUMNS = ["Ideas", "Ready", "In progress", "Validate", "Blocked", "Done"]
+COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Blocked", "Done"]
+LEGACY_ISSUE_COLUMNS = {"Ideas", "\u0418\u0434\u0435\u0438"}
 
 ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 
@@ -100,13 +101,20 @@ META_RETRY_HEADS = "retry_heads"
 # 255) — never set any other way. The only thing this flag gates is STEWARD_REPORT_DONE below; it
 # is not a general-purpose "belongs to steward" marker.
 META_STEWARD_REPORT = "steward_report"
+META_RECORD_TYPE = "record_type"
+RECORD_ISSUE = "issue"
+RECORD_PRODUCT = "product"
+# An execution task record: the card the pipeline works on, as opposed to a product or an issue.
+# Set explicitly on an agent proposal so a card in the legacy Ideas column is not read as
+# an unclassified pre-Product/Issue leftover awaiting PO triage.
+RECORD_TASK = "task"
 
 IN_PROGRESS = "In progress"
 
 # Steward's manual escalation moves. ops.move_card requires a non-empty reason for these, but the
 # dispatcher keeps its own automatic In progress/Validate -> Blocked moves reasonless.
 STEWARD_ESCALATIONS = {
-    ("Ideas", "Blocked"),
+    ("Issues", "Blocked"),
     ("Ready", "Blocked"),
     ("In progress", "Blocked"),
     ("Validate", "Blocked"),
@@ -115,7 +123,7 @@ STEWARD_ESCALATIONS = {
 # Allowed (from, to) column moves per role, for the generic `move` command. Claim owns the
 # only entry into In progress and is not listed here (see module docstring).
 TRANSITIONS: dict[str, set[tuple[str, str]]] = {
-    "po": {("Ideas", "Ready"), ("Blocked", "Ready")},
+    "po": {("Issues", "Ready"), ("Blocked", "Ready")},
     "dispatcher": {
         ("In progress", "Validate"),
         ("In progress", "Blocked"),
@@ -139,7 +147,7 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
     # hatch, see module docstring). Done is deliberately absent as a source, there is nothing
     # left to escalate on a finished card.
     "steward": {
-        ("Ideas", "Ready"), ("Blocked", "Ready"), ("Blocked", "Done"),
+        ("Issues", "Ready"), ("Blocked", "Ready"), ("Blocked", "Done"),
         ("In progress", "Done"),
     } | STEWARD_ESCALATIONS,
 }
@@ -234,7 +242,7 @@ def check_move(role: str, from_col: str, to_col: str) -> None:
     if role not in ROLES:
         raise GuardError(f"unknown role {role!r} (roles: {', '.join(ROLES)})")
     for col in (from_col, to_col):
-        if col not in COLUMNS:
+        if col not in COLUMNS and col not in LEGACY_ISSUE_COLUMNS:
             raise GuardError(f"unknown column {col!r} (columns: {', '.join(COLUMNS)})")
     if (from_col, to_col) in TRANSITIONS[role]:
         return

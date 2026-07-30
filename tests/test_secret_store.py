@@ -1427,25 +1427,27 @@ class SecretCliCase(SecretStoreCase):
         self.assertEqual(read_secret(self.instance_dir, "binary.blob"), blob)
 
     def test_no_command_takes_a_value_on_the_command_line(self) -> None:
-        """There is no `--value`; argparse rejects it before anything runs."""
+        """There is no `--value`; the public CLI returns a structured usage error."""
         self.initialize()
-        with self.assertRaises(SystemExit):
-            self.run_cli(
-                [
-                    "secret",
-                    "set",
-                    "--instance",
-                    str(self.instance_dir),
-                    "--id",
-                    "kanboard.api-token",
-                    "--scope",
-                    "installation",
-                    "--purpose",
-                    "board api",
-                    "--value",
-                    "secret",
-                ]
-            )
+        code, output, errors = self.run_cli(
+            [
+                "secret",
+                "set",
+                "--instance",
+                str(self.instance_dir),
+                "--id",
+                "kanboard.api-token",
+                "--scope",
+                "installation",
+                "--purpose",
+                "board api",
+                "--value",
+                "secret",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(output, "")
+        self.assertEqual(json.loads(errors)["error"]["code"], "usage")
         self.assertEqual(list_secrets(self.instance_dir), ())
 
     def test_import_materialize_and_remove_through_the_cli(self) -> None:

@@ -519,12 +519,14 @@ class ReconcilePlanTests(unittest.TestCase):
         code, output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE), "--offline"])
         self.assertEqual(code, 2, output)
         self.assertIn("--offline cannot produce a plan", output)
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
-            main([
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            code = main([
                 "reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE), "--offline",
                 "--host-fixture", str(HOST_FIXTURE),
             ])
-        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
     def test_runtime_payload_changes_require_an_update(self):
         instance = {"host": {"unit_prefix": "secretary-"}, "heads": [{"role": "worker", "model": "old"}]}

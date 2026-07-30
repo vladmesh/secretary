@@ -70,7 +70,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--description", default="")
     task_create.add_argument("--body-file")
     task_create.add_argument("--ref", default="")
-    task_create.add_argument("--state", choices=("ideas", "ready"), default="ideas")
+    task_create.add_argument("--state", choices=("ideas", "ready"), default="ready")
     task_create.add_argument("--blocked-by", default="")
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")
@@ -80,6 +80,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
     task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", choices=("exec", "tui"), default="")
     task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
+    task_create.add_argument("--priority", default="", help="rejected: tasks do not carry product priority")
     task_create.add_argument("--budget-event", choices=("recreated_task", "hotfix"), default="", help="charge a sprint recreation or hotfix event")
     _add_sprint_override_args(task_create)
     task_create.set_defaults(handler=run_task_create)
@@ -224,6 +225,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             family_preference=args.family_preference,
             codex_launch_mode=args.codex_mode,
             sprint=args.sprint,
+            priority=args.priority,
             budget_event=args.budget_event,
             sprint_override=args.sprint_override,
             sprint_override_reason=_read_body(args.sprint_override_reason_file),

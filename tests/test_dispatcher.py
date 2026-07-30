@@ -193,7 +193,14 @@ class FakeKanboard:
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
-            return self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
+            status = params.get("status_id")
+            if status not in {0, 1}:
+                return []
+            pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
+            return [
+                task for task in pool
+                if (int(task.get("is_active", task.get("status", 1)) or 0) != 0) == (status == 1)
+            ]
         if method == "getTaskByReference":
             pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
             return next((task for task in pool if task["reference"] == params["reference"]), None)
@@ -403,10 +410,14 @@ class FakeHost:
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
         # reads as alive; point it at a free pid to model a head that died.
         self.observers: list[str] = []
+        self.observer_nudges: list[str] = []
         self.stopped_observers: list[str] = []
         # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
         self.observer_terminals: dict[str, str] = {}
         self.observer_pid = os.getpid()
+        # Work liveness is separate from the pid.  Tests can make a live TUI report a completed,
+        # stale queue without pretending the process has died.
+        self.observer_status_result: dict | None = None
         self.fail_observer_reason = ""
         # A bring-up failure the caller has to read for more than its message, e.g. an
         # ObserverLaunchAborted that carries the handle of a terminal that stayed up.
@@ -418,9 +429,6 @@ class FakeHost:
         # that never wrote one would make every intent look like a head that never came up. None
         # models a runtime that writes no heartbeat at all.
         self.head_pid: int | None = os.getpid()
-        # Every heartbeat this fake has written, per role: a stop drops them, so a head the test
-        # stopped stops reading as alive.
-        self.head_pid_files: dict[str, set[str]] = {"worker": set(), "review": set()}
         # Stop refusals (secretary-820). A stop the host will not confirm must never be followed by
         # a replacement head, and these are how a test makes one refuse.
         self.fail_stop_workspace_reason = ""
@@ -440,7 +448,6 @@ class FakeHost:
         if self.head_pid is None:
             path.unlink(missing_ok=True)
             return
-        self.head_pid_files[kind].add(str(path))
         path.write_text(str(self.head_pid), encoding="utf-8")
 
     def prepare_worker(
@@ -504,6 +511,17 @@ class FakeHost:
             "pid_file": str(pid_file),
             "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
         }
+
+    def observer_status(self, _record) -> dict:
+        if self.observer_status_result is not None:
+            return dict(self.observer_status_result)
+        return {"last_activity": time.time(), "queue_finished": False}
+
+    def nudge_observer(self, record) -> None:
+        self.calls.append("nudge_observer")
+        if self.fail_observer_reason:
+            raise HostError(self.fail_observer_reason)
+        self.observer_nudges.append(str(record.sprint))
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")
@@ -662,9 +680,8 @@ class FakeHost:
         every later liveness read would answer that the head the test just stopped is running.
         """
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
-        for path in {pid_file, *self.head_pid_files.get(kind, set())}:
-            if path:
-                Path(path).unlink(missing_ok=True)
+        if pid_file:
+            Path(pid_file).unlink(missing_ok=True)
 
     def stop_review(self, record) -> None:
         self.calls.append("stop_review")
@@ -946,7 +963,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.commit_cutover()
         self.runtime.production_tick()
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
-
         self.writer.move(
             role="po",
             actor="operator",
@@ -968,11 +984,126 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(action["card_state"], "ideas")
         payload = self.runtime.production_state.load()
         self.assertNotIn("secretary-510-pilot", payload["records"])
-        # Reconciliation only ever removes bookkeeping: the workspace and terminal it had are
-        # untouched (claiming a now-unblocked neighbor card is a separate, legitimate tick action).
-        self.assertEqual(self.host.stopped, [])
+        # The record owns the live head. It must be stopped before the record can disappear, or a
+        # later requeue will open another writer in the same workspace.
+        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
         self.assertEqual(self.host.torn_down, [])
         self.assertNotIn("secretary-510-pilot", self.host.prepared)
+
+    def test_production_reconcile_keeps_record_when_head_stop_is_unconfirmed(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="park it",
+            request_id="move-to-blocked-stop-refused",
+        )
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a["step"] == "production-reconcile"]
+        self.assertEqual([a["action"] for a in actions], ["head-stop-unconfirmed"])
+        self.assertEqual(result["status"], "degraded")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_production_requeue_stops_previous_head_before_claiming_again(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="ready",
+            reason="replace the active attempt",
+            request_id="production-fast-requeue",
+        )
+        self.host.calls.clear()
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual(len(claim), 1)
+        self.assertIn("stop_workspace", self.host.calls, result)
+        self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
+
+    def test_fresh_claim_stops_an_unowned_live_worker_before_launch(self) -> None:
+        self.commit_cutover()
+        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        process = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: process.poll() is None and (process.kill(), process.wait()))
+        pid_file.write_text(str(process.pid), encoding="utf-8")
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a.get("status") for a in claim], ["ok"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+
+    def test_fresh_claim_blocks_when_an_unowned_worker_will_not_stop(self) -> None:
+        self.commit_cutover()
+        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        result = self.runtime.production_tick()
+
+        claim = [a for a in result["actions"] if a.get("step") == "claim"]
+        self.assertEqual([a["action"] for a in claim], ["orphan-worker-stop-unconfirmed"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.prepared, [])
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_production_tick_stops_respawn_started_after_po_parked_the_card(self) -> None:
+        self.commit_cutover()
+        self.runtime.production_tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        stale = time.time() - stall_seconds("worker") - 60
+        record["worker_started_at"] = stale
+        record["worker_progress_at"] = stale
+        self.runtime.production_state.save(payload)
+        self.host.worker_status_result = {
+            "known": True,
+            "live": False,
+            "reason": "missing-terminal",
+        }
+        real_show = self.reader.show
+        raced = {"done": False}
+
+        def show_then_park(reference: str):
+            task = real_show(reference)
+            if reference == "secretary-510-pilot" and not raced["done"]:
+                raced["done"] = True
+                self.writer.move(
+                    role="po",
+                    actor="operator",
+                    reference=reference,
+                    target="blocked",
+                    reason="park after the active reread",
+                    request_id="park-during-active-tick",
+                )
+            return task
+
+        with mock.patch.object(self.reader, "show", side_effect=show_then_park):
+            result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
+        self.assertEqual(actions, [])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+        result = self.runtime.production_tick()
+
+        actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
+        self.assertEqual([a["action"] for a in actions], ["record-removed"])
+        self.assertIn("stop_workspace", self.host.calls)
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
         # secretary-755 reviewer finding: `active_refs` is a snapshot taken at the top of the
@@ -983,6 +1114,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.commit_cutover()
         self.runtime.production_tick()
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        # This race concerns an execution card already in the dispatcher cycle. It is not an
+        # unclassified legacy Ideas card, whose only supported exit is PO triage to Ready.
+        self.board.metadata[12]["record_type"] = "task"
 
         self.writer.move(
             role="po",
@@ -3355,6 +3489,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.start_pilot()
         self.runtime.tick(self.selector)
         first_attempt = self.runtime.state.load()["attempt_id"]
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record["handle"] = ""
+        record["worker_leaf"] = ""
+        record["worker_pid_file"] = ""
+        record["review_handle"] = ""
+        record["review_leaf"] = ""
+        record["review_pid_file"] = ""
+        self.runtime.state.save(payload)
+        Path(pid_file_path("worker", "secretary-510-pilot")).unlink(missing_ok=True)
         self.writer.move(
             role="po", actor="operator", reference="secretary-510-pilot",
             target="ready", reason="preempted", request_id="po-preempt-attempt-2",
@@ -3958,9 +4102,27 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
         commands = self._command_lines(doc)
 
-        self.assertEqual(len(commands), 1)
-        self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot-0.md", commands[0])
-        self.assertNotIn("<file>", commands[0])
+        self.assertEqual(len(commands), 2, "one done and one blocked command")
+        for command in commands:
+            self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot-0.md", command)
+            self.assertNotIn("<file>", command)
+
+    def test_worker_prompt_limits_blocked_reports_to_an_obvious_wrong_cut(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("only for an obvious wrong cut", doc)
+        self.assertIn("requires a new durable protocol, product contract, or trust", doc)
+        self.assertIn("Difficulty or size alone is not a reason to stop", doc)
+        self.assertIn("conflict and the observer decision needed", doc)
+
+    def test_review_prompt_requires_evidence_for_every_red_blocker(self) -> None:
+        doc = self.host._review_prompt(self.task, "attempt-1", 3)
+
+        self.assertIn("concrete reachable scenario", doc)
+        self.assertIn("violated acceptance", doc)
+        self.assertIn("whether this branch introduced", doc)
+        self.assertIn("compatibility promise", doc)
+        self.assertIn("do not silently widen the supported boundary or decide sprint scope", doc)
 
     def test_body_file_lives_outside_the_workspace(self) -> None:
         """A body file inside the worktree would make `git status` dirty, and the done-report
@@ -4857,6 +5019,70 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertFalse(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
+    def test_complete_green_refreshes_checkout_from_default_branch_for_stacked_base(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            host.complete_green(
+                {
+                    "ref": "secretary-510-pilot",
+                    "project": "codegen_orchestrator",
+                    "workspace": {"base_branch": "pipeline/secretary-890"},
+                },
+                record,
+            )
+        cmds = [" ".join(run) for run in host.runs]
+        self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds), cmds)
+        # The checkout tracks main, so the stacked base is never what it is fast-forwarded to.
+        self.assertFalse(any("origin/pipeline/secretary-890" in c for c in cmds), cmds)
+        self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
+
+    def test_complete_green_survives_stacked_base_diverged_from_default_branch(self) -> None:
+        """secretary-899: a stacked card's PR merges on GitHub, and an unrelated card has landed on
+        the default branch since the base branch was cut. The post-merge refresh of the project
+        checkout must not report that merge as failed, and must leave the checkout on the default
+        branch at the remote tip."""
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            repo = root / "checkout"
+            workspace = root / "workspace"
+            git(root, "init", "--quiet", "--bare", "--initial-branch", "main", str(remote))
+            git(root, "clone", "--quiet", str(remote), str(repo))
+            _configure_git_user(repo)
+            _commit_file(repo, "README.md", "seed\n", "seed")
+            git(repo, "push", "--quiet", "origin", "main")
+            # The stacked base, cut from the seed and already carrying the parent card.
+            git(repo, "checkout", "--quiet", "-b", "pipeline/secretary-890")
+            _commit_file(repo, "parent.txt", "parent card\n", "parent card")
+            git(repo, "push", "--quiet", "origin", "pipeline/secretary-890")
+            # An unrelated card lands on the default branch while the stack is in flight, so
+            # origin/main and origin/pipeline/secretary-890 diverge.
+            git(repo, "checkout", "--quiet", "main")
+            unrelated = _commit_file(repo, "other.txt", "unrelated card\n", "unrelated card")
+            git(repo, "push", "--quiet", "origin", "main")
+            git(root, "clone", "--quiet", str(remote), str(workspace))
+            _configure_git_user(workspace)
+            git(workspace, "checkout", "--quiet", "-b", _legacy_worker_branch("secretary-899"), "origin/pipeline/secretary-890")
+            _commit_file(workspace, "child.txt", "child card\n", "child card")
+
+            host = _FakeGhMergeHost(_StackedBaseCatalog(repo), root, mode="real")
+            host.complete_green(
+                {
+                    "ref": "secretary-899",
+                    "project": "secretary",
+                    "workspace": {"base_branch": "pipeline/secretary-890"},
+                },
+                SimpleNamespace(workspace=str(workspace)),
+            )
+
+            self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+            self.assertEqual(git(repo, "rev-parse", "HEAD"), unrelated)
+
     def test_instance_repo_merge_preserves_local_checkpoint_commit(self) -> None:
         from types import SimpleNamespace
 
@@ -5204,6 +5430,30 @@ class _RecordingMergeHost(CommandHostRuntime):
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
         return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class _StackedBaseCatalog:
+    def __init__(self, repo: Path) -> None:
+        self.instance_dir = Path("/nonexistent-instance")
+        self._repo = repo
+
+    def binding(self, project: str) -> dict:
+        return {"repo": str(self._repo), "default_branch": "main"}
+
+    def default_branch(self, project: str, override: str | None) -> str:
+        return override or "main"
+
+    def adapter(self, project: str) -> dict:
+        return {"validation": {"ci": "github"}}
+
+
+class _FakeGhMergeHost(CommandHostRuntime):
+    """Real git over real repos, with `gh pr merge` stubbed: the PR merge is GitHub's side."""
+
+    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+        if args and args[0] == "gh":
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+        return super()._run(args, label, cwd=cwd)
 
 
 class GitBranchHost(CommandHostRuntime):

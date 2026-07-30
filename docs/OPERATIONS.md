@@ -1,8 +1,20 @@
 # Operations
 
-This document describes product behaviour. The state of a particular installation — who owns which
-units, which components are up, whether the checkpoint is fresh — is read from `secretary status` and
-`secretary doctor`, not from this file.
+This is the detailed operator reference. Start with the install and recovery path in
+[Recovery](RECOVERY.md); use this document when operating or debugging a running installation. The
+state of a particular installation — who owns which units, which components are up, whether the
+checkpoint is fresh — comes from `secretary status` and `secretary doctor`, not from this file.
+
+The main areas are:
+
+- [installation and host requirements](#install-and-check-the-code);
+- [data, status and checkpoint operation](#data-plane);
+- [connecting a project](#connecting-a-project-gate-and-stale-input-recovery);
+- [sprints and observer heads](#starting-a-sprint);
+- [recovery and the optional cold archive](#recovery);
+- [dispatcher operation and watchdogs](#auto-merging-green-cards);
+- [background roles and units](#background-role-telemetry);
+- [upgrade and runtime health](#upgrade).
 
 ## Install and check the code
 
@@ -12,12 +24,12 @@ python3 -m pip install '.[memory]'
 python3 -m unittest
 ```
 
-The first form installs the CLI, the second adds the memory runtime. Bundled package transport for the
-board and session-manager runtimes is still an open question for the first milestone; an existing
-runtime is applied through `secretary install` / `secretary recover`, see [Recovery](RECOVERY.md).
+The first form installs the CLI, and the second adds the memory runtime. Host bootstrap currently
+supports Ubuntu 24.04. It installs the pinned board and session-manager runtimes; `secretary install`
+or `secretary recover` then applies the instance, as described in [Recovery](RECOVERY.md).
 
 `secretary status --instance <dir>` gives the current summary of an installation. Its `--json` form is a
-stable snapshot of services and timers, active attempts, checkpoint, memory and host resources, and
+structured snapshot of services and timers, active attempts, checkpoint, memory and host resources, and
 writes no state. `doctor` answers a different question: which invariants are broken. It stays a strict
 check and its `--json` form returns a structured list of findings. Changing the host still requires
 `reconcile plan` and a separate confirmed apply.
@@ -320,13 +332,17 @@ the Codex target of the secretary role, so behaviour does not depend on which se
 The skill walks the secretary through preparation: live context (open and closed sprints, deferred items
 from their resume entries and comments, roadmap, Ideas in the affected repositories), a check that no other
 open sprint is holding the repositories needed, an interview on unresolved product forks, and a Definition of
-Done phrased as checkable items. Choosing the goal stays with the person and is not delegated.
+Done phrased as checkable items. Choosing the goal stays with the person and is not delegated. A sprint also
+needs the Product it belongs to, at least one of its open Issues and at least one reserved registered
+project; an installation holds one open sprint at a time, and a project another open sprint reserves is
+refused as a resource conflict.
 
 The entity is created by the product command, as the `po` role:
 
 ```bash
 python3 -m secretary sprint create --role po --actor <actor> \
   --goal "<one sentence>" --dod-file DOD.md \
+  --product <product-id> --issue issue:<ID> --project <project-id> \
   --repository <repo> [--repository <repo>]
 python3 -m secretary sprint show --ref sprint:<ID>
 python3 -m secretary sprint status --ref sprint:<ID>
@@ -377,7 +393,16 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 
 - `observer-launched` — an open sprint with no record got a head;
 - `observer-live` — the head is alive, the tick did nothing;
-- `observer-relaunched` — the head's pid is dead, a new one was launched;
+- `observer-waiting` — the observer is working and no durable event needs a new turn;
+- `observer-idle` — the live Codex TUI has completed its queue with no unacknowledged linked-card event;
+- `observer-nudged` — a committed linked-card event woke one idle observer turn;
+- `observer-wake-pending` — a delivery batch was already sent and awaits its own acknowledgement;
+- `observer-wake-waiting` — an event arrived while the observer was working; its next tick after
+  Codex finishes delivers one nudge, without waiting for the watchdog;
+- `observer-watchdog-woke` — an event remained unacknowledged for
+  `SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS` (30 minutes by default), so the fallback woke the observer;
+- `observer-wake-deferred` — the event wake failed; the observer row carries its reason and bounded retry;
+- `observer-relaunched` — a head with unacknowledged work had a dead pid and was replaced;
 - `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
 - `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in
   `stop-pending` with its handle, no stop event is written, and the next tick retries. This also covers the
@@ -546,10 +571,11 @@ secretary dispatcher production-observe --instance INSTANCE    # .observers
 secretary pause-status --instance INSTANCE                     # .observers, .stopped_observer
 ```
 
-An observer row carries the sprint, the head profile, the state (`running`, `launching`, `deferred`,
-`stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness, the launch count, the
-workspace, the handle-known and abandoned-handle flags, the time and kind of the last action, and the reason for
-a deferred launch.
+An observer row carries the sprint, the head profile, the state (`running`, `waiting`, `idle-grace`, `wake-deferred`,
+`launching`, `deferred`, `stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness,
+the launch count, the workspace, the handle-known and abandoned-handle flags, the time and kind of the last
+action, the reason for a deferred launch, and a delivery object with its stage, fixed event high-water mark,
+causal acknowledgement, deadline, retry state and external-failure reason.
 
 ## Checkpoint push
 
@@ -580,30 +606,35 @@ the diverged state. The lag in minutes is the age of the oldest unpushed commit,
 loss if the machine dies. `doctor` raises a finding on divergence, on a blocked gate, and on a lag above 60
 minutes (two missed windows).
 
-## Recovery
+### A checkpoint blocked by a Product/Issue transaction
 
-The only recovery contract is the Git-backed checkpoint in [Recovery](RECOVERY.md). A live restore comes from the
-private instance repository, with no mandatory object-store transport.
+The checkpoint gate and the board export both refuse to run while a Product or Issue write is staged and
+unfinished, naming the number of pending records. The staged writes are listed and repaired by their own
+commands, and no file under `board/product-issue-transactions/` is ever moved by hand:
 
 ```bash
-secretary install --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
-secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
-  --recovery-phrase-file PHRASE_FILE
+secretary product transaction list --data-dir DATA_DIR
+secretary product transaction retry --request-id REQUEST_ID --data-dir DATA_DIR
+secretary product transaction discard --request-id REQUEST_ID --data-dir DATA_DIR
 ```
 
-Both commands open the secret store, if this instance repository has one, before reading `runtime.env`: with the
-recovery phrase (`--recovery-phrase-file`, `--recovery-phrase-stdin`, or an interactive prompt on a TTY when the
-key is not yet on disk) the installation key is rebuilt and materialises `runtime.env` and the other targets from
-the catalog, including board credentials if they are in the store. Only if this instance repository has no store
-at all does `runtime.env` remain a manual operator file, as described in [Recovery](RECOVERY.md). Without the
-phrase, `recover` does not refuse: it restores everything that needs no credentials and prints a locked/missing
-report for the secrets that stayed unavailable.
+`retry` is the first move: it resumes the operation where it stopped and commits its audit event. `discard`
+is for a transaction the backend never accepted; it reads the board first and refuses with `live_write` when
+the row or the board comment of that request already exists. A document that is already outside the journal
+comes back with `secretary product transaction adopt --path FILE`, which files it under its own request id
+and removes the copy, after which `retry` and `discard` see it again.
 
-The first command clones the remote and stops short of host-only credentials if the store did not materialise
-them. The second, in one idempotent flow, materialises the checkpoint, restores the board — both Pipeline cards
-and sprint entities with their fields, budget, resume and entries — rebuilds the memory index, role worktrees and
-host resources, and then checks status. `restore-board` prints both counts, and a mismatch in either parity check
-leaves recovery unfinished and visible in `doctor`.
+## Recovery
+
+The Git-backed checkpoint and the full recovery sequence are documented in
+[Recovery](RECOVERY.md#fresh-install-and-recovery). On a clean replacement host, bootstrap the pinned
+runtimes and use `recover` rather than `install`:
+
+```bash
+sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
+sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
+  --recovery-phrase-file PHRASE_FILE
+```
 
 The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
 commands remain diagnostic primitives, not the main runbook.
@@ -631,6 +662,10 @@ When a reviewer records a green verdict, the production dispatcher takes the car
    rejected; the dispatcher neither forces nor resolves the conflict itself.
 2. Fast-forward the project's local checkout onto the new default-branch tip. For the product's own repository
    this is a self-deploy: the dispatcher merges and immediately pulls the change into the checkout it runs from.
+   A card whose base branch is another card's branch lands on that base, not on the default branch, and the
+   checkout is still only ever refreshed from the default branch. There the refresh is a courtesy for the next
+   worktree: it cannot fast-forward when the default branch has moved on since the base was cut, and a card whose
+   branch already merged is not sent back for rework over it.
 3. Tear down the workspace: stop the worktree's terminals (worker, reviewer and their child processes) and remove
    the worktree.
 

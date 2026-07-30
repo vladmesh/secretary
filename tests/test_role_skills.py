@@ -65,6 +65,23 @@ class CanonicalRegistryTests(unittest.TestCase):
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
+    def test_observer_skill_contains_the_minimal_supported_change_guardrails(self) -> None:
+        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn("Before creating a `code` card, work through this decision sequence", text)
+        self.assertIn("standard library or a native platform capability", text)
+        self.assertIn("not supported legacy by default", text)
+        self.assertIn("fail-closed upgrade precondition", text)
+        self.assertIn("removal may lose real user data or break a supported installation path", text)
+        self.assertIn("When you see RED or Blocked evidence", text)
+        self.assertIn("a local defect inside the card may return for supported rework or retry", text)
+        self.assertIn("the planned architecture or card cut is wrong", text)
+        self.assertIn("hardening or compatibility outside the sprint is deferred or taken to the user", text)
+        self.assertIn("may already have started the first automatic rework before you wake", text)
+        self.assertNotIn("Before an ordinary RED goes back for another worker round", text)
+        self.assertIn("Apply the same classification to the Blocked evidence", text)
+
     def test_the_observer_skill_reaches_the_shell_its_head_runs_in(self) -> None:
         """`role_defaults.observer` is a codex profile, so the codex shell must carry the skill."""
         shells = {

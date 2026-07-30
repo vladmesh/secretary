@@ -106,7 +106,11 @@ def _fake_board(calls):
         if method == "getActiveSwimlanes":
             return [{"id": 1, "name": "secretary"}]
         if method == "getAllTasks":
-            return TASKS
+            if params.get("status_id") == 1:
+                return [TASKS[0], TASKS[0]]
+            if params.get("status_id") == 0:
+                return [TASKS[0], TASKS[1]]
+            return []
         raise AssertionError(f"unbatched call {method} {params}")
 
     def fake_batch(requests):
@@ -127,8 +131,8 @@ class ExportCardsTests(unittest.TestCase):
     def test_one_batched_request_covers_every_card(self):
         calls = []
         fake_call, fake_batch = _fake_board(calls)
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "call_batch", side_effect=fake_batch):
+        with mock.patch.object(ops, "call", side_effect=fake_call) as board_call, \
+            mock.patch.object(ops, "call_batch", side_effect=fake_batch):
             cards = ops.export_cards()
 
         self.assertEqual(len(calls), 1)
@@ -142,6 +146,9 @@ class ExportCardsTests(unittest.TestCase):
             ],
         )
         self.assertEqual([card["reference"] for card in cards], ["secretary-637", "secretary-638"])
+        self.assertIn(mock.call("getAllTasks", project_id=2, status_id=1), board_call.call_args_list)
+        self.assertIn(mock.call("getAllTasks", project_id=2, status_id=0), board_call.call_args_list)
+        self.assertNotIn(mock.call("getAllTasks", project_id=2, status_id=2), board_call.call_args_list)
 
     def test_card_carries_both_the_list_and_the_show_surface(self):
         calls = []

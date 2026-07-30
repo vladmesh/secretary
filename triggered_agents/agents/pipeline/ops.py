@@ -27,6 +27,24 @@ from .state import STATE
 DONE_RETENTION_DAYS = 5
 
 
+def _all_cards(pid: int) -> list[dict]:
+    """Collect Kanboard's open and closed sets, keeping one row per task id."""
+    cards = []
+    seen_ids = set()
+    for status_id in (1, 0):
+        for task in call("getAllTasks", project_id=pid, status_id=status_id) or []:
+            if not isinstance(task, dict):
+                continue
+            identifier = task.get("id")
+            if identifier is not None:
+                key = str(identifier)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+            cards.append(task)
+    return cards
+
+
 def board_id() -> int:
     """Kanboard project id of the board, creating it if absent.
 
@@ -76,6 +94,30 @@ def _column_title(pid: int, column_id: int) -> str:
     return ""
 
 
+def _proposal_column(pid: int) -> str:
+    """Return the column an agent proposal goes into, or raise if the board has none.
+
+    A proposal is not a Product issue: an agent cannot pick product, kind and priority, so it may
+    not create one, and the Issues column takes nothing else. The route therefore survives only on
+    the legacy layout, where the board's first column is still Ideas (the same tolerance
+    `secretary task create --state ideas` keeps), and fails closed on a migrated board until a PO
+    decides where an agent proposal lands there. Only that first column counts: a board whose
+    first column is already Issues is migrated, and a leftover Ideas column further along it is
+    not a route the PO decision opened.
+    """
+    columns = sorted(call("getColumns", project_id=pid) or [], key=lambda c: int(c.get("position") or 0))
+    first = columns[0]["title"] if columns else ""
+    if first in model.LEGACY_ISSUE_COLUMNS:
+        return str(first)
+    raise model.GuardError(
+        "this board's first column is not the legacy 'Ideas', so an agent proposal has "
+        "nowhere to go: "
+        "'Issues' is the Product backlog and an agent may not create a Product issue (it cannot "
+        "choose product, kind and priority). A PO has to decide where an agent proposal lands on a "
+        "migrated board; until then, report the proposal in the verdict or the retro output instead."
+    )
+
+
 def _ensure_swimlane(pid: int, name: str) -> int:
     """Return the active swimlane id for `name`, creating it if absent."""
     for s in call("getActiveSwimlanes", project_id=pid) or []:
@@ -85,7 +127,7 @@ def _ensure_swimlane(pid: int, name: str) -> int:
 
 
 def ensure_structure() -> dict:
-    """Idempotently bring the board's columns to exactly model.COLUMNS; add the admin member.
+    """Idempotently migrate the first legacy Ideas column to Issues and reconcile the board.
 
     Same reconcile as the legacy board: rename in place, append missing, drop extras beyond
     len(COLUMNS). Swimlanes are left alone here — a card gets its project swimlane created on
@@ -264,15 +306,14 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
     """Guard for a worker's own `create` (triggered-agents-261): a card landing straight in Ready
     is only legal as a continuation of the worker's own approved chain — `own_ref` (the card
     reference this worker is running as) itself, or one of its blocked_by predecessors,
-    transitively. `--column Ideas` stays ungated (same as reviewer_idea/retro_idea): an
-    unapproved idea from a worker still only ever reaches Ideas, never Ready, so it needs no
-    project/chain check here."""
+    transitively. The Ready-only create guard rejects `--column Ideas` before this function runs;
+    a worker records an unrelated concern through feedback instead of creating a card."""
     if column != "Ready":
         return
     if not blocked_by:
         raise model.GuardError(
             "worker create into Ready needs --blocked-by pointing at its own chain "
-            "(use --column Ideas for an unrelated idea)"
+            "(use feedback to record an unrelated concern)"
         )
     if not own_ref:
         raise model.GuardError(
@@ -294,17 +335,21 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
 
 
 def create_card(project: str, task_type: str, title: str, description: str = "",
-                ref: str | None = None, column: str = "Ideas",
+                ref: str | None = None, column: str = "Ready",
                 blocked_by: str | None = None, head: str | None = None,
                 slug: str | None = None, base_branch: str | None = None,
                 review_head: str | None = None, role: str | None = None,
                 own_ref: str | None = None) -> dict:
-    """PO/steward/worker: create a spec card in Ideas or Ready, keyed by reference, with metadata.
+    """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
+
+    Ready is the only default column. A PO may explicitly create a task in the first legacy Ideas
+    column; _proposal_column verifies that the board still has that layout and otherwise fails
+    closed. `Issues` is the Product backlog. The agent proposal helpers are the only other callers
+    that may create in legacy Ideas.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
-    (triggered-agents-261); an Ideas card from a worker is otherwise ungated, matching the
-    general agent-idea policy (reviewer_idea/retro_idea). `own_ref` is the worker's own card
-    reference, required (and only meaningful) for that Ready path.
+    (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
+    meaningful) for that Ready path.
 
     `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); when
     omitted, claim falls back to a transliterated slug of the title (naming.fallback_slug) so an
@@ -317,15 +362,45 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     lookup exactly as before this field existed.
 
     `role="steward"` scrubs title/description the same way add_comment does for steward — the
-    escalation/idea path SKILL.md sends steward through (create in Ideas/Ready, then move to
+    escalation/idea path SKILL.md sends steward through (create in Ready, or file an Idea then move to
     Blocked) is exactly where a quoted transcript/journalctl/env line could carry a raw secret
-    (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller
-    (po, reviewer_idea — which scrubs itself before calling here) passes no role and stays
-    verbatim, unchanged from before."""
+    (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller (po, and
+    the proposal helpers, which scrub themselves before _create_proposal_card) passes no role
+    and stays verbatim, unchanged from before."""
+    proposal = role == "po" and column in model.LEGACY_ISSUE_COLUMNS
+    if proposal:
+        column = _proposal_column(board_id())
+    return _create_card(project=project, task_type=task_type, title=title, description=description,
+                        ref=ref, column=column, blocked_by=blocked_by, head=head, slug=slug,
+                        base_branch=base_branch, review_head=review_head, role=role,
+                        own_ref=own_ref, proposal=proposal)
+
+
+def _create_proposal_card(project: str, task_type: str, title: str, description: str,
+                          ref: str | None, head: str | None, slug: str | None) -> dict:
+    """The agent-proposal exception to the Ready-only rule, private on purpose.
+
+    It takes no column and no proposal flag from its caller: the column comes from
+    _proposal_column, so the only way to write outside Ready is through the proposal helpers
+    on a legacy board. The card is stamped record_type=task so a PO reads it as an execution task
+    awaiting triage, not as an unclassified pre-Product/Issue leftover.
+    """
+    return _create_card(project=project, task_type=task_type, title=title,
+                        description=description, ref=ref, column=_proposal_column(board_id()),
+                        head=head, slug=slug, proposal=True)
+
+
+def _create_card(*, project: str, task_type: str, title: str, description: str,
+                 ref: str | None, column: str, blocked_by: str | None = None,
+                 head: str | None = None, slug: str | None = None,
+                 base_branch: str | None = None, review_head: str | None = None,
+                 role: str | None = None, own_ref: str | None = None,
+                 proposal: bool) -> dict:
+    """Shared card-create body; see create_card and _create_proposal_card for the two entrypoints."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
-    if column not in ("Ideas", "Ready"):
-        raise model.GuardError(f"cards are created only in 'Ideas' or 'Ready', not {column!r}")
+    if column != "Ready" and not (proposal and column in model.LEGACY_ISSUE_COLUMNS):
+        raise model.GuardError("execution cards are created only in 'Ready'; Issues is Product backlog")
     if slug is not None and not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
     if head:
@@ -349,6 +424,8 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
         ref = f"{project}-{task_id}"
         call("updateTask", id=task_id, reference=ref)
     values = {model.META_TASK_TYPE: task_type, model.META_PROJECT: project}
+    if proposal:
+        values[model.META_RECORD_TYPE] = model.RECORD_TASK
     if blocked_by:
         values[model.META_BLOCKED_BY] = blocked_by
     if head:
@@ -478,6 +555,14 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     pid = board_id()
     task = _get_by_ref(reference)
     cur = _column_title(pid, int(task["column_id"]))
+    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
+    if meta.get(model.META_RECORD_TYPE) in {model.RECORD_ISSUE, model.RECORD_PRODUCT}:
+        raise model.GuardError("Product issues and products cannot enter execution task columns")
+    if cur in model.LEGACY_ISSUE_COLUMNS:
+        cur = "Issues"
+    if cur == "Issues" and not meta.get(model.META_RECORD_TYPE):
+        if role != "po" or to_column != "Ready":
+            raise model.GuardError("legacy Ideas require explicit PO triage to Ready")
     model.check_move(role, cur, to_column)
     move = (cur, to_column)
     reason_text = reason.strip()
@@ -499,6 +584,8 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
                 "(created via create_report_card); other cards go through Validate/review"
             )
     meta_updates = {}
+    if cur == "Issues" and not meta.get(model.META_RECORD_TYPE):
+        meta_updates[model.META_RECORD_TYPE] = "task"
     if to_column == "Ready":
         meta_updates.update({
             model.META_CLAIM: "",
@@ -699,11 +786,13 @@ def reviewer_idea(project: str, title: str, description: str = "", task_type: st
                   ref: str | None = None, head: str | None = None,
                   slug: str | None = None) -> dict:
     """Reviewer-only: file an out-of-scope finding as an Ideas card (the reviewer's single
-    code-creation exception). Title and description are scrubbed for the same reason as a verdict."""
-    return create_card(project=project, task_type=task_type,
-                       title=worker.scrub_secrets(title),
-                       description=worker.scrub_secrets(description),
-                       ref=ref, column="Ideas", head=head, slug=slug)
+    code-creation exception). Title and description are scrubbed for the same reason as a verdict.
+    Needs the board's legacy first column; _proposal_column explains why and what happens without
+    it."""
+    return _create_proposal_card(project=project, task_type=task_type,
+                                 title=worker.scrub_secrets(title),
+                                 description=worker.scrub_secrets(description),
+                                 ref=ref, head=head, slug=slug)
 
 
 def retro_idea(project: str, title: str, description: str = "", task_type: str = "code",
@@ -713,10 +802,25 @@ def retro_idea(project: str, title: str, description: str = "", task_type: str =
     same shape as reviewer_idea (never Ready, title/description scrubbed). Retro quotes redacted
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
-    return create_card(project=project, task_type=task_type,
-                       title=worker.scrub_secrets(title),
-                       description=worker.scrub_secrets(description),
-                       ref=ref, column="Ideas", head=head, slug=slug)
+    return _create_proposal_card(project=project, task_type=task_type,
+                                 title=worker.scrub_secrets(title),
+                                 description=worker.scrub_secrets(description),
+                                 ref=ref, head=head, slug=slug)
+
+
+def steward_idea(project: str, title: str, description: str = "", task_type: str = "code",
+                 ref: str | None = None, head: str | None = None,
+                 slug: str | None = None) -> dict:
+    """Steward-only: file a discovered anomaly as a legacy Ideas proposal before escalating it.
+
+    Steward reads raw system output, so redact title and description before the shared proposal
+    route creates the task record. On a migrated board the route fails closed rather than creating
+    a Product issue.
+    """
+    return _create_proposal_card(project=project, task_type=task_type,
+                                 title=worker.scrub_secrets(title),
+                                 description=worker.scrub_secrets(description),
+                                 ref=ref, head=head, slug=slug)
 
 
 def feedback(reference: str, body: str) -> dict:
@@ -790,7 +894,7 @@ def export_cards() -> list[dict]:
     pid = board_id()
     cols = {int(c["id"]): c["title"] for c in call("getColumns", project_id=pid) or []}
     lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
-    tasks = call("getAllTasks", project_id=pid, status_id=1) or []
+    tasks = _all_cards(pid)
     batched = call_batch(
         [(method, {"task_id": int(t["id"])})
          for t in tasks
@@ -803,6 +907,7 @@ def export_cards() -> list[dict]:
         out.append({
             **_card_view(pid, task, cols, lanes, meta),
             "description": task.get("description", "") or "",
+            "closed": int(task.get("is_active", task.get("status", 1)) or 0) == 0,
             "metadata": meta,
             "comments": [
                 {"ts": c.get("date_creation", ""), "text": c.get("comment", "")}

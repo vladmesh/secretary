@@ -38,6 +38,15 @@ def add_sprint_subcommands(subparsers) -> None:
     created.add_argument("--definition-of-done", default="")
     created.add_argument("--dod-file")
     created.add_argument("--repository", action="append", default=[])
+    created.add_argument("--product", required=True, help="product id the sprint belongs to")
+    created.add_argument(
+        "--issue", action="append", required=True,
+        help="open issue of that product the sprint serves; repeat for more",
+    )
+    created.add_argument(
+        "--project", action="append", required=True,
+        help="registered project the sprint reserves; repeat for more",
+    )
     created.add_argument("--ref", default="")
     created.set_defaults(handler=run_create)
     for name, handler, roles in (
@@ -62,6 +71,8 @@ def add_sprint_subcommands(subparsers) -> None:
             command.add_argument("--type", required=True, choices=BUDGET_EVENT_TYPES)
         elif name == "resume":
             command.add_argument("--body-file", required=True)
+            command.add_argument("--delivery-id")
+            command.add_argument("--through-event")
         command.set_defaults(handler=handler)
     sprint.set_defaults(handler=not_implemented)
 
@@ -86,7 +97,10 @@ def _read(
 
 def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]) -> int:
     try:
-        result = operation(SprintWriter(KanboardClient(), data_dir=resolve_data_dir(args), thresholds=_thresholds(args)))
+        result = operation(SprintWriter(
+            KanboardClient(), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
+            instance=getattr(args, "instance", None) or None,
+        ))
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -135,7 +149,12 @@ def run_create(args: argparse.Namespace) -> int:
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
-    return _write(args, lambda writer: writer.create(role=args.role, actor=args.actor or args.role, goal=args.goal, definition_of_done=definition_of_done, repositories=args.repository, reference=args.ref, request_id=args.request_id))
+    return _write(args, lambda writer: writer.create(
+        role=args.role, actor=args.actor or args.role, goal=args.goal,
+        definition_of_done=definition_of_done, repositories=args.repository,
+        product=args.product, issues=args.issue, projects=args.project,
+        reference=args.ref, request_id=args.request_id,
+    ))
 
 
 def run_comment(args: argparse.Namespace) -> int:
@@ -156,7 +175,18 @@ def run_resume(args: argparse.Namespace) -> int:
     except (TaskError, ValueError):
         print(json.dumps({"error": {"code": "validation", "message": "resume file must contain JSON"}}), file=os.sys.stderr)
         return 2
-    return _write(args, lambda writer: writer.resume(role=args.role, actor=args.actor or args.role, reference=args.ref, entry=entry, request_id=args.request_id))
+    return _write(
+        args,
+        lambda writer: writer.resume(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            entry=entry,
+            request_id=args.request_id,
+            delivery_id=args.delivery_id or "",
+            through_event=args.through_event or "",
+        ),
+    )
 
 
 def run_reopen(args: argparse.Namespace) -> int:

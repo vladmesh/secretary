@@ -219,6 +219,7 @@ class StatusCliTests(unittest.TestCase):
             board.metadata[12]["sprint_ref"] = "sprint:1"
             TaskAudit(data_dir).append("later-card-event", {
                 "event_id": "evt_later_card_event", "request_id": "later-card-event", "ref": "secretary-510-pilot", "kind": "commented",
+                "outcome": "success",
                 "occurred_at": "2026-07-27T00:00:00Z",
             })
             output = io.StringIO()

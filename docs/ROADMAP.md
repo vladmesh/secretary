@@ -1,7 +1,7 @@
 # Roadmap
 
-This roadmap describes a sequence of product states, not a queue of tickets. Each milestone lists the
-outcome it must reach, the gate that decides whether it is done, and the questions still open.
+This roadmap separates what works now from the gaps that remain. Milestones describe useful product
+states rather than commitments to a release date.
 
 ## Current baseline
 
@@ -26,16 +26,16 @@ materialiser. Archive backup, offsite transfer and the backup timer are out of t
 the archive remains a manual optional cold archive.
 
 The product restores the installation user, config and state, and the local data plane from a private
-remote through one supported `install` / `recover` sequence. The flow accepts host-only credentials and
+remote through the current `install` / `recover` flow. The flow accepts host-only credentials and
 rebuilds the board, memory index and role worktrees, then applies the materialiser on a clean target.
-Bundled package transport for the board and session-manager runtimes, and full adoption of an existing
-live host, remain the open parts of Milestone 1.
+Bootstrap installs the pinned board and session-manager runtimes on Ubuntu 24.04. A clean-machine
+end-to-end gate and full adoption of an existing live host remain open parts of Milestone 1.
 
 ## Sprints today
 
 A sprint is the product's unit of work: an entity on the sprints board holds the goal, Definition of Done,
-repositories, status, budget, current card and resume entry. Linked cards stay on the Pipeline board and
-carry a reference to the sprint.
+repositories, status, budget, current card and resume entry. The current implementation links Pipeline
+cards directly to the sprint.
 
 The production dispatcher launches one observer head per open sprint and runs its lifecycle. The observer
 recovers its work from the sprint entity and the live board, and writes a structured resume entry after
@@ -46,9 +46,24 @@ While a sprint is open, its repositories belong to the observer as the only prod
 cards from outside requires `--sprint-override` and a recorded reason. The `open-sprint` role skill
 prepares the goal, Definition of Done and repositories, after which the product command creates the entity.
 
-The model does not yet have closing cards or a coded completeness check, review levels or per-project
-overlay deviations, an in-house CI runner for private repositories, or cleanup by owner label. Four gaps in
-the loop itself are known and not yet closed:
+The current card model is now the main product-model gap. Ideas mixes bugs, features, open questions and
+prematurely sliced implementation work, while executable cards can exist independently of a sprint. The
+target model separates durable product issues from tasks that an observer cuts just in time:
+
+- a Product owns issues and sprints and groups one or more projects;
+- an issue requires a product, a kind (`bug`, `feature`, `question` or `improvement`) and a priority
+  (`P0` through `P3`);
+- the first Pipeline column becomes Issues, and issues cannot move into task columns;
+- a sprint takes one or more issues, reserves projects and creates tasks only while it is running;
+- tasks are execution records, not product backlog, and are archived when their sprint closes;
+- only the PO explicitly closes an issue after checking the sprint outcome and product invariants.
+
+The first implementation permits one active sprint per installation. Reservations are recorded from the
+start so this can later loosen to parallel sprints whose project sets do not overlap.
+
+The model does not yet have typed execution gates, a coded completeness check, per-project overlay
+deviations, an in-house CI runner for private repositories, or cleanup by owner label. Four gaps in the
+loop itself are known and not yet closed:
 
 - a stale resume entry is visible from outside but wakes nobody and raises no signal;
 - observer liveness is measured by process, not by work: a head whose agent queue has ended stays
@@ -57,22 +72,54 @@ the loop itself are known and not yet closed:
 - a change to the sprint contract sent as an entry on the entity does not reach the observer: it accepts
   material and questions, but not a narrowing of the Definition of Done.
 
-## Milestone 1. Automatic fresh install
+## Current product-work programme and self-hosting cutover
 
-### Outcome
+The next programme is deliberately bootstrapped by hand. The presence of sprint code is not evidence that
+the sprint system can safely develop itself.
 
-One bootstrap command installs the appliance on a supported clean VPS. The installer creates the chosen
-dedicated OS user, the private instance repository and the local data plane, and installs the board,
-session manager, memory service, dispatcher, background roles and schedules. No agent head is installed
-automatically.
+1. **Manual sprint: observer reliability.** Close the stale-resume and process-versus-work liveness gaps.
+2. **Manual sprint: Product/Issue/Task foundation.** Add Product, valid prioritised issues, sprint issue
+   references, project reservations, just-in-time tasks and terminal-task archival.
+3. **Self-hosted canary.** Run one short code-only sprint through the new observer path. It must create its
+   own task, survive a restart, keep resume current, close, archive the terminal task and leave the issue
+   open for a separate PO decision.
+
+The cutover is an explicit PO decision, recorded as `sprint system accepted for self-hosting`. A failed
+canary returns the programme to manual repair and is repeated; it never advances automatically.
+
+After cutover, the sprint system implements its remaining programme through itself:
+
+1. typed tasks: `code`, `research` and `operation`, with a versioned knowledge artifact required for every
+   research task and a structured state-evidence report for an operation;
+2. abstract routing levels (`low`, `medium`, `high`, `frontier`) resolved by the dispatcher into explicit
+   family, model and effort, with append-only per-round telemetry and a single-family degraded mode;
+3. task review convergence: a review-only budget with analysis on red review three, a hard decision on
+   five, one exceptional sixth fix round, and then a mechanical wait for the owner;
+4. durable product decision requests and `awaiting_decision` when the Definition of Done proves impossible
+   or materially incomplete;
+5. parallel product sprints whose project reservations do not overlap.
+
+Reviewer verdict and release decision remain distinct. Review stays independent and may report every real
+blocker. At the budget boundary the observer may accept a mechanically green, architecturally convergent
+increment with follow-up issues, reslice it, or use the last fix round. It does not rewrite a red review
+into green.
+
+## Milestone 1. Reliable fresh install
+
+### Goal
+
+A short bootstrap and install flow creates the appliance on a clean Ubuntu 24.04 VPS. It creates the
+chosen dedicated OS user, the private instance repository and the local data plane, and installs the
+board, session manager, memory service, dispatcher, background roles and schedules. Agent heads and
+provider logins remain a separate operator choice.
 
 ### User path
 
 ```text
 install secretary
-  -> choose installation user and private remote
-  -> fill credentials/.env
-  -> apply
+  -> bootstrap host with installation user and private remote
+  -> install a new instance or recover an existing one
+  -> connect agent heads
   -> status
 ```
 
@@ -80,19 +127,20 @@ install secretary
 
 - The product materialiser idempotently plans and applies packaged services and timers for the enabled
   components.
+- `secretary bootstrap` installs pinned Kanboard and Orca runtimes, starts the board and generates its
+  local credentials on Ubuntu 24.04.
 - Skills, units and the session-manager automations of background roles are derived from the product root
   and `automation.toml`; a repeat run keeps automation ids and unit names stable.
-- Existing role worktrees are synchronised, but creating missing worktrees is still part of the unfinished
-  clean-host flow.
+- Missing role worktrees are created from the product checkout and existing ones are synchronised.
 - `doctor` and the materialiser's verify step show missing or drifted host resources.
 
-The milestone stays open until there is a supported bootstrap command and a clean-host end-to-end run with
-no pre-prepared checkouts, board or session-manager state.
+The milestone stays open until a clean-host end-to-end run exercises the whole path with no pre-prepared
+checkouts, board or session-manager state.
 
-### Acceptance gate
+### Done when
 
-- A supported host has no pre-prepared home directory for the installation user, no checkouts, no board
-  and no session-manager state.
+- The Ubuntu 24.04 test host has no pre-prepared home directory for the installation user, no
+  checkouts, no board and no session-manager state.
 - Every host path and resource name is derived from the instance and the discovered host context.
 - The installer installs and configures the bundled board and session manager without a pre-prepared
   runtime.
@@ -103,12 +151,12 @@ no pre-prepared checkouts, board or session-manager state.
 
 ### Open questions
 
-- The exact package and install transport, and the supported session-manager version.
+- The compatibility and upgrade policy for the pinned board and session-manager versions.
 - Minimum CPU, RAM and disk for the production memory profile.
 
 ## Milestone 2. Git-backed recovery
 
-### Outcome
+### Goal
 
 The private instance repository is used as an automatic durable checkpoint of configuration and normalised
 state. The recovery contract requires no separate object store or backup host. Archive backup, offsite
@@ -139,7 +187,7 @@ install secretary
 The supported recover-from-private-remote flow and destructive-loss parity on a clean second target are
 implemented. Milestone 2 is closed; the remaining packaging and live-adopt work belongs to Milestone 1.
 
-### Acceptance gate
+### Done when
 
 - The checkpoint holds instance config, persona, the project and head registries, policies, the board
   export, memory facts and the necessary run and audit state.
@@ -151,7 +199,7 @@ implemented. Milestone 2 is closed; the remaining packaging and live-adopt work 
 - Once parity is confirmed, the main UX and the documentation no longer require an archive bundle or
   offsite transport.
 
-### Decisions taken
+### Decisions
 
 - The RPO is at most 30 minutes; the checkpoint push uses its own 30-minute window on top of the
   production tick.
@@ -160,7 +208,7 @@ implemented. Milestone 2 is closed; the remaining packaging and live-adopt work 
 
 ## Milestone 3. Head onboarding and explainable routing
 
-### Outcome
+### Goal
 
 The owner adds heads after bootstrap. The system discovers an installed CLI or offers to install it, runs
 the external auth flow, checks capabilities and creates runnable profiles. Routing picks a head and an
@@ -176,16 +224,22 @@ secretary head add
   -> probe
 ```
 
-### Acceptance gate
+### Done when
 
 - The model distinguishes agent runtime, account, account pool and head profile; a runtime is not equated
   with a model provider.
-- A card selects `light`, `standard` or `deep`, but may name a model or head explicitly.
+- Every task selects one required abstract level (`low`, `medium`, `high` or `frontier`). The observer sees
+  levels and model families, not concrete model names or effort values.
 - The router applies overrides and hard availability constraints first, then weighs capability, quota and
   reset state, and a preference for a different model family for review.
+- Worker and reviewer receive the same level. The dispatcher resolves both to explicit profiles, models
+  and efforts and may swap their families after a convergence signal.
+- If one provider budget is already exhausted, work continues in a visible single-family degraded mode;
+  predicting budget exhaustion and rotating accounts in advance is not part of the first routing step.
 - An account in an `unknown` state is available optimistically; quota, auth and transient failures move it
   into an explainable circuit-breaker state.
-- Every run records the resolved runtime, model, account and decision trace.
+- Every run records the requested level and the resolved family, runtime, profile, model, explicit effort,
+  account, outcome and decision trace. Automatic model-quality scoring is a separate later task.
 
 ### Open questions
 
@@ -194,7 +248,7 @@ secretary head add
 
 ## Milestone 4. Daily control plane
 
-### Outcome
+### Goal
 
 The operator manages projects, settings and runtime through one product interface instead of assembling
 low-level commands by hand. The CLI stays the first interface; the board and a live terminal view cover
@@ -211,7 +265,7 @@ add project
   -> smoke card
 ```
 
-### Acceptance gate
+### Done when
 
 - A high-level project workflow folds the current add, provision and gate stages into a resumable flow.
 - `secretary status` combines services, schedules, heads, quota state, projects, cards, memory and
@@ -227,13 +281,13 @@ add project
 
 ## Milestone 5. Protocol runtime boundaries
 
-### Outcome
+### Goal
 
 Dependencies on the board backend, the session manager and specific CLIs are confined behind checkable
 contracts. This is not a public plugin API, but the ability to replace a backend without rewriting the task
 and agent lifecycle.
 
-### Acceptance gate
+### Done when
 
 - A board adapter implements the normalised task model, transitions, audit, and the export and import
   contract.
@@ -250,21 +304,22 @@ and agent lifecycle.
   in-house session backend.
 - Whether there is a real need for a second board backend and a public extension API.
 
-## Milestone 6. Public open-source release
+## Milestone 6. First supported release
 
-### Outcome
+### Goal
 
-A new user can install a supported release, walk the main path and understand its boundaries without
-knowing the project's internal history.
+A new user can install a versioned release, walk the main path and understand its boundaries without
+knowing the project's internal history. The repository, licence and contribution path are already
+public; this milestone is about making a release supportable rather than making the code visible.
 
-### Acceptance gate
+### Done when
 
 - There is a versioned package, release notes, a compatibility matrix, schema and data migrations, and
   rollback.
 - A clean-VM end-to-end run covers install, head onboarding, project add, a worker/reviewer task, the Git
   checkpoint and recovery on a second target.
-- The trusted single-user security boundary, credential scopes and agent host access are documented.
-- The licence, contribution path, issue templates and minimum deployment requirements are published.
+- The trusted single-user security boundary, credential scopes and agent host access remain documented.
+- Minimum deployment requirements are published.
 - The examples contain no private paths, accounts, projects or the author's historical repositories.
 
 ### Open questions

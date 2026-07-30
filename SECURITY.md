@@ -1,8 +1,8 @@
-# Security policy
+# Security
 
-## Supported versions
+## Current status
 
-The project is pre-1.0 and has no release branches. Only the current `main` receives fixes.
+The project is pre-1.0 and has no release branches. Development and fixes happen on `main`.
 
 ## Reporting a security problem
 
@@ -12,9 +12,7 @@ private vulnerability-reporting flow. Rough notes and incomplete reports are wel
 Please do not include working credentials, private keys, recovery phrases, personal data or other
 secrets in a public report.
 
-## Security model
-
-Know what the product does and does not promise before you file a report.
+## Current security boundaries
 
 The appliance assumes **one trusted owner on one host**. Agent heads run as the installation user
 with that user's filesystem and network access. They are not sandboxed and are not treated as
@@ -31,10 +29,10 @@ untrusted tenants. Anything an agent can reach, a compromised agent can reach.
 - State pushed to the private remote passes a secret scan before every commit. A detected secret
   fails the commit closed rather than publishing it.
 
-In scope for a report: a way to read secrets without the installation key or the recovery phrase; a
-path that publishes secrets into the checkpoint past the scan; privilege escalation beyond the
-installation user; a remote path into board, memory or dispatcher state.
+Examples of security problems include a way to read secrets without the installation key or the
+recovery phrase; a path that publishes secrets into the checkpoint past the scan; privilege
+escalation beyond the installation user; or a remote path into board, memory or dispatcher state.
 
-Out of scope: a process already running as the installation user reading that user's files; the lack
-of worker sandboxing; at-rest encryption not protecting against host compromise. These are stated
-limits of the current model, not defects. If you think one of them should change, open an issue.
+A process already running as the installation user can read that user's files. Workers are not
+sandboxed, and at-rest encryption does not protect a compromised host. These are current design
+boundaries, but discussion and proposals to change them are welcome.

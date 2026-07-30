@@ -47,7 +47,7 @@ The public path to the board is `secretary task`. A card carries a `ref`, projec
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
-ideas → ready → in_progress → validate → done
+Issues → ready → in_progress → validate → done
                          └────────────→ blocked
 ```
 
@@ -66,16 +66,21 @@ python3 -m secretary task create --role po --project PROJECT --type code --title
 ```
 
 `create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
-Worker, reviewer and retro roles may only create Ideas; the PO may choose Ready. `--codex-mode` is
-valid only for a worker profile on a `codex` adapter. Without an override, launch mode comes from the
-head profile.
+On a Pipeline with the Issues column, a new execution task requires `--sprint`: the sprint must be
+open and the task project must be one of its reservations. A closed sprint and an unreserved project
+are separate errors, both before the first backend write. Tasks never accept product priority;
+`--priority` is rejected rather than ignored. Execution tasks are created in Ready, never in Issues.
+Old task-shaped Ideas remain readable after the supported board migration but are fail-closed: only
+the PO may explicitly triage one to Ready, which marks it as a task without inventing Product, issue
+kind or priority. `--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
+override, launch mode comes from the head profile.
 
-`archive` closes a card in the backend and removes it from ordinary active listings and exports without
+`archive` closes an execution task in the backend and removes it from ordinary active listings without
 deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
 supports idempotent retry through `--request-id`. Only a card with no live work can be archived:
 in-progress and validate cards, and cards with an active claim, are rejected. A card closed from Done
 stays a satisfied dependency; a card closed from any other column is not Done and does not unblock
-anything.
+anything. It cannot close a Product or Issue: use `secretary issue close` for the latter.
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (the full new text, not
 a diff), `--head`, `--review-head`. PO, dispatcher and observer may edit, but an ordinary card is only
@@ -85,6 +90,61 @@ event records the old and new digests; the full text of past versions is recover
 of the board export in the checkpoint. Comments stay the dialogue of an attempt; the spec lives only in
 the description.
 
+## Products and issues
+
+`secretary product` and `secretary issue` use typed records in the existing Pipeline backend. They do
+not introduce a file or a second board as a competing source of truth, so normal board export,
+checkpoint and restore carry their metadata and comments.
+
+```bash
+python3 -m secretary product create --role po --id secretary --project secretary --title Secretary
+python3 -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
+python3 -m secretary issue list --product secretary
+python3 -m secretary issue show --ref issue:123
+python3 -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
+python3 -m secretary issue close --role po --ref issue:123 --reason resolved
+```
+
+A Product id is stable and its non-empty project set must contain only ids registered under the
+instance `projects/` directory. Product ids cannot be duplicated. Every new issue requires its
+Product, one kind (`bug`, `feature`, `question`, `improvement`) and one priority (`P0` through `P3`).
+Priority changes require a non-empty reason, add an `[issue:priority]` board comment and append a
+durable audit event. Only the PO may close an issue, using exactly one of `resolved`, `invalid`,
+`duplicate` or `wont_do`; closure archives the backend record but leaves its comments and audit
+history available through `issue show --ref` and checkpoint recovery. `issue list --closed` includes
+both open and closed issues; without it the list contains only open issues.
+
+A Product and an Issue are not execution tasks and never enter the execution columns: `move` and `claim`
+both reject one before any write, whatever column it currently sits in. Work on an issue is a separate
+card the PO creates in Ready.
+
+A record belongs to the board rather than to one project, so every Product and Issue row is created in a
+single lane: the board's first active swimlane in the board's own order, position first and the swimlane
+id as the tie-break. The order is a property of the board, so concurrent writers and retries choose the
+same lane, and a board without named swimlanes keeps Kanboard's implicit default lane.
+
+Every Product and Issue write is staged before it touches the backend, and a staged write that is neither
+finished nor dropped blocks checkpoint and board export. A refusal that a retry cannot turn into a success
+therefore has to end the transaction rather than leave it: a `createTask` the backend declines is reported
+as `backend_rejected`, and once the board shows no row of that request the staged document is dropped with
+it. `validation` and `closed` refusals before the first backend write end the same way.
+
+A staged write that did reach the backend stays, and belongs to its own request id. Its supported repair is:
+
+```bash
+python3 -m secretary product transaction list
+python3 -m secretary product transaction retry --request-id REQUEST_ID
+python3 -m secretary product transaction discard --request-id REQUEST_ID
+python3 -m secretary product transaction adopt --path FILE
+```
+
+`retry` finishes the staged operation exactly where it stopped and commits its one audit event; a request
+already committed is answered with its record. `discard` drops a transaction only after reading the board:
+a create whose row exists and a priority or close change whose board comment exists are refused as
+`live_write` and have to be retried instead. `adopt` files a transaction document that lives outside the
+journal back under its own request id, which is how a document carried out of the journal comes back into
+`retry` or `discard`. The commands cover Product and Issue writes alike; the journal is one.
+
 ## Sprints
 
 A sprint is a data entity on a separate `Secretary sprints` board, not a Pipeline card. One board task
@@ -93,6 +153,7 @@ reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` ca
 
 ```bash
 python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
+  --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --repository REPO --request-id REQUEST_ID
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint show --ref sprint:ID
@@ -105,13 +166,76 @@ python3 -m secretary sprint reopen --role po --ref sprint:ID
 python3 -m secretary sprint close --role po --ref sprint:ID
 ```
 
-Stored fields are the goal, the Definition of Done text, repositories, open/closed/stopped status, a
+Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
+the reserved projects, open/closed/stopped status, a
 budget counter by event type, the current card and a structured resume entry. The six valid budget event
 types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
 them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
 an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
 budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity have no
 matching event and do not move the counter.
+
+A new sprint belongs to a Product, serves at least one of its open Issues and reserves at least one
+registered project. `--product` names an existing Product, every `--issue` is an open Issue of that
+Product, and every `--project` is an id from the instance project registry; `--repository` keeps its own
+meaning as the write-guard scope. An Issue of another Product and a closed Issue are refused with their
+own messages. One installation holds at most one open sprint: a second `create` is refused as
+`sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
+that, as `resource_conflict` naming the project and its holder. Every one of these checks is a read, so a
+refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
+returns the first event instead of colliding with the sprint it already opened.
+
+Because the rules are reads of live state, `create` and `reopen` hold one exclusive lock on the data
+directory (`sprints/admission.lock`) across the check and the write it admits. Two writers on the same
+installation are serialized by it, so the second sees the sprint the first opened rather than a state
+from before it. The lock is an admission gate only: it holds no sprint state and is released with the
+write.
+
+Admission runs in one fixed order, the one Product and Issue writes already use. `create` and `reopen`
+are the two transitions into `open` and both run it, on that same staged-intent journal:
+
+1. take the admission lock;
+2. under it, settle the request id first. A committed or staged intent of the same request id comes back
+   as it is, before any check of live state, so a repeat that overlaps the request it repeats is replayed
+   rather than refused as a conflict with the sprint it opened itself. The same request id carrying a
+   different payload is refused as `validation` before any side effect;
+3. check product, issues, registry and both conflict rules only for a fresh request. A staged intent is
+   resumed on the state it was admitted on, so a Product or Issue that changed after the refusal does not
+   turn a repeat into a validation error;
+4. apply the backend steps through the staged intent. Each one recognises what an earlier attempt of the
+   same request already did. A metadata answer other than `True` is a backend refusal, not a success:
+   the call reports `audit_pending` instead of `created` or `reopened`, the staged intent stays and the
+   retry with the same request id finishes that same operation;
+5. commit one audit event, however often the delivery repeats.
+
+The sprint reference is written last, and writing it is what publishes the sprint: a row on the sprint
+board counts as a sprint only once it carries one. An interrupted create is therefore never observed as
+an open sprint without its product, issues and reservations.
+
+An unfinished create holds nothing. Instead of holding the installation it compensates: a step refused
+after the row was created takes that row back, so no unreferenced row is left behind, and only when the
+backend also refuses that does the row stay for the repair to pick up. Before it publishes, a resumed
+create or reopen re-checks both conflict rules; if another sprint took the slot or the project meanwhile, the
+repeat is refused as `sprint_conflict` or `resource_conflict` naming that sprint and publishes nothing.
+The losing request is then filed again as a fresh one. Like a staged Product or Issue write, an
+unfinished sprint create blocks the checkpoint until it is retried or dropped.
+
+Sprints created before ownership existed carry none of these fields. They stay readable, exportable and
+restorable exactly as they are, and nothing fills the fields in for them: `show`, `status`, the board
+export and the checkpoint record leave the three fields out rather than answering `""` and `[]`. `reopen` re-checks every rule
+above, so such a sprint is refused with a message that names what it lacks; the supported move is to open
+a new sprint that owns its issues. `reopen` is refused the same way when the sprint's own issues have
+since been closed or its projects are held elsewhere.
+
+`sprint close` freezes the active cards linked to that sprint. It archives its terminal Done tasks with
+the normal task archive audit, leaves linked non-terminal cards on the board, and returns both lists.
+The Done transition clears the completed worker claim and its resolved routing fields, so that stale
+ownership does not prevent normal terminal archival; `archive` still refuses a live claim.
+Cards without that `sprint_ref` are not considered. Product and Issue records are never closure targets,
+including if malformed metadata links one to the sprint, so an Issue remains open until the PO calls
+`issue close`. The close request is staged: retrying the same request id after a lost archive or status
+reply resumes the same task set, does not archive a task twice, and records one sprint close event.
+Legacy sprints without reservations are closed without retroactively archiving cards.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
@@ -125,8 +249,11 @@ launched observer prompt but does not stop work. At the hard limit the dispatche
 `sprint resume` accepts JSON with required string fields `selected_step`, `selected_why`,
 `rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored separately from
 normal comments and carries a `[sprint:resume]` marker. `show` and `status` compute freshness from card
-audit records: missing data is `resume_missing`, and a record older than the latest non-routing card event
-is `resume_stale`. Neither command reads an observer transcript. `secretary status --json` exposes the
+audit records: missing data is `resume_missing`; a resume may trail a successful non-routing, non-guard-denied card event for up to
+five minutes, then is `resume_stale`. Neither command reads an observer transcript. The dispatcher records a
+durable delivery batch before it wakes or replaces an observer. An observer acknowledges it by passing the
+matching `--delivery-id` and `--through-event` from `status` to `sprint resume`; those values are audit payload,
+not part of the six stored resume fields. `secretary status --json` exposes the
 same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.

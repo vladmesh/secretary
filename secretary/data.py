@@ -173,6 +173,15 @@ def export_board(
     audit = TaskAudit(data_dir).status()
     if not audit["ok"]:
         raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
+    # Product/Issue writes own their private staged journals.  They cannot be
+    # reconstructed from an untyped partial backend row, so no checkpoint may
+    # export the board while one remains.
+    from secretary.product_issues import ProductIssueTransaction
+    product_issue = ProductIssueTransaction(data_dir, TaskAudit(data_dir)).status()
+    if not product_issue["ok"]:
+        raise RuntimeError(
+            f"board export blocked by {product_issue['pending']} unresolved Product/Issue transaction(s)"
+        )
 
     # One `pipeline export` instead of a `show` per card: the checkpoint writer runs this on
     # every dispatcher tick under `tick_lock`, and the per-card path cost a subprocess and five
@@ -244,6 +253,7 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
         "column": str(shown_card.get("column") or list_card.get("column") or ""),
         "position": _int_or_none(list_card.get("position")) or 0,
         "date_moved": _int_or_none(list_card.get("date_moved")),
+        "closed": bool(shown_card.get("closed", list_card.get("closed", False))),
         "metadata": {str(k): str(v) for k, v in sorted(metadata.items())},
         "fields": {
             "task_type": str(shown_card.get("task_type") or list_card.get("task_type") or ""),
@@ -307,6 +317,14 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         "goal": str(sprint.get("goal") or ""),
         "definition_of_done": str(sprint.get("definition_of_done") or ""),
         "repositories": [str(repo) for repo in sprint.get("repositories") or []],
+        # A sprint that predates ownership has none of the three fields, and the record
+        # keeps them absent rather than storing an empty value it was never given.
+        **({"product": str(sprint["product"])} if "product" in sprint else {}),
+        **({"issues": [str(issue) for issue in sprint["issues"] or []]} if "issues" in sprint else {}),
+        **(
+            {"reservations": [str(project) for project in sprint["reservations"] or []]}
+            if "reservations" in sprint else {}
+        ),
         "status": str(sprint.get("status") or ""),
         "budget": {"by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())}},
         "current_task": str(sprint.get("current_task") or ""),

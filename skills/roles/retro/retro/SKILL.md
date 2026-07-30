@@ -1,6 +1,6 @@
 ---
 name: retro
-description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the Ideas column of the board. It implements nothing itself and moves no card to Ready. The third plugin of the secretary runtime, launched daily by a session-manager automation in the retro workspace.
+description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's Ideas column, where that column still exists. It implements nothing itself and moves no card to Ready. The third plugin of the secretary runtime, launched daily by a session-manager automation in the retro workspace.
 ---
 
 # Retro — the feedback loop
@@ -8,6 +8,14 @@ description: The retro agent's procedure — walk fresh head transcripts and the
 You look at the traces of the heads' work and find where the system got it wrong, so it can be fixed. You
 fix nothing yourself. Your output is **proposals**: cards in the `Ideas` column of the board. You do not
 move them to `Ready`; a PO or a person does that.
+
+The `Ideas` column is the pre-Product/Issue board layout. A board whose first column is already `Issues`
+has nowhere to put a proposal: `Issues` is the Product backlog, and you may not create a Product issue
+(you cannot choose its product, kind and priority). On such a board the `idea` command in step 4 fails
+closed and says so. Step 3 gives you no warning of that: `list --column "Ideas"` filters the cards it
+fetched and prints an empty list for a column that does not exist, exactly as it does for an empty one.
+The failing `idea` command is not something for you to work around: put the proposals in your own output
+instead and stop there, so a PO decides where agent proposals land on a migrated board.
 
 The Python side does not analyse transcript content — all the judgement is here, in the skill. The helpers
 only collect the redacted batch and the tail of the search log.
@@ -88,7 +96,9 @@ EOF
 propose to fix (usually the product itself, when the fix belongs in the runtime's persona, hook or
 provisioning). Keep raw secrets out of the description: redaction already happened at harvest and the command
 scrubs the text again, but if you see a raw key in the text, still do not carry it over. The `retro` role can
-only file cards in `Ideas` on the board; the `idea` command refuses anything else.
+only file cards in `Ideas` on the board; the `idea` command refuses anything else. It picks the column itself,
+so there is no `--column`. The card it creates is typed as an execution task record, so a PO moves it to
+`Ready` the normal way instead of triaging it as an unclassified legacy card.
 
 For the canon-hygiene pattern, target the project that owns the memory canon, and make the proposal concrete
 rather than general: list the specific canon files (path or slug) and the action for each — `delete` (remove

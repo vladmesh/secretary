@@ -110,7 +110,9 @@ def write_launch_intent(
     merge two rounds and their routing into one.
     """
     previous = dict(getattr(record, "launch_intent", None) or {})
+    previous_workspace_settled = record.workspace_settled
     reserved = record.attempt_round if round_number is None else round_number
+    record.workspace_settled = False
     record.launch_intent = {
         "role": role,
         "action": action,
@@ -128,6 +130,7 @@ def write_launch_intent(
         runtime.save_records(payload, records)
     except STORAGE_ERRORS as exc:
         record.launch_intent = previous
+        record.workspace_settled = previous_workspace_settled
         return f"{type(exc).__name__}: {exc}"
     return None
 

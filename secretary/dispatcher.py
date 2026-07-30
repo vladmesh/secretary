@@ -56,6 +56,7 @@ from secretary.dispatcher_observer import (
     OBSERVER_ROLE,
     ObserverLaunchAborted,
     observer_launch_prompt as _observer_launch_prompt,
+    observer_queue_finished as _observer_queue_finished,
     observer_pid_file as _observer_pid_file,
 )
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
@@ -93,6 +94,7 @@ from secretary.dispatcher_review import (
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
+from secretary.dispatcher_tui import read_terminal_text as _read_terminal_text
 from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
@@ -747,6 +749,75 @@ class CommandHostRuntime:
             "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
         ])
 
+    def observer_status(self, record: Any) -> dict[str, Any]:
+        """Read the observer pane's output clock and completed-turn marker.
+
+        This is advisory work liveness, not process liveness.  The lifecycle still owns the pid
+        heartbeat, and an unreadable terminal deliberately returns no queue-end signal rather than
+        risking a replacement beside an observer that is merely invisible to Orca.
+        """
+        if self.mode == "noop" or not record.workspace or not (record.handle or record.leaf):
+            return {}
+        terminals = self._worktree_terminals(str(record.workspace))
+        terminal = next(
+            (
+                item for item in terminals
+                if (record.handle and item.get("handle") == record.handle)
+                or (record.leaf and item.get("leafId") == record.leaf)
+            ),
+            None,
+        )
+        if terminal is None or terminal.get("connected") is False:
+            return {}
+        try:
+            last = float(terminal.get("lastOutputAt")) / 1000.0
+        except (TypeError, ValueError):
+            return {}
+        try:
+            screen = _read_terminal_text(str(terminal.get("handle") or ""), run_json=self._run_json)
+        except (HostError, OSError, ValueError, TypeError):
+            return {"last_activity": last, "queue_finished": False}
+        return {
+            "last_activity": last,
+            "queue_finished": _observer_queue_finished(screen),
+        }
+
+    def nudge_observer(self, record: Any) -> None:
+        """Give a completed observer queue one event-driven turn without replacing its head."""
+        if self.mode == "noop":
+            return
+        workspace = str(getattr(record, "workspace", "") or "")
+        handle = str(getattr(record, "handle", "") or "")
+        leaf = str(getattr(record, "leaf", "") or "")
+        if not workspace or not (handle or leaf):
+            raise HostError("observer has no terminal handle for an event wake")
+        terminals = self._worktree_terminals(workspace)
+        terminal = next(
+            (
+                item for item in terminals
+                if (handle and item.get("handle") == handle) or (leaf and item.get("leafId") == leaf)
+            ),
+            None,
+        )
+        current = str(terminal.get("handle") or "") if isinstance(terminal, dict) else ""
+        if not current:
+            raise HostError("observer terminal is unavailable for an event wake")
+        delivery = getattr(record, "delivery", None)
+        delivery_id = str(getattr(delivery, "delivery_id", "") or "")
+        through_event = str(getattr(delivery, "through_event", "") or "")
+        message = "A linked card changed. Reread the live sprint board, take the next step, then record resume."
+        if delivery_id and through_event:
+            message += (
+                " Acknowledge this delivery in that resume with --delivery-id "
+                f"{delivery_id} --through-event {through_event}."
+            )
+        self._run_json([
+            "orca", "terminal", "send",
+            "--terminal", current, "--text", message,
+            "--enter",
+            "--json",
+        ])
+
     def _stop_observer_terminals(self, workspace: str) -> None:
         """Stop every pane of an observer workspace.
 
@@ -1077,11 +1148,33 @@ class CommandHostRuntime:
         merge while required checks are unsatisfied, so a non-green CI never lands even though the
         dispatcher has already re-run the gate on this same tick. Then fast-forward the project's
         own checkout (from the worker workspace's origin) so the next worktree bases on the merged
-        tree, matching the local-merge path."""
+        tree, matching the local-merge path.
+
+        The checkout tracks the project's default branch, not the card's base: a stacked card bases
+        on another `pipeline/<ref>` branch, and `_create_workspace` fetches that base itself. So the
+        refresh follows the default branch even when the PR landed on a stacked base, where
+        `origin/<base>` is a sibling of the checkout's branch and any unrelated card that merged
+        meanwhile makes it unmergeable. The card is already merged at this point, so the refresh
+        failing there is not the card's failure either; it stays best-effort and the deliverable
+        does not get reported as a merge that did not happen."""
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
-        self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+        default_branch = self.catalog.default_branch(task["project"], None)
+        if base == default_branch:
+            self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+            self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+            return
+        try:
+            self._run(
+                ["git", "-C", str(repo), "fetch", "origin", default_branch],
+                "post-merge fetch",
+            )
+            self._run(
+                ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{default_branch}"],
+                "post-merge fast-forward",
+            )
+        except HostError:
+            pass
 
     def stop(self, record: DispatcherRecord) -> None:
         if self.mode == "noop" or not record.workspace:
@@ -1143,6 +1236,8 @@ class CommandHostRuntime:
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             status = _head_process_status(pid_file)
             if not status.get("known") or not status.get("alive"):
+                if status.get("known"):
+                    Path(pid_file).unlink(missing_ok=True)
                 return
             # SIGTERM and SIGHUP remain pending for a SIGSTOPed retained worker.  Wake its group
             # before the graceful signal so green handoff does not wait out the whole grace period
@@ -1154,6 +1249,8 @@ class CommandHostRuntime:
         status = _head_process_status(pid_file)
         if status.get("known") and status.get("alive"):
             raise HostError(f"head process from {pid_file} is still running after stop")
+        if status.get("known"):
+            Path(pid_file).unlink(missing_ok=True)
 
     def _signal_head(self, pid_file: str, signal_number: int) -> None:
         try:
@@ -1640,6 +1737,9 @@ class CommandHostRuntime:
         # reuses the same attempt_id, so without it the second done-report collides with
         # the first and is idempotently deduped, leaving the dispatcher waiting forever.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
+        blocked_request = _attempt_request_id(
+            attempt_id, "worker-report-blocked", task["ref"], str(review_round)
+        )
         body_file = _body_file_path("report", task["ref"], review_round)
         sections = [
             f"# Task {task['ref']}",
@@ -1671,6 +1771,14 @@ class CommandHostRuntime:
                 "",
             ]
         sections += [
+            "## Scope of a rework",
+            "",
+            "Address a reviewer finding when its repair is local to this card. Use `report:blocked`",
+            "instead only for an obvious wrong cut: the requested fix contradicts this card, crosses",
+            "its explicit Out of scope, or requires a new durable protocol, product contract, or trust",
+            "boundary. Difficulty or size alone is not a reason to stop. In a blocked report, name the",
+            "conflict and the observer decision needed. Do not silently expand the supported boundary.",
+            "",
             "Before reporting done, stage AND commit everything on the worker branch: run",
             "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
             "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
@@ -1679,6 +1787,7 @@ class CommandHostRuntime:
             "Report through the secretary task protocol only:",
             *_body_file_instructions(body_file),
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --request-id {blocked_request} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -1704,6 +1813,12 @@ class CommandHostRuntime:
             # sprint a budget event.
             "A red verdict must list every blocker you have found in this round. Do not hold "
             "blockers back for a later round and do not widen the scope on the next one.",
+            "",
+            "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
+            "criterion or operational invariant, material assumptions, whether this branch introduced",
+            "the defect or it was pre-existing, and whether the repair appears local or would change",
+            "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
+            "evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
@@ -2135,11 +2250,7 @@ class DispatcherRuntime:
         # the old report, and the journal gets a second attempt instead of nothing. A committed
         # claim without a record is a genuine board divergence and still fails closed below.
         active = records.get(ref)
-        requeued = (
-            active is not None
-            and (active.attempt_id or attempt_id) == attempt_id
-            and self.audit.committed_event(_attempt_request_id(attempt_id, "claim", ref)) is not None
-        )
+        requeued = active is not None
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
             for action in (
@@ -2166,7 +2277,7 @@ class DispatcherRuntime:
             # workspace is what it is stopped through, not the handle: a head adopted from a launch
             # intent is running with no handle on record, and skipping it here would leave it in
             # the checkout the new round is about to hand a second head.
-            if active.review_handle or active.review_leaf or active.review_pid_file:
+            if active.owns_head("review"):
                 # A preempt out of Validate leaves the worker pane already closed by
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
@@ -2175,7 +2286,7 @@ class DispatcherRuntime:
                 )
                 if unconfirmed is not None:
                     return unconfirmed
-            if active.handle or active.workspace or active.worker_pid_file:
+            if active.needs_settling():
                 unconfirmed = self._stop_worker_confirmed(
                     active, ref, step="claim", attempt_id=attempt_id
                 )
@@ -2185,6 +2296,7 @@ class DispatcherRuntime:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
+        claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
@@ -2196,7 +2308,7 @@ class DispatcherRuntime:
             resolved_review_head=review_head,
             slug=task.get("workspace", {}).get("slug") or "",
             base_branch=task.get("workspace", {}).get("base_branch") or "",
-            request_id=_attempt_request_id(attempt_id, "claim", ref),
+            request_id=claim_request_id,
         )
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
@@ -2259,6 +2371,37 @@ class DispatcherRuntime:
                 "reason": "claim live board mismatch",
                 "divergence_id": divergence["id"],
             }
+        live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
+        if live_head.get("known") and live_head.get("alive"):
+            record.workspace = self.host.restore_workspace(claimed, record.worker)
+            record.worker_pid_file = _launch_pid_file(WORKER_ROLE, ref)
+            records[ref] = record
+            try:
+                self.host.stop_workspace(record)
+            except HostError as exc:
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=(
+                        "dispatcher found an unowned live worker and could not confirm its stop: "
+                        f"{scrub_host_output(str(exc))}"
+                    ),
+                    request_id=_attempt_request_id(
+                        record.attempt_id, "orphan-worker-stop-blocked", ref
+                    ),
+                )
+                self.save_records(payload, records)
+                return {
+                    "status": "blocked",
+                    "step": "claim",
+                    "action": "orphan-worker-stop-unconfirmed",
+                    "pilot_ref": ref,
+                    "attempt_id": record.attempt_id,
+                    "reason": "an unowned live worker could not be stopped",
+                }
+            _forget_role_head(record, WORKER_ROLE)
         # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
         # resolves the same path itself, and the answer is exactly what a tick that dies mid-launch
         # never sees. With it and the pid file in the record, the next tick can read the head's

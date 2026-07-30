@@ -16,7 +16,13 @@ from secretary.dispatcher_observer import (
     reconcile_observers,
     retry_pending_observer_stops,
 )
-from secretary.dispatcher_launch import launch_intent, stop_launch_intent
+from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
+    WORKER_ROLE,
+    forget_role_head,
+    launch_intent,
+    stop_launch_intent,
+)
 from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -28,6 +34,7 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
+from secretary.dispatcher_types import HostError
 from secretary.tasks import TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
 
@@ -863,12 +870,11 @@ def _reconcile_production(
     `_advance_active` only ever looks at cards the board currently reports as
     in_progress/validate, so a record whose card left that cycle from outside the
     dispatcher (a PO move, an archive, a delete) is invisible to it forever. This
-    runs every tick, before the active cards are advanced, and is the only place
-    that removes a record without also touching the card, its workspace or its
-    terminal: reconciliation observes drift the dispatcher did not cause, it does
-    not correct it. A controlled divergence closes the same way: once the card
-    tied to it is no longer in the active cycle, whatever the reason it opened,
-    it does not need an operator's eyes anymore.
+    runs every tick, before the active cards are advanced. A record owns every
+    head launched for the card, so reconciliation must settle those heads before
+    it can remove the record. A controlled divergence closes the same way: once
+    the card tied to it is no longer in the active cycle, whatever the reason it
+    opened, it does not need an operator's eyes anymore.
     """
     outcomes: list[dict[str, Any]] = []
     state_cache: dict[str, str | None] = {}
@@ -887,25 +893,15 @@ def _reconcile_production(
         if state is None or state in ("in_progress", "validate"):
             continue
         record = records[ref]
-        intent = launch_intent(record)
-        if intent:
-            # An unresolved bring-up is the only pointer to a head that may be running right now,
-            # and this record is the only pointer to that intent. `_tick_task` never sees this card
-            # — the board has taken it out of the active cycle — so the intent is settled here or
-            # not at all: a record dropped over a live head leaves it in the workspace, and the
-            # requeue that follows opens a second one beside it.
-            failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
-            if failure is not None:
-                outcomes.append({
-                    "status": "degraded",
-                    "step": "production-reconcile",
-                    "ref": ref,
-                    "action": "launch-intent-stop-unconfirmed",
-                    "reason": f"the head of an unresolved launch could not be stopped: {failure}",
-                    "record_state": record.state,
-                    "card_state": state,
-                })
-                continue
+        intent_action = str(launch_intent(record).get("action") or "")
+        stopped = _stop_record_heads(runtime, record, ref, state)
+        if stopped is not None:
+            outcomes.append(stopped)
+            continue
+        # Keep the settled record for `_claim`: its workspace is the checkout the next attempt
+        # must reuse, while every head and unresolved intent it used to own is now confirmed gone.
+        if state == "ready":
+            continue
         records.pop(ref)
         outcomes.append({
             "status": "ok",
@@ -915,7 +911,7 @@ def _reconcile_production(
             "reason": "card left the active dispatcher cycle",
             "record_state": record.state,
             "card_state": state,
-            **({"stopped_launch": str(intent.get("action") or "")} if intent else {}),
+            **({"stopped_launch": intent_action} if intent_action else {}),
         })
 
     divergences = payload.get("controlled_divergences")
@@ -940,6 +936,53 @@ def _reconcile_production(
                 "divergence_ids": closed_ids,
             })
     return outcomes
+
+
+def _stop_record_heads(
+    runtime: Any,
+    record: DispatcherRecord,
+    ref: str,
+    card_state: str,
+) -> dict[str, Any] | None:
+    """Stop every head owned by one record, or preserve the record and report the refusal."""
+    intent = launch_intent(record)
+    if intent:
+        failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
+        if failure is not None:
+            return {
+                "status": "degraded",
+                "step": "production-reconcile",
+                "ref": ref,
+                "action": "launch-intent-stop-unconfirmed",
+                "reason": f"the head of an unresolved launch could not be stopped: {failure}",
+                "record_state": record.state,
+                "card_state": card_state,
+            }
+    if not record.needs_settling():
+        return None
+    try:
+        if record.workspace:
+            runtime.host.stop_workspace(record)
+        else:
+            if record.owns_head(REVIEW_ROLE):
+                runtime.host.stop_head(record, REVIEW_ROLE)
+            if record.owns_head(WORKER_ROLE):
+                runtime.host.stop_head(record, WORKER_ROLE)
+    except HostError as exc:
+        return {
+            "status": "degraded",
+            "step": "production-reconcile",
+            "ref": ref,
+            "action": "head-stop-unconfirmed",
+            "reason": f"the card left the active cycle, but its heads could not be stopped: {exc}",
+            "record_state": record.state,
+            "card_state": card_state,
+        }
+    forget_role_head(record, WORKER_ROLE)
+    forget_role_head(record, REVIEW_ROLE)
+    if record.workspace:
+        record.workspace_settled = True
+    return None
 
 
 def _close_divergences_for_ref(payload: dict[str, Any], ref: str, card_state: str) -> list[str]:
@@ -1026,7 +1069,8 @@ def _production_tick_active(
     if mismatch is not None:
         return mismatch
     attempt_id = record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
-    return runtime._tick_task(task, records, payload, attempt_id)
+    outcome = runtime._tick_task(task, records, payload, attempt_id)
+    return outcome
 
 
 def _production_active_mismatch(
@@ -1041,26 +1085,16 @@ def _production_active_mismatch(
     actual_worker = task.get("claim", {}).get("worker")
     if actual_worker in (None, record.worker):
         return None
-    intent = launch_intent(record)
-    if intent:
-        # This record is dropped a few lines down, and while an unresolved bring-up sits on it, it
-        # is the only thing naming a head that may be running in that workspace. The mismatch runs
-        # before `_tick_task`, so nothing else will settle it: the head goes first, and a stop the
-        # host will not confirm leaves the card and its record exactly as they are for the next
-        # tick to retry. Blocking over a live worker is how the requeue opens a second one.
-        failure = stop_launch_intent(runtime, record, intent, str(intent.get("role") or ""))
-        if failure is not None:
-            return {
-                "status": "degraded",
-                "step": "production-recovery",
-                "ref": task["ref"],
-                "action": "launch-intent-stop-unconfirmed",
-                "reason": (
-                    "active task claim no longer matches production record, and the head of an "
-                    f"unresolved launch could not be stopped: {failure}"
-                ),
-            }
-        runtime.save_records(payload, records)
+    stopped = _stop_record_heads(
+        runtime, record, task["ref"], str(task.get("state") or "")
+    )
+    if stopped is not None:
+        stopped["step"] = "production-recovery"
+        stopped["reason"] = (
+            "active task claim no longer matches production record, and its heads could not be "
+            f"stopped: {stopped['reason']}"
+        )
+        return stopped
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,
