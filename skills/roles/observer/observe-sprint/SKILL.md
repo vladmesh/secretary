@@ -152,6 +152,33 @@ The exception is when a durable artifact is needed in a specific repository: tha
 Exactly one substantive sprint card is executing at a time. A new one is created only after the previous
 one has been fully analysed.
 
+Before creating a `code` card, work through this decision sequence and record the selected route in the
+card or resume entry:
+
+1. Delete an unnecessary path, behavior or layer if that advances the sprint without losing a supported
+   invariant.
+2. Reuse an existing project capability.
+3. Use the standard library or a native platform capability.
+4. Use an already installed dependency.
+5. Only then write the smallest new implementation that materially advances the sprint.
+
+This is a decision sequence after understanding the problem, not permission to cut corners. Inside the
+supported boundary, validation, error handling, security, accessibility, recovery and explicit
+Definition-of-Done requirements remain mandatory.
+
+Before requiring backward compatibility, a shim, an adapter or a fallback, identify the real producer and
+consumer: which released version created the state, whether it can exist on a live installation, who still
+depends on it, and whether it can safely be removed, drained or rejected at an upgrade boundary. Unmerged
+branches, abandoned prototypes and never-deployed intermediate formats are not supported legacy by default;
+retaining them needs an explicit product reason. If old transient state can safely be drained or repaired by
+the old version, consider a fail-closed upgrade precondition instead of an in-place migration layer. If you
+know or cannot establish that removal may lose real user data or break a supported installation path, ask
+the user for a decision rather than preserving every historical branch.
+
+The card or resume entry records the selected route, evidence for any retained compatibility, and why any
+new abstraction, dependency, shim or fallback is necessary. Do not impose a one-card-per-DoD mapping or a
+per-card retry budget: the sprint budget remains the global loop breaker.
+
 A card is fresh, self-sufficient for a head that does not have your context, limited to one repository
 from the sprint's `repositories`, and linked to the sprint immediately. The spec has: Goal, Context
 (pointers, not copy-paste), checkable Acceptance criteria, Out of scope.
@@ -188,8 +215,20 @@ Do not end the step while the card is in Ready, In progress or Validate, while c
 running, or before the pull request reaches a terminal result. Watch the card's state, its comments,
 reports, verdicts, pull request and CI.
 
-An ordinary red review and rework are neither a failure of the card nor a reason to intervene.
-Intervention is acceptable only when the work has observably gone against the sprint contract:
+When you see RED or Blocked evidence, classify the finding from the report evidence:
+
+- a local defect inside the card may return for supported rework or retry;
+- evidence that the planned architecture or card cut is wrong closes or preempts this attempt and is recut
+  differently; the next cut may be smaller, larger or a different approach;
+- hardening or compatibility outside the sprint is deferred or taken to the user.
+
+The dispatcher may already have started the first automatic rework before you wake. Do not promise or
+assume otherwise. You make the final classification because you have the sprint context. A reviewer provides
+evidence; it does not decide sprint scope. Record the classification and evidence in the card or resume entry.
+
+An ordinary red review and rework are neither a failure of the card nor a reason to intervene when the
+finding is a local defect. For a wrong cut, intervention is required when the work has observably gone
+against the sprint contract:
 
 1. Name the specific Definition of Done item being ignored or the out-of-scope boundary being crossed.
 2. Leave a comment on the card.
@@ -217,10 +256,14 @@ actual contribution. Record the conclusion in a resume entry and return to step 
 
 ## 8. Work through a Blocked card
 
+Apply the same classification to the Blocked evidence before identifying the immediate cause. Do not treat
+hardening or compatibility outside the sprint as a local implementation defect.
+
 Identify the class of cause and act accordingly:
 
 - an implementation defect — return the card to a supported rework or retry;
 - a bad spec or a wrong cut — preempt, rewrite the spec or create a fresh card;
+- hardening or compatibility outside the sprint — defer it or take it to the user;
 - a pipeline or runtime bug — follow the hotfix rules below;
 - missing access — record exactly what is missing and stop;
 - a product fork listed in the stop conditions — record the options and stop;

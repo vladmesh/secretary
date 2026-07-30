@@ -1142,11 +1142,33 @@ class CommandHostRuntime:
         merge while required checks are unsatisfied, so a non-green CI never lands even though the
         dispatcher has already re-run the gate on this same tick. Then fast-forward the project's
         own checkout (from the worker workspace's origin) so the next worktree bases on the merged
-        tree, matching the local-merge path."""
+        tree, matching the local-merge path.
+
+        The checkout tracks the project's default branch, not the card's base: a stacked card bases
+        on another `pipeline/<ref>` branch, and `_create_workspace` fetches that base itself. So the
+        refresh follows the default branch even when the PR landed on a stacked base, where
+        `origin/<base>` is a sibling of the checkout's branch and any unrelated card that merged
+        meanwhile makes it unmergeable. The card is already merged at this point, so the refresh
+        failing there is not the card's failure either; it stays best-effort and the deliverable
+        does not get reported as a merge that did not happen."""
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
-        self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+        default_branch = self.catalog.default_branch(task["project"], None)
+        if base == default_branch:
+            self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+            self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+            return
+        try:
+            self._run(
+                ["git", "-C", str(repo), "fetch", "origin", default_branch],
+                "post-merge fetch",
+            )
+            self._run(
+                ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{default_branch}"],
+                "post-merge fast-forward",
+            )
+        except HostError:
+            pass
 
     def stop(self, record: DispatcherRecord) -> None:
         if self.mode == "noop" or not record.workspace:
@@ -1611,6 +1633,9 @@ class CommandHostRuntime:
         # reuses the same attempt_id, so without it the second done-report collides with
         # the first and is idempotently deduped, leaving the dispatcher waiting forever.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
+        blocked_request = _attempt_request_id(
+            attempt_id, "worker-report-blocked", task["ref"], str(review_round)
+        )
         body_file = _body_file_path("report", task["ref"], review_round)
         sections = [
             f"# Task {task['ref']}",
@@ -1642,6 +1667,14 @@ class CommandHostRuntime:
                 "",
             ]
         sections += [
+            "## Scope of a rework",
+            "",
+            "Address a reviewer finding when its repair is local to this card. Use `report:blocked`",
+            "instead only for an obvious wrong cut: the requested fix contradicts this card, crosses",
+            "its explicit Out of scope, or requires a new durable protocol, product contract, or trust",
+            "boundary. Difficulty or size alone is not a reason to stop. In a blocked report, name the",
+            "conflict and the observer decision needed. Do not silently expand the supported boundary.",
+            "",
             "Before reporting done, stage AND commit everything on the worker branch: run",
             "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
             "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
@@ -1650,6 +1683,7 @@ class CommandHostRuntime:
             "Report through the secretary task protocol only:",
             *_body_file_instructions(body_file),
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --request-id {blocked_request} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -1675,6 +1709,12 @@ class CommandHostRuntime:
             # sprint a budget event.
             "A red verdict must list every blocker you have found in this round. Do not hold "
             "blockers back for a later round and do not widen the scope on the next one.",
+            "",
+            "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
+            "criterion or operational invariant, material assumptions, whether this branch introduced",
+            "the defect or it was pre-existing, and whether the repair appears local or would change",
+            "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
+            "evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),

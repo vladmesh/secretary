@@ -640,6 +640,10 @@ When a reviewer records a green verdict, the production dispatcher takes the car
    rejected; the dispatcher neither forces nor resolves the conflict itself.
 2. Fast-forward the project's local checkout onto the new default-branch tip. For the product's own repository
    this is a self-deploy: the dispatcher merges and immediately pulls the change into the checkout it runs from.
+   A card whose base branch is another card's branch lands on that base, not on the default branch, and the
+   checkout is still only ever refreshed from the default branch. There the refresh is a courtesy for the next
+   worktree: it cannot fast-forward when the default branch has moved on since the base was cut, and a card whose
+   branch already merged is not sent back for rework over it.
 3. Tear down the workspace: stop the worktree's terminals (worker, reviewer and their child processes) and remove
    the worktree.
 
