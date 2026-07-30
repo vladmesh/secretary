@@ -478,14 +478,10 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
     ) or len(set(refs)) != len(refs):
         raise RestoreError("normalized sprint export has invalid references")
     for sprint in sprints:
-        if sprint.get("status") not in {"open", "opening", "closed", "stopped"}:
-            raise RestoreError("normalized sprint export has an invalid status")
-        # A sprint caught mid-admission by the checkpoint may not have written its goal
-        # yet; every sprint that finished opening has one.
-        if not isinstance(sprint.get("goal"), str) or not (
-            sprint["goal"].strip() or sprint["status"] == "opening"
-        ):
+        if not isinstance(sprint.get("goal"), str) or not sprint["goal"].strip():
             raise RestoreError("normalized sprint export has an invalid goal")
+        if sprint.get("status") not in {"open", "closed", "stopped"}:
+            raise RestoreError("normalized sprint export has an invalid status")
         if not isinstance(sprint.get("definition_of_done"), str) or not isinstance(
             sprint.get("current_task"), str
         ):

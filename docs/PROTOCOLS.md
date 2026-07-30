@@ -169,27 +169,26 @@ are the two transitions into `open` and both run it, on that same staged-intent 
    as it is, before any check of live state, so a repeat that overlaps the request it repeats is replayed
    rather than refused as a conflict with the sprint it opened itself. The same request id carrying a
    different payload is refused as `validation` before any side effect;
-3. check product, issues, registry and both conflict rules only for a request that holds nothing yet:
-   a fresh one, or a staged one whose row is not on the board;
+3. check product, issues, registry and both conflict rules only for a fresh request. A staged intent is
+   resumed on the state it was admitted on, so a Product or Issue that changed after the refusal does not
+   turn a repeat into a validation error;
 4. apply the backend steps through the staged intent. Each one recognises what an earlier attempt of the
    same request already did. A metadata answer other than `True` is a backend refusal, not a success:
    the call reports `audit_pending` instead of `created` or `reopened`, the staged intent stays and the
    retry with the same request id finishes that same operation;
 5. commit one audit event, however often the delivery repeats.
 
-A sprint reaches `open` through the intermediate status `opening`. The row is written with its own
-reference and `opening` before the fields the sprint was admitted with, and the status becomes `open`
-only once product, issues and reservations are on the row. An `opening` sprint is a separate observable
-state and is read as open nowhere: not by `show`, not by `status`, not by `sprint list --status open`,
-not by the write guard, and not by anything that treats a sprint as the live one. Every other write to it
-is refused, and only its own request id finishes it.
+The sprint reference is written last, and writing it is what publishes the sprint: a row on the sprint
+board counts as a sprint only once it carries one. An interrupted create is therefore never observed as
+an open sprint without its product, issues and reservations.
 
-`opening` is what holds the installation while an admitted delivery is unfinished. It holds both the
-single open-sprint slot and its reservations, so a fresh `create` while one exists is refused as
-`sprint_conflict` naming the unfinished sprint, whether or not the two want the same projects; the
-supported move is to repeat the original request id. A `create` refused by the backend before the row
-carries its reference holds nothing and is admitted again from scratch when it is repeated. Like a staged
-Product or Issue write, an unfinished sprint create blocks the checkpoint until it is retried.
+An unfinished create holds nothing. Instead of holding the installation it compensates: a step refused
+after the row was created takes that row back, so no unreferenced row is left behind, and only when the
+backend also refuses that does the row stay for the repair to pick up. Before it publishes, a resumed
+create or reopen re-checks both conflict rules; if another sprint took the slot or the project meanwhile, the
+repeat is refused as `sprint_conflict` or `resource_conflict` naming that sprint and publishes nothing.
+The losing request is then filed again as a fresh one. Like a staged Product or Issue write, an
+unfinished sprint create blocks the checkpoint until it is retried or dropped.
 
 Sprints created before ownership existed carry none of these fields. They stay readable, exportable and
 restorable exactly as they are, and nothing fills the fields in for them: `show`, `status`, the board

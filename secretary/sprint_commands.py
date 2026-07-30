@@ -19,7 +19,7 @@ def add_sprint_subcommands(subparsers) -> None:
     sprint = subparsers.add_parser("sprint", help="manage sprint entities on the dedicated Kanboard board")
     commands = sprint.add_subparsers(dest="sprint_command")
     listed = commands.add_parser("list")
-    listed.add_argument("--status", action="append", choices=("open", "opening", "closed", "stopped"))
+    listed.add_argument("--status", action="append", choices=("open", "closed", "stopped"))
     listed.set_defaults(handler=run_list)
     shown = commands.add_parser("show")
     shown.add_argument("--ref", required=True)
