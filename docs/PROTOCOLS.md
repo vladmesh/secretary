@@ -202,6 +202,8 @@ since been closed or its projects are held elsewhere.
 
 `sprint close` freezes the active cards linked to that sprint. It archives its terminal Done tasks with
 the normal task archive audit, leaves linked non-terminal cards on the board, and returns both lists.
+The Done transition clears the completed worker claim and its resolved routing fields, so that stale
+ownership does not prevent normal terminal archival; `archive` still refuses a live claim.
 Cards without that `sprint_ref` are not considered. Product and Issue records are never closure targets,
 including if malformed metadata links one to the sprint, so an Issue remains open until the PO calls
 `issue close`. The close request is staged: retrying the same request id after a lost archive or status

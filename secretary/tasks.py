@@ -974,7 +974,7 @@ class TaskWriter:
             try:
                 if legacy_unclassified:
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"record_type": "task"})
-                if target == "ready":
+                if target in {"ready", "done"}:
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
                 elif source == "validate":
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
@@ -1095,12 +1095,6 @@ class TaskWriter:
             sprint_guard_index_initialized,
             update_active_sprint_repositories,
         )
-
-        # A newly created, sprint-bound task is admitted by the sprint's reservations.
-        # Repositories remain the guard scope for writes to older unbound cards, but are
-        # not a second admission rule for this just-in-time path.
-        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
-            return {}
 
         if not sprint_guard_index_initialized(self.data_dir):
             try:

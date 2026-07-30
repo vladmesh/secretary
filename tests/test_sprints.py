@@ -873,8 +873,20 @@ class SprintTests(SprintFixture):
             role="po", actor="operator", project="secretary", task_type="code", title="open",
             target="ready", sprint=ref, request_id="close-open",
         )["task"]
+        writer.claim(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker",
+            request_id="close-claim",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="validate", reason="",
+            request_id="close-validate",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="done", reason="",
+            request_id="close-done-move",
+        )
         done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
-        done_row["column_id"] = 6
+        self.assertIsNone(TaskReader(self.client).show(done["ref"])["claim"]["worker"])  # type: ignore[arg-type]
         # Even malformed metadata cannot turn an Issue into a close target.
         self.client.metadata[22]["sprint_ref"] = ref
 
@@ -901,8 +913,19 @@ class SprintTests(SprintFixture):
             role="po", actor="operator", project="secretary", task_type="code", title="done",
             target="ready", sprint=ref, request_id="repair-done",
         )["task"]
+        writer.claim(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker",
+            request_id="repair-claim",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="validate", reason="",
+            request_id="repair-validate",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="done", reason="",
+            request_id="repair-done-move",
+        )
         done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
-        done_row["column_id"] = 6
         original_call = self.client.call
         lost = False
 
@@ -924,6 +947,26 @@ class SprintTests(SprintFixture):
         self.assertEqual(len([params for method, params in self.client.calls if method == "closeTask"]), 1)
         self.assertEqual(
             len([event for event in TaskAudit(self.tmp.name).events(reference=ref) if event["kind"] == "closed"]), 1,
+        )
+
+    def test_close_propagates_a_terminal_archive_refusal_without_leaving_a_transaction(self) -> None:
+        ref = self._create(goal="terminal refusal")["sprint"]["ref"]
+        writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        done = writer.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            target="ready", sprint=ref, request_id="terminal-done",
+        )["task"]
+        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
+        done_row["column_id"] = 6
+
+        with mock.patch.object(TaskWriter, "archive", side_effect=TaskError("live_work", "live worker", 3)):
+            with self.assertRaises(TaskError) as raised:
+                self.writer.close(role="po", actor="operator", reference=ref, request_id="terminal-close")
+
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=ref)], ["created"],
         )
 
     def test_cli_create_and_list_return_stable_json(self) -> None:
@@ -1131,6 +1174,29 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.assertEqual(first["event_id"], second["event_id"])
         event = next(event for event in TaskAudit(self.tmp.name).events() if event["request_id"] == "override-once")
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
+
+    def test_linked_task_still_obeys_the_held_project_guard(self) -> None:
+        for role, actor, request_id in (
+            ("po", "operator", "linked-po-denied"),
+            ("steward", "steward", "linked-steward-denied"),
+        ):
+            with self.assertRaises(TaskError) as raised:
+                self.tasks.create(
+                    role=role, actor=actor, project="secretary", task_type="code", title="guarded",
+                    sprint=self.ref, request_id=request_id,
+                )
+            self.assertEqual(raised.exception.code, "sprint_write_forbidden")
+
+        created = self.tasks.create(
+            role="po", actor="operator", project="secretary", task_type="code", title="overridden",
+            sprint=self.ref, sprint_override=True, sprint_override_reason="production incident",
+            request_id="linked-po-override",
+        )
+        event = next(event for event in TaskAudit(self.tmp.name).events() if event["request_id"] == "linked-po-override")
+        self.assertEqual(created["task"]["sprint"], self.ref)
+        self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
+        denied = [event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"]
+        self.assertEqual([event["payload"]["operation_request_id"] for event in denied], ["linked-po-denied", "linked-steward-denied"])
 
     def test_po_cannot_edit_a_held_card_without_an_audited_override(self) -> None:
         card = self.tasks.create(

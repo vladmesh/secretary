@@ -1052,7 +1052,10 @@ class SprintWriter:
             self.transactions.save(document)
             self.transactions.complete(document)
         except TaskError as exc:
-            raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from exc
+            if exc.code in {"validation", "closed", "not_found", "transition_forbidden", "live_work", "role_forbidden"} and not document.get("progress"):
+                self.transactions.discard(document)
+                raise
+            raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
         except (OSError, KeyError, TypeError):
             raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
         update_active_sprint_repositories(self.data_dir, self.reader.show(str(event["ref"]), include_cards=False))
