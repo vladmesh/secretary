@@ -1,9 +1,9 @@
 """Agent proposal route (secretary-900, secretary-901).
 
 Reviewer, retro, and steward file proposal cards only on the legacy board layout, where the first
-column is still `Ideas`. On a migrated board `Issues` is the Product backlog and no agent may
-create a Product issue, so the route fails closed instead of guessing a column. The `Ready`-only
-guard on every other create path stays untouched.
+column is still `Ideas`. A PO may also explicitly create a task there through `create --column Ideas`.
+On a migrated board `Issues` is the Product backlog and no agent may create a Product issue, so the
+routes fail closed instead of guessing a column. The default create column stays `Ready`.
 """
 from __future__ import annotations
 
@@ -93,29 +93,136 @@ class ProposalRouteTests(unittest.TestCase):
                     self.assertNotIn("createTask", [method for method, _ in calls])
                     self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
 
-    def test_ready_stays_the_only_other_column_a_card_is_created_in(self):
+    def test_steward_can_escalate_its_legacy_proposal_to_blocked_with_a_reason(self):
+        task = {
+            "id": 41, "reference": "secretary-901", "column_id": 1, "swimlane_id": 1,
+        }
+        metadata = {}
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)):
-            for column in ("Ideas", "Issues", "In progress", "Done"):
-                with self.subTest(column=column), self.assertRaisesRegex(
-                    model.GuardError, "created only in 'Ready'"
-                ):
-                    ops.create_card(project="secretary", task_type="code", title="t", column=column)
-        self.assertNotIn("createTask", [method for method, _ in calls])
 
-    def test_the_proposal_exception_is_not_reachable_through_the_public_create_card(self):
-        # The exception belongs to the two proposal helpers, not to the shared operation: no
-        # caller can ask create_card for a legacy column, whatever it passes.
+        def fake_call(method, **params):
+            calls.append((method, params))
+            if method == "getAllProjects":
+                return [{"id": 2, "name": ops.model.BOARD_NAME}]
+            if method == "getColumns":
+                return LEGACY_COLUMNS
+            if method == "getActiveSwimlanes":
+                return [{"id": 1, "name": "secretary"}]
+            if method == "createTask":
+                return 41
+            if method == "getTaskByReference":
+                return task if params["reference"] == task["reference"] else None
+            if method == "getTaskMetadata":
+                return metadata.copy()
+            if method == "saveTaskMetadata":
+                metadata.update(params["values"])
+                return True
+            if method == "getTaskTags":
+                return {}
+            if method == "moveTaskPosition":
+                task["column_id"] = params["column_id"]
+                return True
+            if method == "createComment":
+                return 1
+            raise AssertionError(f"unexpected call {method} {params}")
+
+        with mock.patch.object(ops, "call", side_effect=fake_call), \
+             mock.patch.object(ops, "_sync_head_tags"):
+            created = ops.steward_idea(
+                project="secretary", title="unresolved anomaly", description="analysis",
+                ref="secretary-901",
+            )
+            self.assertEqual(created["column"], "Ideas")
+            self.assertEqual(metadata[model.META_RECORD_TYPE], model.RECORD_TASK)
+
+            with self.assertRaisesRegex(model.GuardError, "non-empty escalation reason"):
+                ops.move_card("steward", "secretary-901", "Blocked")
+            self.assertEqual(task["column_id"], 1)
+
+            moved = ops.move_card(
+                "steward", "secretary-901", "Blocked", reason="needs an owner decision",
+            )
+
+        self.assertEqual(moved, {
+            "action": "moved", "reference": "secretary-901", "from": "Issues", "to": "Blocked",
+        })
+        self.assertEqual(task["column_id"], 5)
+        comment = next(params for method, params in calls if method == "createComment")
+        self.assertIn("needs an owner decision", comment["content"])
+
+    def test_po_can_explicitly_create_a_legacy_ideas_task(self):
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)):
-            with self.assertRaises(TypeError):
-                ops.create_card(project="secretary", task_type="code", title="t",
-                                column="Ideas", proposal=True)
-            for column in sorted(model.LEGACY_ISSUE_COLUMNS):
-                with self.subTest(column=column), self.assertRaisesRegex(
-                    model.GuardError, "created only in 'Ready'"
-                ):
-                    ops.create_card(project="secretary", task_type="code", title="t", column=column)
+        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
+             mock.patch.object(ops, "_sync_head_tags"):
+            result = ops.create_card(
+                project="secretary", task_type="code", title="agent idea", column="Ideas", role="po",
+            )
+
+        self.assertEqual(result["column"], "Ideas")
+        created = next(params for method, params in calls if method == "createTask")
+        self.assertEqual(created["column_id"], 1)
+        values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
+        self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
+
+    def test_only_po_can_create_in_legacy_ideas(self):
+        for role in (*model.ROLES, None):
+            if role == "po":
+                continue
+            with self.subTest(role=role):
+                calls = []
+                with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)):
+                    with self.assertRaisesRegex(model.GuardError, "created only in 'Ready'"):
+                        ops.create_card(
+                            project="secretary", task_type="code", title="t", column="Ideas", role=role,
+                        )
+                self.assertNotIn("createTask", [method for method, _ in calls])
+
+    def test_po_legacy_ideas_create_fails_closed_on_a_migrated_board(self):
+        calls = []
+        with mock.patch.object(ops, "call", side_effect=_fake_board(MIGRATED_COLUMNS, calls)):
+            with self.assertRaisesRegex(model.GuardError, "first column is not the legacy 'Ideas'"):
+                ops.create_card(
+                    project="secretary", task_type="code", title="agent idea", column="Ideas", role="po",
+                )
+        self.assertNotIn("createTask", [method for method, _ in calls])
+        self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
+
+    def test_create_default_remains_ready(self):
+        calls = []
+        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
+             mock.patch.object(ops, "_sync_head_tags"):
+            result = ops.create_card(project="secretary", task_type="code", title="approved", role="po")
+        self.assertEqual(result["column"], "Ready")
+        created = next(params for method, params in calls if method == "createTask")
+        self.assertEqual(created["column_id"], 2)
+
+    def test_cli_po_creates_legacy_ideas_and_defaults_to_ready(self):
+        for column, expected in (("Ideas", "Ideas"), (None, "Ready")):
+            with self.subTest(column=column):
+                calls = []
+                argv = [
+                    "--role", "po", "create", "--project", "secretary", "--type", "code",
+                    "--title", "agent idea", "--description", "body",
+                ]
+                if column:
+                    argv.extend(("--column", column))
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
+                     mock.patch.object(ops, "_sync_head_tags"), \
+                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main(argv)
+                self.assertEqual(code, 0, err.getvalue())
+                self.assertEqual(json.loads(out.getvalue())["column"], expected)
+
+        out, err, calls = io.StringIO(), io.StringIO(), []
+        with mock.patch.object(ops, "call", side_effect=_fake_board(MIGRATED_COLUMNS, calls)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main([
+                "--role", "po", "create", "--project", "secretary", "--type", "code",
+                "--title", "agent idea", "--column", "Ideas", "--description", "body",
+            ])
+        self.assertEqual(code, 3)
+        self.assertIn("first column is not the legacy 'Ideas'", err.getvalue())
         self.assertNotIn("createTask", [method for method, _ in calls])
 
 

@@ -324,9 +324,10 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
                 own_ref: str | None = None) -> dict:
     """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
 
-    Ready is the only column any caller of this function creates a card in; `Issues` is the
-    Product backlog. The single exception belongs to the agent proposal helpers and is not
-    reachable from here: it lives in _create_proposal_card, which picks the column itself.
+    Ready is the only default column. A PO may explicitly create a task in the first legacy Ideas
+    column; _proposal_column verifies that the board still has that layout and otherwise fails
+    closed. `Issues` is the Product backlog. The agent proposal helpers are the only other callers
+    that may create in legacy Ideas.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
     (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
@@ -348,10 +349,13 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller (po, and
     the proposal helpers, which scrub themselves before _create_proposal_card) passes no role
     and stays verbatim, unchanged from before."""
+    proposal = role == "po" and column in model.LEGACY_ISSUE_COLUMNS
+    if proposal:
+        column = _proposal_column(board_id())
     return _create_card(project=project, task_type=task_type, title=title, description=description,
                         ref=ref, column=column, blocked_by=blocked_by, head=head, slug=slug,
                         base_branch=base_branch, review_head=review_head, role=role,
-                        own_ref=own_ref, proposal=False)
+                        own_ref=own_ref, proposal=proposal)
 
 
 def _create_proposal_card(project: str, task_type: str, title: str, description: str,
