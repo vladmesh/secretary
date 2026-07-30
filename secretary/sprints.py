@@ -16,6 +16,7 @@ from secretary.tasks import (
     TaskAudit,
     TaskError,
     TaskReader,
+    TaskWriter,
     is_significant_card_event,
     _digest,
     _now,
@@ -67,6 +68,7 @@ _GUARD_INDEX = "sprints/active-repositories.json"
 _ADMISSION_LOCK = "sprints/admission.lock"
 SPRINT_CREATED = "created"
 SPRINT_REOPENED = "reopened"
+SPRINT_CLOSED = "closed"
 SPRINT_STATUSES = {"open", "closed", "stopped"}
 # An admitted create that the backend refused holds nothing: it compensates its own row
 # and re-checks the installation before it publishes.  These are the refusals of that
@@ -949,7 +951,122 @@ class SprintWriter:
 
     def close(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"po"})
-        return self._write("closed", role, actor, reference, request_id, {}, lambda sprint: self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_status": "closed"}))
+        request_id = request_id or str(uuid.uuid4())
+        self.audit.require_pending_layout()
+        intent = {"role": role, "actor": actor, "reference": reference}
+        with self.transactions.reference_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                document, committed = self.transactions.existing(
+                    request_id, kind=SPRINT_CLOSED, intent=intent,
+                )
+                if committed is not None:
+                    return self._close_result(committed)
+                if document is None:
+                    sprint = self.reader.show(reference, include_cards=False)
+                    targets = self._close_targets(sprint)
+                    event = self._event(
+                        SPRINT_CLOSED, role, actor, reference, request_id,
+                        {
+                            "intent": intent,
+                            "targets": targets,
+                            "archived_tasks": [],
+                            "remaining_tasks": list(targets["remaining"]),
+                        },
+                        sprint,
+                    )
+                    document, committed = self.transactions.begin(
+                        request_id, kind=SPRINT_CLOSED, intent=intent, event=event,
+                    )
+                    if committed is not None:
+                        return self._close_result(committed)
+                    if document is None:
+                        raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
+                return self._run_close(document)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _close_targets(self, sprint: dict[str, Any]) -> dict[str, list[str]]:
+        """Freeze this close's task set before any archival write.
+
+        A sprint that predates reservations is retained for recovery only.  Closing it
+        can change its status, but must not retrospectively archive arbitrary cards.
+        """
+        if "reservations" not in sprint:
+            return {"archive": [], "remaining": []}
+        cards = TaskReader(self.client).list(sprint=str(sprint["ref"]))
+        tasks = [
+            card for card in cards
+            if card.get("record_type") not in {"product", "issue"}
+        ]
+        return {
+            "archive": sorted(str(card["ref"]) for card in tasks if card.get("state") == "done"),
+            "remaining": sorted(str(card["ref"]) for card in tasks if card.get("state") != "done"),
+        }
+
+    def _run_close(self, document: dict[str, Any]) -> dict[str, Any]:
+        event = document.get("event")
+        if not isinstance(event, dict):
+            raise TaskError("audit_pending", "sprint close transaction has no audit event", 4)
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise TaskError("audit_pending", "sprint close transaction has no payload", 4)
+        targets = payload.get("targets")
+        if not isinstance(targets, dict):
+            raise TaskError("audit_pending", "sprint close transaction has no task targets", 4)
+        archive = targets.get("archive")
+        if not isinstance(archive, list) or not all(isinstance(ref, str) for ref in archive):
+            raise TaskError("audit_pending", "sprint close transaction has invalid archival targets", 4)
+        archived = payload.setdefault("archived_tasks", [])
+        if not isinstance(archived, list) or not all(isinstance(ref, str) for ref in archived):
+            raise TaskError("audit_pending", "sprint close transaction has invalid archival progress", 4)
+        try:
+            writer = TaskWriter(self.client, data_dir=self.data_dir) if archive else None
+            for task_ref in archive:
+                if task_ref in archived:
+                    continue
+                assert writer is not None
+                writer.archive(
+                    role="po",
+                    actor=str(document["intent"]["actor"]),
+                    reference=task_ref,
+                    reason=f"archived when sprint {event['ref']} closed",
+                    request_id=_close_archive_request_id(str(document["request_id"]), task_ref),
+                )
+                archived.append(task_ref)
+                self.transactions.save(document)
+            sprint = self.reader.show(str(event["ref"]), include_cards=False)
+            if sprint["status"] != "closed":
+                document.setdefault("progress", {})["status_started"] = True
+                self.transactions.save(document)
+                if self.client.call(
+                    "saveTaskMetadata",
+                    task_id=_sprint_number(sprint),
+                    values={"sprint_status": "closed"},
+                ) is not True:
+                    raise TaskError("backend_error", "Kanboard rejected sprint closure", 1)
+                sprint = self.reader.show(str(event["ref"]), include_cards=False)
+                if sprint["status"] != "closed":
+                    raise TaskError("backend_error", "sprint closure remains incomplete", 1)
+            document.setdefault("progress", {})["status_done"] = True
+            self.transactions.save(document)
+            self.transactions.complete(document)
+        except TaskError as exc:
+            raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from exc
+        except (OSError, KeyError, TypeError):
+            raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
+        update_active_sprint_repositories(self.data_dir, self.reader.show(str(event["ref"]), include_cards=False))
+        return self._close_result(event)
+
+    def _close_result(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        return {
+            "action": SPRINT_CLOSED,
+            "sprint": self.reader.show(str(event["ref"])),
+            "event_id": str(event["event_id"]),
+            "archived_tasks": list(payload.get("archived_tasks") or []),
+            "remaining_tasks": list(payload.get("remaining_tasks") or []),
+        }
 
     def reopen(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
         """Reopen a sprint that still satisfies every rule for an open sprint.
@@ -1156,6 +1273,11 @@ def _is_sprint_row(raw: Any) -> bool:
 
 def _create_marker(request_id: str) -> str:
     return "[secretary-sprint-transaction:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest() + "]"
+
+
+def _close_archive_request_id(request_id: str, reference: str) -> str:
+    digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
+    return f"{request_id}:sprint-close-archive:{digest}"
 
 
 def _unique_strings(values: list[str]) -> list[str]:

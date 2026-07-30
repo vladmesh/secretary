@@ -542,6 +542,7 @@ class TaskWriter:
         family_preference: str = "auto",
         codex_launch_mode: str = "",
         sprint: str = "",
+        priority: str = "",
         budget_event: str = "",
         sprint_override: bool = False,
         sprint_override_reason: str = "",
@@ -562,6 +563,7 @@ class TaskWriter:
         family_preference = family_preference.strip() or "auto"
         codex_launch_mode = codex_launch_mode.strip()
         sprint = sprint.strip()
+        priority = priority.strip()
         budget_event = budget_event.strip()
         sprint_override_reason = sprint_override_reason.strip()
         if not project:
@@ -579,6 +581,8 @@ class TaskWriter:
             raise TaskError("legacy_layout", "execution tasks cannot be created in Issues; create a Ready task", 2)
         if target == "issues":
             raise TaskError("transition_forbidden", "execution tasks cannot be created in Issues", 3)
+        if "Issues" in columns.values() and not sprint:
+            raise TaskError("validation", "task creation requires an open sprint", 2)
         if role in {"worker", "reviewer", "retro"} and target != "ideas":
             raise TaskError("role_forbidden", f"{role} may create only ideas cards", 3)
         if complexity not in _COMPLEXITIES:
@@ -587,6 +591,8 @@ class TaskWriter:
             raise TaskError("validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2)
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
             raise TaskError("validation", "codex launch mode must be exec or tui", 2)
+        if priority:
+            raise TaskError("validation", "tasks do not accept product priority", 2)
         if slug and not _SLUG_RE.match(slug):
             raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
         linked_sprint: dict[str, Any] | None = None
@@ -596,6 +602,12 @@ class TaskWriter:
             linked_sprint = SprintReader(self.client).show(sprint, include_cards=False)
             if linked_sprint["status"] != "open":
                 raise TaskError("closed", "cannot link a new card to a closed or stopped sprint", 3)
+            if project not in linked_sprint.get("reservations", []):
+                raise TaskError(
+                    "sprint_project_unreserved",
+                    f"project {project!r} is not reserved by sprint {sprint}",
+                    3,
+                )
         if budget_event not in {"", "recreated_task", "hotfix"}:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
@@ -1083,6 +1095,12 @@ class TaskWriter:
             sprint_guard_index_initialized,
             update_active_sprint_repositories,
         )
+
+        # A newly created, sprint-bound task is admitted by the sprint's reservations.
+        # Repositories remain the guard scope for writes to older unbound cards, but are
+        # not a second admission rule for this just-in-time path.
+        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
+            return {}
 
         if not sprint_guard_index_initialized(self.data_dir):
             try:
