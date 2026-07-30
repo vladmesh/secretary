@@ -151,7 +151,8 @@ class ProductIssueTransaction:
     def __init__(self, data_dir: str | Path, audit: TaskAudit) -> None:
         board = Path(data_dir) / "board"
         self.directory = board / "product-issue-transactions"
-        self.lock_path = board / ".product-issue-transactions.lock"
+        # Product/Issue claims and generic audit claims share one request-id namespace.
+        self.lock_path = board / ".audit.lock"
         self.audit = audit
 
     def _path(self, request_id: str) -> Path:
@@ -182,6 +183,14 @@ class ProductIssueTransaction:
         return event.get("kind") == kind and isinstance(payload, dict) and payload.get("intent") == intent
 
     def existing(self, request_id: str, *, kind: str, intent: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        with self._lock() as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return self._existing_locked(request_id, kind=kind, intent=intent)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _existing_locked(self, request_id: str, *, kind: str, intent: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         committed = self.audit.committed_event(request_id)
         if committed is not None:
             if not self._matches(committed, kind=kind, intent=intent):
@@ -193,6 +202,9 @@ class ProductIssueTransaction:
             except OSError:
                 raise TaskError("audit_pending", "Product/Issue audit cleanup is pending repair", 4) from None
             return None, committed
+        # A generic record is a live claim in the same public request-id namespace.
+        if self.audit.pending_event(request_id) is not None:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
         path = self._path(request_id)
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
@@ -204,11 +216,14 @@ class ProductIssueTransaction:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
         return document, None
 
-    def begin(self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    def begin(self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         path = self._path(request_id)
         with self._lock() as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
+                existing, committed = self._existing_locked(request_id, kind=kind, intent=intent)
+                if existing is not None or committed is not None:
+                    return existing, committed
                 try:
                     document = json.loads(path.read_text(encoding="utf-8"))
                 except FileNotFoundError:
@@ -218,9 +233,36 @@ class ProductIssueTransaction:
                     raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
                 if document.get("kind") != kind or document.get("intent") != intent:
                     raise TaskError("validation", "request id belongs to another operation or payload", 2)
-                return document
+                return document, None
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def pending_for_reference(self, reference: str, *, excluding: str) -> list[dict[str, Any]]:
+        try:
+            paths = list(self.directory.glob("v1-*.json"))
+        except OSError:
+            raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+        result = []
+        for path in paths:
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+            if document.get("request_id") != excluding and document.get("intent", {}).get("reference") == reference:
+                result.append(document)
+        return result
+
+    def status(self) -> dict[str, int | bool]:
+        try:
+            pending = sum(path.is_file() for path in self.directory.glob("v1-*.json"))
+        except OSError:
+            pending = 1
+        return {"ok": pending == 0, "pending": pending}
+
+    def issue_lock(self, reference: str):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
+        return open(self.directory / f".issue-{digest}.lock", "a+", encoding="utf-8")
 
     def save(self, document: dict[str, Any]) -> None:
         request_id = document.get("request_id")
@@ -388,6 +430,10 @@ class ProductIssueStore:
         try:
             card = self._transaction_card(document)
         except TaskError:
+            if document.get("progress", {}).get("create_started"):
+                # The backend may have committed before losing its reply.  Without a
+                # durable card id or reference, another create would be a duplicate.
+                raise TaskError("audit_pending", "Product/Issue create reply is unresolved; locate the staged row before retrying", 4)
             event = document["event"]
             reference = str(event.get("ref") or "")
             if not reference:
@@ -508,10 +554,20 @@ class ProductIssueStore:
         except (OSError, KeyError, TypeError):
             raise TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4) from None
 
+    def _begin(self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        return self.transactions.begin(request_id, kind=kind, intent=intent, event=event)
+
+    def _finish_priorities_before_close(self, reference: str, request_id: str) -> None:
+        """A terminal close may not strand a previously staged priority change."""
+        for document in self.transactions.pending_for_reference(reference, excluding=request_id):
+            if document.get("kind") == "issue_priority_changed":
+                self._complete_transaction(document, self._finish_priority)
+
     def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not _ID.fullmatch(product_id) or not title.strip() or not projects or len(set(projects)) != len(projects):
             raise TaskError("validation", "product needs a valid id, title and non-empty unique project set", 2)
         request_id = request_id or str(uuid.uuid4())
+        self.audit.require_pending_layout()
         intent = {"record_type": PRODUCT_TYPE, "product_id": product_id, "product_projects": json.dumps(sorted(projects), separators=(",", ":")), "title": title, "description": description, "actor": actor}
         document, completed = self.transactions.existing(request_id, kind="product_created", intent=intent)
         if completed is not None:
@@ -525,7 +581,11 @@ class ProductIssueStore:
             if self.client.call("getTaskByReference", project_id=board_id, reference=reference):
                 raise TaskError("validation", f"product {product_id!r} already exists", 2)
             event = self._transaction_event(kind="product_created", actor=actor, reference=reference, request_id=request_id, intent=intent)
-            document = self.transactions.begin(request_id, kind="product_created", intent=intent, event=event)
+            document, completed = self._begin(request_id, kind="product_created", intent=intent, event=event)
+            if completed is not None:
+                return self.show_product(product_id)
+            if document is None:
+                raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
         self._complete_transaction(document, self._finish_create)
         return self.show_product(product_id)
 
@@ -533,6 +593,7 @@ class ProductIssueStore:
         if not product.strip() or issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
             raise TaskError("validation", "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)", 2)
         request_id = request_id or str(uuid.uuid4())
+        self.audit.require_pending_layout()
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
         intent = {"record_type": ISSUE_TYPE, "product": product, "issue_kind": issue_kind, "priority": priority, "title": title, "description": description, "actor": actor}
@@ -543,7 +604,11 @@ class ProductIssueStore:
             self.show_product(product)
             self._board()
             event = self._transaction_event(kind="issue_created", actor=actor, reference=reference, request_id=request_id, intent=intent)
-            document = self.transactions.begin(request_id, kind="issue_created", intent=intent, event=event)
+            document, completed = self._begin(request_id, kind="issue_created", intent=intent, event=event)
+            if completed is not None:
+                return self.show_issue(str(completed["ref"]))
+            if document is None:
+                raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
         self._complete_transaction(document, self._finish_create)
         return self.show_issue(str(document["event"]["ref"]))
 
@@ -551,33 +616,54 @@ class ProductIssueStore:
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
+        self.audit.require_pending_layout()
         intent = {"reference": reference, "priority": priority, "reason": reason, "actor": actor}
-        document, completed = self.transactions.existing(request_id, kind="issue_priority_changed", intent=intent)
-        if completed is not None:
-            return self.show_issue(reference)
-        if document is None:
-            card, metadata = self._find(reference, ISSUE_TYPE)
-            if int(card.get("is_active", 1) or 0) == 0:
-                raise TaskError("closed", "cannot reprioritize a closed issue", 3)
-            event = self._transaction_event(kind="issue_priority_changed", actor=actor, reference=reference, request_id=request_id, intent=intent)
-            event["payload"] = {"intent": intent, "from": metadata.get(META_ISSUE_PRIORITY, ""), "to": priority, "reason": reason}
-            document = self.transactions.begin(request_id, kind="issue_priority_changed", intent=intent, event=event)
-        self._complete_transaction(document, self._finish_priority)
-        return self.show_issue(reference)
+        with self.transactions.issue_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                document, completed = self.transactions.existing(request_id, kind="issue_priority_changed", intent=intent)
+                if completed is not None:
+                    return self.show_issue(reference)
+                if document is None:
+                    card, metadata = self._find(reference, ISSUE_TYPE)
+                    if int(card.get("is_active", 1) or 0) == 0:
+                        raise TaskError("closed", "cannot reprioritize a closed issue", 3)
+                    event = self._transaction_event(kind="issue_priority_changed", actor=actor, reference=reference, request_id=request_id, intent=intent)
+                    event["payload"] = {"intent": intent, "from": metadata.get(META_ISSUE_PRIORITY, ""), "to": priority, "reason": reason}
+                    document, completed = self._begin(request_id, kind="issue_priority_changed", intent=intent, event=event)
+                    if completed is not None:
+                        return self.show_issue(reference)
+                    if document is None:
+                        raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
+                self._complete_transaction(document, self._finish_priority)
+                return self.show_issue(reference)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def close_issue(self, *, reference: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if reason not in ISSUE_CLOSE_REASONS:
             raise TaskError("validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2)
         request_id = request_id or str(uuid.uuid4())
+        self.audit.require_pending_layout()
         intent = {"reference": reference, "reason": reason, "actor": actor}
-        document, completed = self.transactions.existing(request_id, kind="issue_closed", intent=intent)
-        if completed is not None:
-            return self.show_issue(reference)
-        if document is None:
-            card, _ = self._find(reference, ISSUE_TYPE)
-            if int(card.get("is_active", 1) or 0) == 0:
-                raise TaskError("closed", "issue is already closed", 3)
-            event = self._transaction_event(kind="issue_closed", actor=actor, reference=reference, request_id=request_id, intent=intent)
-            document = self.transactions.begin(request_id, kind="issue_closed", intent=intent, event=event)
-        self._complete_transaction(document, self._finish_close)
-        return self.show_issue(reference)
+        with self.transactions.issue_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                document, completed = self.transactions.existing(request_id, kind="issue_closed", intent=intent)
+                if completed is not None:
+                    return self.show_issue(reference)
+                self._finish_priorities_before_close(reference, request_id)
+                if document is None:
+                    card, _ = self._find(reference, ISSUE_TYPE)
+                    if int(card.get("is_active", 1) or 0) == 0:
+                        raise TaskError("closed", "issue is already closed", 3)
+                    event = self._transaction_event(kind="issue_closed", actor=actor, reference=reference, request_id=request_id, intent=intent)
+                    document, completed = self._begin(request_id, kind="issue_closed", intent=intent, event=event)
+                    if completed is not None:
+                        return self.show_issue(reference)
+                    if document is None:
+                        raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
+                self._complete_transaction(document, self._finish_close)
+                return self.show_issue(reference)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

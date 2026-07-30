@@ -320,7 +320,18 @@ class TaskAudit:
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
         os.makedirs(self.pending_dir, exist_ok=True)
         self._require_v2_pending_layout()
-        self._atomic_json(self._pending_path(request_id), event)
+        with open(self.lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                committed = self.committed_event(request_id)
+                if committed is not None:
+                    self._require_same_event(committed, event)
+                    return
+                if self._product_issue_pending(request_id):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                self._atomic_json(self._pending_path(request_id), event)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def append(self, request_id: str, event: dict[str, Any]) -> str:
         os.makedirs(self.board_dir, exist_ok=True)
@@ -328,11 +339,14 @@ class TaskAudit:
         with open(self.lock_path, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                if not self._has_request(request_id):
+                committed = self.committed_event(request_id)
+                if committed is None:
                     with open(self.events_path, "a", encoding="utf-8") as events:
                         events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
                         events.flush()
                         os.fsync(events.fileno())
+                else:
+                    self._require_same_event(committed, event)
                 pending = self._pending_path(request_id)
                 if os.path.exists(pending):
                     os.unlink(pending)
@@ -449,6 +463,20 @@ class TaskAudit:
                 return any(json.loads(line).get("request_id") == request_id for line in events if line.strip())
         except FileNotFoundError:
             return False
+
+    def _product_issue_pending(self, request_id: str) -> bool:
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return os.path.exists(os.path.join(self.board_dir, "product-issue-transactions", f"v1-{digest}.json"))
+
+    @staticmethod
+    def _require_same_event(existing: dict[str, Any], event: dict[str, Any]) -> None:
+        """A request id is an ownership claim, not merely an append de-duplication key."""
+        if existing != event:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+
+    def require_pending_layout(self) -> None:
+        """Run the released generic-pending upgrade gate before a new mutation starts."""
+        self._require_v2_pending_layout()
 
     @staticmethod
     def _atomic_json(path: str, document: dict[str, Any]) -> None:

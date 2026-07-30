@@ -10,7 +10,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.product_issues import ProductIssueStore
-from secretary.tasks import TaskError, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from tests.test_tasks import WriteKanboard
 
 
@@ -449,6 +449,92 @@ class ProductIssueStoreTests(unittest.TestCase):
         with self.assertRaises(TaskError) as raised:
             self.store.audit.status()
         self.assertEqual(raised.exception.code, "upgrade_required")
+
+    def test_generic_pending_request_id_blocks_product_before_backend_write(self) -> None:
+        generic = {
+            "event_id": "generic-shared", "request_id": "shared", "kind": "commented",
+            "payload": {"body_sha256": "x"}, "ref": "secretary-468",
+        }
+        TaskAudit(self.root / "data").stage("shared", generic)
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="shared",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(TaskAudit(self.root / "data").pending_event("shared"), generic)
+        self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
+
+    def test_create_reply_loss_never_retries_an_unidentified_row(self) -> None:
+        original_call = self.client.call
+        failed = False
+
+        def lose_create_reply(method: str, **params: object) -> object:
+            nonlocal failed
+            result = original_call(method, **params)
+            if method == "createTask" and not failed:
+                failed = True
+                raise TaskError("backend_error", "lost create reply", 1)
+            return result
+
+        self.client.call = lose_create_reply  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="lost-create",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        with self.assertRaises(TaskError):
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="lost-create",
+            )
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+    def test_close_repairs_an_older_pending_priority_before_terminal_write(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        original_call = self.client.call
+        failed = False
+
+        def reject_priority_comment_once(method: str, **params: object) -> object:
+            nonlocal failed
+            if method == "createComment" and not failed:
+                failed = True
+                self.client.calls.append((method, params))
+                return 0
+            return original_call(method, **params)
+
+        self.client.call = reject_priority_comment_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError):
+            self.store.update_priority(
+                reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority",
+            )
+        closed = self.store.close_issue(
+            reference=issue["ref"], reason="resolved", actor="po", request_id="close",
+        )
+        self.assertTrue(closed["closed"])
+        self.assertEqual(closed["priority"], "P0")
+        self.assertEqual(
+            [event["kind"] for event in self.store.audit.events() if event.get("ref") == issue["ref"]],
+            ["issue_created", "issue_priority_changed", "issue_closed"],
+        )
+
+    def test_generic_upgrade_gate_runs_before_product_mutation(self) -> None:
+        pending = self.root / "data" / "board" / "pending-audit"
+        pending.mkdir(parents=True)
+        (pending / "old-generic.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="upgrade",
+            )
+        self.assertEqual(raised.exception.code, "upgrade_required")
+        self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
 
 
 if __name__ == "__main__":
