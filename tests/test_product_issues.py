@@ -168,6 +168,41 @@ class ProductIssueStoreTests(unittest.TestCase):
                 self.assertEqual(writer.audit.status(), {"ok": True, "pending": 0})
                 self.assertFalse(Path(writer.audit.events_path).exists())
 
+    def test_pending_claim_replay_and_reconcile_refuse_a_product_or_issue(self) -> None:
+        # The supported partial-write state of a generic claim: the claim metadata committed and
+        # the column move was lost. Neither the retry with the same request id nor reconcile may
+        # finish that move once the card is a Product or an Issue — both replay through
+        # _finish_pending_claim, which never reaches the claim mutation.
+        for record_type in ("product", "issue"):
+            with self.subTest(record_type=record_type):
+                writer = TaskWriter(self.client, data_dir=self.root / f"data-{record_type}")
+                self.client.tasks[0]["column_id"] = 2
+                self.client.metadata[12] = {"project": "secretary", "task_type": "code", "claim": ""}
+                self.client.fail_move = True
+                request_id = f"pending-claim-{record_type}"
+                claim = dict(
+                    role="dispatcher", actor="d", reference="secretary-468",
+                    worker="replayed-worker", request_id=request_id,
+                )
+                with self.assertRaisesRegex(TaskError, "audit repair"):
+                    writer.claim(**claim)
+                self.assertEqual(writer.audit.status(), {"ok": False, "pending": 1})
+
+                self.client.fail_move = False
+                self.client.metadata[12]["record_type"] = record_type
+                self.client.calls.clear()
+
+                with self.assertRaises(TaskError) as raised:
+                    writer.claim(**claim)
+
+                self.assertEqual(raised.exception.code, "transition_forbidden")
+                self.assertEqual(writer.reader.show("secretary-468")["state"], "ready")
+                self.assertFalse(any(method == "moveTaskPosition" for method, _ in self.client.calls))
+                self.assertEqual(writer.reconcile(), (0, 1))
+                self.assertEqual(writer.reader.show("secretary-468")["state"], "ready")
+                self.assertEqual(writer.audit.status(), {"ok": False, "pending": 1})
+        self.client.fail_move = False
+
     def test_legacy_ideas_require_po_triage_and_mark_the_execution_task(self) -> None:
         self.client.tasks[0]["column_id"] = 1
         self.client.metadata[12] = {}

@@ -81,16 +81,19 @@ def _proposal_column(pid: int) -> str:
 
     A proposal is not a Product issue: an agent cannot pick product, kind and priority, so it may
     not create one, and the Issues column takes nothing else. The route therefore survives only on
-    a board that still carries the legacy Ideas column (the same tolerance `secretary task create
-    --state ideas` keeps), and fails closed on a migrated board until a PO decides where an agent
-    proposal lands there.
+    the legacy layout, where the board's first column is still Ideas (the same tolerance
+    `secretary task create --state ideas` keeps), and fails closed on a migrated board until a PO
+    decides where an agent proposal lands there. Only that first column counts: a board whose
+    first column is already Issues is migrated, and a leftover Ideas column further along it is
+    not a route the PO decision opened.
     """
     columns = sorted(call("getColumns", project_id=pid) or [], key=lambda c: int(c.get("position") or 0))
-    for column in columns:
-        if column["title"] in model.LEGACY_ISSUE_COLUMNS:
-            return str(column["title"])
+    first = columns[0]["title"] if columns else ""
+    if first in model.LEGACY_ISSUE_COLUMNS:
+        return str(first)
     raise model.GuardError(
-        "this board has no legacy 'Ideas' column, so a reviewer/retro proposal has nowhere to go: "
+        "this board's first column is not the legacy 'Ideas', so a reviewer/retro proposal has "
+        "nowhere to go: "
         "'Issues' is the Product backlog and an agent may not create a Product issue (it cannot "
         "choose product, kind and priority). A PO has to decide where an agent proposal lands on a "
         "migrated board; until then, report the proposal in the verdict or the retro output instead."
@@ -319,13 +322,12 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
                 blocked_by: str | None = None, head: str | None = None,
                 slug: str | None = None, base_branch: str | None = None,
                 review_head: str | None = None, role: str | None = None,
-                own_ref: str | None = None, proposal: bool = False) -> dict:
+                own_ref: str | None = None) -> dict:
     """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
 
-    Ready is the only column an execution card is created in; `Issues` is the Product backlog.
-    `proposal=True` is the one exception, reserved for reviewer_idea/retro_idea: on a board that
-    still has the legacy Ideas column, those two file into it (see _proposal_column) and the card
-    is stamped record_type=task so it is not mistaken for an unclassified legacy leftover.
+    Ready is the only column any caller of this function creates a card in; `Issues` is the
+    Product backlog. The single exception belongs to reviewer_idea/retro_idea and is not
+    reachable from here: it lives in _create_proposal_card, which picks the column itself.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
     (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
@@ -344,9 +346,36 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     `role="steward"` scrubs title/description the same way add_comment does for steward — the
     escalation/idea path SKILL.md sends steward through (create in Ideas/Ready, then move to
     Blocked) is exactly where a quoted transcript/journalctl/env line could carry a raw secret
-    (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller
-    (po, reviewer_idea — which scrubs itself before calling here) passes no role and stays
-    verbatim, unchanged from before."""
+    (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller (po, and
+    reviewer_idea/retro_idea, which scrub themselves before _create_proposal_card) passes no role
+    and stays verbatim, unchanged from before."""
+    return _create_card(project=project, task_type=task_type, title=title, description=description,
+                        ref=ref, column=column, blocked_by=blocked_by, head=head, slug=slug,
+                        base_branch=base_branch, review_head=review_head, role=role,
+                        own_ref=own_ref, proposal=False)
+
+
+def _create_proposal_card(project: str, task_type: str, title: str, description: str,
+                          ref: str | None, head: str | None, slug: str | None) -> dict:
+    """The reviewer/retro exception to the Ready-only rule, private on purpose.
+
+    It takes no column and no proposal flag from its caller: the column comes from
+    _proposal_column, so the only way to write outside Ready is through the two proposal helpers
+    on a legacy board. The card is stamped record_type=task so a PO reads it as an execution task
+    awaiting triage, not as an unclassified pre-Product/Issue leftover.
+    """
+    return _create_card(project=project, task_type=task_type, title=title,
+                        description=description, ref=ref, column=_proposal_column(board_id()),
+                        head=head, slug=slug, proposal=True)
+
+
+def _create_card(*, project: str, task_type: str, title: str, description: str,
+                 ref: str | None, column: str, blocked_by: str | None = None,
+                 head: str | None = None, slug: str | None = None,
+                 base_branch: str | None = None, review_head: str | None = None,
+                 role: str | None = None, own_ref: str | None = None,
+                 proposal: bool) -> dict:
+    """Shared card-create body; see create_card and _create_proposal_card for the two entrypoints."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
     if column != "Ready" and not (proposal and column in model.LEGACY_ISSUE_COLUMNS):
@@ -737,13 +766,12 @@ def reviewer_idea(project: str, title: str, description: str = "", task_type: st
                   slug: str | None = None) -> dict:
     """Reviewer-only: file an out-of-scope finding as an Ideas card (the reviewer's single
     code-creation exception). Title and description are scrubbed for the same reason as a verdict.
-    Needs the board's legacy Ideas column; _proposal_column explains why and what happens without
+    Needs the board's legacy first column; _proposal_column explains why and what happens without
     it."""
-    return create_card(project=project, task_type=task_type,
-                       title=worker.scrub_secrets(title),
-                       description=worker.scrub_secrets(description),
-                       ref=ref, column=_proposal_column(board_id()), head=head, slug=slug,
-                       proposal=True)
+    return _create_proposal_card(project=project, task_type=task_type,
+                                 title=worker.scrub_secrets(title),
+                                 description=worker.scrub_secrets(description),
+                                 ref=ref, head=head, slug=slug)
 
 
 def retro_idea(project: str, title: str, description: str = "", task_type: str = "code",
@@ -753,11 +781,10 @@ def retro_idea(project: str, title: str, description: str = "", task_type: str =
     same shape as reviewer_idea (never Ready, title/description scrubbed). Retro quotes redacted
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
-    return create_card(project=project, task_type=task_type,
-                       title=worker.scrub_secrets(title),
-                       description=worker.scrub_secrets(description),
-                       ref=ref, column=_proposal_column(board_id()), head=head, slug=slug,
-                       proposal=True)
+    return _create_proposal_card(project=project, task_type=task_type,
+                                 title=worker.scrub_secrets(title),
+                                 description=worker.scrub_secrets(description),
+                                 ref=ref, head=head, slug=slug)
 
 
 def feedback(reference: str, body: str) -> dict:

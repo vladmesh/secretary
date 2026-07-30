@@ -46,6 +46,13 @@ UNTRANSLATED_COLUMNS = [
     *LEGACY_COLUMNS[1:],
 ]
 MIGRATED_COLUMNS = [dict(LEGACY_COLUMNS[0], title="Issues"), *LEGACY_COLUMNS[1:]]
+# A migrated board someone extended by hand: `Issues` leads, an old `Ideas` column survives later
+# in the order. The PO decision opened the route only while the first column itself is legacy.
+MIGRATED_WITH_LATER_IDEAS = [
+    *MIGRATED_COLUMNS[:2],
+    {"id": 7, "title": "Ideas", "position": 3},
+    *[dict(column, position=int(column["position"]) + 1) for column in MIGRATED_COLUMNS[2:]],
+]
 
 
 class ProposalRouteTests(unittest.TestCase):
@@ -70,23 +77,41 @@ class ProposalRouteTests(unittest.TestCase):
                     self.assertEqual(values[model.META_PROJECT], "secretary")
 
     def test_migrated_board_fails_closed_and_names_the_po_decision(self):
-        for file_proposal in (ops.reviewer_idea, ops.retro_idea):
-            with self.subTest(route=file_proposal.__name__):
-                calls = []
-                with mock.patch.object(ops, "call", side_effect=_fake_board(MIGRATED_COLUMNS, calls)):
-                    with self.assertRaises(model.GuardError) as raised:
-                        file_proposal(project="secretary", title="proposal", description="body")
+        # Including the hand-extended layout: an `Ideas` column that is no longer the first one is
+        # not the legacy layout, so the route stays closed there too.
+        for columns in (MIGRATED_COLUMNS, MIGRATED_WITH_LATER_IDEAS):
+            for file_proposal in (ops.reviewer_idea, ops.retro_idea):
+                with self.subTest(layout=[c["title"] for c in columns], route=file_proposal.__name__):
+                    calls = []
+                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)):
+                        with self.assertRaises(model.GuardError) as raised:
+                            file_proposal(project="secretary", title="proposal", description="body")
 
-                message = str(raised.exception)
-                self.assertIn("no legacy 'Ideas' column", message)
-                self.assertIn("A PO has to decide", message)
-                self.assertNotIn("createTask", [method for method, _ in calls])
-                self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
+                    message = str(raised.exception)
+                    self.assertIn("first column is not the legacy 'Ideas'", message)
+                    self.assertIn("A PO has to decide", message)
+                    self.assertNotIn("createTask", [method for method, _ in calls])
+                    self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
 
     def test_ready_stays_the_only_other_column_a_card_is_created_in(self):
         calls = []
         with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)):
             for column in ("Ideas", "Issues", "In progress", "Done"):
+                with self.subTest(column=column), self.assertRaisesRegex(
+                    model.GuardError, "created only in 'Ready'"
+                ):
+                    ops.create_card(project="secretary", task_type="code", title="t", column=column)
+        self.assertNotIn("createTask", [method for method, _ in calls])
+
+    def test_the_proposal_exception_is_not_reachable_through_the_public_create_card(self):
+        # The exception belongs to the two proposal helpers, not to the shared operation: no
+        # caller can ask create_card for a legacy column, whatever it passes.
+        calls = []
+        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)):
+            with self.assertRaises(TypeError):
+                ops.create_card(project="secretary", task_type="code", title="t",
+                                column="Ideas", proposal=True)
+            for column in sorted(model.LEGACY_ISSUE_COLUMNS):
                 with self.subTest(column=column), self.assertRaisesRegex(
                     model.GuardError, "created only in 'Ready'"
                 ):
@@ -115,7 +140,7 @@ class ProposalRouteTests(unittest.TestCase):
                     code = cli.main(argv)
                 self.assertEqual(code, 3)
                 self.assertEqual(out.getvalue(), "")
-                self.assertIn("no legacy 'Ideas' column", err.getvalue())
+                self.assertIn("first column is not the legacy 'Ideas'", err.getvalue())
 
 
 if __name__ == "__main__":

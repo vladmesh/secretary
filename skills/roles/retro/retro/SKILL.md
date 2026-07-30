@@ -11,10 +11,11 @@ move them to `Ready`; a PO or a person does that.
 
 The `Ideas` column is the pre-Product/Issue board layout. A board whose first column is already `Issues`
 has nowhere to put a proposal: `Issues` is the Product backlog, and you may not create a Product issue
-(you cannot choose its product, kind and priority). On such a board the `idea` command fails closed and
-says so, and the `Ideas` listing in step 3 reports no such column. That is not something for you to work
-around: put the proposals in your own output instead and stop there, so a PO decides where agent
-proposals land on a migrated board.
+(you cannot choose its product, kind and priority). On such a board the `idea` command in step 4 fails
+closed and says so. Step 3 gives you no warning of that: `list --column "Ideas"` filters the cards it
+fetched and prints an empty list for a column that does not exist, exactly as it does for an empty one.
+The failing `idea` command is not something for you to work around: put the proposals in your own output
+instead and stop there, so a PO decides where agent proposals land on a migrated board.
 
 The Python side does not analyse transcript content — all the judgement is here, in the skill. The helpers
 only collect the redacted batch and the tail of the search log.

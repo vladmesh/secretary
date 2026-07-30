@@ -11,8 +11,9 @@ move's per-role matrix. `move --reason` records a comment on the moved card. ste
 transition (via move/ready) plus one more: Blocked -> Done, which additionally needs a non-empty
 reason in the same call, see model.STEWARD_OVERRIDE and ops.move_card. steward escalations to
 Blocked also need a non-empty reason. idea is reviewer- or retro-only (both file a proposal into the
-board's legacy Ideas column and never move anything, model.TRANSITIONS leaves each an empty set); on
-a board without that column the call fails closed, see ops._proposal_column.
+board's first column while it is still the legacy Ideas, and never move anything, model.TRANSITIONS
+leaves each an empty set); on a board whose first column is already Issues the call fails closed, see
+ops._proposal_column.
 setup/list/show/probe need no role. Guards live in model/ops; this layer only wires argv to them
 and maps failures to exit codes.
 

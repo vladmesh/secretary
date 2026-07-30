@@ -132,6 +132,19 @@ _READY_RESET_METADATA = {
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
+# A Product or an Issue is not an execution task: it never takes a claim or a task transition,
+# whatever column it currently sits in.
+_TYPED_RECORD_TYPES = {"issue", "product"}
+
+
+def _check_execution_record(task: dict[str, Any]) -> None:
+    """Reject a Product or an Issue on an execution-task path, before any write."""
+    if task.get("record_type") in _TYPED_RECORD_TYPES:
+        raise TaskError(
+            "transition_forbidden",
+            "Product issues and products cannot enter execution task columns",
+            3,
+        )
 
 
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
@@ -848,13 +861,14 @@ class TaskWriter:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
         if cap < 1:
             raise TaskError("validation", "claim cap must be positive", 2)
+        # Same guard as move: a product or an issue is not an execution task, so it never takes a
+        # claim even if someone dragged it into Ready by hand. It runs before _write, not only in
+        # the mutation, because a retry with a pending or committed claim request id replays
+        # through _finish_pending_claim and never reaches the mutation at all.
+        _check_execution_record(self.reader.show(reference))
 
         def mutation(task: dict[str, Any]) -> Any:
-            # Same guard as move: a product or an issue is not an execution task, so it never
-            # takes a claim even if someone dragged it into Ready by hand. It runs before the Ready
-            # check and before any backend call, so a rejected claim writes nothing.
-            if task.get("record_type") in {"issue", "product"}:
-                raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
+            _check_execution_record(task)
             if task["state"] != "ready":
                 raise TaskError("claim_conflict", "claim requires a Ready task", 3)
             if task["claim"]["worker"] is not None:
@@ -1377,6 +1391,10 @@ class TaskWriter:
         if not worker:
             raise TaskError("backend_error", "pending claim is missing its worker id", 1)
         task = self.reader.show(ref)
+        # A pending claim on a typed record can only come from before the claim guard existed (or
+        # from a card typed after the claim). Finishing it would move a Product or an Issue into
+        # In progress, so cleanup fails closed here as well and leaves the event for a PO.
+        _check_execution_record(task)
         if task["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim no longer matches task claim", 1)
         if not _matches_optional(payload.get("resolved_head"), task["routing"]["resolved_worker_head"]):
