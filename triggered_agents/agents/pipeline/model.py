@@ -104,6 +104,10 @@ META_STEWARD_REPORT = "steward_report"
 META_RECORD_TYPE = "record_type"
 RECORD_ISSUE = "issue"
 RECORD_PRODUCT = "product"
+# An execution task record: the card the pipeline works on, as opposed to a product or an issue.
+# Set explicitly on a reviewer/retro proposal so a card in the legacy Ideas column is not read as
+# an unclassified pre-Product/Issue leftover awaiting PO triage.
+RECORD_TASK = "task"
 
 IN_PROGRESS = "In progress"
 

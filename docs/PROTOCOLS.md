@@ -111,6 +111,10 @@ durable audit event. Only the PO may close an issue, using exactly one of `resol
 history available through `issue show --ref` and checkpoint recovery. `issue list --closed` includes
 both open and closed issues; without it the list contains only open issues.
 
+A Product and an Issue are not execution tasks and never enter the execution columns: `move` and `claim`
+both reject one before any write, whatever column it currently sits in. Work on an issue is a separate
+card the PO creates in Ready.
+
 ## Sprints
 
 A sprint is a data entity on a separate `Secretary sprints` board, not a Pipeline card. One board task
