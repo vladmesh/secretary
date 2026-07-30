@@ -212,9 +212,8 @@ def _import_sprints(
     for sprint in sprints:
         reference = sprint["reference"]
         if reference not in existing:
-            writer.create(
-                role="steward", actor="restore", goal=sprint["goal"],
-                definition_of_done=sprint["definition_of_done"],
+            writer.restore_create(
+                goal=sprint["goal"], definition_of_done=sprint["definition_of_done"],
                 repositories=list(sprint["repositories"]), reference=reference,
                 request_id=f"{prefix}sprint-create:{reference}",
             )
@@ -243,9 +242,14 @@ def _import_sprints(
 
 
 SPRINT_PARITY_FIELDS = (
-    "reference", "goal", "definition_of_done", "repositories", "status", "budget",
-    "current_task", "resume", "audit",
+    "reference", "goal", "definition_of_done", "repositories", "product", "issues",
+    "reservations", "status", "budget", "current_task", "resume", "audit",
 )
+# A checkpoint written before a sprint owned a product carries none of the ownership
+# keys, and the restored entity has to read back with none of them either.  Absence is
+# its own value here: a target that gained an empty `product` the source never had is a
+# lossy metadata write, not a match.
+_ABSENT = object()
 
 
 def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
@@ -255,7 +259,9 @@ def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
     by body; the source timestamps of the entity travel in its audit metadata and
     do compare exactly.
     """
-    core: dict[str, Any] = {field: sprint.get(field) for field in SPRINT_PARITY_FIELDS}
+    core: dict[str, Any] = {
+        field: sprint[field] if field in sprint else _ABSENT for field in SPRINT_PARITY_FIELDS
+    }
     core["comments"] = [
         str(comment.get("text") or "")
         for comment in sprint.get("comments", [])
@@ -266,7 +272,20 @@ def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
 
 def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
     resume = sprint.get("resume")
-    return {
+    ownership = {
+        key: value for key, value in (
+            ("sprint_product", str(sprint.get("product") or "")),
+            ("sprint_issues", json.dumps(list(sprint.get("issues") or []), separators=(",", ":"))),
+            (
+                "sprint_reservations",
+                json.dumps(list(sprint.get("reservations") or []), separators=(",", ":")),
+            ),
+        )
+        # An export without ownership restores a row without those keys rather than
+        # with empty ones an operator never wrote.
+        if value not in {"", "[]"}
+    }
+    return ownership | {
         "sprint_goal": str(sprint["goal"]),
         "sprint_definition_of_done": str(sprint["definition_of_done"]),
         "sprint_repositories": json.dumps(list(sprint["repositories"]), separators=(",", ":")),
@@ -471,6 +490,13 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             not isinstance(repo, str) for repo in sprint["repositories"]
         ):
             raise RestoreError("normalized sprint export has invalid repositories")
+        # Ownership is absent in a pre-ownership export and is never filled in here.
+        if not isinstance(sprint.get("product", ""), str):
+            raise RestoreError("normalized sprint export has an invalid product")
+        for field in ("issues", "reservations"):
+            value = sprint.get(field, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise RestoreError(f"normalized sprint export has invalid {field}")
         budget = sprint.get("budget")
         if not isinstance(budget, dict) or not isinstance(budget.get("by_type"), dict) or any(
             not isinstance(count, int) for count in budget["by_type"].values()

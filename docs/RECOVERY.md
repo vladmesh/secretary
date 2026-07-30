@@ -58,9 +58,13 @@ checkpoint.
 Pipeline cards, including Product and Issue records, and sprint entities go into the checkpoint as separate sets: sprints live on their own
 board and are not part of the card export, so the writer reads them in its own pass instead of
 deriving them from cards that reference a sprint. A sprint record carries its reference, goal,
-Definition of Done, repositories, status, budget by event type, current card, resume entry, all entries
-on the entity and the source's audit metadata. Derived values (budget totals, installation thresholds,
-resume freshness) are not stored: they are recomputed from the record and configuration.
+Definition of Done, repositories, owning product, issues, reserved projects, status, budget by event
+type, current card, resume entry, all entries
+on the entity and the source's audit metadata. A sprint closed before a sprint owned a product has none
+of those three fields on its row, so its record omits them instead of storing an empty value, and a
+checkpoint written before they existed omits them the same way. Derived values (budget totals,
+installation thresholds, resume freshness) are not stored: they are recomputed from the record and
+configuration.
 
 ## Layout
 
@@ -216,10 +220,15 @@ install, prints no values and adds it to no commit.
    derived JSON forms are built from the NDJSON, and counters are verified before any live write.
 4. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`.
    The board import also restores sprint entities: if the export carries them, `restore-board` creates
-   the sprints board and returns each entity whole — goal, Definition of Done, repositories, status,
+   the sprints board and returns each entity whole — goal, Definition of Done, repositories, product,
+   issues, reservations, status,
    budget, current card, resume, entries and the source's audit metadata. There is no need to recreate a
    sprint after recovery. A restored entity occupies a new board row, so its own dates describe the
-   restore while the source dates are read from its audit metadata.
+   restore while the source dates are read from its audit metadata. Recovery rewrites what the export
+   holds and never validates a sprint the way opening one is validated: an entity without a product, its
+   issues or its reservations comes back without those metadata keys rather than with empty ones. Parity
+   compares whether each of the three fields is there at all, not only what it holds: a restored entity
+   that gained an empty `product` its export never carried is a lossy write and fails the check.
 5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
    runtime-home files for the agent CLIs. Provider authentication stays manual.
 6. Runs the same materialiser as `secretary upgrade`: recreates role worktrees, installs units,

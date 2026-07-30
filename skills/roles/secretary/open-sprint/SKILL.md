@@ -127,10 +127,16 @@ The only way is the product command. A sprint is opened by the PO.
 python3 -m secretary sprint create --role po --actor <you> \
   --goal "<one sentence about the end product state>" \
   --dod-file /tmp/dod.md \
+  --product <product-id> --issue issue:<ID> --project <project-id> \
   --repository <repo> --repository <repo>
 ```
 
 - `--role` accepts `po` and `steward`. Opening a sprint is `po`.
+- `--product` is the Product the sprint belongs to; `--issue` is repeated once per open Issue of that
+  Product the sprint serves, and at least one is required. Read them with `secretary issue list --product
+  <product-id>`.
+- `--project` is repeated once per registered project the sprint reserves. While the sprint is open, no
+  other sprint may reserve them, and the installation holds only this one open sprint.
 - `--repository` is repeated once per repository.
 - Do not set `--ref`: the entity gets its own `sprint:<ID>`. If you do set it, the value must start with
   `sprint:` and must clash with neither an existing sprint nor a card.

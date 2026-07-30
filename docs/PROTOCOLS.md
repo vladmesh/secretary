@@ -123,6 +123,7 @@ reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` ca
 
 ```bash
 python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
+  --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --repository REPO --request-id REQUEST_ID
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint show --ref sprint:ID
@@ -135,13 +136,66 @@ python3 -m secretary sprint reopen --role po --ref sprint:ID
 python3 -m secretary sprint close --role po --ref sprint:ID
 ```
 
-Stored fields are the goal, the Definition of Done text, repositories, open/closed/stopped status, a
+Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
+the reserved projects, open/closed/stopped status, a
 budget counter by event type, the current card and a structured resume entry. The six valid budget event
 types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
 them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
 an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
 budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity have no
 matching event and do not move the counter.
+
+A new sprint belongs to a Product, serves at least one of its open Issues and reserves at least one
+registered project. `--product` names an existing Product, every `--issue` is an open Issue of that
+Product, and every `--project` is an id from the instance project registry; `--repository` keeps its own
+meaning as the write-guard scope. An Issue of another Product and a closed Issue are refused with their
+own messages. One installation holds at most one open sprint: a second `create` is refused as
+`sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
+that, as `resource_conflict` naming the project and its holder. Every one of these checks is a read, so a
+refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
+returns the first event instead of colliding with the sprint it already opened.
+
+Because the rules are reads of live state, `create` and `reopen` hold one exclusive lock on the data
+directory (`sprints/admission.lock`) across the check and the write it admits. Two writers on the same
+installation are serialized by it, so the second sees the sprint the first opened rather than a state
+from before it. The lock is an admission gate only: it holds no sprint state and is released with the
+write.
+
+Admission runs in one fixed order, the one Product and Issue writes already use. `create` and `reopen`
+are the two transitions into `open` and both run it, on that same staged-intent journal:
+
+1. take the admission lock;
+2. under it, settle the request id first. A committed or staged intent of the same request id comes back
+   as it is, before any check of live state, so a repeat that overlaps the request it repeats is replayed
+   rather than refused as a conflict with the sprint it opened itself. The same request id carrying a
+   different payload is refused as `validation` before any side effect;
+3. check product, issues, registry and both conflict rules only for a fresh request. A staged intent is
+   resumed on the state it was admitted on, so a Product or Issue that changed after the refusal does not
+   turn a repeat into a validation error;
+4. apply the backend steps through the staged intent. Each one recognises what an earlier attempt of the
+   same request already did. A metadata answer other than `True` is a backend refusal, not a success:
+   the call reports `audit_pending` instead of `created` or `reopened`, the staged intent stays and the
+   retry with the same request id finishes that same operation;
+5. commit one audit event, however often the delivery repeats.
+
+The sprint reference is written last, and writing it is what publishes the sprint: a row on the sprint
+board counts as a sprint only once it carries one. An interrupted create is therefore never observed as
+an open sprint without its product, issues and reservations.
+
+An unfinished create holds nothing. Instead of holding the installation it compensates: a step refused
+after the row was created takes that row back, so no unreferenced row is left behind, and only when the
+backend also refuses that does the row stay for the repair to pick up. Before it publishes, a resumed
+create or reopen re-checks both conflict rules; if another sprint took the slot or the project meanwhile, the
+repeat is refused as `sprint_conflict` or `resource_conflict` naming that sprint and publishes nothing.
+The losing request is then filed again as a fresh one. Like a staged Product or Issue write, an
+unfinished sprint create blocks the checkpoint until it is retried or dropped.
+
+Sprints created before ownership existed carry none of these fields. They stay readable, exportable and
+restorable exactly as they are, and nothing fills the fields in for them: `show`, `status`, the board
+export and the checkpoint record leave the three fields out rather than answering `""` and `[]`. `reopen` re-checks every rule
+above, so such a sprint is refused with a message that names what it lacks; the supported move is to open
+a new sprint that owns its issues. `reopen` is refused the same way when the sprint's own issues have
+since been closed or its projects are held elsewhere.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
