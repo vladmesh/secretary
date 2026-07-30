@@ -19,7 +19,7 @@ from unittest import mock
 from secretary.data import export_board, init_layout, normalize_sprint_entity
 from secretary.restore import RestoreError, import_normalized_board, restore_findings, restore_state
 from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
-from secretary.tasks import TaskWriter
+from secretary.tasks import TaskError, TaskWriter
 
 from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.test_sprints import ProductSprintKanboard, _write_project_registry
@@ -217,6 +217,58 @@ class SprintRestoreTests(unittest.TestCase):
         state = restore_state(self.target_data)
         self.assertEqual(state["sprint_parity"], "failed")
         self.assertEqual(state["sprints"], "failed")
+
+    def test_an_opening_sprint_survives_the_whole_recovery_path(self) -> None:
+        """A checkpoint can catch a sprint between admission and its open status.
+
+        Such an entity is neither open nor closed, and recovery has to carry it across as
+        it stands: the same status, and none of the fields it had not written yet.
+        """
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.source, data_dir=self.source_data, instance=self.instance,
+        )
+        original = self.source.call
+        refused: list[str] = []
+
+        def refuse_the_fields(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata" and "sprint_goal" in dict(params["values"]) and not refused:  # type: ignore[arg-type]
+                refused.append(method)
+                return False
+            return original(method, **params)
+
+        with mock.patch.object(self.source, "call", side_effect=refuse_the_fields):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                writer.create(
+                    role="po", actor="operator", goal="caught mid admission",
+                    reference="sprint:unfinished", product="secretary", issues=["issue:open"],
+                    projects=["secretary"], request_id="unfinished-create",
+                )
+
+        unfinished = next(
+            normalize_sprint_entity(sprint)
+            for sprint in SprintReader(self.source).export()  # type: ignore[arg-type]
+            if sprint["ref"] == "sprint:unfinished"
+        )
+        self.assertEqual(unfinished["status"], "opening")
+        self.assertEqual(unfinished["goal"], "")
+        for field in ("product", "issues", "reservations"):
+            self.assertNotIn(field, unfinished)
+
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"].append(unfinished)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        client, _ = self._restore()
+
+        live = SprintReader(client, data_dir=self.target_data).show("sprint:unfinished")  # type: ignore[arg-type]
+        self.assertEqual(live["status"], "opening")
+        self.assertEqual(live["goal"], "")
+        for field in ("product", "issues", "reservations"):
+            self.assertNotIn(field, live)
+        self.assertEqual(normalize_sprint_entity(live), unfinished)
+        self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
+        self.assertEqual(restore_state(self.target_data)["sprint_count"], 2)
 
     def test_pipeline_cards_still_restore_alongside_the_entities(self) -> None:
         client, cards = self._restore()

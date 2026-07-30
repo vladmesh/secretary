@@ -62,7 +62,9 @@ Definition of Done, repositories, owning product, issues, reserved projects, sta
 type, current card, resume entry, all entries
 on the entity and the source's audit metadata. A sprint closed before a sprint owned a product has none
 of those three fields on its row, so its record omits them instead of storing an empty value, and a
-checkpoint written before they existed omits them the same way. Derived values (budget totals,
+checkpoint written before they existed omits them the same way. A sprint the checkpoint catches in
+`opening` is recorded with that status and with whatever it had written by then, which may be no goal and
+none of the ownership fields; the export invents nothing for it. Derived values (budget totals,
 installation thresholds, resume freshness) are not stored: they are recomputed from the record and
 configuration.
 
@@ -226,7 +228,8 @@ install, prints no values and adds it to no commit.
    sprint after recovery. A restored entity occupies a new board row, so its own dates describe the
    restore while the source dates are read from its audit metadata. Recovery rewrites what the export
    holds and never validates a sprint the way opening one is validated: an entity without a product, its
-   issues or its reservations comes back without those metadata keys rather than with empty ones. Parity
+   issues or its reservations comes back without those metadata keys rather than with empty ones, and an
+   entity exported as `opening` comes back as `opening` rather than as an open sprint. Parity
    compares whether each of the three fields is there at all, not only what it holds: a restored entity
    that gained an empty `product` its export never carried is a lossy write and fails the check.
 5. Clones missing project checkouts from the registry remotes and creates the non-secret managed

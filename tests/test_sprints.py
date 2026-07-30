@@ -17,6 +17,7 @@ from secretary.sprints import (
     BUDGET_EVENT_TYPES,
     SprintReader,
     SprintWriter,
+    active_sprint_repositories,
     budget_thresholds,
     ensure_sprint_board,
     sprint_admission_lock,
@@ -304,40 +305,93 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
         self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], ["sprint:once"])  # type: ignore[arg-type]
 
-    def test_a_refused_metadata_write_does_not_report_a_created_sprint(self) -> None:
-        """Kanboard may refuse the metadata write that carries the whole ownership.
-
-        Reporting `created` on it would leave an open sprint with no product, issues or
-        reservations. The staged intent stays repairable instead, and the repeat with the
-        same request id finishes that very operation.
-        """
+    def _refuse_metadata(self, field: str):
+        """Answer the first metadata write carrying `field` the way Kanboard refuses."""
         original = self.client.call
         refused: list[str] = []
 
-        def refuse_first_metadata(method: str, **params: object) -> object:
-            if method == "saveTaskMetadata" and "sprint_status" in dict(params["values"]) and not refused:  # type: ignore[arg-type]
+        def refuse(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata" and field in dict(params["values"]) and not refused:  # type: ignore[arg-type]
                 refused.append(method)
                 return False
             return original(method, **params)
 
-        with mock.patch.object(self.client, "call", side_effect=refuse_first_metadata):
-            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self._create(goal="rejected metadata", request_id="metadata-once")
+        return mock.patch.object(self.client, "call", side_effect=refuse)
 
+    def _stall_create(self, request_id: str) -> dict:
+        """Leave one admitted sprint in `opening`, repairable by its own request id."""
+        with self._refuse_metadata("sprint_goal"):
+            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
+                self._create(goal="rejected metadata", request_id=request_id)
         self.assertEqual(pending.exception.code, "audit_pending")
         self.assertEqual(self._events(), [])
-        # Nothing observes a sprint open without what it was admitted with.
-        self.assertEqual(SprintReader(self.client).list(create=False), [])  # type: ignore[arg-type]
+        return SprintReader(self.client).list(create=False)[0]  # type: ignore[arg-type]
+
+    def test_a_refused_metadata_write_leaves_the_sprint_opening_and_repairable(self) -> None:
+        """Kanboard may refuse the metadata write that carries the whole ownership.
+
+        Reporting `created` on it would leave an open sprint with no product, issues or
+        reservations. The row stays `opening` instead: it is on the board with its own
+        reference, no reader counts it as open, and the repeat with the same request id
+        finishes that very operation.
+        """
+        stalled = self._stall_create("metadata-once")
+
+        self.assertEqual(stalled["status"], "opening")
+        self.assertTrue(stalled["ref"].startswith("sprint:"))
+        for field in ("product", "issues", "reservations"):
+            self.assertNotIn(field, stalled)
+        self.assertEqual(SprintReader(self.client).list(statuses={"open"}, create=False), [])  # type: ignore[arg-type]
 
         repaired = self._create(goal="rejected metadata", request_id="metadata-once")
 
         self.assertEqual(repaired["action"], "created")
+        self.assertEqual(repaired["sprint"]["ref"], stalled["ref"])
+        self.assertEqual(repaired["sprint"]["status"], "open")
         self.assertEqual(repaired["sprint"]["product"], "secretary")
         self.assertEqual(repaired["sprint"]["issues"], ["issue:open"])
         self.assertEqual(repaired["sprint"]["reservations"], ["secretary"])
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
         board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
         self.assertEqual(len([task for task in self.client.tasks if task["project_id"] == board]), 1)
+
+    def test_an_opening_sprint_holds_admission_whatever_the_next_create_reserves(self) -> None:
+        """The hold is the unfinished sprint itself, not the projects it happens to want.
+
+        Between the refusal and the repair there must be no window for a second sprint:
+        a fresh create is refused whether or not it collides on a project, and the error
+        names the delivery that has to be finished first.
+        """
+        stalled = self._stall_create("held-open")
+
+        for projects in (["secretary"], ["secretary-instance"]):
+            with self.assertRaisesRegex(TaskError, "unfinished sprint") as raised:
+                self._create(goal="second", reference="sprint:second", projects=projects)
+            self.assertEqual(raised.exception.code, "sprint_conflict")
+            self.assertIn(stalled["ref"], raised.exception.message)
+        self.assertEqual(self._events(), [])
+
+        repaired = self._create(goal="rejected metadata", request_id="held-open")
+
+        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [repaired["sprint"]["ref"]])  # type: ignore[arg-type]
+
+    def test_an_opening_sprint_is_read_as_open_nowhere(self) -> None:
+        stalled = self._stall_create("never-open")
+        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        reference = stalled["ref"]
+
+        self.assertEqual(reader.show(reference)["status"], "opening")
+        self.assertEqual(reader.status(reference)["status"], "opening")
+        self.assertEqual(reader.list(statuses={"open"}, create=False), [])
+        self.assertEqual([sprint["ref"] for sprint in reader.list(statuses={"opening"})], [reference])
+        self.assertEqual(reader.export()[0]["status"], "opening")
+        # The sprint holds no repository for the card guard either: it has no cards yet.
+        self.assertEqual(active_sprint_repositories(self.tmp.name), {})
+        with self.assertRaisesRegex(TaskError, "has not finished opening") as raised:
+            self.writer.comment(role="po", actor="operator", reference=reference, body="early")
+        self.assertEqual(raised.exception.code, "validation")
+        with self.assertRaisesRegex(TaskError, "has not finished opening"):
+            self.writer.reopen(role="po", actor="operator", reference=reference)
 
     def test_a_repeated_create_records_exactly_one_audit_event(self) -> None:
         first = self._create(goal="repeated", request_id="repeat-once")
@@ -474,6 +528,45 @@ class SprintOwnershipTests(SprintFixture):
 
         self.assertEqual(first["sprint"]["status"], "open")
         self.assertEqual(first["event_id"], second["event_id"])
+
+    def test_reopen_refuses_a_request_id_that_belongs_to_another_operation(self) -> None:
+        """The transition into `open` owns its request id like every other one.
+
+        A caller that passes the id of its own `close` back to `reopen` is delivering a
+        second operation under one id. It has to be refused before a side effect instead
+        of being replayed into a `reopened` answer the board never made.
+        """
+        ref = self._create(goal="reused id", reference="sprint:reused")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref, request_id="reused-id")
+        self.client.calls.clear()
+
+        with self.assertRaisesRegex(TaskError, "request id belongs to another operation") as raised:
+            self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reused-id")
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertFalse(any(method == "saveTaskMetadata" for method, _params in self.client.calls))
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
+        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed"])
+
+    def test_a_refused_reopen_stays_repairable_and_reports_no_transition(self) -> None:
+        ref = self._create(goal="refused reopen", reference="sprint:refused")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+
+        with self._refuse_metadata("sprint_status"):
+            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
+                self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-repair")
+
+        self.assertEqual(pending.exception.code, "audit_pending")
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
+        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed"])
+
+        repaired = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-repair")
+        replay = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-repair")
+
+        self.assertEqual(repaired["action"], "reopened")
+        self.assertEqual(repaired["sprint"]["status"], "open")
+        self.assertEqual(repaired["event_id"], replay["event_id"])
+        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed", "reopened"])
 
     def test_reopen_is_refused_when_its_only_issue_has_been_closed(self) -> None:
         ref = self._create(goal="issue closed later", reference="sprint:stale")["sprint"]["ref"]
