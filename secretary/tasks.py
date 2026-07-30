@@ -300,12 +300,31 @@ class TaskAudit:
         self.pending_dir = os.path.join(self.board_dir, "pending-audit")
         self.lock_path = os.path.join(self.board_dir, ".audit.lock")
 
+    def _pending_path(self, request_id: str) -> str:
+        """Keep untrusted request ids out of the installation filesystem layout."""
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return os.path.join(self.pending_dir, f"v2-{digest}.json")
+
+    def _require_v2_pending_layout(self) -> None:
+        """Do not guess how a released generic transient record maps to v2."""
+        if not os.path.isdir(self.pending_dir):
+            return
+        legacy = [name for name in os.listdir(self.pending_dir) if name.endswith(".json") and not name.startswith("v2-")]
+        if legacy:
+            raise TaskError(
+                "upgrade_required",
+                "generic pending audit records use the pre-v2 filename layout; reconcile them with the previous Secretary version before upgrading",
+                4,
+            )
+
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
         os.makedirs(self.pending_dir, exist_ok=True)
-        self._atomic_json(os.path.join(self.pending_dir, f"{request_id}.json"), event)
+        self._require_v2_pending_layout()
+        self._atomic_json(self._pending_path(request_id), event)
 
     def append(self, request_id: str, event: dict[str, Any]) -> str:
         os.makedirs(self.board_dir, exist_ok=True)
+        self._require_v2_pending_layout()
         with open(self.lock_path, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -314,7 +333,7 @@ class TaskAudit:
                         events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
                         events.flush()
                         os.fsync(events.fileno())
-                pending = os.path.join(self.pending_dir, f"{request_id}.json")
+                pending = self._pending_path(request_id)
                 if os.path.exists(pending):
                     os.unlink(pending)
                 return str(event["event_id"])
@@ -323,13 +342,15 @@ class TaskAudit:
 
     def discard(self, request_id: str) -> None:
         try:
-            os.unlink(os.path.join(self.pending_dir, f"{request_id}.json"))
+            self._require_v2_pending_layout()
+            os.unlink(self._pending_path(request_id))
         except FileNotFoundError:
             pass
 
     def reconcile(self) -> tuple[int, int]:
         if not os.path.isdir(self.pending_dir):
             return 0, 0
+        self._require_v2_pending_layout()
         repaired = 0
         unresolved = 0
         for name in sorted(os.listdir(self.pending_dir)):
@@ -349,6 +370,7 @@ class TaskAudit:
     def pending_events(self) -> list[dict[str, Any]]:
         if not os.path.isdir(self.pending_dir):
             return []
+        self._require_v2_pending_layout()
         result = []
         for name in sorted(os.listdir(self.pending_dir)):
             if not name.endswith(".json"):
@@ -361,6 +383,7 @@ class TaskAudit:
         return result
 
     def status(self) -> dict[str, int | bool]:
+        self._require_v2_pending_layout()
         pending = 0
         if os.path.isdir(self.pending_dir):
             pending = sum(name.endswith(".json") for name in os.listdir(self.pending_dir))
@@ -412,7 +435,8 @@ class TaskAudit:
         return None
 
     def pending_event(self, request_id: str) -> dict[str, Any] | None:
-        pending = os.path.join(self.pending_dir, f"{request_id}.json")
+        self._require_v2_pending_layout()
+        pending = self._pending_path(request_id)
         try:
             with open(pending, encoding="utf-8") as source:
                 return json.load(source)
