@@ -775,9 +775,19 @@ def _reset_delivery_to_idle(
 def _acknowledge_delivery_from_resume(
     delivery: ObserverDelivery, resumes: list[dict[str, Any]]
 ) -> None:
-    """Advance only when the active batch's marker was written by its observer."""
+    """Advance only when the active batch's marker was written by its observer.
 
-    if delivery.stage not in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}:
+    A refused delivery counts here too. The marker only exists in a prompt that reached the head,
+    so a resume naming it is proof of the turn whatever the dispatcher managed to observe of the
+    send: a wake refused after the prompt landed must not be sent a second time once its own
+    resume is on the board.
+    """
+
+    if delivery.stage not in {
+        DeliveryStage.DELIVERY_INTENT,
+        DeliveryStage.AWAITING_ACK,
+        DeliveryStage.RETRY_DEFERRED,
+    }:
         return
     if not delivery.delivery_id or not delivery.through_event:
         return

@@ -110,21 +110,48 @@ def terminal_readiness(handle: str, *, run_json: RunJson, timeout_ms: int | None
             "--json",
         ])
     except Exception as exc:
-        return READINESS_BUSY if _wait_timed_out(exc) else READINESS_UNKNOWN
+        return _refused_wait_readiness(exc)
     wait = data.get("wait") if isinstance(data, dict) and isinstance(data.get("wait"), dict) else data
     if isinstance(wait, dict) and "satisfied" in wait:
         return READINESS_READY if wait.get("satisfied") else READINESS_BUSY
     return READINESS_READY
 
 
-def _wait_timed_out(exc: Exception) -> bool:
-    """Whether a refused wait is Orca saying the condition was not met in time.
+def _refused_wait_readiness(exc: Exception) -> str:
+    """Classify a `terminal wait` the host refused, from the body Orca printed with it.
 
-    The runtime prints its error body as JSON on stdout and the host carries that text into the
-    failure it raises, so the machine-readable code survives. A failure without that code is not a
-    timeout: an unreachable runtime, a stale handle and a missing CLI all land there.
+    The CLI exits non-zero both for a condition it could not satisfy and for a failure, and the
+    host turns the two into the same exception, so the answer is in the text rather than in the
+    outcome. It prints that text as JSON, and the host carries it into the failure it raises:
+
+      * a `wait` object saying `satisfied: false` is a pane Orca has looked at and found working
+        or blocked behind a dialog. That is busy, and busy waits for readiness;
+      * `code: timeout` is the same condition not being met before the probe's own deadline;
+      * anything else, a body that cannot be read included, is a probe that was never answered.
     """
-    return "timeout" in _WAIT_ERROR_CODE_RE.findall(str(exc))
+    body = _json_object(str(exc))
+    result = body.get("result") if isinstance(body.get("result"), dict) else body
+    wait = result.get("wait") if isinstance(result, dict) else None
+    if isinstance(wait, dict) and "satisfied" in wait:
+        return READINESS_READY if wait.get("satisfied") else READINESS_BUSY
+    error = body.get("error") if isinstance(body.get("error"), dict) else {}
+    code = str(error.get("code") or "")
+    if not code:
+        # A body too damaged to parse can still carry its code in the text.
+        codes = _WAIT_ERROR_CODE_RE.findall(str(exc))
+        code = codes[-1] if codes else ""
+    return READINESS_BUSY if code == "timeout" else READINESS_UNKNOWN
+
+
+def _json_object(text: str) -> dict[str, Any]:
+    start = text.find("{")
+    if start < 0:
+        return {}
+    try:
+        parsed = json.loads(text[start:])
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def terminal_turn_started(

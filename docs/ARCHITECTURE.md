@@ -171,14 +171,18 @@ Liveness uses the same pid heartbeat as worker and reviewer. A live head can sti
 turn, so the dispatcher also asks Orca whether the pane is ready for input and reads its terminal
 output time. Readiness is `tui-idle`, the same signal the delivery path waits on before it sends to
 any head, so the answer does not depend on which provider the observer profile names. It has three
-answers, not two: ready, busy (the condition unmet before the probe's timeout, or a pane blocked
-behind a dialog) and unanswerable. A probe that cannot be answered is not a busy head; it enters the
+answers, not two: ready, busy (a pane Orca looked at and found working or blocked behind a dialog,
+or the condition unmet before the probe's deadline) and unanswerable. Orca leaves the command with
+a non-zero status for a busy pane as well as for a failure, so the answer is read from the body it
+printed rather than from the outcome. A probe that cannot be answered is not a busy head; it enters the
 same bounded failure path as a refused delivery, because a head nobody can ask about is not one the
 sprint can wait on. A ready pane exposes `idle-grace` in the observer record, but does not relaunch
 it by itself. A committed,
 successful non-routing, non-guard-denied event on a linked card opens one durable delivery batch. Its immutable high-water mark is
 written before a nudge or replacement launch, and only an observer resume carrying that delivery's exact audit
-marker can acknowledge the specific batch. Events
+marker can acknowledge the specific batch, including one whose delivery was refused: that marker
+only exists in a prompt that reached the head, so its resume ends the batch rather than earning a
+second turn. Events
 that arrive before the intent coalesce; later events wait for the next batch. A dead head is replaced only for
 pending work. An unacknowledged batch receives the same recovery attempt after 30 minutes by default. Failed
 wakes carry their reason and bounded retry time in the observer record, and a batch that has spent

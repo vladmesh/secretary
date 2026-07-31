@@ -19,7 +19,11 @@ from secretary.dispatcher_tui import (
     terminal_readiness,
     terminal_turn_started,
 )
-from tests.test_dispatcher_observer import STALE_HANDLE_WAIT_FAILURE, TIMEOUT_WAIT_FAILURE
+from tests.test_dispatcher_observer import (
+    BLOCKED_PANE_WAIT_BODY,
+    STALE_HANDLE_WAIT_FAILURE,
+    TIMEOUT_WAIT_FAILURE,
+)
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -63,6 +67,15 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         # The condition not being met in time comes back as a failed command carrying its code.
         self.assertEqual(
             terminal_readiness("term", run_json=answer(HostError(TIMEOUT_WAIT_FAILURE))),
+            READINESS_BUSY,
+        )
+        # So does a pane Orca looked at and found working: the CLI exits non-zero for it too, and
+        # the answer survives only in the body it printed.
+        self.assertEqual(
+            terminal_readiness(
+                "term",
+                run_json=answer(HostError(f"orca terminal wait failed: {BLOCKED_PANE_WAIT_BODY}")),
+            ),
             READINESS_BUSY,
         )
         for failure in (

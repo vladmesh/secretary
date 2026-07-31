@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import tempfile
 import time
 import tomllib
@@ -54,14 +56,23 @@ from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegac
 # is above the default pid_max and is reliably free.
 DEAD_PID = 999999
 
-# What the host raises when Orca refuses `terminal wait`. Both bodies are the live CLI's, captured
-# from `orca terminal wait --for tui-idle --json`: the runtime prints its error as JSON on stdout
-# and the host carries that text into the failure, which is what tells a busy pane (`timeout`) from
-# a probe that could not be answered at all.
+# What the host raises when Orca refuses `terminal wait`. The bodies are the live CLI's: it exits
+# non-zero for a condition it could not satisfy as well as for a failure, printing the answer as
+# JSON on stdout, and the host carries that text into the failure it raises. Reading it is what
+# tells a busy pane from a probe that was never answered.
 TIMEOUT_WAIT_FAILURE = (
     "orca terminal wait --terminal observer:sprint:1 --for tui-idle --timeout-ms 6000 --json "
     'failed: {\n  "id": "0b1ba8ed",\n  "ok": false,\n  "error": {\n'
     '    "code": "timeout",\n    "message": "timeout"\n  }\n}'
+)
+# The live CLI exits non-zero for a pane it has looked at and found busy, printing an `ok: true`
+# body with `satisfied: false`. Captured from the production audit log, `observer_launch_deferred`
+# event `evt_24fb1640c4ea4a998f9f80e060d722fb` on `sprint:879`.
+BLOCKED_PANE_WAIT_BODY = (
+    '{\n  "id": "c5bb8352-65ff-4f8a-bd3a-fb0cdb97655c",\n  "ok": true,\n  "result": {\n'
+    '    "wait": {\n      "handle": "term_c0755f85",\n      "condition": "tui-idle",\n'
+    '      "satisfied": false,\n      "status": "running",\n      "exitCode": null,\n'
+    '      "blockedReason": "codex-update-prompt"\n    }\n  }\n}'
 )
 STALE_HANDLE_WAIT_FAILURE = (
     "orca terminal wait --terminal observer:sprint:1 --for tui-idle --timeout-ms 6000 --json "
@@ -417,6 +428,73 @@ class ObserverLifecycleTests(unittest.TestCase):
             [event["kind"] for event in self.audit.events("sprint:1")],
             [EVENT_LAUNCHED, EVENT_RELAUNCHED],
         )
+
+    def test_a_resume_for_a_refused_delivery_stops_the_retry(self) -> None:
+        """A wake refused after its prompt landed is not sent twice.
+
+        The delivery marker only exists in a prompt that reached the head, so a resume naming it
+        is proof of the turn whatever the dispatcher saw of the send. Reachable now that a failure
+        can happen after the prompt is in: the pane goes unanswerable while the head works on it.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+        sends: list[list[str]] = []
+        unanswerable = [False]
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "send"]:
+                sends.append(args)
+                unanswerable[0] = True
+                return {}
+            if args[1:3] == ["terminal", "wait"]:
+                if unanswerable[0]:
+                    raise HostError(STALE_HANDLE_WAIT_FAILURE)
+                return {"wait": {"condition": "tui-idle", "satisfied": True}}
+            raise AssertionError(args)
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="post-send-refusal-event",
+        )
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+            refused = self.runtime.production_tick()
+
+            self.assertEqual(
+                [row["action"] for row in self.actions(refused)], ["observer-wake-deferred"]
+            )
+            delivery = self.observers()["sprint:1"].delivery
+            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+            self.assertEqual(len(sends), 1)
+
+            # The head had the prompt after all, and says so with this delivery's own markers.
+            entry = {
+                "selected_step": "read board", "selected_why": "card changed",
+                "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+                "dod_state": "open", "next_safe_step": "resume",
+            }
+            self.acknowledge_delivery(entry, request_id="post-send-refusal-ack")
+            unanswerable[0] = False
+            self.expire_wake_retry()
+            acknowledged = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.IDLE)
+        self.assertTrue(delivery.acknowledged_resume_id)
+        # No second turn for a batch the observer has already answered.
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_a_readiness_probe_that_fails_is_not_read_as_a_busy_head(self) -> None:
         """Through the real `observer_status`: a probe Orca refuses must not read as ordinary work.
@@ -2285,6 +2363,37 @@ class ObserverConfigurationTests(unittest.TestCase):
 
 
 class ObserverTerminalStatusTests(unittest.TestCase):
+    def test_a_busy_pane_survives_the_hosts_non_zero_exit_path(self) -> None:
+        """Through the real runner: Orca exits non-zero for a busy pane, and it is still busy.
+
+        `_run` raises on the exit code before any JSON is parsed, so the only place the answer
+        survives is the text of the failure. Reading it wrong would replace a working observer.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1"
+            )
+            listed = json.dumps({"result": {"terminals": [{
+                "handle": "observer:sprint:1", "connected": True, "lastOutputAt": 1_753_456_789_123,
+            }]}})
+
+            def run(args, **kwargs):
+                if args[1:3] == ["terminal", "list"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=listed, stderr="")
+                if args[1:3] == ["terminal", "wait"]:
+                    # Exactly what the CLI does with a pane it found working: non-zero exit, and
+                    # the answer on stdout.
+                    return subprocess.CompletedProcess(
+                        args, 1, stdout=BLOCKED_PANE_WAIT_BODY, stderr=""
+                    )
+                raise AssertionError(args)
+
+            with mock.patch.object(dispatcher_module.subprocess, "run", side_effect=run):
+                status = host.observer_status(record)
+
+        self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": False})
+
     def test_real_host_nudge_carries_the_active_delivery_marker(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
