@@ -82,17 +82,8 @@ class RestoreTests(unittest.TestCase):
         }
         return card
 
-    def test_restore_keeps_unclassified_legacy_ideas_unclassified(self):
-        class IssuesBoard(_EmptyWriteKanboard):
-            def call(self, method: str, **params: object) -> object:
-                if method == "getColumns":
-                    return [
-                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
-                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
-                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
-                    ]
-                return super().call(method, **params)
-
+    def test_restore_refuses_a_card_without_a_record_type(self):
+        """A card with no kind cannot be placed, so the export is refused by reference."""
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
@@ -101,11 +92,12 @@ class RestoreTests(unittest.TestCase):
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
-            client = IssuesBoard()
+            client = _EmptyWriteKanboard()
 
-            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
-            self.assertNotIn("record_type", client.metadata[12])
-            self.assertEqual(client.tasks[0]["column_id"], 1)
+            with self.assertRaisesRegex(RestoreError, "secretary-1"):
+                import_normalized_board(data_dir, client=client)
+
+            self.assertEqual(client.tasks, [])
 
     def test_restore_preserves_closed_issue_metadata_and_history(self):
         class IssuesBoard(_EmptyWriteKanboard):
@@ -302,7 +294,7 @@ class RestoreTests(unittest.TestCase):
                     "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
                     "column": "Ready", "task_type": "code", "project": "secretary",
                     "claim": "worker", "blocked_by": "secretary-0",
-                    "metadata": {"claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
+                    "metadata": {"record_type": "task", "claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
                     "comments": [
                         {"ts": "2024-07-03T09:47:00Z", "text": "[worker]\\nfirst"},
                         {"ts": "2024-07-03T09:48:00Z", "text": "[report:done]\\nrestored"},

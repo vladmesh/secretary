@@ -97,21 +97,20 @@ def _column_title(pid: int, column_id: int) -> str:
 def _proposal_column(pid: int) -> str:
     """Return the column an agent proposal goes into, or raise if the board has none.
 
-    The PO decision (2026-07-31) puts a proposal in the board's first column on both layouts: the
-    Product backlog `Issues` after the migration, and `Ideas` under either legacy name before it.
-    A proposal is still not a Product issue, and the card carries that distinction itself: it is
-    stamped record_type=task, so a PO reads it as an execution card awaiting triage, while
-    `issue create` (which needs product, kind and priority) stays closed to every agent. Only the
-    first column counts, so a leftover legacy column further along the order is not a target.
+    The PO decision (2026-07-31) puts a proposal in the board's first column, the Product backlog
+    `Issues`. A proposal is still not a Product issue, and the card carries that distinction
+    itself: it is stamped record_type=task, so a PO reads it as an execution card awaiting triage,
+    while `issue create` (which needs product, kind and priority) stays closed to every agent.
+    Only the first column counts, so a same-named column further along the order is not a target.
     """
     columns = sorted(call("getColumns", project_id=pid) or [], key=lambda c: int(c.get("position") or 0))
     first = str(columns[0]["title"]) if columns else ""
-    if first in model.PROPOSAL_COLUMNS:
+    if first == model.PROPOSAL_COLUMN:
         return first
     raise model.GuardError(
-        f"this board's first column is {first!r}, which is neither the Product backlog 'Issues' "
-        "nor a legacy 'Ideas', so an agent proposal has nowhere to go. Run `pipeline setup` to "
-        "reconcile the board, or report the proposal in the verdict or the retro output instead."
+        f"this board's first column is {first!r}, not the Product backlog "
+        f"{model.PROPOSAL_COLUMN!r}, so an agent proposal has nowhere to go. Run `pipeline setup` "
+        "to reconcile the board, or report the proposal in the verdict or the retro output instead."
     )
 
 
@@ -124,10 +123,9 @@ def _ensure_swimlane(pid: int, name: str) -> int:
 
 
 def ensure_structure() -> dict:
-    """Idempotently migrate the first legacy Ideas column to Issues and reconcile the board.
+    """Idempotently reconcile the board's columns with model.COLUMNS.
 
-    Same reconcile as the legacy board: rename in place, append missing, drop extras beyond
-    len(COLUMNS). Swimlanes are left alone here — a card gets its project swimlane created on
+    Rename in place, append missing, drop extras beyond len(COLUMNS). Swimlanes are left alone here — a card gets its project swimlane created on
     demand at create time, and the default swimlane stays.
     """
     pid = board_id()
@@ -303,7 +301,7 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
     """Guard for a worker's own `create` (triggered-agents-261): a card landing straight in Ready
     is only legal as a continuation of the worker's own approved chain — `own_ref` (the card
     reference this worker is running as) itself, or one of its blocked_by predecessors,
-    transitively. The Ready-only create guard rejects `--column Ideas` before this function runs;
+    transitively. The Ready-only create guard rejects a non-proposal column before this runs;
     a worker records an unrelated concern through feedback instead of creating a card."""
     if column != "Ready":
         return
@@ -340,8 +338,8 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
 
     Ready is the only default column. A PO may explicitly create a task in the board's first
-    column; _proposal_column resolves it under either the current or a legacy name. Such a card is
-    an untriaged proposal, not a Product issue. The agent proposal helpers are the only other
+    column; _proposal_column resolves it. Such a card is an untriaged proposal, not a Product
+    issue. The agent proposal helpers are the only other
     callers that may create outside Ready.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
@@ -364,7 +362,7 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller (po, and
     the proposal helpers, which scrub themselves before _create_proposal_card) passes no role
     and stays verbatim, unchanged from before."""
-    proposal = role == "po" and column in model.PROPOSAL_COLUMNS
+    proposal = role == "po" and column == model.PROPOSAL_COLUMN
     if proposal:
         column = _proposal_column(board_id())
     return _create_card(project=project, task_type=task_type, title=title, description=description,
@@ -378,9 +376,9 @@ def _create_proposal_card(project: str, task_type: str, title: str, description:
     """The agent-proposal exception to the Ready-only rule, private on purpose.
 
     It takes no column and no proposal flag from its caller: the column comes from
-    _proposal_column, so the only way to write outside Ready is through the proposal helpers
-    on a legacy board. The card is stamped record_type=task so a PO reads it as an execution task
-    awaiting triage, not as an unclassified pre-Product/Issue leftover.
+    _proposal_column, so the only way to write outside Ready is through the proposal helpers.
+    The card is stamped record_type=task so a PO reads it as an execution task awaiting triage,
+    not as a Product issue.
     """
     return _create_card(project=project, task_type=task_type, title=title,
                         description=description, ref=ref, column=_proposal_column(board_id()),
@@ -396,7 +394,7 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     """Shared card-create body; see create_card and _create_proposal_card for the two entrypoints."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
-    if column != "Ready" and not (proposal and column in model.PROPOSAL_COLUMNS):
+    if column != "Ready" and not (proposal and column == model.PROPOSAL_COLUMN):
         raise model.GuardError(
             "execution cards are created only in 'Ready'; the first column takes proposals only"
         )
@@ -422,9 +420,12 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     if ref is None:
         ref = f"{project}-{task_id}"
         call("updateTask", id=task_id, reference=ref)
-    values = {model.META_TASK_TYPE: task_type, model.META_PROJECT: project}
-    if proposal:
-        values[model.META_RECORD_TYPE] = model.RECORD_TASK
+    values = {
+        model.META_TASK_TYPE: task_type, model.META_PROJECT: project,
+        # Every card this route creates is an execution task, wherever it lands: a card without
+        # a record type has no place on the board.
+        model.META_RECORD_TYPE: model.RECORD_TASK,
+    }
     if blocked_by:
         values[model.META_BLOCKED_BY] = blocked_by
     if head:
@@ -463,6 +464,7 @@ def create_report_card(project: str, title: str, slug: str, description: str = "
     call("updateTask", id=task_id, reference=ref)
     call("saveTaskMetadata", task_id=task_id, values={
         model.META_TASK_TYPE: "research",
+        model.META_RECORD_TYPE: model.RECORD_TASK,
         model.META_PROJECT: project,
         model.META_SLUG: slug,
         model.META_CLAIM: slug,
@@ -557,11 +559,6 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
     if meta.get(model.META_RECORD_TYPE) in {model.RECORD_ISSUE, model.RECORD_PRODUCT}:
         raise model.GuardError("Product issues and products cannot enter execution task columns")
-    if cur in model.LEGACY_ISSUE_COLUMNS:
-        cur = "Issues"
-    if cur == "Issues" and not meta.get(model.META_RECORD_TYPE):
-        if role != "po" or to_column != "Ready":
-            raise model.GuardError("legacy Ideas require explicit PO triage to Ready")
     model.check_move(role, cur, to_column)
     move = (cur, to_column)
     reason_text = reason.strip()

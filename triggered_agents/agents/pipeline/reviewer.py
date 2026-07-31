@@ -164,7 +164,7 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
               branch: str | None = None, head_sha: str | None = None,
               comments: list[dict] | None = None) -> str:
     """REVIEW.md for the reviewer head: what to review, the three lenses, the blocking semantics,
-    and how to emit the verdict + Ideas cards through board-CLI. `spec` is the card description.
+    and how to emit the verdict + proposal cards through board-CLI. `spec` is the card description.
     `pr` is the card's PR link — or None for a contrib (fork) card, which has no PR in this
     pipeline by definition (a human opens it against upstream from the pushed branch afterward);
     `branch`/`head_sha` then point at what to review instead (the worker's own report:done
@@ -282,7 +282,7 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
         "any class from lens 2; OR a criterion is met only on paper.",
         "- **NOT blockers**: pre-existing debt, findings in NEIGHBOURING code the PR did not touch, "
         "ambitious rebuilds outside the card. Do NOT push those into a red verdict — file them as "
-        "cards in the Ideas column (see below). That is the only exception to \"no write access to "
+        "cards in the Issues column (see below). That is the only exception to \"no write access to "
         "the code\".",
         "",
         "## How to deliver the result",
@@ -303,12 +303,12 @@ def build_task(card: dict, ref: str, pr: str | None, spec: str, base_branch: str
         f"python3 -m triggered_agents pipeline --role reviewer verdict --ref {ref} --kind green --body-file <file>",
         "```",
         "",
-        "Non-blockers (neighbouring code, debt, ideas beyond the card) go into Ideas cards:",
+        "Non-blockers (neighbouring code, debt, ideas beyond the card) go into proposal cards:",
         "```",
         f"python3 -m triggered_agents pipeline --role reviewer idea --project {project} "
         "--title '<short>' --description-file <file>",
         "```",
-        "The command picks the column itself. A board whose first column is no longer Ideas has "
+        "The command picks the column itself. A board whose first column is not Issues has "
         "nowhere to put a proposal, so the call fails with that explanation: then keep the "
         "non-blocker in the verdict body as a remark and create nothing.",
         "",

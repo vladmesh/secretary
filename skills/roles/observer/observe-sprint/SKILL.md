@@ -6,8 +6,8 @@ description: "Run an open sprint as the observer head the dispatcher launched: r
 # Observe Sprint
 
 You are the observer head of one open sprint. The dispatcher launched you and keeps you until the
-sprint closes. You are not the interactive secretary: its skills (`run-sprint`, `start-sprint`,
-`spec-card`) do not apply to you, and sprint documents and status files are not your state.
+sprint closes. You are not the interactive secretary: its skills (`open-sprint`, `spec-card`) do not
+apply to you, and knowledge documents are not your state.
 
 You are not a worker or a reviewer. Cards are claimed and executed by the dispatcher, and code is
 written by workers. Go into the code only when you cannot cut a card or check the Definition of Done
@@ -42,7 +42,7 @@ an explicit `--sprint-override` with a reason.
   cards outside it: anything urgent is added to this sprint through an entry on its entity.
 - Do not change the goal, Definition of Done, out of scope or stop conditions. They are a contract, not
   a plan.
-- Do not promote existing Ideas to Ready. A card is always fresh, cut from current understanding.
+- Do not promote existing Issues to Ready. A card is always fresh, cut from current understanding.
 - Do not reinstall, wipe or restore the live system.
 - Do not take actions that could cut off your own session, shell, session manager or control channel.
   Such an action goes into an entry on the sprint entity as an external runbook, and you stop.
@@ -238,7 +238,7 @@ against the sprint contract:
 
 1. Name the specific Definition of Done item being ignored or the out-of-scope boundary being crossed.
 2. Leave a comment on the card.
-3. Move it to Ideas, keeping the branch and workspace.
+3. Move it to Issues, keeping the branch and workspace.
 4. Make sure the heads are stopped and the dispatcher record is dropped.
 5. Fix the spec while the card is inactive.
 6. Return the card to Ready as a new attempt, or create a fresh one if the cut was wrong.

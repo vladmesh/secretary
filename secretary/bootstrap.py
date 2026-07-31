@@ -29,7 +29,7 @@ from secretary.installation import (
     _run,
     _set_installation_owner,
 )
-from secretary.tasks import LEGACY_IDEAS_COLUMN, KanboardClient, TaskError, all_project_cards
+from secretary.tasks import KanboardClient, TaskError, all_project_cards
 
 
 KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
@@ -114,23 +114,16 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
         if not isinstance(columns, list):
             raise BootstrapError("Kanboard returned invalid Pipeline columns")
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
-        if (
-            titles[:1] in ([LEGACY_IDEAS_COLUMN], ["Ideas"])
-            and titles[1:] == list(PIPELINE_COLUMNS[1:])
-            and isinstance(columns[0], dict)
-            and columns[0].get("id")
-        ):
-            # A board created before the column titles were translated differs only in the
-            # first title.  updateColumn renames it where it stands, so every card keeps its
-            # column, position and swimlane; the board is then the current schema.
-            _rename_column(api, columns[0], PIPELINE_COLUMNS[0])
-            titles[0] = PIPELINE_COLUMNS[0]
         if titles != list(PIPELINE_COLUMNS):
-            # Removing a column moves every card it contains to the trash, so an open
-            # or a closed card makes this incompatible.
+            # A board that holds cards is never reshaped here: renaming a column in place would
+            # silently change what its cards mean, and removing one moves every card it holds to
+            # the trash.  Such a board is a migration job for a human, so name both layouts.
             tasks = all_project_cards(api, board_id)
             if tasks:
-                raise BootstrapError("Pipeline board has cards but an incompatible column schema")
+                raise BootstrapError(
+                    "Pipeline board has cards but an incompatible column schema: "
+                    f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)})"
+                )
             for index, title in enumerate(PIPELINE_COLUMNS):
                 if index < len(columns) and isinstance(columns[index], dict) and columns[index].get("id"):
                     _rename_column(api, columns[index], title)

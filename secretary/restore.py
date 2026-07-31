@@ -56,6 +56,9 @@ class RestoreError(RuntimeError):
 
 RESTORE_STATE_FILE = "restore-state.json"
 MEMORY_REINDEX_TIMEOUT_SECONDS = 300
+# Every card carries its kind; a card without one cannot be placed on the current board, so a
+# checkpoint holding one is refused instead of being restored into an unreadable row.
+_RECORD_TYPES = {"task", "issue", "product"}
 _PRODUCT_ISSUE_METADATA = (
     "record_type",
     "product_id",
@@ -438,6 +441,10 @@ def _normalized_cards(
             raise RestoreError("normalized board export has an invalid column")
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
+        if card["metadata"].get("record_type") not in _RECORD_TYPES:
+            raise RestoreError(
+                f"normalized board export card {card['reference']} has no record type"
+            )
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
         if "closed" in card and not isinstance(card["closed"], bool):
@@ -557,7 +564,7 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str)
         return
     writer.create(
         role="steward", actor="restore", project=fields["project"] or "product-backlog",
-        task_type=fields["task_type"] or "research",
+        task_type=fields["task_type"] or "research", target="ready", restoring=True,
         title=card["title"], description=card["description"], reference=card["reference"],
         blocked_by=fields["blocked_by"], head=fields["head"], review_head=fields["review_head"],
         slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
@@ -567,11 +574,10 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str)
 
 
 def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
-    """Recreate a Product, Issue, or unclassified legacy Ideas card without classifying it.
+    """Recreate a Product or an Issue in its own column, without classifying it.
 
-    The following restore metadata write preserves the export exactly.  In particular an old
-    Ideas card that has no ``record_type`` remains unclassified and must later go through the
-    PO triage transition; it never passes through ``TaskWriter.create``, which stamps task.
+    The following restore metadata write preserves the export exactly: such a record never
+    passes through ``TaskWriter.create``, which stamps a task type it does not have.
     """
     board_id, columns, _ = writer.reader._board()
     column = str(card.get("column") or "")
@@ -675,8 +681,6 @@ def _product_issue_metadata(metadata: dict[str, Any]) -> dict[str, str]:
 
 
 def _state_for_column(column: str) -> str | None:
-    # A backup taken before the column titles were translated carries the former first-column
-    # title (secretary.tasks.LEGACY_IDEAS_COLUMN); it restores into the same state.
     return _STATE_BY_COLUMN.get(column)
 
 

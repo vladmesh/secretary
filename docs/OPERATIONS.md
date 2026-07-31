@@ -330,7 +330,7 @@ which is delivered to shells by the ordinary `secretary role-skills sync`. It si
 the Codex target of the secretary role, so behaviour does not depend on which secretary was opened.
 
 The skill walks the secretary through preparation: live context (open and closed sprints, deferred items
-from their resume entries and comments, roadmap, Ideas in the affected repositories), a check that no other
+from their resume entries and comments, roadmap, the Issues backlog of the affected repositories), a check that no other
 open sprint is holding the repositories needed, an interview on unresolved product forks, and a Definition of
 Done phrased as checkable items. Choosing the goal stays with the person and is not delegated. A sprint also
 needs the Product it belongs to, at least one of its open Issues and at least one reserved registered
@@ -360,10 +360,6 @@ Storage split: the goal, Definition of Done text, repositories, status, budget, 
 fields of the entity; a knowledge document holds only the "why" (the context of the moment, the choice of
 goal, the alternatives rejected) plus a pointer to the sprint reference. The document does not duplicate the
 entity's fields.
-
-The `start-sprint` and `run-sprint` skills run a sprint the older way, as a knowledge document with a status
-pointer, executed by the interactive secretary. Both loops exist deliberately; one sprint lives in exactly
-one of them.
 
 ## Sprint observer heads
 

@@ -11,8 +11,6 @@
 [roles.secretary]
 skills = [
   "open-sprint",
-  "start-sprint",
-  "run-sprint",
   "spec-card",
   "knowledge-doc",
   "grilling",

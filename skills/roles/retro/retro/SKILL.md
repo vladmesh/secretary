@@ -11,8 +11,7 @@ move them to `Ready`; a PO or a person does that.
 
 `Issues` is also the Product backlog, and a Product issue is not yours to create: you cannot choose its
 product, kind and priority. Your card is a different record in the same column, typed as an execution task
-awaiting triage, and the `idea` command is the only way you write one. Older installations still call that
-first column `Ideas`; the command resolves the name itself, so nothing changes for you.
+awaiting triage, and the `idea` command is the only way you write one; it resolves the column itself.
 
 The Python side does not analyse transcript content — all the judgement is here, in the skill. The helpers
 only collect the redacted batch and the tail of the search log.

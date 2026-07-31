@@ -17,7 +17,8 @@ will catch it: it only shows up when the results are read. A person formulates t
 you. Do not supply the goal for them, do not derive it from the backlog "by majority", and do not hand
 the choice to a subagent.
 
-Everything else — gathering context, surfacing deferred items, reading the roadmap and Ideas, wording —
+Everything else — gathering context, surfacing deferred items, reading the roadmap and the Issues
+backlog, wording —
 is your preparation work.
 
 ## Where things are stored
@@ -40,7 +41,7 @@ Read live sources, not your memory of them.
 ```bash
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint list --status closed
-python3 -m secretary task list --state ideas --project <project>
+python3 -m secretary task list --state issues --project <project>
 python3 -m secretary task list --state ready --project <project>
 python3 -m secretary task list --sprint sprint:<ID>
 ```
@@ -51,10 +52,11 @@ What you need as input:
 - deferred items from past sprints, which live in the resume entries and comments of their entities
   (`python3 -m secretary sprint show --ref sprint:<ID>`), not in a separate list;
 - the product roadmap and vision (`docs/ROADMAP.md`, `docs/VISION.md` of the affected repositories);
-- the Ideas of the affected repositories, as input material for future cards rather than as a plan;
+- the Issues backlog of the affected repositories, as input material for future cards rather than as
+  a plan;
 - the recorded facts of the installation and the relevant knowledge documents.
 
-Do not promote Ideas to Ready and do not touch cards. Fresh cards are cut by the observer from current
+Do not promote Issues to Ready and do not touch cards. Fresh cards are cut by the observer from current
 understanding.
 
 ## 2. Check that the repositories are free
@@ -173,8 +175,7 @@ The document holds:
 The document does not hold: the goal verbatim, the Definition of Done text, the repository list, status,
 budget or current card. Those are fields of the entity; a copy in the document would go stale silently.
 
-No status pointer file is written for this loop: sprint state lives where the cards are and cannot diverge
-from them.
+No status pointer file is written: sprint state lives where the cards are and cannot diverge from them.
 
 ## 7. From here the sprint is not run by hand
 
@@ -198,11 +199,8 @@ The instance path is mandatory for `status`. A common cause is an undelivered ro
 Tell the person: the entity's ref, the goal, the Definition of Done items, the repositories, the path to
 the document, and that the observer runs the sprint from here. Do not create a card "just in case".
 
-## The document loop
+## One loop
 
-`start-sprint` and `run-sprint` remain in place and work as before: a sprint document in the knowledge
-directory, a status pointer, and execution by the interactive secretary. Both loops exist deliberately.
-
-Do not remove the older skills, do not rewrite their semantics and do not mix the loops inside one sprint:
-a sprint is either an entity (`open-sprint` plus an observer) or a document (`start-sprint` plus
-`run-sprint`).
+A sprint is an entity on the sprints board with an observer head running it. There is no second loop:
+a sprint is never a knowledge document with a status pointer, and the document beside it holds only the
+"why".

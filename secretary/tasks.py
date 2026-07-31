@@ -75,14 +75,8 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
-# Installations created before Product/Issue used Ideas (or its translated form) as the first
-# column.  Reads keep accepting both names until the supported bootstrap migration renames the
-# column in place.  Spelled as escapes to keep the tracked tree ASCII.
-LEGACY_IDEAS_COLUMN = "\u0418\u0434\u0435\u0438"  # "Ideas" in the pre-translation board schema
 _STATE_BY_COLUMN = {
     "Issues": "issues",
-    "Ideas": "ideas",
-    LEGACY_IDEAS_COLUMN: "ideas",
     "Ready": "ready",
     "In progress": "in_progress",
     "Validate": "validate",
@@ -103,9 +97,12 @@ _CODEX_LAUNCH_MODES = {"exec", "tui"}
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
 _COMMENT_ROLES = _ROLES
 _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
+# Agent roles that may not open an execution card: their only create is a proposal in the
+# board's first column, which a PO later triages into Ready.
+_PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}
 _EDIT_ROLES = {"po", "dispatcher", "observer"}
-_EDITABLE_STATES = {"ideas", "ready", "blocked"}
-_STATES = ("issues", "ideas", "ready", "in_progress", "validate", "blocked", "done")
+_EDITABLE_STATES = {"ready", "blocked"}
+_STATES = ("issues", "ready", "in_progress", "validate", "blocked", "done")
 _TRANSITIONS = {
     # PO is the human operator and may move a card between any two states.
     "po": {(source, target) for source in _STATES for target in _STATES if source != target},
@@ -557,7 +554,7 @@ class TaskWriter:
         task_type: str,
         title: str,
         description: str = "",
-        target: str = "ideas",
+        target: str = "ready",
         reference: str = "",
         blocked_by: str = "",
         head: str = "",
@@ -573,7 +570,11 @@ class TaskWriter:
         sprint_override: bool = False,
         sprint_override_reason: str = "",
         request_id: str | None = None,
+        restoring: bool = False,
     ) -> dict[str, Any]:
+        # `restoring` is the restore path recreating a card that already existed: sprint
+        # admission decides what new work may start, and history is not new work.  Every
+        # other guard here still applies to it.
         self._role(role, _CREATE_ROLES)
         project = project.strip()
         task_type = task_type.strip()
@@ -599,18 +600,13 @@ class TaskWriter:
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
-        if target not in {"ideas", "ready", "issues"}:
-            raise TaskError("validation", "create target must be ready (Ideas is legacy-only)", 2)
-        _board_id, columns, _ = self.reader._board()
-        legacy_ideas = "Ideas" in columns.values() or LEGACY_IDEAS_COLUMN in columns.values()
-        if target == "ideas" and not legacy_ideas:
-            raise TaskError("legacy_layout", "execution tasks cannot be created in Issues; create a Ready task", 2)
-        if target == "issues":
+        if target not in {"ready", "issues"}:
+            raise TaskError("validation", "create target must be ready or issues", 2)
+        if role in _PROPOSAL_CREATE_ROLES:
+            if target != "issues":
+                raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
+        elif target == "issues":
             raise TaskError("transition_forbidden", "execution tasks cannot be created in Issues", 3)
-        if "Issues" in columns.values() and not sprint:
-            raise TaskError("validation", "task creation requires an open sprint", 2)
-        if role in {"worker", "reviewer", "retro"} and target != "ideas":
-            raise TaskError("role_forbidden", f"{role} may create only ideas cards", 3)
         if complexity not in _COMPLEXITIES:
             raise TaskError("validation", "complexity must be one of: " + ", ".join(sorted(_COMPLEXITIES)), 2)
         if family_preference not in _FAMILY_PREFERENCES:
@@ -646,6 +642,12 @@ class TaskWriter:
             sprint_override_reason=sprint_override_reason, request_id=request_id,
             reference=reference,
         )
+        # After the ownership guard: a project another sprint holds is refused by that sprint,
+        # not by the admission rule.  A proposal in Issues is not yet admitted work, so only a
+        # Ready card needs a sprint of its own; an audited PO override is the hotfix path around
+        # it, and restore recreates cards that were admitted once already.
+        if target == "ready" and not sprint and not restoring and not override_payload:
+            raise TaskError("validation", "task creation requires an open sprint", 2)
         committed = self.audit.committed_event(request_id)
         if committed is not None:
             try:
@@ -976,30 +978,16 @@ class TaskWriter:
         )
         def mutation(task: dict[str, Any]) -> Any:
             source = task["state"]
-            record_type = task.get("record_type")
-            if record_type in {"issue", "product"}:
+            if task.get("record_type") in {"issue", "product"}:
                 raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
-            # An unclassified card in the current Issues column is a migrated legacy
-            # Ideas card.  A still-unmigrated Ideas board has the same requirement.
-            # Neither may take a normal task transition until a PO explicitly triages it.
-            legacy_unclassified = source in {"issues", "ideas"} and not record_type
-            if legacy_unclassified:
-                if role != "po" or target != "ready":
-                    raise TaskError("transition_forbidden", "legacy Ideas require explicit PO triage to Ready", 3)
             if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
                 raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-            _board_id, columns, _lanes = self.reader._board()
-            legacy_ideas_target = target == "ideas" and any(
-                title in {"Ideas", LEGACY_IDEAS_COLUMN} for title in columns.values()
-            )
-            if (source, target) not in _TRANSITIONS[role] and not (role == "po" and legacy_ideas_target):
+            if (source, target) not in _TRANSITIONS[role]:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
-                if legacy_unclassified:
-                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"record_type": "task"})
                 if target in {"ready", "done"}:
                     self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
                 elif source == "validate":
@@ -1068,7 +1056,7 @@ class TaskWriter:
 
         def mutation(task: dict[str, Any]) -> Any:
             if task["state"] not in _EDITABLE_STATES:
-                raise TaskError("edit_forbidden", "edit requires an Ideas, Ready or Blocked card", 3)
+                raise TaskError("edit_forbidden", "edit requires a Ready or Blocked card", 3)
             number = _task_number(task)
             update: dict[str, Any] = {}
             if title is not None:
@@ -1571,9 +1559,6 @@ def _text(value: Any) -> str:
 
 
 def _target_column_id(columns: dict[int, str], target: str) -> int | None:
-    """Resolve a write target without making the legacy Ideas column a current state."""
-    if target == "ideas":
-        return next((identifier for identifier, name in columns.items() if name in {"Ideas", LEGACY_IDEAS_COLUMN}), None)
     return next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
 
 

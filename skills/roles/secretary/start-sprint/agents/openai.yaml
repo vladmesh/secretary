@@ -1,4 +1,0 @@
-interface:
-  display_name: "Start Sprint"
-  short_description: "Agree and open a new sprint"
-  default_prompt: "Use $start-sprint to agree the goal and open a new sprint."

@@ -1,9 +1,9 @@
 """Agent proposal route (secretary-900, secretary-901).
 
-Reviewer, retro, and steward file proposal cards into the board's first column, under either its
-current name `Issues` or a legacy `Ideas`. A PO may create a task there explicitly through
-`create --column ...`. The card is stamped record_type=task, so it is an untriaged execution card
-and never a Product issue, which no agent may create. The default create column stays `Ready`.
+Reviewer, retro, and steward file proposal cards into the board's first column, `Issues`. A PO may
+create a task there explicitly through `create --column ...`. The card is stamped record_type=task,
+so it is an untriaged execution card and never a Product issue, which no agent may create. The
+default create column stays `Ready`.
 """
 from __future__ import annotations
 
@@ -36,48 +36,34 @@ def _fake_board(columns, calls):
     return fake_call
 
 
-LEGACY_COLUMNS = [
-    {"id": 1, "title": "Ideas", "position": 1}, {"id": 2, "title": "Ready", "position": 2},
+BOARD_COLUMNS = [
+    {"id": 1, "title": "Issues", "position": 1}, {"id": 2, "title": "Ready", "position": 2},
     {"id": 3, "title": "In progress", "position": 3}, {"id": 4, "title": "Validate", "position": 4},
     {"id": 5, "title": "Blocked", "position": 5}, {"id": 6, "title": "Done", "position": 6},
 ]
-UNTRANSLATED_COLUMNS = [
-    dict(LEGACY_COLUMNS[0], title=next(iter(model.LEGACY_ISSUE_COLUMNS - {"Ideas"}))),
-    *LEGACY_COLUMNS[1:],
-]
-MIGRATED_COLUMNS = [dict(LEGACY_COLUMNS[0], title="Issues"), *LEGACY_COLUMNS[1:]]
-# A migrated board someone extended by hand: `Issues` leads, an old `Ideas` column survives later
-# in the order. Only the first column is a proposal target, so the leftover one is never used.
-MIGRATED_WITH_LATER_IDEAS = [
-    *MIGRATED_COLUMNS[:2],
-    {"id": 7, "title": "Ideas", "position": 3},
-    *[dict(column, position=int(column["position"]) + 1) for column in MIGRATED_COLUMNS[2:]],
-]
-# A board nobody reconciled: the first column is neither name the route knows.
-UNKNOWN_FIRST_COLUMN = [dict(LEGACY_COLUMNS[0], title="Backlog"), *LEGACY_COLUMNS[1:]]
+# A board nobody reconciled: the first column is not the one the route writes into.
+UNKNOWN_FIRST_COLUMN = [dict(BOARD_COLUMNS[0], title="Backlog"), *BOARD_COLUMNS[1:]]
 
 
 class ProposalRouteTests(unittest.TestCase):
     def test_first_column_takes_agent_proposals_typed_as_tasks(self):
-        for columns in (LEGACY_COLUMNS, UNTRANSLATED_COLUMNS, MIGRATED_COLUMNS,
-                        MIGRATED_WITH_LATER_IDEAS):
-            for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
-                with self.subTest(column=columns[0]["title"], route=file_proposal.__name__):
-                    calls = []
-                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)), \
-                         mock.patch.object(ops, "_sync_head_tags"):
-                        result = file_proposal(
-                            project="secretary", title="retro: looping head",
-                            description="Pattern: looping", ref="secretary-901",
-                        )
+        for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
+            with self.subTest(route=file_proposal.__name__):
+                calls = []
+                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
+                     mock.patch.object(ops, "_sync_head_tags"):
+                    result = file_proposal(
+                        project="secretary", title="retro: looping head",
+                        description="Pattern: looping", ref="secretary-901",
+                    )
 
-                    self.assertEqual(result["action"], "created")
-                    self.assertEqual(result["column"], columns[0]["title"])
-                    created = next(params for method, params in calls if method == "createTask")
-                    self.assertEqual(created["column_id"], 1)
-                    values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
-                    self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
-                    self.assertEqual(values[model.META_PROJECT], "secretary")
+                self.assertEqual(result["action"], "created")
+                self.assertEqual(result["column"], "Issues")
+                created = next(params for method, params in calls if method == "createTask")
+                self.assertEqual(created["column_id"], 1)
+                values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
+                self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
+                self.assertEqual(values[model.META_PROJECT], "secretary")
 
     def test_unreconciled_board_fails_closed_and_names_the_column(self):
         for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
@@ -105,7 +91,7 @@ class ProposalRouteTests(unittest.TestCase):
             if method == "getAllProjects":
                 return [{"id": 2, "name": ops.model.BOARD_NAME}]
             if method == "getColumns":
-                return MIGRATED_COLUMNS
+                return BOARD_COLUMNS
             if method == "getActiveSwimlanes":
                 return [{"id": 1, "name": "secretary"}]
             if method == "createTask":
@@ -158,77 +144,58 @@ class ProposalRouteTests(unittest.TestCase):
         self.assertEqual(promoted["from"], "Issues")
         self.assertEqual(task["column_id"], 2)
 
-    def test_po_can_explicitly_create_a_proposal_task_under_either_column_name(self):
-        for columns, requested, expected in (
-            (LEGACY_COLUMNS, "Ideas", "Ideas"),
-            (MIGRATED_COLUMNS, "Issues", "Issues"),
-            (MIGRATED_COLUMNS, "Ideas", "Issues"),
-        ):
-            with self.subTest(layout=columns[0]["title"], requested=requested):
-                calls = []
-                with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)), \
-                     mock.patch.object(ops, "_sync_head_tags"):
-                    result = ops.create_card(
-                        project="secretary", task_type="code", title="agent idea",
-                        column=requested, role="po",
-                    )
-
-                self.assertEqual(result["column"], expected)
-                created = next(params for method, params in calls if method == "createTask")
-                self.assertEqual(created["column_id"], 1)
-                values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
-                self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
-
-    def test_po_create_keeps_the_record_type_on_the_legacy_layout(self):
+    def test_po_can_explicitly_create_a_proposal_task_in_the_first_column(self):
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
+        with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
              mock.patch.object(ops, "_sync_head_tags"):
             result = ops.create_card(
-                project="secretary", task_type="code", title="agent idea", column="Ideas", role="po",
+                project="secretary", task_type="code", title="agent idea",
+                column="Issues", role="po",
             )
 
-        self.assertEqual(result["column"], "Ideas")
+        self.assertEqual(result["column"], "Issues")
         created = next(params for method, params in calls if method == "createTask")
         self.assertEqual(created["column_id"], 1)
         values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
         self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
 
     def test_only_po_can_create_in_the_first_column(self):
-        for columns in (LEGACY_COLUMNS, MIGRATED_COLUMNS):
-            for role in (*model.ROLES, None):
-                if role == "po":
-                    continue
-                with self.subTest(layout=columns[0]["title"], role=role):
-                    calls = []
-                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)):
-                        with self.assertRaisesRegex(model.GuardError, "created only in 'Ready'"):
-                            ops.create_card(
-                                project="secretary", task_type="code", title="t",
-                                column=columns[0]["title"], role=role,
-                            )
-                    self.assertNotIn("createTask", [method for method, _ in calls])
+        for role in (*model.ROLES, None):
+            if role == "po":
+                continue
+            with self.subTest(role=role):
+                calls = []
+                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)):
+                    with self.assertRaisesRegex(model.GuardError, "created only in 'Ready'"):
+                        ops.create_card(
+                            project="secretary", task_type="code", title="t",
+                            column="Issues", role=role,
+                        )
+                self.assertNotIn("createTask", [method for method, _ in calls])
 
     def test_po_proposal_create_fails_closed_on_an_unreconciled_board(self):
         calls = []
         with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)):
             with self.assertRaisesRegex(model.GuardError, "first column is 'Backlog'"):
                 ops.create_card(
-                    project="secretary", task_type="code", title="agent idea", column="Ideas", role="po",
+                    project="secretary", task_type="code", title="agent idea", column="Issues", role="po",
                 )
         self.assertNotIn("createTask", [method for method, _ in calls])
         self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
 
-    def test_create_default_remains_ready(self):
+    def test_create_default_remains_ready_and_is_typed(self):
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
+        with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
              mock.patch.object(ops, "_sync_head_tags"):
             result = ops.create_card(project="secretary", task_type="code", title="approved", role="po")
         self.assertEqual(result["column"], "Ready")
         created = next(params for method, params in calls if method == "createTask")
         self.assertEqual(created["column_id"], 2)
+        values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
+        self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
 
     def test_cli_po_creates_a_proposal_and_defaults_to_ready(self):
-        for column, expected in (("Ideas", "Ideas"), (None, "Ready")):
+        for column, expected in (("Issues", "Issues"), (None, "Ready")):
             with self.subTest(column=column):
                 calls = []
                 argv = [
@@ -238,7 +205,7 @@ class ProposalRouteTests(unittest.TestCase):
                 if column:
                     argv.extend(("--column", column))
                 out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
+                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
                      mock.patch.object(ops, "_sync_head_tags"), \
                      contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = cli.main(argv)
@@ -250,7 +217,7 @@ class ProposalRouteTests(unittest.TestCase):
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main([
                 "--role", "po", "create", "--project", "secretary", "--type", "code",
-                "--title", "agent idea", "--column", "Ideas", "--description", "body",
+                "--title", "agent idea", "--column", "Issues", "--description", "body",
             ])
         self.assertEqual(code, 3)
         self.assertIn("first column is 'Backlog'", err.getvalue())
@@ -259,19 +226,18 @@ class ProposalRouteTests(unittest.TestCase):
 
     def test_cli_idea_reports_the_first_column_and_a_guard_exit_without_one(self):
         for role in ("reviewer", "retro", "steward"):
-            for columns in (LEGACY_COLUMNS, MIGRATED_COLUMNS):
-                with self.subTest(role=role, layout=columns[0]["title"]):
-                    argv = [
-                        "--role", role, "idea", "--project", "secretary",
-                        "--title", "proposal", "--description", "body",
-                    ]
-                    out, err = io.StringIO(), io.StringIO()
-                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, [])), \
-                         mock.patch.object(ops, "_sync_head_tags"), \
-                         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                        code = cli.main(argv)
-                    self.assertEqual(code, 0, err.getvalue())
-                    self.assertEqual(json.loads(out.getvalue())["column"], columns[0]["title"])
+            with self.subTest(role=role):
+                argv = [
+                    "--role", role, "idea", "--project", "secretary",
+                    "--title", "proposal", "--description", "body",
+                ]
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, [])), \
+                     mock.patch.object(ops, "_sync_head_tags"), \
+                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main(argv)
+                self.assertEqual(code, 0, err.getvalue())
+                self.assertEqual(json.loads(out.getvalue())["column"], "Issues")
 
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, [])), \

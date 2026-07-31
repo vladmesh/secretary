@@ -48,7 +48,7 @@ class _BoardFixture:
             return {"id": 7}
         if method == "getColumns":
             return [
-                {"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"},
+                {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
                 {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
                 {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
             ]

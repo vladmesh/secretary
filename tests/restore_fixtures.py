@@ -125,7 +125,9 @@ def _restore_card(
             "id": task_id, "reference": reference, "title": title, "description": description,
             "column": column, "task_type": "code", "project": "secretary",
             "comments": comments or [],
-            "metadata": {"complexity": "standard", "family_preference": "auto"},
+            "metadata": {
+                "record_type": "task", "complexity": "standard", "family_preference": "auto",
+            },
         },
     )
 

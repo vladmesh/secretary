@@ -30,7 +30,7 @@ class SprintKanboard:
         self.projects = {"Pipeline": 7}
         self.columns = {
             7: [
-                {"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"},
+                {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
                 {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
                 {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
             ]
@@ -682,7 +682,7 @@ class SprintOwnershipTests(SprintFixture):
             self.writer.reopen(role="po", actor="operator", reference=ref)
 
     def test_board_layout_without_issues_column_fails_closed(self) -> None:
-        self.client.columns[7][0] = {"id": 1, "title": "Ideas"}
+        self.client.columns[7][0] = {"id": 1, "title": "Backlog"}
 
         with self.assertRaises(TaskError) as raised:
             self._create(goal="legacy layout")
@@ -1131,8 +1131,8 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-        # The guard is about card writes against an open sprint, not about opening one,
-        # and this board still has the legacy Ideas layout that ownership cannot read.
+        # The guard is about card writes against an open sprint, not about opening one, so the
+        # sprint is seeded through the restore route instead of `create`.
         self.ref = self.sprints.restore_create(
             reference="sprint:guard", goal="single writer", repositories=["secretary", "other"],
             request_id="seed-guard-sprint",
@@ -1155,7 +1155,7 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, self.ref) as retro:
             self.tasks.create(
                 role="retro", actor="retro", project="secretary", task_type="research", title="finding",
-                request_id="retro-denied",
+                target="issues", request_id="retro-denied",
             )
         self.assertEqual(retro.exception.code, "sprint_write_forbidden")
         denied = [event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"]
@@ -1227,17 +1227,17 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         )["task"]
         with self.assertRaisesRegex(TaskError, self.ref) as denied:
             self.tasks.move(
-                role="po", actor="operator", reference=card["ref"], target="ready", reason="",
+                role="po", actor="operator", reference=card["ref"], target="blocked", reason="",
                 request_id="po-override-retry",
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
         moved = self.tasks.move(
-            role="po", actor="operator", reference=card["ref"], target="ready", reason="",
+            role="po", actor="operator", reference=card["ref"], target="blocked", reason="",
             sprint_override=True, sprint_override_reason="production incident", request_id="po-override-retry",
         )
 
-        self.assertEqual(moved["task"]["state"], "ready")
+        self.assertEqual(moved["task"]["state"], "blocked")
         events = TaskAudit(self.tmp.name).events()
         denial = next(event for event in events if event["kind"] == "sprint_guard_denied")
         self.assertEqual(denial["payload"]["operation_request_id"], "po-override-retry")
@@ -1249,41 +1249,50 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, self.ref) as denied:
             self.tasks.create(
                 role="retro", actor="retro", project="secretary", task_type="research", title="finding",
-                request_id="retro-after-close",
+                target="issues", request_id="retro-after-close",
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
         self.sprints.close(role="po", actor="operator", reference=self.ref)
 
         created = self.tasks.create(
             role="retro", actor="retro", project="secretary", task_type="research", title="finding",
-            request_id="retro-after-close",
+            target="issues", request_id="retro-after-close",
         )
 
         self.assertEqual(created["task"]["project"], "secretary")
-        self.assertEqual(created["task"]["state"], "ideas")
+        self.assertEqual(created["task"]["state"], "issues")
 
     def test_dispatcher_cycle_and_observer_move_are_allowed(self) -> None:
         card = self.tasks.create(
             role="observer", actor="observer", project="secretary", task_type="code", title="cycle",
             sprint=self.ref,
         )["task"]
-        self.tasks.move(role="observer", actor="observer", reference=card["ref"], target="ready", reason="")
+        self.assertEqual(card["state"], "ready")
         self.tasks.claim(role="dispatcher", actor="dispatcher", reference=card["ref"], worker="worker")
         result = self.tasks.move(role="dispatcher", actor="dispatcher", reference=card["ref"], target="validate", reason="")
         self.assertEqual(result["task"]["state"], "validate")
 
     def test_close_releases_every_repository_and_unheld_projects_skip_sprint_board(self) -> None:
+        """A project no open sprint holds is never looked up on the sprint board.
+
+        Such a card is still refused, but by the admission rule (every Ready card needs its own
+        open sprint), not by another sprint's hold — and that is what changes on close.
+        """
         self.client.calls.clear()
-        card = self.tasks.create(
-            role="po", actor="operator", project="unheld", task_type="code", title="normal",
-        )["task"]
-        self.assertEqual(card["project"], "unheld")
+        with self.assertRaises(TaskError) as unheld:
+            self.tasks.create(role="po", actor="operator", project="unheld", task_type="code", title="normal")
+        self.assertEqual(unheld.exception.code, "validation")
         self.assertFalse(any(method == "getProjectByName" and params.get("name") == "Secretary sprints" for method, params in self.client.calls))
-        with self.assertRaises(TaskError):
+
+        with self.assertRaises(TaskError) as held:
             self.tasks.create(role="po", actor="operator", project="other", task_type="code", title="cross repo")
+        self.assertEqual(held.exception.code, "sprint_write_forbidden")
+
         self.sprints.close(role="po", actor="operator", reference=self.ref)
-        released = self.tasks.create(role="po", actor="operator", project="other", task_type="code", title="released")
-        self.assertEqual(released["task"]["project"], "other")
+
+        with self.assertRaises(TaskError) as released:
+            self.tasks.create(role="po", actor="operator", project="other", task_type="code", title="released")
+        self.assertEqual(released.exception.code, "validation")
 
     def test_unavailable_sprint_board_fails_closed(self) -> None:
         original = self.client.call

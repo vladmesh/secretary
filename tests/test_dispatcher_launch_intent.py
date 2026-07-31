@@ -2426,7 +2426,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             role="po",
             actor="operator",
             reference="secretary-510-neighbor",
-            target="ideas",
+            target="issues",
             reason="park the neighbour",
             request_id="park-neighbor",
         )
@@ -2444,7 +2444,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             role="po",
             actor="operator",
             reference="secretary-510-neighbor",
-            target="ideas",
+            target="issues",
             reason="make the requeue claimable",
             request_id="park-neighbor-for-ready-intent",
         )

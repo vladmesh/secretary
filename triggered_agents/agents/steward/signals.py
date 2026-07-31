@@ -32,7 +32,7 @@ from ..pipeline import ops as pipeline_ops
 
 STATE = AgentState("steward")
 
-# Columns where a long dwell is itself worth a look. "Ideas" (backlog, not yet triaged into Ready)
+# Columns where a long dwell is itself worth a look. "Issues" (backlog, not yet triaged into Ready)
 # and "Done" (terminal) are excluded — sitting there indefinitely is the expected shape, not an
 # anomaly.
 STALE_COLUMNS = ("Ready", "In progress", "Validate", "Blocked")

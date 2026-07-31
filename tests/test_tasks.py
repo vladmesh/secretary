@@ -19,13 +19,24 @@ from secretary.routing_journal import (
     routing_payload,
 )
 from secretary.tasks import (
-    LEGACY_IDEAS_COLUMN,
     KanboardClient,
     TaskAudit,
     TaskError,
     TaskReader,
     TaskWriter,
 )
+
+
+@contextlib.contextmanager
+def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
+    """Stand in for the open sprint every Ready card needs.
+
+    These tests are about the create and audit path; the sprint link is a precondition of a
+    create on the board, and the guard behind it is covered in tests/test_sprints.py.
+    """
+    sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
+    with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
+        yield ref
 
 
 class FakeKanboard:
@@ -54,7 +65,7 @@ class FakeKanboard:
         if method == "getProjectByName":
             return {"id": 7}
         if method == "getColumns":
-            return [{"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"}]
+            return [{"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"}]
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
         if method == "getAllTasks":
@@ -107,19 +118,6 @@ class TaskReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "not found") as raised:
             self.reader.show("missing")
         self.assertEqual(raised.exception.code, "not_found")
-
-    def test_reads_a_board_whose_first_column_is_not_migrated_yet(self) -> None:
-        # An installation that predates the column translation keeps its cards readable until
-        # ensure_pipeline_board renames the column.
-        columns = [{"id": 1, "title": LEGACY_IDEAS_COLUMN}, {"id": 2, "title": "Ready"}]
-        with mock.patch.object(
-            self.client, "call",
-            side_effect=lambda method, **params: columns if method == "getColumns"
-            else FakeKanboard.call(self.client, method, **params),
-        ):
-            result = self.reader.list(states={"ideas"})
-
-        self.assertEqual([task["ref"] for task in result], ["old-1"])
 
     def test_unknown_column_is_backend_error(self) -> None:
         self.client.tasks[0]["column_id"] = 999
@@ -238,7 +236,7 @@ class WriteKanboard(FakeKanboard):
     def call(self, method: str, **params: object) -> object:
         if method == "getColumns":
             return [
-                {"id": 1, "title": "Ideas"}, {"id": 2, "title": "Ready"},
+                {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
                 {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
                 {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
             ]
@@ -372,7 +370,7 @@ class TaskWriterTests(unittest.TestCase):
 
     def test_edit_refuses_active_states(self) -> None:
         self.client.tasks[0]["column_id"] = 3
-        with self.assertRaisesRegex(TaskError, "Ideas, Ready or Blocked") as raised:
+        with self.assertRaisesRegex(TaskError, "Ready or Blocked") as raised:
             self.writer.edit(role="po", actor="operator", reference="secretary-468", description="new spec")
         self.assertEqual(raised.exception.code, "edit_forbidden")
         self.assertFalse(any(call[0] == "updateTask" for call in self.client.calls))
@@ -706,18 +704,21 @@ class TaskWriterTests(unittest.TestCase):
 
     def test_pending_create_repairs_orphaned_reference(self) -> None:
         self.client.fail_update = True
-        with self.assertRaisesRegex(TaskError, "audit repair"):
-            self.writer.create(
-                role="po", actor="operator", project="secretary", task_type="code",
-                title="Restore", reference="secretary-restore", request_id="restore-create",
-            )
-        self.assertEqual(self.client.tasks[-1]["reference"], "")
-        self.client.fail_update = False
+        with open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Restore", reference="secretary-restore", request_id="restore-create",
+                    sprint=sprint,
+                )
+            self.assertEqual(self.client.tasks[-1]["reference"], "")
+            self.client.fail_update = False
 
-        result = self.writer.create(
-            role="po", actor="operator", project="secretary", task_type="code",
-            title="Restore", reference="secretary-restore", request_id="restore-create",
-        )
+            result = self.writer.create(
+                role="observer", actor="observer", project="secretary", task_type="code",
+                title="Restore", reference="secretary-restore", request_id="restore-create",
+                sprint=sprint,
+            )
         self.assertEqual(result["task"]["ref"], "secretary-restore")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
@@ -792,19 +793,21 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(event["payload"]["worker"], "secretary-468-runtime")
 
     def test_create_stores_codex_launch_mode_and_audits(self) -> None:
-        result = self.writer.create(
-            role="po",
-            actor="operator",
-            project="secretary",
-            task_type="code",
-            title="Launch mode",
-            description="body",
-            target="ready",
-            reference="secretary-522",
-            head="codex-extra",
-            codex_launch_mode="tui",
-            request_id="create-tui",
-        )
+        with open_sprint() as sprint:
+            result = self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Launch mode",
+                description="body",
+                target="ready",
+                reference="secretary-522",
+                head="codex-extra",
+                codex_launch_mode="tui",
+                request_id="create-tui",
+                sprint=sprint,
+            )
 
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["task"]["ref"], "secretary-522")
@@ -822,10 +825,27 @@ class TaskWriterTests(unittest.TestCase):
 
     def test_pending_create_replay_restores_metadata_before_audit(self) -> None:
         self.client.fail_metadata = True
-        with self.assertRaisesRegex(TaskError, "audit repair"):
-            self.writer.create(
-                role="po",
-                actor="operator",
+        with open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Launch mode",
+                    target="ready",
+                    reference="secretary-523",
+                    codex_launch_mode="tui",
+                    request_id="create-replay",
+                    sprint=sprint,
+                )
+            self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+            create_writes = len([call for call in self.client.calls if call[0] == "createTask"])
+
+            self.client.fail_metadata = False
+            result = self.writer.create(
+                role="observer",
+                actor="observer",
                 project="secretary",
                 task_type="code",
                 title="Launch mode",
@@ -833,22 +853,8 @@ class TaskWriterTests(unittest.TestCase):
                 reference="secretary-523",
                 codex_launch_mode="tui",
                 request_id="create-replay",
+                sprint=sprint,
             )
-        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
-        create_writes = len([call for call in self.client.calls if call[0] == "createTask"])
-
-        self.client.fail_metadata = False
-        result = self.writer.create(
-            role="po",
-            actor="operator",
-            project="secretary",
-            task_type="code",
-            title="Launch mode",
-            target="ready",
-            reference="secretary-523",
-            codex_launch_mode="tui",
-            request_id="create-replay",
-        )
 
         self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
         self.assertEqual(create_writes, len([call for call in self.client.calls if call[0] == "createTask"]))
@@ -873,8 +879,8 @@ class TaskWriterTests(unittest.TestCase):
     def test_create_rejects_invalid_codex_launch_mode_without_write(self) -> None:
         with self.assertRaisesRegex(TaskError, "codex launch mode") as raised:
             self.writer.create(
-                role="po",
-                actor="operator",
+                role="observer",
+                actor="observer",
                 project="secretary",
                 task_type="code",
                 title="Launch mode",
@@ -885,7 +891,7 @@ class TaskWriterTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
 
     def test_worker_create_ready_is_forbidden_without_backend_write(self) -> None:
-        with self.assertRaisesRegex(TaskError, "only ideas") as raised:
+        with self.assertRaisesRegex(TaskError, "only proposals in Issues") as raised:
             self.writer.create(
                 role="worker",
                 actor="w",

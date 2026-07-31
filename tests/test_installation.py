@@ -40,7 +40,7 @@ CARD = {
     "swimlane": "secretary",
     "position": 1,
     "fields": {"project": "secretary", "task_type": "code"},
-    "metadata": {},
+    "metadata": {"record_type": "task"},
     "comments": [],
 }
 

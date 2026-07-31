@@ -43,12 +43,10 @@ import os
 BOARD_NAME = os.environ.get("TA_PIPELINE_BOARD", "Pipeline")
 
 COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Blocked", "Done"]
-LEGACY_ISSUE_COLUMNS = {"Ideas", "\u0418\u0434\u0435\u0438"}
-# Where an agent proposal lands: the board's first column, under either the current name or a
-# legacy one. The card is stamped record_type=task, so it reads as an execution card awaiting PO
-# triage and never as a Product issue: an agent still cannot choose product, kind and priority,
-# so `issue create` stays closed to it.
-PROPOSAL_COLUMNS = {COLUMNS[0]} | LEGACY_ISSUE_COLUMNS
+# Where an agent proposal lands: the board's first column. The card is stamped record_type=task,
+# so it reads as an execution card awaiting PO triage and never as a Product issue: an agent
+# still cannot choose product, kind and priority, so `issue create` stays closed to it.
+PROPOSAL_COLUMN = COLUMNS[0]
 
 ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 
@@ -110,8 +108,8 @@ META_RECORD_TYPE = "record_type"
 RECORD_ISSUE = "issue"
 RECORD_PRODUCT = "product"
 # An execution task record: the card the pipeline works on, as opposed to a product or an issue.
-# Set explicitly on an agent proposal so a card in the legacy Ideas column is not read as
-# an unclassified pre-Product/Issue leftover awaiting PO triage.
+# Set on every card this agent creates, so an Issues-column proposal reads as an execution card
+# awaiting PO triage and never as a Product issue.
 RECORD_TASK = "task"
 
 IN_PROGRESS = "In progress"
@@ -139,10 +137,10 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
     },
     "worker": set(),
     # The layer-3 reviewer never moves cards (the dispatcher acts on its verdict, like it does on
-    # a worker report). Its only artifacts are the verdict comment and Ideas cards.
+    # a worker report). Its only artifacts are the verdict comment and proposal cards.
     "reviewer": set(),
     # retro (the daily fail-pattern scan) never moves a card either, same reasoning as reviewer:
-    # its only board write is an Ideas card (ops.retro_idea) for a proposal, never Ready or beyond.
+    # its only board write is a proposal card (ops.retro_idea) in Issues, never Ready or beyond.
     "retro": set(),
     # steward gets every po transition plus one override: Blocked -> Done, a legal replacement for
     # the raw-API Blocked->Done edits seen on agent-kanban-232/235 and triggered-agents-230. That
@@ -247,7 +245,7 @@ def check_move(role: str, from_col: str, to_col: str) -> None:
     if role not in ROLES:
         raise GuardError(f"unknown role {role!r} (roles: {', '.join(ROLES)})")
     for col in (from_col, to_col):
-        if col not in COLUMNS and col not in LEGACY_ISSUE_COLUMNS:
+        if col not in COLUMNS:
             raise GuardError(f"unknown column {col!r} (columns: {', '.join(COLUMNS)})")
     if (from_col, to_col) in TRANSITIONS[role]:
         return
