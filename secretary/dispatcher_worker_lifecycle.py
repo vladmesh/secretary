@@ -17,6 +17,7 @@ class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"
     RETAINED = "retained"
+    RED_TRANSITION_PENDING = "red_transition_pending"
     DELIVERY_PENDING = "delivery_pending"
     DELIVERY_CONFIRMED = "delivery_confirmed"
 
@@ -27,10 +28,27 @@ class WorkerContinuation:
     phase: str = ""
     retained_at: float = 0.0
     sent_at: float = 0.0
+    report_baseline: int = 0
+    move_reason: str = ""
+    """The comment the red move carries, kept so recovery finishes the move it opened.
+
+    A gate verdict is not reconstructible from the record: the CI summary and its tail live in the
+    tick that read them. Recovery that re-derived a reason would either move the card with a
+    different body or have to re-run the gate, which is exactly the replay this stage exists to
+    prevent.
+    """
+    verdict_outcome: str = ""
+    session_held: bool = False
+    """Whether a suspended session of this round is still there to be resumed.
+
+    Separate from the stage because a red transition outlives the session it was opened over: the
+    intent has to be durable whether or not anything can take the continuation, and a confirmed
+    stop in the middle of one drops the session without dropping the transition.
+    """
 
     @property
     def retained(self) -> bool:
-        return self.stage != WorkerContinuationStage.NONE
+        return self.session_held and self.stage != WorkerContinuationStage.NONE
 
     @property
     def awaiting_continuation(self) -> bool:
@@ -39,6 +57,10 @@ class WorkerContinuation:
     @property
     def validation_move_pending(self) -> bool:
         return self.stage == WorkerContinuationStage.VALIDATION_MOVE_PENDING
+
+    @property
+    def red_transition_pending(self) -> bool:
+        return self.stage == WorkerContinuationStage.RED_TRANSITION_PENDING
 
     @property
     def delivery_pending(self) -> bool:
@@ -53,6 +75,7 @@ class WorkerContinuation:
         self.phase = ""
         self.retained_at = now
         self.sent_at = 0.0
+        self.session_held = True
 
     def confirm_validation_move(self) -> None:
         if self.stage == WorkerContinuationStage.RETAINED:
@@ -61,12 +84,50 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm validation move from {self.stage}")
         self.stage = WorkerContinuationStage.RETAINED
 
+    def begin_red_transition(
+        self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str
+    ) -> None:
+        """Record the red verdict before the board is moved.
+
+        The board move and the state write are separate durable facts. Without this the record of a
+        crashed tick still names the report that closed the previous round, and recovery reads that
+        report as a new completion instead of finishing the red transition.
+
+        Opening one over a round that holds no session is the same transition, not a lesser case:
+        whether the continuation ends up in the old conversation or in a replacement is decided
+        after this, and a round with nothing to reuse is exactly the one whose replacement must not
+        be lost to a crash.
+
+        An open transition is immutable. It carries everything its own completion needs, so a tick
+        that finds one finishes it rather than opening a second one over a freshly read verdict.
+        """
+        if self.stage not in {
+            WorkerContinuationStage.NONE,
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
+            WorkerContinuationStage.RETAINED,
+        }:
+            raise ValueError(f"cannot open a red transition from {self.stage}")
+        self.stage = WorkerContinuationStage.RED_TRANSITION_PENDING
+        self.phase = phase
+        self.report_baseline = int(report_baseline)
+        self.move_reason = move_reason
+        self.verdict_outcome = verdict_outcome
+
     def begin_delivery(self, phase: str, now: float) -> None:
-        if self.stage != WorkerContinuationStage.RETAINED:
+        # `DELIVERY_PENDING` is allowed back in: a tick that died between the send and its
+        # checkpoint is recovered by re-entering the same delivery, not by a different path.
+        if self.stage not in {
+            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.RED_TRANSITION_PENDING,
+            WorkerContinuationStage.DELIVERY_PENDING,
+        }:
             raise ValueError(f"cannot resume worker from {self.stage}")
+        if self.stage != WorkerContinuationStage.DELIVERY_PENDING:
+            # The earliest send is what a turn is looked for after. Moving this forward on a retry
+            # would hide a turn the first send already started and cost the worker a second prompt.
+            self.sent_at = now
         self.stage = WorkerContinuationStage.DELIVERY_PENDING
         self.phase = phase
-        self.sent_at = now
 
     def confirm_delivery(self) -> None:
         if self.stage not in {
@@ -76,11 +137,29 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm worker delivery from {self.stage}")
         self.stage = WorkerContinuationStage.DELIVERY_CONFIRMED
 
+    def drop_session(self) -> None:
+        """The session is gone, by a confirmed stop or by its own death.
+
+        A retention that has nothing else pending disappears with it. A red transition does not:
+        it still owes the card a replacement, and losing the intent here is what would let a later
+        tick read the closed round's report as a new completion.
+        """
+        self.session_held = False
+        if self.stage in {
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
+            WorkerContinuationStage.RETAINED,
+        }:
+            self.clear()
+
     def clear(self) -> None:
         self.stage = WorkerContinuationStage.NONE
         self.phase = ""
         self.retained_at = 0.0
         self.sent_at = 0.0
+        self.report_baseline = 0
+        self.move_reason = ""
+        self.verdict_outcome = ""
+        self.session_held = False
 
     def to_json(self) -> dict[str, Any]:
         if self.stage == WorkerContinuationStage.NONE:
@@ -90,6 +169,10 @@ class WorkerContinuation:
             "phase": self.phase,
             "retained_at": self.retained_at,
             "sent_at": self.sent_at,
+            "report_baseline": self.report_baseline,
+            "move_reason": self.move_reason,
+            "verdict_outcome": self.verdict_outcome,
+            "session_held": self.session_held,
         }
 
     @classmethod
@@ -102,6 +185,12 @@ class WorkerContinuation:
             phase=str(value.get("phase") or ""),
             retained_at=float(value.get("retained_at") or 0.0),
             sent_at=float(value.get("sent_at") or 0.0),
+            report_baseline=int(value.get("report_baseline") or 0),
+            move_reason=str(value.get("move_reason") or ""),
+            verdict_outcome=str(value.get("verdict_outcome") or ""),
+            # Records written before the session flag existed only ever reached a stage by
+            # retaining one.
+            session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),
         )
 
     @classmethod
@@ -124,4 +213,5 @@ class WorkerContinuation:
             phase=str(payload.get("worker_resume_phase") or ""),
             retained_at=retained_at,
             sent_at=float(payload.get("worker_resume_sent_at") or 0.0),
+            session_held=stage != WorkerContinuationStage.NONE,
         )

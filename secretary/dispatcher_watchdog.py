@@ -111,8 +111,9 @@ def head_process_status(pid_file: str) -> dict[str, Any]:
         return {"known": True, "alive": False}
     except PermissionError:
         # Exists, owned by someone else. Cannot happen for a head this dispatcher launched itself,
-        # but existing beats dead here rather than guessing.
-        return {"known": True, "alive": True}
+        # but existing beats dead here rather than guessing. `/proc` is still readable, so the
+        # suspended flag stays available to retention rather than silently reading as "running".
+        return {"known": True, "alive": True, "stopped": _is_stopped(pid)}
     except OSError:
         return {"known": False}
     alive = not _is_zombie(pid)

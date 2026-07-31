@@ -21,14 +21,14 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 "✻ Forming... (4s · ↑ 13.2k tokens)",
             ]}}
 
-        self.assertTrue(terminal_turn_started("term-claude", run_json=run_json))
+        self.assertTrue(terminal_turn_started("term-claude", adapter="claude", run_json=run_json))
 
         def completed_run_json(command: list[str]) -> dict:
             return {"terminal": {"tail": [
                 "The completed response says it was thinking while working.",
             ]}}
 
-        self.assertFalse(terminal_turn_started("term-claude", run_json=completed_run_json))
+        self.assertFalse(terminal_turn_started("term-claude", adapter="claude", run_json=completed_run_json))
 
     def test_claude_delivery_accepts_its_durable_user_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,7 +58,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m\n›"]}}])
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
 
             handle = host._launch(
                 str(workspace),
@@ -84,7 +84,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "TASK.md").write_text("full spec body that must not be delivered\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m\n›"]}}])
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
 
             host._launch(
                 str(workspace),
@@ -110,7 +110,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 workspace,
                 [
                     {"terminal": {"tail": ["\u203a Read TASK.md"]}},
-                    {"terminal": {"tail": ["thinking\n›"]}},
+                    {"terminal": {"tail": ["thinking"]}},
                 ],
             )
 
