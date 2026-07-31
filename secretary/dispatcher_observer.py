@@ -1035,7 +1035,9 @@ def _wake_for_event(
     try:
         # The criterion travels with the call: this batch is closed by the observer's own resume
         # naming it, never by the pane merely starting a turn.
-        runtime.host.nudge_observer(record, confirm=lambda: _resume_acknowledged(runtime, ref, record))
+        runtime.host.nudge_observer(
+            record, confirm=lambda _sent_at: _resume_acknowledged(runtime, ref, record)
+        )
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         return _fail_delivery(
             runtime, payload, observers, ref, record, event, f"observer wake failed: {exc}"

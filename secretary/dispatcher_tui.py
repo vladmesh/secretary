@@ -25,6 +25,7 @@ TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S"
 TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
 TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_WAIT_ERROR_CODE_RE = re.compile(r'"code"\s*:\s*"([a-z_]+)"')
 _CODEX_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
 # Claude's composer has no Codex `›` marker. Its active turn is a dedicated status line, so a
 # transcript word such as "working" or "thinking" is not enough to say a new turn started.
@@ -41,6 +42,11 @@ class TuiDeliveryError(RuntimeError):
 # the caller's own proof of delivery is expected to arrive later, outside this call.
 DELIVERY_CONFIRMED = "confirmed"
 DELIVERY_ACCEPTED = "accepted"
+
+# What Orca answered about a pane. `unknown` is the probe failing, which is not a busy head.
+READINESS_READY = "ready"
+READINESS_BUSY = "busy"
+READINESS_UNKNOWN = "unknown"
 
 
 def deliver_tui_prompt(
@@ -82,14 +88,18 @@ def wait_for_tui_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None 
     ])
 
 
-def terminal_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> bool:
-    """Whether the pane is ready for input right now, on Orca's signal rather than on its screen.
+def terminal_readiness(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> str:
+    """Ask Orca whether the pane is ready for input, and answer in three states, not two.
 
     This is the one readiness question the product asks about an interactive head, whatever
     provider runs in it: the runtime derives it from the pane's own agent status and falls back to
-    a quiescence window. A pane Orca will not answer for, or one it reports as blocked behind a
-    dialog, is deliberately not idle: an unreadable head stays live rather than being guessed
-    quiet.
+    a quiescence window, so no screen is read here.
+
+    `READINESS_BUSY` is that condition not being met, which Orca reports either as a satisfied-false
+    answer for a pane blocked behind a dialog or as a failed command carrying `code: timeout`.
+    `READINESS_UNKNOWN` is the probe itself failing, and it must not be read as an ordinary busy
+    head: a caller that cannot ask the question is not looking at a working observer, it is looking
+    at nothing.
     """
     try:
         data = run_json([
@@ -99,14 +109,22 @@ def terminal_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None = No
             "--timeout-ms", str(TUI_IDLE_PROBE_TIMEOUT_MS if timeout_ms is None else timeout_ms),
             "--json",
         ])
-    except Exception:
-        # A timeout is how Orca says "not idle", and it comes back as a failed command. Every other
-        # refusal reads the same way here, because none of them is evidence of a quiet pane.
-        return False
+    except Exception as exc:
+        return READINESS_BUSY if _wait_timed_out(exc) else READINESS_UNKNOWN
     wait = data.get("wait") if isinstance(data, dict) and isinstance(data.get("wait"), dict) else data
     if isinstance(wait, dict) and "satisfied" in wait:
-        return bool(wait.get("satisfied"))
-    return True
+        return READINESS_READY if wait.get("satisfied") else READINESS_BUSY
+    return READINESS_READY
+
+
+def _wait_timed_out(exc: Exception) -> bool:
+    """Whether a refused wait is Orca saying the condition was not met in time.
+
+    The runtime prints its error body as JSON on stdout and the host carries that text into the
+    failure it raises, so the machine-readable code survives. A failure without that code is not a
+    timeout: an unreachable runtime, a stale handle and a missing CLI all land there.
+    """
+    return "timeout" in _WAIT_ERROR_CODE_RE.findall(str(exc))
 
 
 def terminal_turn_started(
@@ -133,11 +151,10 @@ def terminal_turn_started(
 
 def deliver_interactive_prompt(
     handle: str,
-    workspace: str,
     prompt: str,
     *,
     run_json: RunJson,
-    confirm: Callable[[], bool] | None = None,
+    confirm: Callable[[float], bool],
     ack_out_of_band: bool = False,
 ) -> str:
     """Deliver a prompt into a live interactive head, on one path for every role that has one.
@@ -146,9 +163,10 @@ def deliver_interactive_prompt(
     send, then keep re-entering the prompt while the pane stays idle, which is what a swallowed
     prompt looks like. Exhausting the retries raises, so the caller can take its own failure path.
 
-    What closes the delivery is the caller's business, not this function's. `confirm` defaults to
-    the head's own durable user turn, which is the worker and reviewer criterion. A caller whose proof
-    arrives later (an observer resume naming this delivery) passes that criterion here and sets
+    What closes the delivery is the caller's, and this function has no opinion of its own: `confirm`
+    is required, and it is called with the moment the prompt was sent. Worker and reviewer pass the
+    criterion they always had, their head's turn having visibly started. A caller whose proof
+    arrives later (an observer resume naming this delivery) passes that criterion and sets
     `ack_out_of_band`, and gets `DELIVERY_ACCEPTED` as soon as the pane has taken the prompt.
     """
     wait_for_tui_idle(handle, run_json=run_json)
@@ -162,7 +180,6 @@ def deliver_interactive_prompt(
     ])
     return _confirm_interactive_turn(
         handle,
-        workspace,
         sent_at,
         run_json=run_json,
         confirm=confirm,
@@ -228,22 +245,27 @@ def _confirm_delivered(
 
 def _confirm_interactive_turn(
     handle: str,
-    workspace: str,
     sent_at: float,
     *,
     run_json: RunJson,
-    confirm: Callable[[], bool] | None = None,
+    confirm: Callable[[float], bool],
     ack_out_of_band: bool = False,
 ) -> str:
-    confirmed = confirm or (lambda: bool(latest_claude_user_turn_for(workspace, sent_at)))
     deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
     next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
     resends = 0
     accepted = False
     while time.monotonic() < deadline:
-        if confirmed():
+        if confirm(sent_at):
             return DELIVERY_CONFIRMED
-        if not terminal_idle(handle, run_json=run_json):
+        readiness = terminal_readiness(handle, run_json=run_json)
+        if readiness == READINESS_UNKNOWN:
+            # Not a swallowed prompt and not a working head: the pane cannot be asked at all.
+            # Guessing either way here would hide the failure the caller has to act on.
+            raise TuiDeliveryError(
+                f"the pane could not be probed after the prompt was sent (resends={resends})"
+            )
+        if readiness == READINESS_BUSY:
             # The pane went to work on something: the prompt is in, whether or not the caller's
             # own proof of it has appeared yet.
             accepted = True

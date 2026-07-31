@@ -118,11 +118,13 @@ from secretary.dispatcher_state import (
 )
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
+    READINESS_READY,
+    READINESS_UNKNOWN,
     TuiDeliveryError,
     close_terminal as _close_tui_terminal,
     close_terminal_strict as _close_tui_terminal_strict,
     deliver_interactive_prompt as _deliver_interactive_prompt,
-    terminal_idle as _terminal_idle,
+    terminal_readiness as _terminal_readiness,
     terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
@@ -777,12 +779,16 @@ class CommandHostRuntime:
             last = float(terminal.get("lastOutputAt")) / 1000.0
         except (TypeError, ValueError):
             return {}
-        return {
-            "last_activity": last,
-            "idle": _terminal_idle(str(terminal.get("handle") or ""), run_json=self._run_json),
-        }
+        readiness = _terminal_readiness(
+            str(terminal.get("handle") or ""), run_json=self._run_json
+        )
+        if readiness == READINESS_UNKNOWN:
+            # A probe that failed is not a working observer. Raising puts it on the lifecycle's
+            # bounded failure path, where a busy pane would wait forever instead.
+            raise HostError("observer terminal readiness could not be read")
+        return {"last_activity": last, "idle": readiness == READINESS_READY}
 
-    def nudge_observer(self, record: Any, *, confirm: Callable[[], bool] | None = None) -> str:
+    def nudge_observer(self, record: Any, *, confirm: Callable[[float], bool] | None = None) -> str:
         """Give an idle observer one event-driven turn without replacing its head.
 
         The prompt goes through the same delivery path as a worker or reviewer continuation: wait
@@ -820,12 +826,11 @@ class CommandHostRuntime:
         try:
             return _deliver_interactive_prompt(
                 current,
-                workspace,
                 message,
                 run_json=self._run_json,
                 # A wake with no criterion of its own is never confirmed in this call: an
                 # observer's proof of delivery is a resume, and it arrives long after the send.
-                confirm=confirm or (lambda: False),
+                confirm=confirm or (lambda _sent_at: False),
                 ack_out_of_band=True,
             )
         except TuiDeliveryError as exc:
@@ -1756,11 +1761,39 @@ class CommandHostRuntime:
                     prompt_text=prompt,
                 )
             else:
-                # No `confirm` and no out-of-band acknowledgement: this returns only once the head
-                # has recorded the user turn, and raises otherwise.
-                _deliver_interactive_prompt(record.handle, str(workspace), prompt, run_json=self._run_json)
+                _deliver_interactive_prompt(
+                    record.handle,
+                    prompt,
+                    run_json=self._run_json,
+                    confirm=self._turn_started_confirm(
+                        record.handle, str(workspace), str(adapter or "")
+                    ),
+                )
         except (TuiDeliveryError, HostError) as exc:
             raise HostError(f"retained worker continuation was not delivered: {exc}") from None
+
+    def _turn_started_confirm(
+        self, handle: str, workspace: str, adapter: str
+    ) -> Callable[[float], bool]:
+        """The worker and reviewer delivery criterion: this head's turn has visibly started.
+
+        Same evidence `resume_worker` already trusts when it decides a crashed tick had delivered
+        its prompt: the head's own durable user record after the send boundary, and failing that
+        the pane showing a turn underway. Handed to the delivery path rather than assumed by it,
+        because an observer's proof of delivery is a different thing entirely.
+        """
+        def confirm(sent_at: float) -> bool:
+            if _terminal_turn_started(
+                handle,
+                run_json=self._run_json,
+                workspace=workspace,
+                since=sent_at,
+                adapter=adapter,
+            ):
+                return True
+            return _terminal_turn_started(handle, run_json=self._run_json, adapter=adapter)
+
+        return confirm
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":

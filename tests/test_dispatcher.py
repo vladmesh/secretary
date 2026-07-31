@@ -530,7 +530,7 @@ class FakeHost:
         # Like the real host: the pane took the prompt, and the delivery criterion the lifecycle
         # passed in is what decides whether the batch is closed.
         self.observer_wake_confirms.append(confirm)
-        return "confirmed" if confirm is not None and confirm() else "accepted"
+        return "confirmed" if confirm is not None and confirm(time.time()) else "accepted"
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")

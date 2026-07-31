@@ -10,7 +10,16 @@ from unittest import mock
 from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import deliver_interactive_prompt, terminal_turn_started
+from secretary.dispatcher_tui import (
+    READINESS_BUSY,
+    READINESS_READY,
+    READINESS_UNKNOWN,
+    deliver_interactive_prompt,
+    latest_claude_user_turn_for,
+    terminal_readiness,
+    terminal_turn_started,
+)
+from tests.test_dispatcher_observer import STALE_HANDLE_WAIT_FAILURE, TIMEOUT_WAIT_FAILURE
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -29,6 +38,40 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             ]}}
 
         self.assertFalse(terminal_turn_started("term-claude", adapter="claude", run_json=completed_run_json))
+
+    def test_readiness_tells_a_busy_pane_from_one_that_cannot_be_probed(self) -> None:
+        """A refused probe is its own answer: it is neither a ready pane nor a working one."""
+        def answer(payload: dict | Exception):
+            def run_json(_command: list[str]) -> dict:
+                if isinstance(payload, Exception):
+                    raise payload
+                return payload
+
+            return run_json
+
+        self.assertEqual(
+            terminal_readiness("term", run_json=answer({"wait": {"satisfied": True}})),
+            READINESS_READY,
+        )
+        # A pane Orca reports as blocked behind a dialog answers, and answers "not ready".
+        self.assertEqual(
+            terminal_readiness(
+                "term", run_json=answer({"wait": {"satisfied": False, "blockedReason": "modal"}})
+            ),
+            READINESS_BUSY,
+        )
+        # The condition not being met in time comes back as a failed command carrying its code.
+        self.assertEqual(
+            terminal_readiness("term", run_json=answer(HostError(TIMEOUT_WAIT_FAILURE))),
+            READINESS_BUSY,
+        )
+        for failure in (
+            HostError(STALE_HANDLE_WAIT_FAILURE),
+            HostError("orca terminal wait failed: [Errno 2] No such file or directory: 'orca'"),
+        ):
+            self.assertEqual(
+                terminal_readiness("term", run_json=answer(failure)), READINESS_UNKNOWN
+            )
 
     def test_claude_delivery_accepts_its_durable_user_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,7 +93,12 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 return {}
 
             with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
-                deliver_interactive_prompt("term-claude", str(workspace), "Read TASK.md", run_json=run_json)
+                deliver_interactive_prompt(
+                    "term-claude",
+                    "Read TASK.md",
+                    run_json=run_json,
+                    confirm=lambda sent_at: bool(latest_claude_user_turn_for(str(workspace), sent_at)),
+                )
 
         self.assertTrue(any(command[2] == "send" for command in calls))
 

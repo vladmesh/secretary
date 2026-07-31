@@ -54,6 +54,21 @@ from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegac
 # is above the default pid_max and is reliably free.
 DEAD_PID = 999999
 
+# What the host raises when Orca refuses `terminal wait`. Both bodies are the live CLI's, captured
+# from `orca terminal wait --for tui-idle --json`: the runtime prints its error as JSON on stdout
+# and the host carries that text into the failure, which is what tells a busy pane (`timeout`) from
+# a probe that could not be answered at all.
+TIMEOUT_WAIT_FAILURE = (
+    "orca terminal wait --terminal observer:sprint:1 --for tui-idle --timeout-ms 6000 --json "
+    'failed: {\n  "id": "0b1ba8ed",\n  "ok": false,\n  "error": {\n'
+    '    "code": "timeout",\n    "message": "timeout"\n  }\n}'
+)
+STALE_HANDLE_WAIT_FAILURE = (
+    "orca terminal wait --terminal observer:sprint:1 --for tui-idle --timeout-ms 6000 --json "
+    'failed: {\n  "id": "7ea4ada1",\n  "ok": false,\n  "error": {\n'
+    '    "code": "terminal_handle_stale",\n    "message": "terminal_handle_stale"\n  }\n}'
+)
+
 
 def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
     """A role-skill registry of this test's own, pointed at by SECRETARY_ROLE_SKILLS_MANIFEST.
@@ -402,6 +417,92 @@ class ObserverLifecycleTests(unittest.TestCase):
             [event["kind"] for event in self.audit.events("sprint:1")],
             [EVENT_LAUNCHED, EVENT_RELAUNCHED],
         )
+
+    def test_a_readiness_probe_that_fails_is_not_read_as_a_busy_head(self) -> None:
+        """Through the real `observer_status`: a probe Orca refuses must not read as ordinary work.
+
+        The wake would otherwise sit in `waiting_for_idle` forever, counting no attempts and never
+        reaching either the explicit refusal or the replacement.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "wait"]:
+                raise HostError(STALE_HANDLE_WAIT_FAILURE)
+            raise AssertionError(args)
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="unprobeable-pane-event",
+        )
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            first = self.runtime.production_tick()
+
+            action = self.actions(first)[0]
+            self.assertEqual(action["action"], "observer-wake-deferred")
+            self.assertEqual(action["status"], "degraded")
+            self.assertIn("observer terminal readiness could not be read", action["reason"])
+            delivery = self.observers()["sprint:1"].delivery
+            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+            self.assertEqual(delivery.attempts, 1)
+
+            self.expire_wake_retry()
+            self.runtime.production_tick()
+            self.expire_wake_retry()
+            replaced = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        self.assertEqual(self.host.observer_nudges, [])
+
+    def test_a_readiness_probe_timeout_is_an_ordinary_busy_head(self) -> None:
+        """The other half of the same distinction: a busy pane must not cost the sprint its head."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "wait"]:
+                raise HostError(TIMEOUT_WAIT_FAILURE)
+            raise AssertionError(args)
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="busy-pane-event",
+        )
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            waiting = self.runtime.production_tick()
+            self.expire_wake_retry()
+            still_waiting = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
+        self.assertEqual(
+            [row["action"] for row in self.actions(still_waiting)], ["observer-wake-waiting"]
+        )
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.WAITING_FOR_IDLE)
+        self.assertEqual(delivery.attempts, 0)
+        self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_a_terminal_orca_will_not_answer_for_also_ends_in_a_replacement(self) -> None:
         """The other external failure of a wake: bounded retries, then the same replacement path."""
@@ -2253,7 +2354,7 @@ class ObserverTerminalStatusTests(unittest.TestCase):
                 raise AssertionError(args)
 
             with mock.patch.object(host, "_run_json", side_effect=run_json):
-                outcome = host.nudge_observer(record, confirm=lambda: acknowledged[0])
+                outcome = host.nudge_observer(record, confirm=lambda _sent_at: acknowledged[0])
 
         self.assertEqual(outcome, "confirmed")
         self.assertEqual([call for call in calls if call[1:3] == ["terminal", "read"]], [])
@@ -2286,7 +2387,7 @@ class ObserverTerminalStatusTests(unittest.TestCase):
                  mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
                  mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2), \
                  self.assertRaises(HostError) as raised:
-                host.nudge_observer(record, confirm=lambda: False)
+                host.nudge_observer(record, confirm=lambda _sent_at: False)
 
         self.assertIn("observer wake was not delivered", str(raised.exception))
         self.assertIn("pane-stayed-idle", str(raised.exception))
