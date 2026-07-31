@@ -2783,6 +2783,11 @@ class DispatcherRuntime:
                     record.state = "claim_verified"
                     self.save_records(payload, records)
                     return self._launch_worker_after_claim(task, record, records, payload)
+        if record.worker_continuation.red_transition_pending:
+            # An open red transition outranks everything else this card could be doing. The board
+            # move may or may not have committed before the tick that opened it died, so the
+            # transition is finished against the board as it is now, ahead of any report marker.
+            return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
         marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
@@ -2811,23 +2816,6 @@ class DispatcherRuntime:
             # recorded. Finishing it again is what makes that checkpoint worth writing: the rework
             # otherwise runs attributed to the round the verdict closed, with no reuse on the card.
             return self._finish_retained_worker_resume(
-                task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
-            )
-        if continuation.red_transition_pending:
-            # The board move committed and the tick died before the delivery boundary was durable.
-            # The intent is finished against the board as it is now: the report it was opened
-            # against belongs to the closed round and is never read as a new completion.
-            record.comment_baseline = max(
-                len(task.get("comments") or []), continuation.report_baseline
-            )
-            record.review_baseline = record.comment_baseline
-            record.gate_state = ""
-            record.gate_pending_since = 0.0
-            _reset_wait(record, "review")
-            _reset_wait(record, "worker")
-            records[ref] = record
-            self.save_records(payload, records)
-            return self._deliver_red_continuation(
                 task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
         if marker == "report:done":
@@ -3059,6 +3047,12 @@ class DispatcherRuntime:
             except HostError as exc:
                 return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
+        if record.worker_continuation.red_transition_pending:
+            # A red transition whose board move did not commit leaves the card in Validate with the
+            # verdict already recorded. Finishing it comes before the gate is read again, before any
+            # review marker and before a reviewer is started: a rollup that has turned green since
+            # cannot retract a red round this card is already owed.
+            return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
             return self._finish_green(task, record, records, payload, attempt_id)
@@ -3080,7 +3074,7 @@ class DispatcherRuntime:
             # still there is decided inside the transition, on the same order as the red gate.
             return self._begin_red_transition(
                 task, record, records, payload, attempt_id, phase="review",
-                move_reason="review:red", move_kind="review-red", verdict_outcome="red",
+                move_reason="review:red", verdict_outcome="red",
             )
         # Mechanical gate (secretary-633): a fresh report clears the cheap CI/local gate before the
         # expensive reviewer is spawned. A review already in flight (state review_starting/reviewing)
@@ -3448,21 +3442,21 @@ class DispatcherRuntime:
         # reading does not attribute the bounce to whoever reviewed the round.
         return self._begin_red_transition(
             task, record, records, payload, attempt_id, phase=phase,
-            move_reason=body, move_kind=f"{phase}-red", verdict_outcome=f"{phase}_red",
+            move_reason=body, verdict_outcome=f"{phase}_red",
         )
 
     def _begin_red_transition(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, phase: str, move_reason: str, move_kind: str,
+        payload: dict[str, Any], attempt_id: str, *, phase: str, move_reason: str,
         verdict_outcome: str,
     ) -> dict[str, Any]:
         """The only way a card goes back to In progress for rework.
 
         A red gate and a red review differ in the comment they leave and in the identities they
         dedupe on, not in the order they owe the card. That order lives here and nowhere else: the
-        intent is on disk, with its phase and the report baseline it was opened against, before
-        anything observable moves; the board moves; and only then is it decided whether the round's
-        own session takes the continuation or a replacement does.
+        intent is on disk, with its phase, the report baseline it was opened against and the reason
+        the card is moving, before anything observable moves; the board moves; and only then is it
+        decided whether the round's own session takes the continuation or a replacement does.
 
         Whether a session is held is deliberately not a precondition of this call. The round with
         nothing to reuse is the one whose replacement a crash would otherwise lose, leaving the
@@ -3470,22 +3464,44 @@ class DispatcherRuntime:
         """
         ref = task["ref"]
         baseline = len(task.get("comments") or [])
-        record.worker_continuation.begin_red_transition(phase, baseline)
+        record.worker_continuation.begin_red_transition(
+            phase, baseline, move_reason, verdict_outcome
+        )
         records[ref] = record
         self.save_records(payload, records)
-        self._record_verdict_routing(ref, record, verdict_outcome)
+        return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
+
+    def _complete_red_transition(
+        self, record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, *, ref: str,
+    ) -> dict[str, Any]:
+        """Finish the open red transition from the board as it is now.
+
+        Every tick that finds one comes here, whichever phase opened it and whether or not a session
+        is held, before it reads a gate result, a report marker or a review verdict. The move is
+        keyed on the baseline the intent was opened against, so the tick that already moved the card
+        and the tick recovering from a crash before that move run the same call and the card moves
+        once. Nothing here re-reads the verdict: the transition carries its own reason, so a gate
+        that has since turned green cannot talk this card out of the red round it already owes.
+        """
+        continuation = record.worker_continuation
+        phase = continuation.phase or "gate"
+        baseline = continuation.report_baseline
+        self._record_verdict_routing(ref, record, continuation.verdict_outcome)
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
             target="in_progress",
-            reason=move_reason,
+            reason=continuation.move_reason,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, move_kind, ref, str(baseline)
+                record.attempt_id or attempt_id, f"{phase}-red", ref, str(baseline)
             ),
         )
         moved = self.reader.show(ref)
-        record.comment_baseline = len(moved.get("comments") or [])
+        # The report that closed the previous round is behind this baseline, so no later tick can
+        # read it as a completion of the round this transition opens.
+        record.comment_baseline = max(len(moved.get("comments") or []), baseline)
         # `review_baseline` is part of the worker report identity. The rework round gets a new
         # TASK.md, so its report must not dedupe against the round the verdict closed.
         record.review_baseline = record.comment_baseline
@@ -3493,6 +3509,8 @@ class DispatcherRuntime:
         record.gate_pending_since = 0.0
         _reset_wait(record, "review")
         _reset_wait(record, "worker")
+        records[ref] = record
+        self.save_records(payload, records)
         return self._deliver_red_continuation(
             moved, record, records, payload, attempt_id, phase=phase
         )

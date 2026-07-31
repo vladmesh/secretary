@@ -341,7 +341,8 @@ back to the session that wrote the code. A red mechanical gate opens it directly
 it after the reviewer's stop is confirmed. Nothing else moves a card to In progress for rework, and
 the transition always runs the same order, differing only in the phase it records:
 
-1. The red intent, with its phase and the baseline of the report it closes, goes to disk.
+1. The red intent, with its phase, the baseline of the report it closes and the reason the card is
+   moving, goes to disk.
 2. The card moves.
 3. The delivery decision is made: a confirmed-suspended session takes the continuation, and
    anything else gets a confirmed stop and exactly one replacement.
@@ -351,7 +352,11 @@ durable intent, because it is the round whose replacement a crash would otherwis
 would still name the report that closed the round, and the next tick would replay that report as a
 new completion while the card sat In progress with no worker. A tick that dies anywhere after step 1
 is recovered by re-entering this transition against the board as it stands, never by replaying the
-Validate handoff. The suspension of the session about to be reused is confirmed from the heartbeat
+Validate handoff. An open intent outranks everything else the card could be doing: every tick
+finishes it before it reads the mechanical gate, a report marker or a review verdict, and before it
+starts a reviewer. The intent is immutable once written and carries its own reason, so a rollup that
+has turned green between two ticks cannot retract a red round the card is already owed, and the card
+moves once however many ticks it takes to finish the transition. The suspension of the session about to be reused is confirmed from the heartbeat
 immediately before the delivery boundary opens, on recovery as well as on the first attempt, rather
 than trusting the confirmation the reviewer launch made earlier; a session that is no longer
 confirmably suspended is stopped with a confirmed stop and replaced exactly once. The dispatcher then

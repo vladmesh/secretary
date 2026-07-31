@@ -628,6 +628,118 @@ class LaunchIntentTests(unittest.TestCase):
             self.host.calls.index("confirm_worker_retained"), len(self.host.calls)
         )
 
+    def fail_the_red_move(self):
+        """The red intent reaches the disk and the board move behind it does not.
+
+        A refusing move and a process that dies just before it leave the same thing on disk: an
+        open red transition over a card the board still shows in Validate.
+        """
+        real_move = self.writer.move
+
+        def move(**kwargs):
+            if kwargs.get("target") == "in_progress":
+                raise OSError("dispatcher died before the red board move")
+            return real_move(**kwargs)
+
+        return mock.patch.object(self.writer, "move", move)
+
+    def assert_red_intent_open_in_validate(self, phase: str) -> None:
+        self.assertEqual(self.reader.show(REF)["state"], "validate")
+        stranded = self.record()
+        assert stranded is not None
+        self.assertEqual(
+            stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING
+        )
+        self.assertEqual(stranded.worker_continuation.phase, phase)
+
+    def test_a_red_gate_intent_before_the_board_move_outranks_a_fresh_green_gate(self) -> None:
+        """The recorded red verdict is not up for re-decision by the next tick's rollup.
+
+        Between the two ticks CI can turn green: the failing job is retried, a flake settles, or the
+        rollup simply finishes. Reading the gate again there would start a reviewer over a card that
+        already owes its worker a red round, and the red verdict would be gone from the record with
+        nothing having delivered it.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.fail_the_red_move():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assert_red_intent_open_in_validate("gate")
+        self.host.gate_results = [GateResult("green", "passed")]
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "gate-red-reused-worker")
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("start_review"), 0)
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertIn("gate red continuation: reused", self.reader.show(REF)["comments"][-1]["body"])
+
+    def test_a_red_review_intent_before_the_board_move_is_finished_as_that_intent(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.rework_after_red_review()
+
+        with self.fail_the_red_move():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assert_red_intent_open_in_validate("review")
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("start_review"), 1, "no second reviewer is spawned")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertIn(
+            "review red continuation: reused", self.reader.show(REF)["comments"][-1]["body"]
+        )
+
+    def test_a_red_gate_intent_without_a_session_still_moves_and_replaces_once(self) -> None:
+        """Nothing to reuse is not a lesser transition: the replacement is owed just the same."""
+        self.without_a_retained_session()
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.fail_the_red_move():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assert_red_intent_open_in_validate("gate")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.host.gate_results = [GateResult("green", "passed")]
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "gate-red-rework")
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("start_review"), 0)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_a_red_review_intent_without_a_session_still_moves_and_replaces_once(self) -> None:
+        self.without_a_retained_session()
+        self.rework_after_red_review()
+
+        with self.fail_the_red_move():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assert_red_intent_open_in_validate("review")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "rework-started")
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("start_review"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
     def die_after_red_move(self):
         """A tick that moves the card back to In progress and never records why.
 
