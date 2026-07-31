@@ -171,10 +171,13 @@ Liveness uses the same pid heartbeat as worker and reviewer. A live head can sti
 turn, so the dispatcher also asks Orca whether the pane is ready for input and reads its terminal
 output time. Readiness is `tui-idle`, the same signal the delivery path waits on before it sends to
 any head, so the answer does not depend on which provider the observer profile names. It has three
-answers, not two: ready, busy (a pane Orca looked at and found working or blocked behind a dialog,
-or the condition unmet before the probe's deadline) and unanswerable. Orca leaves the command with
-a non-zero status for a busy pane as well as for a failure, so the answer is read from the body it
-printed rather than from the outcome. A probe that cannot be answered is not a busy head; it enters the
+answers, not two: ready, busy (a pane that is working, or the condition unmet before the probe's
+deadline), blocked (a pane held in a dialog, which is not ready and is not working on a prompt
+either) and unanswerable. Orca leaves the command with a non-zero status for a busy pane as well as
+for a failure, so the answer is read from the body it printed rather than from the outcome. A pane
+nothing can be sent to at all, because the record has no handle, because Orca no longer lists that
+terminal or because it is disconnected, is not a busy head either: it enters the same bounded
+failure path. A probe that cannot be answered is not a busy head; it enters the
 same bounded failure path as a refused delivery, because a head nobody can ask about is not one the
 sprint can wait on. A ready pane exposes `idle-grace` in the observer record, but does not relaunch
 it by itself. A committed,
@@ -193,8 +196,10 @@ the head is `idle-grace` even if its linked card remains active; the next signif
 event wakes it. If that event arrived while the head was still working, the dispatcher keeps the
 pending event and checks again on later ticks, delivering the nudge as soon as the pane is ready.
 
-The wake itself goes through the one delivery path every interactive head shares with worker and
-reviewer continuations: wait for the pane, send, re-enter a prompt the pane swallowed, and refuse
+The wake itself goes through the one delivery path every interactive head has, whatever provider it
+runs and whichever role owns it: a Codex launch, a worker or reviewer continuation and an observer
+wake are the same primitive. Wait for the pane, send, re-enter the prompt while Orca says the pane
+took nothing, which is what carries it past a dialog that swallowed the first Enter, and refuse
 upwards when the retries run out. What closes the delivery is the caller's, and the path has no
 criterion of its own: every caller passes one. A worker or reviewer continuation is delivered once
 its own head's turn has visibly started, which is that role's long-standing criterion; an observer

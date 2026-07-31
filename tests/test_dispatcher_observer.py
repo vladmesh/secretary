@@ -544,6 +544,50 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
         self.assertEqual(self.host.observer_nudges, [])
 
+    def test_an_adopted_head_with_no_handle_is_replaced_not_waited_on(self) -> None:
+        """A tick that died before recording the handle leaves a head nothing can be sent to.
+
+        Its pid is alive, so the lifecycle keeps it, and a card event then has nowhere to go. That
+        must reach the delivery's bounded failure path rather than waiting for a readiness the
+        record can never be asked for.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+        adopted = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(adopted)], ["observer-adopted"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.handle, "")
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="unaddressable-head-event",
+        )
+        self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+
+        first = self.runtime.production_tick()
+
+        action = self.actions(first)[0]
+        self.assertEqual(action["action"], "observer-wake-deferred")
+        self.assertEqual(action["status"], "degraded")
+        self.assertIn("observer record names no terminal to read", action["reason"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.attempts, 1)
+
+        self.expire_wake_retry()
+        self.runtime.production_tick()
+        self.expire_wake_retry()
+        replaced = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertTrue(record.handle)
+        self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(record.delivery.method, "launch")
+
     def test_a_readiness_probe_timeout_is_an_ordinary_busy_head(self) -> None:
         """The other half of the same distinction: a busy pane must not cost the sprint its head."""
         self.open_sprint()
@@ -2394,6 +2438,32 @@ class ObserverTerminalStatusTests(unittest.TestCase):
 
         self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": False})
 
+    def test_a_pane_nothing_can_be_sent_to_refuses_instead_of_reading_busy(self) -> None:
+        """A head that cannot be addressed is not a working one, whatever its pid says."""
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            adopted = ObserverRecord(sprint="sprint:1", workspace="/workspace")
+
+            # A record whose handle died with the tick that launched it: nothing to read at all.
+            with self.assertRaises(HostError):
+                host.observer_status(adopted)
+
+            record = ObserverRecord(
+                sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1"
+            )
+            for terminals in (
+                [],
+                [{"handle": "observer:sprint:1", "connected": False}],
+            ):
+                def run_json(args: list[str], answer=terminals) -> dict:
+                    if args[1:3] == ["terminal", "list"]:
+                        return {"terminals": answer}
+                    raise AssertionError(args)
+
+                with mock.patch.object(host, "_run_json", side_effect=run_json), \
+                     self.assertRaises(HostError):
+                    host.observer_status(record)
+
     def test_real_host_nudge_carries_the_active_delivery_marker(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
@@ -2499,7 +2569,7 @@ class ObserverTerminalStatusTests(unittest.TestCase):
                 host.nudge_observer(record, confirm=lambda _sent_at: False)
 
         self.assertIn("observer wake was not delivered", str(raised.exception))
-        self.assertIn("pane-stayed-idle", str(raised.exception))
+        self.assertIn("pane-stayed-ready", str(raised.exception))
         sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
         self.assertEqual(len(sends), 3)
         self.assertEqual([call[call.index("--text") + 1] for call in sends[1:]], ["", ""])

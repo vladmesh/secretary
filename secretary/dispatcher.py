@@ -126,6 +126,7 @@ from secretary.dispatcher_tui import (
     deliver_interactive_prompt as _deliver_interactive_prompt,
     terminal_readiness as _terminal_readiness,
     terminal_turn_started as _terminal_turn_started,
+    turn_started_confirm as _turn_started_confirm,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
@@ -758,12 +759,16 @@ class CommandHostRuntime:
         to any head. Nothing here reads the screen, so the answer does not depend on which provider
         the observer profile happens to name.
 
-        This is advisory work liveness, not process liveness.  The lifecycle still owns the pid
-        heartbeat, and an unreadable terminal deliberately reports no readiness rather than
-        risking a replacement beside an observer that is merely invisible to Orca.
+        This is advisory work liveness, not process liveness. The lifecycle still owns the pid
+        heartbeat. A pane nothing can be sent to, though, is not a busy observer: a record whose
+        handle died with the tick that launched it, a terminal Orca no longer lists and a
+        disconnected one all refuse here, so the caller's bounded failure path replaces that head
+        instead of waiting for a readiness that can never arrive.
         """
-        if self.mode == "noop" or not record.workspace or not (record.handle or record.leaf):
+        if self.mode == "noop":
             return {}
+        if not record.workspace or not (record.handle or record.leaf):
+            raise HostError("observer record names no terminal to read")
         terminals = self._worktree_terminals(str(record.workspace))
         terminal = next(
             (
@@ -773,12 +778,10 @@ class CommandHostRuntime:
             ),
             None,
         )
-        if terminal is None or terminal.get("connected") is False:
-            return {}
-        try:
-            last = float(terminal.get("lastOutputAt")) / 1000.0
-        except (TypeError, ValueError):
-            return {}
+        if terminal is None:
+            raise HostError("observer terminal is not in the inventory of its workspace")
+        if terminal.get("connected") is False:
+            raise HostError("observer terminal is not connected")
         readiness = _terminal_readiness(
             str(terminal.get("handle") or ""), run_json=self._run_json
         )
@@ -786,7 +789,13 @@ class CommandHostRuntime:
             # A probe that failed is not a working observer. Raising puts it on the lifecycle's
             # bounded failure path, where a busy pane would wait forever instead.
             raise HostError("observer terminal readiness could not be read")
-        return {"last_activity": last, "idle": readiness == READINESS_READY}
+        status: dict[str, Any] = {"idle": readiness == READINESS_READY}
+        try:
+            status["last_activity"] = float(terminal.get("lastOutputAt")) / 1000.0
+        except (TypeError, ValueError):
+            # Only the idle-recovery path needs the clock, and it says so itself when it is missing.
+            pass
+        return status
 
     def nudge_observer(self, record: Any, *, confirm: Callable[[float], bool] | None = None) -> str:
         """Give an idle observer one event-driven turn without replacing its head.
@@ -1765,35 +1774,13 @@ class CommandHostRuntime:
                     record.handle,
                     prompt,
                     run_json=self._run_json,
-                    confirm=self._turn_started_confirm(
-                        record.handle, str(workspace), str(adapter or "")
+                    confirm=_turn_started_confirm(
+                        record.handle, str(workspace), str(adapter or ""),
+                        run_json=self._run_json,
                     ),
                 )
         except (TuiDeliveryError, HostError) as exc:
             raise HostError(f"retained worker continuation was not delivered: {exc}") from None
-
-    def _turn_started_confirm(
-        self, handle: str, workspace: str, adapter: str
-    ) -> Callable[[float], bool]:
-        """The worker and reviewer delivery criterion: this head's turn has visibly started.
-
-        Same evidence `resume_worker` already trusts when it decides a crashed tick had delivered
-        its prompt: the head's own durable user record after the send boundary, and failing that
-        the pane showing a turn underway. Handed to the delivery path rather than assumed by it,
-        because an observer's proof of delivery is a different thing entirely.
-        """
-        def confirm(sent_at: float) -> bool:
-            if _terminal_turn_started(
-                handle,
-                run_json=self._run_json,
-                workspace=workspace,
-                since=sent_at,
-                adapter=adapter,
-            ):
-                return True
-            return _terminal_turn_started(handle, run_json=self._run_json, adapter=adapter)
-
-        return confirm
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":

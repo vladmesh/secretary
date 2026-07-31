@@ -43,9 +43,11 @@ class TuiDeliveryError(RuntimeError):
 DELIVERY_CONFIRMED = "confirmed"
 DELIVERY_ACCEPTED = "accepted"
 
-# What Orca answered about a pane. `unknown` is the probe failing, which is not a busy head.
+# What Orca answered about a pane. `blocked` is a pane held in a dialog: not ready for a prompt,
+# and not working on one either. `unknown` is the probe failing, which is not a busy head.
 READINESS_READY = "ready"
 READINESS_BUSY = "busy"
+READINESS_BLOCKED = "blocked"
 READINESS_UNKNOWN = "unknown"
 
 
@@ -58,6 +60,12 @@ def deliver_tui_prompt(
     session_root: Path | None = None,
     prompt_text: str | None = None,
 ) -> None:
+    """Deliver a Codex TUI prompt: the shared path, with this role's own criterion.
+
+    Nothing here is a second delivery path. It resolves what to send, which is the caller's
+    business, and hands the same criterion worker and reviewer use on any other head: their head's
+    turn having visibly started.
+    """
     if prompt_text is not None:
         prompt = prompt_text
     else:
@@ -65,16 +73,44 @@ def deliver_tui_prompt(
             prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
-    wait_for_tui_idle(handle, run_json=run_json)
-    sent_at = time.time()
-    run_json([
-        "orca", "terminal", "send",
-        "--terminal", handle,
-        "--text", prompt,
-        "--enter",
-        "--json",
-    ])
-    _confirm_delivered(handle, workspace, prompt, sent_at, run_json=run_json, session_root=session_root)
+    deliver_interactive_prompt(
+        handle,
+        prompt,
+        run_json=run_json,
+        confirm=turn_started_confirm(
+            handle, workspace, "codex", run_json=run_json, session_root=session_root
+        ),
+    )
+
+
+def turn_started_confirm(
+    handle: str,
+    workspace: str,
+    adapter: str,
+    *,
+    run_json: RunJson,
+    session_root: Path | None = None,
+) -> Callable[[float], bool]:
+    """The worker and reviewer delivery criterion, on whichever head that role was given.
+
+    Their providers persist a user turn locally, and that record after the send boundary is the
+    first proof; a pane showing a turn underway is the second. This is the criterion the roles
+    have always used, expressed as something a caller passes rather than something the delivery
+    path decides for them.
+    """
+    def confirm(sent_at: float) -> bool:
+        if terminal_turn_started(
+            handle,
+            run_json=run_json,
+            workspace=workspace,
+            since=sent_at,
+            adapter=adapter,
+            session_root=session_root,
+        ):
+            return True
+        return terminal_turn_started(handle, run_json=run_json, adapter=adapter)
+
+    return confirm
 
 
 def wait_for_tui_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> None:
@@ -95,11 +131,12 @@ def terminal_readiness(handle: str, *, run_json: RunJson, timeout_ms: int | None
     provider runs in it: the runtime derives it from the pane's own agent status and falls back to
     a quiescence window, so no screen is read here.
 
-    `READINESS_BUSY` is that condition not being met, which Orca reports either as a satisfied-false
-    answer for a pane blocked behind a dialog or as a failed command carrying `code: timeout`.
-    `READINESS_UNKNOWN` is the probe itself failing, and it must not be read as an ordinary busy
-    head: a caller that cannot ask the question is not looking at a working observer, it is looking
-    at nothing.
+    `READINESS_BUSY` is the condition not being met by a pane that is working, which Orca reports
+    as a satisfied-false answer or as a failed command carrying `code: timeout`. A pane it names a
+    `blockedReason` for is `READINESS_BLOCKED`: also not ready, but held in a dialog rather than
+    working, so a prompt sent to it went nowhere. `READINESS_UNKNOWN` is the probe itself failing,
+    and it must not be read as an ordinary busy head: a caller that cannot ask the question is not
+    looking at a working observer, it is looking at nothing.
     """
     try:
         data = run_json([
@@ -113,7 +150,7 @@ def terminal_readiness(handle: str, *, run_json: RunJson, timeout_ms: int | None
         return _refused_wait_readiness(exc)
     wait = data.get("wait") if isinstance(data, dict) and isinstance(data.get("wait"), dict) else data
     if isinstance(wait, dict) and "satisfied" in wait:
-        return READINESS_READY if wait.get("satisfied") else READINESS_BUSY
+        return _answered_readiness(wait)
     return READINESS_READY
 
 
@@ -133,7 +170,7 @@ def _refused_wait_readiness(exc: Exception) -> str:
     result = body.get("result") if isinstance(body.get("result"), dict) else body
     wait = result.get("wait") if isinstance(result, dict) else None
     if isinstance(wait, dict) and "satisfied" in wait:
-        return READINESS_READY if wait.get("satisfied") else READINESS_BUSY
+        return _answered_readiness(wait)
     error = body.get("error") if isinstance(body.get("error"), dict) else {}
     code = str(error.get("code") or "")
     if not code:
@@ -141,6 +178,12 @@ def _refused_wait_readiness(exc: Exception) -> str:
         codes = _WAIT_ERROR_CODE_RE.findall(str(exc))
         code = codes[-1] if codes else ""
     return READINESS_BUSY if code == "timeout" else READINESS_UNKNOWN
+
+
+def _answered_readiness(wait: dict[str, Any]) -> str:
+    if wait.get("satisfied"):
+        return READINESS_READY
+    return READINESS_BLOCKED if wait.get("blockedReason") else READINESS_BUSY
 
 
 def _json_object(text: str) -> dict[str, Any]:
@@ -161,6 +204,7 @@ def terminal_turn_started(
     workspace: str = "",
     since: float = 0.0,
     adapter: str = "",
+    session_root: Path | None = None,
 ) -> bool:
     """Whether an interactive provider pane already accepted a prompt into a turn.
 
@@ -172,7 +216,7 @@ def terminal_turn_started(
         if adapter == "claude":
             return bool(latest_claude_user_turn_for(workspace, since))
         if adapter == "codex":
-            return bool(latest_user_turn_for(workspace, since))
+            return bool(latest_user_turn_for(workspace, since, session_root=session_root))
     return _screen_started_turn(read_terminal_text(handle, run_json=run_json), adapter=adapter)
 
 
@@ -230,46 +274,6 @@ def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:
     run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
 
 
-def _confirm_delivered(
-    handle: str,
-    workspace: str,
-    prompt: str,
-    sent_at: float,
-    *,
-    run_json: RunJson,
-    session_root: Path | None = None,
-) -> None:
-    deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
-    next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
-    resends = 0
-    last_reason = "no-start-signal"
-    while time.monotonic() < deadline:
-        if latest_user_turn_for(workspace, sent_at, session_root=session_root):
-            return
-        screen = read_terminal_text(handle, run_json=run_json)
-        if _screen_started_turn(screen):
-            return
-        if _prompt_still_in_codex_composer(screen, prompt):
-            last_reason = "prompt-in-composer"
-            if resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
-                run_json([
-                    "orca", "terminal", "send",
-                    "--terminal", handle,
-                    "--text", "",
-                    "--enter",
-                    "--json",
-                ])
-                resends += 1
-                next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
-        else:
-            last_reason = "awaiting-start-signal"
-        time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
-    raise TuiDeliveryError(
-        f"TUI prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
-        f"(reason={last_reason}, resends={resends})"
-    )
-
-
 def _confirm_interactive_turn(
     handle: str,
     sent_at: float,
@@ -282,6 +286,7 @@ def _confirm_interactive_turn(
     next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
     resends = 0
     accepted = False
+    readiness = READINESS_READY
     while time.monotonic() < deadline:
         if confirm(sent_at):
             return DELIVERY_CONFIRMED
@@ -299,6 +304,8 @@ def _confirm_interactive_turn(
             if ack_out_of_band:
                 return DELIVERY_ACCEPTED
         elif resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
+            # Ready or held in a dialog: either way the pane is not working on this prompt, so it
+            # is entered again. That is what carries a prompt past a dialog that swallowed it.
             accepted = False
             run_json([
                 "orca", "terminal", "send",
@@ -312,7 +319,7 @@ def _confirm_interactive_turn(
         time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
     raise TuiDeliveryError(
         f"interactive prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
-        f"(reason={'accepted-but-unconfirmed' if accepted else 'pane-stayed-idle'}, "
+        f"(reason={'accepted-but-unconfirmed' if accepted else f'pane-stayed-{readiness}'}, "
         f"resends={resends})"
     )
 
@@ -487,22 +494,6 @@ def _is_user_turn(record: dict[str, Any]) -> bool:
         and record.get("type") == "event_msg"
         and payload.get("type") == "user_message"
     )
-
-
-def _prompt_signature(prompt: str) -> str:
-    for token in ("TASK.md", "REVIEW.md"):
-        if token in prompt:
-            return token
-    words = re.findall(r"\S+", prompt)
-    return " ".join(words[:6])
-
-
-def _prompt_still_in_codex_composer(screen: str, prompt: str) -> bool:
-    marker = screen.rfind("\u203a")
-    if marker < 0:
-        return False
-    signature = _prompt_signature(prompt)
-    return bool(signature and signature in screen[marker:])
 
 
 def _screen_started_turn(screen: str, *, adapter: str = "") -> bool:
