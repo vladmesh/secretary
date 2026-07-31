@@ -628,18 +628,28 @@ class LaunchIntentTests(unittest.TestCase):
             self.host.calls.index("confirm_worker_retained"), len(self.host.calls)
         )
 
-    def test_a_crash_after_red_move_does_not_replay_the_old_validate_handoff(self) -> None:
-        """The initial freeze checkpoint must not survive a completed Validate handoff."""
-        self.run_to_validate()
-        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+    def die_after_red_move(self):
+        """A tick that moves the card back to In progress and never records why.
+
+        The red intent is written before the move, so the only saves this refuses are the delivery
+        boundary and everything after it.
+        """
         real_save = self.runtime.state.save
 
-        def die_after_red_move(payload: dict) -> None:
+        def save(payload: dict) -> None:
             if self.reader.show(REF)["state"] == "in_progress":
                 raise OSError("dispatcher died after red board move")
             real_save(payload)
 
-        with mock.patch.object(self.runtime.state, "save", die_after_red_move):
+        return mock.patch.object(self.runtime.state, "save", save)
+
+    def test_a_crash_after_the_red_gate_move_delivers_the_continuation_it_intended(self) -> None:
+        """The Validate handoff of the closed round is never replayed by its own done report."""
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.die_after_red_move():
             with self.assertRaises(OSError):
                 self.tick()
 
@@ -648,13 +658,135 @@ class LaunchIntentTests(unittest.TestCase):
         assert retained is not None
         self.assertEqual(
             retained.worker_continuation.stage,
-            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.RED_TRANSITION_PENDING,
+        )
+        self.assertEqual(retained.worker_continuation.phase, "gate")
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "gate-red-reused-worker")
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+
+    def test_a_crash_after_the_red_review_move_delivers_the_continuation_it_intended(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.tick()  # reviewer up
+        self.verdict("red", "needs work", "verdict-red")
+
+        with self.die_after_red_move():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        retained = self.record()
+        assert retained is not None
+        self.assertEqual(
+            retained.worker_continuation.stage,
+            WorkerContinuationStage.RED_TRANSITION_PENDING,
+        )
+        self.assertEqual(retained.worker_continuation.phase, "review")
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+
+    def die_before_finishing_the_round(self):
+        """The delivery is checkpointed and the tick dies before the round it opened is recorded."""
+
+        def die(*_args, **_kwargs):
+            raise OSError("dispatcher died after the delivery checkpoint")
+
+        return mock.patch.object(self.runtime, "_finish_retained_worker_resume", die)
+
+    def test_a_confirmed_gate_red_delivery_is_finished_by_the_next_tick(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.die_before_finishing_the_round():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        confirmed = self.record()
+        assert confirmed is not None
+        self.assertEqual(
+            confirmed.worker_continuation.stage, WorkerContinuationStage.DELIVERY_CONFIRMED
+        )
+        self.assertEqual(confirmed.attempt_round, 1)
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "gate-red-reused-worker")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2)
+        self.assertEqual(record.worker_continuation.stage, WorkerContinuationStage.NONE)
+        self.assertIn("gate red continuation: reused", self.reader.show(REF)["comments"][-1]["body"])
+
+    def test_a_confirmed_review_red_delivery_is_finished_by_the_next_tick(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.rework_after_red_review()
+
+        with self.die_before_finishing_the_round():
+            with self.assertRaises(OSError):
+                self.tick()
+
+        confirmed = self.record()
+        assert confirmed is not None
+        self.assertEqual(
+            confirmed.worker_continuation.stage, WorkerContinuationStage.DELIVERY_CONFIRMED
         )
 
         recovered = self.tick()
 
-        self.assertEqual(recovered["to"], "validate")
-        self.assertEqual(self.reader.show(REF)["state"], "validate")
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2)
+        self.assertIn(
+            "review red continuation: reused", self.reader.show(REF)["comments"][-1]["body"]
+        )
+
+    def test_a_session_that_lost_its_suspension_during_review_is_replaced_once(self) -> None:
+        """The suspension confirmed before the reviewer started is not evidence at delivery time."""
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.tick()  # reviewer up over a confirmed suspended worker
+        self.host.retained_worker_alive = False
+        self.verdict("red", "needs work", "verdict-red")
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "rework-started")
+        self.assertEqual(self.host.calls.count("resume_worker"), 0)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertIn(
+            "review red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"]
+        )
+
+    def test_a_session_that_lost_its_suspension_before_the_red_gate_is_replaced_once(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+        self.host.retained_worker_alive = False
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "gate-red-rework")
+        self.assertEqual(self.host.calls.count("resume_worker"), 0)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertIn(
+            "gate red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"]
+        )
 
     def test_a_dead_rework_intent_relaunches_inside_the_round_it_reserved(self) -> None:
         """The reservation outlives the head the rework never got.

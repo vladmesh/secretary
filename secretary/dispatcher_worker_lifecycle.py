@@ -17,6 +17,7 @@ class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"
     RETAINED = "retained"
+    RED_TRANSITION_PENDING = "red_transition_pending"
     DELIVERY_PENDING = "delivery_pending"
     DELIVERY_CONFIRMED = "delivery_confirmed"
 
@@ -27,6 +28,7 @@ class WorkerContinuation:
     phase: str = ""
     retained_at: float = 0.0
     sent_at: float = 0.0
+    report_baseline: int = 0
 
     @property
     def retained(self) -> bool:
@@ -39,6 +41,10 @@ class WorkerContinuation:
     @property
     def validation_move_pending(self) -> bool:
         return self.stage == WorkerContinuationStage.VALIDATION_MOVE_PENDING
+
+    @property
+    def red_transition_pending(self) -> bool:
+        return self.stage == WorkerContinuationStage.RED_TRANSITION_PENDING
 
     @property
     def delivery_pending(self) -> bool:
@@ -61,8 +67,27 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm validation move from {self.stage}")
         self.stage = WorkerContinuationStage.RETAINED
 
+    def begin_red_transition(self, phase: str, report_baseline: int) -> None:
+        """Record the red verdict before the board is moved.
+
+        The board move and the state write are separate durable facts. Without this the record of a
+        crashed tick still names the report that closed the previous round, and recovery reads that
+        report as a new completion instead of finishing the red transition.
+        """
+        if self.stage not in {
+            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.RED_TRANSITION_PENDING,
+        }:
+            raise ValueError(f"cannot open a red transition from {self.stage}")
+        self.stage = WorkerContinuationStage.RED_TRANSITION_PENDING
+        self.phase = phase
+        self.report_baseline = int(report_baseline)
+
     def begin_delivery(self, phase: str, now: float) -> None:
-        if self.stage != WorkerContinuationStage.RETAINED:
+        if self.stage not in {
+            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.RED_TRANSITION_PENDING,
+        }:
             raise ValueError(f"cannot resume worker from {self.stage}")
         self.stage = WorkerContinuationStage.DELIVERY_PENDING
         self.phase = phase
@@ -81,6 +106,7 @@ class WorkerContinuation:
         self.phase = ""
         self.retained_at = 0.0
         self.sent_at = 0.0
+        self.report_baseline = 0
 
     def to_json(self) -> dict[str, Any]:
         if self.stage == WorkerContinuationStage.NONE:
@@ -90,6 +116,7 @@ class WorkerContinuation:
             "phase": self.phase,
             "retained_at": self.retained_at,
             "sent_at": self.sent_at,
+            "report_baseline": self.report_baseline,
         }
 
     @classmethod
@@ -102,6 +129,7 @@ class WorkerContinuation:
             phase=str(value.get("phase") or ""),
             retained_at=float(value.get("retained_at") or 0.0),
             sent_at=float(value.get("sent_at") or 0.0),
+            report_baseline=int(value.get("report_baseline") or 0),
         )
 
     @classmethod

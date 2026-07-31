@@ -2811,6 +2811,30 @@ class DispatcherRuntime:
             return self._finish_retained_worker_resume(
                 task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
+        if continuation.delivery_confirmed:
+            # The delivery was checkpointed and the tick died before the round it opened was
+            # recorded. Finishing it again is what makes that checkpoint worth writing: the rework
+            # otherwise runs attributed to the round the verdict closed, with no reuse on the card.
+            return self._finish_retained_worker_resume(
+                task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
+            )
+        if continuation.red_transition_pending:
+            # The board move committed and the tick died before the delivery boundary was durable.
+            # The intent is finished against the board as it is now: the report it was opened
+            # against belongs to the closed round and is never read as a new completion.
+            record.comment_baseline = max(
+                len(task.get("comments") or []), continuation.report_baseline
+            )
+            record.review_baseline = record.comment_baseline
+            record.gate_state = ""
+            record.gate_pending_since = 0.0
+            _reset_wait(record, "review")
+            _reset_wait(record, "worker")
+            records[ref] = record
+            self.save_records(payload, records)
+            return self._deliver_red_continuation(
+                task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
+            )
         if marker == "report:done":
             if continuation.validation_move_pending:
                 # The process was frozen and recorded before a tick died between retention and
@@ -3068,6 +3092,13 @@ class DispatcherRuntime:
                 if unconfirmed is not None:
                     return unconfirmed
                 worker_stopped = True
+            else:
+                # Same order as the red gate: the red transition is durable before the card moves,
+                # so a crash in between is finished as this transition rather than replayed as the
+                # Validate handoff of the round the verdict just closed.
+                continuation.begin_red_transition("review", len(task.get("comments") or []))
+                records[ref] = record
+                self.save_records(payload, records)
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -3088,29 +3119,8 @@ class DispatcherRuntime:
             _reset_wait(record, "review")
             _reset_wait(record, "worker")
             moved = self.reader.show(ref)
-            if continuation.retained:
-                # Persist the red delivery boundary before waking the worker, the same way the red
-                # gate does: a tick that dies after delivery replays on this branch instead of
-                # reading the closed round's done marker as a completion of the rework.
-                continuation.begin_delivery("review", time.time())
-                records[ref] = record
-                self.save_records(payload, records)
-                try:
-                    self.host.resume_worker(moved, record)
-                except HostError as exc:
-                    return self._restart_red_worker(
-                        moved, record, records, payload, attempt_id,
-                        continuation_reason=scrub_host_output(str(exc)), phase="review",
-                    )
-                continuation.confirm_delivery()
-                records[ref] = record
-                self.save_records(payload, records)
-                return self._finish_retained_worker_resume(
-                    moved, record, records, payload, attempt_id, phase="review"
-                )
-            return self._restart_red_worker(
-                moved, record, records, payload, attempt_id,
-                continuation_reason="no retained worker session was available", phase="review",
+            return self._deliver_red_continuation(
+                moved, record, records, payload, attempt_id, phase="review",
                 worker_stopped=worker_stopped,
             )
         # Mechanical gate (secretary-633): a fresh report clears the cheap CI/local gate before the
@@ -3485,6 +3495,13 @@ class DispatcherRuntime:
             if unconfirmed is not None:
                 return unconfirmed
             worker_stopped = True
+        else:
+            # The intent goes to disk before anything observable moves. A tick that dies after the
+            # board move and before the delivery boundary is recovered as this red transition, not
+            # as the completion the closed round reported.
+            continuation.begin_red_transition(phase, len(task.get("comments") or []))
+            records[ref] = record
+            self.save_records(payload, records)
         # The round ends here without a reviewer verdict: the outcome names the gate so a later
         # reading does not attribute the bounce to whoever reviewed the round.
         self._record_verdict_routing(ref, record, f"{phase}_red")
@@ -3507,34 +3524,67 @@ class DispatcherRuntime:
         # `review_baseline` is part of the worker report identity. The retained conversation gets
         # a new TASK.md, so its next report must not dedupe against the completed round.
         record.review_baseline = len(moved.get("comments") or [])
+        return self._deliver_red_continuation(
+            moved, record, records, payload, attempt_id, phase=phase, worker_stopped=worker_stopped,
+        )
+
+    def _deliver_red_continuation(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, *, phase: str, worker_stopped: bool = False,
+    ) -> dict[str, Any]:
+        """Hand a red verdict back to the session that wrote the code, or to one replacement.
+
+        Both red verdicts and the recovery of an interrupted red transition come through here, so
+        the order is the same for the gate and for the review: the suspension is re-confirmed at the
+        moment of use, the delivery boundary is durable before the worker is woken, and every way
+        out that cannot reuse the session goes through a confirmed stop first.
+        """
+        ref = task["ref"]
+        continuation = record.worker_continuation
+        step = "review" if phase == "review" else "gate"
         if continuation.retained:
-            # Persist the red delivery boundary before waking the worker.  If this tick dies after
+            try:
+                # The suspension was confirmed when the round was handed to the gate or the
+                # reviewer, but that answer is a memory of a past tick: a SIGCONT from terminal
+                # recovery or an operator since then makes this a second writer, not a session to
+                # reuse. The heartbeat is asked again here, where the boundary actually opens.
+                self.host.confirm_worker_retained(record)
+            except HostError as exc:
+                reason = scrub_host_output(str(exc))
+                unconfirmed = self._stop_worker_confirmed(
+                    record, ref, step=step, attempt_id=attempt_id
+                )
+                if unconfirmed is not None:
+                    return unconfirmed
+                return self._restart_red_worker(
+                    task, record, records, payload, attempt_id,
+                    continuation_reason=reason, phase=phase, worker_stopped=True,
+                )
+            # Persist the delivery boundary before waking the worker. If this tick dies after
             # delivery, replay stays on this branch instead of treating the old done marker as a
             # completion from the new rework round.
             continuation.begin_delivery(phase, time.time())
             records[ref] = record
             self.save_records(payload, records)
             try:
-                self.host.resume_worker(moved, record)
+                self.host.resume_worker(task, record)
             except HostError as exc:
                 return self._restart_red_worker(
-                    moved, record, records, payload, attempt_id,
+                    task, record, records, payload, attempt_id,
                     continuation_reason=scrub_host_output(str(exc)), phase=phase,
                 )
-            else:
-                continuation.confirm_delivery()
-                records[ref] = record
-                self.save_records(payload, records)
-                return self._finish_retained_worker_resume(
-                    moved, record, records, payload, attempt_id, phase=phase
-                )
-        else:
-            continuation_reason = "no retained worker session was available"
-        # Same reservation as the review-red bounce: the round the rework head belongs to is fixed
-        # on disk with the intent, so an adoption resumes it instead of the round the gate closed.
+            continuation.confirm_delivery()
+            records[ref] = record
+            self.save_records(payload, records)
+            return self._finish_retained_worker_resume(
+                task, record, records, payload, attempt_id, phase=phase
+            )
+        # Same reservation as the retained branch: the round the rework head belongs to is fixed on
+        # disk with the intent, so an adoption resumes it instead of the round the verdict closed.
         return self._restart_red_worker(
-            moved, record, records, payload, attempt_id,
-            continuation_reason=continuation_reason, phase=phase, worker_stopped=worker_stopped,
+            task, record, records, payload, attempt_id,
+            continuation_reason="no retained worker session was available", phase=phase,
+            worker_stopped=worker_stopped,
         )
 
     def _finish_retained_worker_resume(

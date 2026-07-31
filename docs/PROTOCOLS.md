@@ -337,14 +337,22 @@ Nothing here stops every terminal in the worktree, so the worker's own pane stay
 split anchor.
 
 Both red verdicts return the card to In progress and hand the same session its next round. A red
-mechanical gate does it directly; a red review does it after the reviewer's stop is confirmed. The
-dispatcher updates `TASK.md` with the failure and the next report identity, persists a
-pending-delivery boundary before SIGCONT, then checkpoints confirmation only after the provider
-durably records the continuation user turn. Terminal activity is a recovery hint for records
-without that boundary, not the delivery proof. Recovery after a crash cannot mistake the previous
-`done` report for a new completion, replay an incomplete delivery as if it were confirmed, or
-overwrite a confirmed continuation. A crash after SIGCONT but before delivery replays the prompt,
-while a turn already underway is checkpointed and not sent again. Codex TUI and Claude interactive
+mechanical gate does it directly; a red review does it after the reviewer's stop is confirmed. Both
+run the same order, differing only in the phase they record. The red transition, with its phase and
+the baseline of the report it closes, is durable before the card is moved: a tick that dies between
+the move and its delivery boundary is finished as that transition, and the report behind the
+baseline is never read as a new completion. The suspension of the session about to be reused is
+confirmed again at that point, immediately before the delivery boundary opens, rather than trusting
+the confirmation the reviewer launch made earlier; a session that is no longer confirmably suspended
+is stopped with a confirmed stop and replaced exactly once. The dispatcher then updates `TASK.md`
+with the failure and the next report identity, persists a pending-delivery boundary before SIGCONT,
+then checkpoints confirmation only after the provider durably records the continuation user turn.
+Terminal activity is a recovery hint for records without that boundary, not the delivery proof.
+Recovery after a crash cannot mistake the previous `done` report for a new completion, replay an
+incomplete delivery as if it were confirmed, or overwrite a confirmed continuation. A checkpointed
+delivery is finished on the next tick, so the rework opens its own round and the reuse is recorded
+on the card once and only once. A crash after SIGCONT but before delivery replays the prompt, while
+a turn already underway is checkpointed and not sent again. Codex TUI and Claude interactive
 workers accept a continuation; a one-shot Codex exec worker has spent its turn and refuses one. The
 routing record and card comment name the outcome as a reused continuation or a replacement, with
 the worker profile, model, effort, reason and timestamp. A dead session, an unavailable
