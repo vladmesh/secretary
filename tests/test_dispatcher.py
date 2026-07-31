@@ -7379,3 +7379,51 @@ class ProductionPauseTests(unittest.TestCase):
             self.pause("drain")
 
         self.assertTrue((state_dir / "pause.json").is_file())
+
+
+class _SelectorNotFoundHost(CommandHostRuntime):
+    """Stubs the orca CLI to answer `selector_not_found` for a terminal stop, as it does for a
+    workspace already removed out from under the dispatcher."""
+
+    def __init__(self, root: Path, *, reply: str = "selector_not_found") -> None:
+        super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.calls: list[list[str]] = []
+        self._reply = reply
+
+    def _run_json(self, args: list[str]) -> dict:
+        self.calls.append(args)
+        if args[:3] == ["orca", "terminal", "stop"]:
+            raise HostError(self._reply)
+        return {}
+
+
+class CommandHostStopWorkspaceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.record = DispatcherRecord(
+            worker="secretary-997-w1",
+            workspace=str(self.root / "workspaces" / "secretary-997"),
+            handle="",
+            head="head",
+            review_head="review-head",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="working",
+            claimed_at=0.0,
+        )
+
+    def test_a_worktree_orca_no_longer_knows_reads_as_already_stopped(self) -> None:
+        host = _SelectorNotFoundHost(self.root)
+
+        host.stop_workspace(self.record)  # must not raise
+
+        self.assertTrue(any(call[:3] == ["orca", "terminal", "stop"] for call in host.calls))
+
+    def test_any_other_stop_refusal_still_raises(self) -> None:
+        host = _SelectorNotFoundHost(self.root, reply="orca terminal stop failed")
+
+        with self.assertRaises(HostError):
+            host.stop_workspace(self.record)

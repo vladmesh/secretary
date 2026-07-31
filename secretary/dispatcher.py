@@ -1196,12 +1196,22 @@ class CommandHostRuntime:
         The confirmed twin of `stop`. A path that opens a replacement head afterwards cannot use
         the suppressing one: `orca terminal stop` refusing is not evidence the head is gone, and
         the replacement would then be the second process on the same checkout.
+
+        `selector_not_found` is the one exception: as in `_observer_workspace_registered`, it means
+        Orca has no worktree left at this path at all, which a stop cannot be refused on since
+        there is nothing there to refuse stopping. A workspace already removed out from under the
+        dispatcher (a manual cleanup, a PO taking a card back out of the cycle) must not read as a
+        stop that failed.
         """
         if self.mode == "noop" or not record.workspace:
             return
-        self._run_json(
-            ["orca", "terminal", "stop", "--worktree", f"path:{record.workspace}", "--json"]
-        )
+        try:
+            self._run_json(
+                ["orca", "terminal", "stop", "--worktree", f"path:{record.workspace}", "--json"]
+            )
+        except HostError as exc:
+            if "selector_not_found" not in str(exc):
+                raise
         for pid_file in (record.worker_pid_file, record.review_pid_file):
             self._confirm_head_process_gone(pid_file)
 
