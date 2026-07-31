@@ -2978,8 +2978,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
 
-    def test_gate_red_retries_an_unconfirmed_stop_without_leaving_validate(self) -> None:
-        """A non-retained worker cannot strand the card after a red gate stop refusal."""
+    def test_gate_red_retries_an_unconfirmed_stop_before_a_replacement(self) -> None:
+        """A non-retained worker cannot strand the card after a red gate stop refusal.
+
+        The red transition is already durable and the card is already back with the worker: what
+        the refusal costs is the replacement, and the next tick picks the transition up from the
+        record rather than re-running the gate.
+        """
         self.start_pilot()
         self.host.gate_results = [
             GateResult("red", "local validation failed", "assert False"),
@@ -2994,8 +2999,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         stopped = self.runtime.tick(self.selector)
 
         self.assertEqual(stopped["action"], "worker-stop-unconfirmed")
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            record["worker_continuation"]["stage"],
+            WorkerContinuationStage.RED_TRANSITION_PENDING.value,
+        )
 
         self.host.fail_stop_head_reason = ""
         retried = self.runtime.tick(self.selector)

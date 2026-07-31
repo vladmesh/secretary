@@ -2594,7 +2594,9 @@ class DispatcherRuntime:
                 reason=scrub_host_output(str(exc)),
             )
         _forget_role_head(record, WORKER_ROLE)
-        record.worker_continuation.clear()
+        # The session is gone; a red transition already opened over it is not. Dropping that here
+        # would leave the card In progress with nothing durable owing it a replacement.
+        record.worker_continuation.drop_session()
         return None
 
     def _worker_launch_aborted(
@@ -2797,18 +2799,11 @@ class DispatcherRuntime:
                     task, record, records, payload, attempt_id,
                     phase=continuation.phase or "gate",
                 )
-            try:
-                self.host.resume_worker(task, record)
-            except HostError as exc:
-                return self._restart_red_worker(
-                    task, record, records, payload, attempt_id,
-                    continuation_reason=scrub_host_output(str(exc)),
-                    phase=continuation.phase or "gate",
-                )
-            continuation.confirm_delivery()
-            records[ref] = record
-            self.save_records(payload, records)
-            return self._finish_retained_worker_resume(
+            # Nothing is woken from here. The suspension this delivery was opened over is a fact
+            # of the tick that died: terminal recovery or an operator may have resumed that head
+            # since, and re-entering the transition is what asks the heartbeat again before the
+            # boundary is reopened.
+            return self._deliver_red_continuation(
                 task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
         if continuation.delivery_confirmed:
@@ -3081,47 +3076,11 @@ class DispatcherRuntime:
             record.rejected_sha = record.review_commit or self.host.head_commit(record)
             record.rejected_done_reports = 0
             # The worker of this round stayed suspended through the gate and the review, so the
-            # verdict goes to the conversation that wrote the code. A worker without a retained
-            # session is stopped here instead, before the card is moved back.
-            continuation = record.worker_continuation
-            worker_stopped = False
-            if not continuation.retained:
-                unconfirmed = self._stop_worker_confirmed(
-                    record, ref, step="review", attempt_id=attempt_id
-                )
-                if unconfirmed is not None:
-                    return unconfirmed
-                worker_stopped = True
-            else:
-                # Same order as the red gate: the red transition is durable before the card moves,
-                # so a crash in between is finished as this transition rather than replayed as the
-                # Validate handoff of the round the verdict just closed.
-                continuation.begin_red_transition("review", len(task.get("comments") or []))
-                records[ref] = record
-                self.save_records(payload, records)
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                target="in_progress",
-                reason="review:red",
-                request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id,
-                    "review-red",
-                    ref,
-                    str(len(task.get("comments") or [])),
-                ),
-            )
-            self._record_verdict_routing(ref, record, "red")
-            record.comment_baseline = len(task.get("comments") or [])
-            record.gate_state = ""
-            record.gate_pending_since = 0.0
-            _reset_wait(record, "review")
-            _reset_wait(record, "worker")
-            moved = self.reader.show(ref)
-            return self._deliver_red_continuation(
-                moved, record, records, payload, attempt_id, phase="review",
-                worker_stopped=worker_stopped,
+            # verdict goes to the conversation that wrote the code. Whether that conversation is
+            # still there is decided inside the transition, on the same order as the red gate.
+            return self._begin_red_transition(
+                task, record, records, payload, attempt_id, phase="review",
+                move_reason="review:red", move_kind="review-red", verdict_outcome="red",
             )
         # Mechanical gate (secretary-633): a fresh report clears the cheap CI/local gate before the
         # expensive reviewer is spawned. A review already in flight (state review_starting/reviewing)
@@ -3485,52 +3444,62 @@ class DispatcherRuntime:
         )
         if unconfirmed is not None:
             return unconfirmed
-        # A worker that was not retained has no conversation to resume. Stop it before moving
-        # the card: a refusal then leaves the card in Validate, where the next tick can retry
-        # instead of waiting in In progress for a report from a worker that was already stopped.
-        worker_stopped = False
-        continuation = record.worker_continuation
-        if not continuation.retained:
-            unconfirmed = self._stop_worker_confirmed(record, ref, step="gate", attempt_id=attempt_id)
-            if unconfirmed is not None:
-                return unconfirmed
-            worker_stopped = True
-        else:
-            # The intent goes to disk before anything observable moves. A tick that dies after the
-            # board move and before the delivery boundary is recovered as this red transition, not
-            # as the completion the closed round reported.
-            continuation.begin_red_transition(phase, len(task.get("comments") or []))
-            records[ref] = record
-            self.save_records(payload, records)
         # The round ends here without a reviewer verdict: the outcome names the gate so a later
         # reading does not attribute the bounce to whoever reviewed the round.
-        self._record_verdict_routing(ref, record, f"{phase}_red")
+        return self._begin_red_transition(
+            task, record, records, payload, attempt_id, phase=phase,
+            move_reason=body, move_kind=f"{phase}-red", verdict_outcome=f"{phase}_red",
+        )
+
+    def _begin_red_transition(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, *, phase: str, move_reason: str, move_kind: str,
+        verdict_outcome: str,
+    ) -> dict[str, Any]:
+        """The only way a card goes back to In progress for rework.
+
+        A red gate and a red review differ in the comment they leave and in the identities they
+        dedupe on, not in the order they owe the card. That order lives here and nowhere else: the
+        intent is on disk, with its phase and the report baseline it was opened against, before
+        anything observable moves; the board moves; and only then is it decided whether the round's
+        own session takes the continuation or a replacement does.
+
+        Whether a session is held is deliberately not a precondition of this call. The round with
+        nothing to reuse is the one whose replacement a crash would otherwise lose, leaving the
+        report that closed the round to be read as a fresh completion.
+        """
+        ref = task["ref"]
+        baseline = len(task.get("comments") or [])
+        record.worker_continuation.begin_red_transition(phase, baseline)
+        records[ref] = record
+        self.save_records(payload, records)
+        self._record_verdict_routing(ref, record, verdict_outcome)
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
             target="in_progress",
-            reason=body,
+            reason=move_reason,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{phase}-red", ref, str(len(task.get("comments") or []))
+                record.attempt_id or attempt_id, move_kind, ref, str(baseline)
             ),
         )
-        record.comment_baseline = len(self.reader.show(ref)["comments"])
+        moved = self.reader.show(ref)
+        record.comment_baseline = len(moved.get("comments") or [])
+        # `review_baseline` is part of the worker report identity. The rework round gets a new
+        # TASK.md, so its report must not dedupe against the round the verdict closed.
+        record.review_baseline = record.comment_baseline
         record.gate_state = ""
         record.gate_pending_since = 0.0
         _reset_wait(record, "review")
         _reset_wait(record, "worker")
-        moved = self.reader.show(ref)
-        # `review_baseline` is part of the worker report identity. The retained conversation gets
-        # a new TASK.md, so its next report must not dedupe against the completed round.
-        record.review_baseline = len(moved.get("comments") or [])
         return self._deliver_red_continuation(
-            moved, record, records, payload, attempt_id, phase=phase, worker_stopped=worker_stopped,
+            moved, record, records, payload, attempt_id, phase=phase
         )
 
     def _deliver_red_continuation(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, phase: str, worker_stopped: bool = False,
+        payload: dict[str, Any], attempt_id: str, *, phase: str,
     ) -> dict[str, Any]:
         """Hand a red verdict back to the session that wrote the code, or to one replacement.
 
@@ -3584,7 +3553,6 @@ class DispatcherRuntime:
         return self._restart_red_worker(
             task, record, records, payload, attempt_id,
             continuation_reason="no retained worker session was available", phase=phase,
-            worker_stopped=worker_stopped,
         )
 
     def _finish_retained_worker_resume(
@@ -3635,6 +3603,10 @@ class DispatcherRuntime:
             if unconfirmed is not None:
                 return unconfirmed
         rework_round = record.attempt_round + 1
+        # The launch intent takes the transition over from here: it is durable, it reserves the
+        # rework round, and recovery adopts or relaunches exactly one head from it. Handing the
+        # record over in the same write is what keeps the two from both owing this card a worker.
+        record.worker_continuation.clear()
         failure = self._worker_relaunch_intent(
             payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
         )
