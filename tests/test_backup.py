@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.backup import create_backup, create_backups, verify_backup
+from secretary.backup_policy import POLICIES, should_skip_data_entry
 from secretary._fsutil import sha256_file
 from secretary.data import DataExport
 
@@ -971,6 +972,49 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(_git_commit(Path("/product")), "abc123")
 
         self.assertEqual(calls[0][1]["cwd"], Path("/product"))
+
+
+class ShouldSkipDataEntryTests(unittest.TestCase):
+    def test_data_manifest_is_admitted_only_at_the_top_level(self):
+        for policy in POLICIES.values():
+            with self.subTest(kind=policy.kind):
+                self.assertFalse(
+                    should_skip_data_entry(Path("data-manifest.json"), policy=policy)
+                )
+                for smuggled in (
+                    "evil/data-manifest.json",
+                    "evil/deep/nested/data-manifest.json",
+                ):
+                    self.assertTrue(
+                        should_skip_data_entry(Path(smuggled), policy=policy),
+                        smuggled,
+                    )
+
+    def test_allowed_roots_keep_their_outcomes(self):
+        admitted = {
+            "core": (
+                "board/cards.json",
+                "board/data-manifest.json",
+                "memory/export.ndjson",
+                "runs/watermarks.json",
+            ),
+            "full": (
+                "board/cards.json",
+                "board/data-manifest.json",
+                "memory/export.ndjson",
+                "runs/runs.ndjson",
+                "transcripts/inventory.json",
+                "artifacts/inventory.json",
+                "artifacts/data-manifest.json",
+            ),
+        }
+        for kind, relatives in admitted.items():
+            policy = POLICIES[kind]
+            for relative in relatives:
+                with self.subTest(kind=kind, relative=relative):
+                    self.assertFalse(
+                        should_skip_data_entry(Path(relative), policy=policy)
+                    )
 
 
 def _write_instance(instance: Path, data_dir: Path) -> None:

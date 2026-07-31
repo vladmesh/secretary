@@ -311,6 +311,46 @@ class RestoreArchiveTests(unittest.TestCase):
                 )
             self.assertFalse((root / "secretary-data").exists())
 
+    def test_restore_rejects_a_data_manifest_below_the_top_level(self):
+        # The archive carries the file members only: without a directory member
+        # for "evil" the entry is judged on its own path, which used to pass the
+        # gate on its basename alone.
+        for smuggled in ("evil/data-manifest.json", "evil/deep/nested/data-manifest.json"):
+            with self.subTest(smuggled=smuggled):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    instance = _write_instance(root, "test")
+                    archive = _core_archive(root, "test")
+                    payload = root / ARCHIVE_ROOT
+                    entry = payload / "secretary-data" / smuggled
+                    entry.parent.mkdir(parents=True, exist_ok=True)
+                    entry.write_text("{}", encoding="utf-8")
+                    manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+                    _write_checksums(payload, manifest)
+                    (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+                    top = Path(smuggled).parts[0]
+                    with tarfile.open(archive, "w") as bundle:
+                        bundle.add(
+                            payload,
+                            arcname=ARCHIVE_ROOT,
+                            filter=lambda info: (
+                                None
+                                if top in Path(info.name).parts
+                                else info
+                            ),
+                        )
+                        bundle.add(
+                            entry,
+                            arcname=f"{ARCHIVE_ROOT}/secretary-data/{smuggled}",
+                        )
+
+                    with self.assertRaisesRegex(RestoreError, "unexpected data component"):
+                        restore_backup(
+                            archive,
+                            instance,
+                        )
+                    self.assertFalse((root / "secretary-data").exists())
+
     def test_restore_discards_memory_journal_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
