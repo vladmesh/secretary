@@ -46,14 +46,12 @@ While a sprint is open, its repositories belong to the observer as the only prod
 cards from outside requires `--sprint-override` and a recorded reason. The `open-sprint` role skill
 prepares the goal, Definition of Done and repositories, after which the product command creates the entity.
 
-The current card model is now the main product-model gap. Ideas mixes bugs, features, open questions and
-prematurely sliced implementation work, while executable cards can exist independently of a sprint. The
-target model separates durable product issues from tasks that an observer cuts just in time:
+The card model separates the durable product plane from execution:
 
 - a Product owns issues and sprints and groups one or more projects;
 - an issue requires a product, a kind (`bug`, `feature`, `question` or `improvement`) and a priority
   (`P0` through `P3`);
-- the first Pipeline column becomes Issues, and issues cannot move into task columns;
+- the first Pipeline column is Issues, and issues cannot move into task columns;
 - a sprint takes one or more issues, reserves projects and creates tasks only while it is running;
 - tasks are execution records, not product backlog, and are archived when their sprint closes;
 - only the PO explicitly closes an issue after checking the sprint outcome and product invariants.
@@ -62,25 +60,19 @@ The first implementation permits one active sprint per installation. Reservation
 start so this can later loosen to parallel sprints whose project sets do not overlap.
 
 The model does not yet have typed execution gates, a coded completeness check, per-project overlay
-deviations, an in-house CI runner for private repositories, or cleanup by owner label. Four gaps in the
-loop itself are known and not yet closed:
-
-- a stale resume entry is visible from outside but wakes nobody and raises no signal;
-- observer liveness is measured by process, not by work: a head whose agent queue has ended stays
-  `running` and holds the sprint still behind a green summary;
-- a rework round leaves a dead terminal tab in the card's workspace;
-- a change to the sprint contract sent as an entry on the entity does not reach the observer: it accepts
-  material and questions, but not a narrowing of the Definition of Done.
+deviations, an in-house CI runner for private repositories, or cleanup by owner label. Known defects in
+the loop itself are prioritised issues on the board under the `secretary` product, not a list here.
 
 ## Current product-work programme and self-hosting cutover
 
 The next programme is deliberately bootstrapped by hand. The presence of sprint code is not evidence that
 the sprint system can safely develop itself.
 
+The Product/Issue/Task foundation is in place: Product, valid prioritised issues, sprint issue references,
+project reservations, just-in-time tasks and terminal-task archival. Two steps remain before the cutover.
+
 1. **Manual sprint: observer reliability.** Close the stale-resume and process-versus-work liveness gaps.
-2. **Manual sprint: Product/Issue/Task foundation.** Add Product, valid prioritised issues, sprint issue
-   references, project reservations, just-in-time tasks and terminal-task archival.
-3. **Self-hosted canary.** Run one short code-only sprint through the new observer path. It must create its
+2. **Self-hosted canary.** Run one short code-only sprint through the new observer path. It must create its
    own task, survive a restart, keep resume current, close, archive the terminal task and leave the issue
    open for a separate PO decision.
 
