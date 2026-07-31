@@ -287,9 +287,12 @@ def start_review(
     runtime.record_review_routing(task, record, launch.run)
     clear_launch_intent(record)
     record.review_started_at = record.review_progress_at = time.time()
-    # The worker head is gone: its pane was shut down so the reviewer judges a checkout nothing is
-    # still editing. A red verdict launches a fresh worker into the same workspace.
-    forget_role_head(record, WORKER_ROLE)
+    # A retained worker is suspended, not gone: it keeps its pane and its heartbeat so a red
+    # verdict can continue that same conversation, and the reviewer still judges a checkout
+    # nothing is editing. Without retention the worker head was shut down for the reviewer, and
+    # the record must stop naming a pane that no longer exists.
+    if not record.worker_continuation.retained:
+        forget_role_head(record, WORKER_ROLE)
     record.state = "reviewing"
     return {
         "status": "ok",

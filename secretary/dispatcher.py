@@ -898,7 +898,13 @@ class CommandHostRuntime:
             task=task,
         )
         try:
-            self._freeze_worker(record)
+            if record.worker_continuation.retained:
+                # A retained worker is already SIGSTOPed: it cannot touch the checkout the reviewer
+                # judges, and its conversation is what a red verdict continues. Confirm that
+                # suspension rather than trusting the record; anything else takes the freeze path.
+                self.confirm_worker_retained(record)
+            else:
+                self._freeze_worker(record)
         except HostError as exc:
             # The reviewer pane is up and the worker would not stop. Neither head can be reported
             # as absent, so the bring-up hands the reviewer's pane back with the failure and the
@@ -1620,9 +1626,16 @@ class CommandHostRuntime:
         The pid heartbeat names the actual head rather than its surrounding terminal shell.  A
         missing or dead heartbeat is not safe to retain: the caller falls back through the
         confirmed-stop and durable replacement path instead of guessing that a pane is idle.
+
+        A head with no pane handle is not retained at all: nothing can address it, so there is no
+        conversation to keep and the caller stops it before the reviewer takes the checkout.
+        Whether the provider behind that pane will actually take a continuation is decided at
+        delivery, where a refusal falls back to a confirmed stop and a replacement.
         """
         if self.mode == "noop":
             raise HostError("noop runtime cannot retain a worker session")
+        if not record.handle:
+            raise HostError("worker session has no addressable pane to retain")
         status = _head_process_status(record.worker_pid_file)
         if not status.get("known") or not status.get("alive"):
             raise HostError("worker session is unavailable for retention")
@@ -1640,6 +1653,37 @@ class CommandHostRuntime:
             time.sleep(HEAD_STOP_POLL_SECONDS)
         raise HostError("worker session could not be confirmed suspended")
 
+    def _continuation_addressable(self, record: DispatcherRecord) -> bool:
+        """Whether this worker head is a live provider conversation a prompt can be sent into.
+
+        Codex TUI and Claude's interactive terminal are; a one-shot Codex exec worker has already
+        spent its turn, and a head with no pane handle cannot be typed into at all.
+        """
+        run = record.worker_run
+        adapter = run.get("adapter")
+        return bool(record.handle) and (
+            adapter == "claude" or (adapter == "codex" and run.get("codex_mode") == "tui")
+        )
+
+    def worker_retained_alive(self, record: DispatcherRecord) -> bool:
+        """Whether this card's worker session is confirmably alive and still suspended.
+
+        The record saying `retained` is a memory of a past tick. Only the heartbeat says whether
+        that head is still frozen now, and an ambiguous answer is never permission to leave it
+        beside a reviewer.
+        """
+        if self.mode == "noop" or not record.worker_continuation.retained:
+            return False
+        status = _head_process_status(record.worker_pid_file)
+        return bool(status.get("known") and status.get("alive") and status.get("stopped"))
+
+    def confirm_worker_retained(self, record: DispatcherRecord) -> None:
+        """Assert the retained worker is still suspended, or raise for the caller's stop path."""
+        if self.mode == "noop":
+            return
+        if not self.worker_retained_alive(record):
+            raise HostError("retained worker session is no longer confirmably suspended")
+
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
 
@@ -1651,12 +1695,9 @@ class CommandHostRuntime:
         status = _head_process_status(record.worker_pid_file)
         if not status.get("known") or not status.get("alive"):
             raise HostError("retained worker session exited")
-        run = record.worker_run
-        adapter = run.get("adapter")
-        if not record.handle or not (
-            adapter == "claude" or (adapter == "codex" and run.get("codex_mode") == "tui")
-        ):
+        if not self._continuation_addressable(record):
             raise HostError("retained worker session cannot accept a continuation")
+        adapter = record.worker_run.get("adapter")
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("retained worker workspace is missing")
@@ -1685,10 +1726,7 @@ class CommandHostRuntime:
         try:
             if status.get("stopped"):
                 self._signal_head(record.worker_pid_file, signal.SIGCONT)
-            prompt = (
-                "The mechanical validation gate returned red. Read the updated TASK.md, "
-                "fix the failure, then report through its command."
-            )
+            prompt = _continuation_prompt(continuation.phase)
             if adapter == "codex":
                 _deliver_tui_prompt(
                     record.handle, str(workspace), "TASK.md", run_json=self._run_json,
@@ -2762,7 +2800,7 @@ class DispatcherRuntime:
             try:
                 self.host.resume_worker(task, record)
             except HostError as exc:
-                return self._restart_gate_red_worker(
+                return self._restart_red_worker(
                     task, record, records, payload, attempt_id,
                     continuation_reason=scrub_host_output(str(exc)),
                     phase=continuation.phase or "gate",
@@ -3007,10 +3045,10 @@ class DispatcherRuntime:
             return self._finish_green(task, record, records, payload, attempt_id)
         if marker == "review:red":
             # Only the reviewer's lifecycle ends here. A full `stop` would take the worktree's
-            # terminals down wholesale, and the same checkout is about to be handed back to a
-            # fresh worker head for rework — it is never re-created from base. A stop the host
-            # will not confirm ends the tick before the card is moved: the rework worker must not
-            # open beside a reviewer that may still be running in the same checkout.
+            # terminals down wholesale, and the same checkout is about to be handed back to the
+            # worker for rework — it is never re-created from base. A stop the host will not
+            # confirm ends the tick before the card is moved: nothing else may run in this
+            # checkout while a reviewer may still be alive in it.
             unconfirmed = self._end_review_pane_confirmed(
                 record, records, payload, ref, step="review", attempt_id=attempt_id
             )
@@ -3018,6 +3056,18 @@ class DispatcherRuntime:
                 return unconfirmed
             record.rejected_sha = record.review_commit or self.host.head_commit(record)
             record.rejected_done_reports = 0
+            # The worker of this round stayed suspended through the gate and the review, so the
+            # verdict goes to the conversation that wrote the code. A worker without a retained
+            # session is stopped here instead, before the card is moved back.
+            continuation = record.worker_continuation
+            worker_stopped = False
+            if not continuation.retained:
+                unconfirmed = self._stop_worker_confirmed(
+                    record, ref, step="review", attempt_id=attempt_id
+                )
+                if unconfirmed is not None:
+                    return unconfirmed
+                worker_stopped = True
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -3038,50 +3088,31 @@ class DispatcherRuntime:
             _reset_wait(record, "review")
             _reset_wait(record, "worker")
             moved = self.reader.show(ref)
-            # The rework round is reserved before the intent goes to disk. The head this launch
-            # starts belongs to the next round, and a recovery that read the intent's round as the
-            # closed one would fold the rework into the round its red verdict ended.
-            rework_round = record.attempt_round + 1
-            failure = self._worker_relaunch_intent(
-                payload, records, ref, record, action="review-red-rework", round_number=rework_round
-            )
-            if failure is not None:
-                return _launch_intent_unwritable(
-                    step="review",
-                    ref=ref,
-                    attempt_id=record.attempt_id or attempt_id,
-                    role=WORKER_ROLE,
-                    reason=failure,
+            if continuation.retained:
+                # Persist the red delivery boundary before waking the worker, the same way the red
+                # gate does: a tick that dies after delivery replays on this branch instead of
+                # reading the closed round's done marker as a completion of the rework.
+                continuation.begin_delivery("review", time.time())
+                records[ref] = record
+                self.save_records(payload, records)
+                try:
+                    self.host.resume_worker(moved, record)
+                except HostError as exc:
+                    return self._restart_red_worker(
+                        moved, record, records, payload, attempt_id,
+                        continuation_reason=scrub_host_output(str(exc)), phase="review",
+                    )
+                continuation.confirm_delivery()
+                records[ref] = record
+                self.save_records(payload, records)
+                return self._finish_retained_worker_resume(
+                    moved, record, records, payload, attempt_id, phase="review"
                 )
-            launched, failed = self._bring_up_worker_head(
-                moved,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="review",
-                blocked_reason="rework bring-up failed",
-                blocked_request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id, "rework-blocked", ref
-                ),
+            return self._restart_red_worker(
+                moved, record, records, payload, attempt_id,
+                continuation_reason="no retained worker session was available", phase="review",
+                worker_stopped=worker_stopped,
             )
-            if launched is None:
-                assert failed is not None
-                return failed
-            record.state = "claimed"
-            self.open_worker_round(record, round_number=rework_round)
-            self.record_worker_routing(moved, record, launched.run)
-            _clear_launch_intent(record)
-            record.worker_started_at = record.worker_progress_at = time.time()
-            records[ref] = record
-            self.save_records(payload, records)
-            return {
-                "status": "ok",
-                "step": "review",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "action": "rework-started",
-            }
         # Mechanical gate (secretary-633): a fresh report clears the cheap CI/local gate before the
         # expensive reviewer is spawned. A review already in flight (state review_starting/reviewing)
         # cleared the gate when it launched, so re-running it here would be wasted host I/O.
@@ -3092,9 +3123,11 @@ class DispatcherRuntime:
         if record.state == "review_starting":
             return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
         if record.state != "reviewing":
-            if record.worker_continuation.retained:
-                # The gate is green, but a reviewer must still be the only writer. This stop is
-                # deliberately confirmed before the reviewer launch intent is written.
+            if record.worker_continuation.retained and not self.host.worker_retained_alive(record):
+                # The record remembers a suspended worker the host cannot confirm is still frozen.
+                # Ambiguous liveness is never permission to leave it beside the reviewer, so a
+                # confirmed stop runs before the reviewer launch intent is written and the round
+                # loses its continuation.
                 unconfirmed = self._stop_worker_confirmed(
                     record, ref, step="review", attempt_id=attempt_id
                 )
@@ -3484,7 +3517,7 @@ class DispatcherRuntime:
             try:
                 self.host.resume_worker(moved, record)
             except HostError as exc:
-                return self._restart_gate_red_worker(
+                return self._restart_red_worker(
                     moved, record, records, payload, attempt_id,
                     continuation_reason=scrub_host_output(str(exc)), phase=phase,
                 )
@@ -3499,7 +3532,7 @@ class DispatcherRuntime:
             continuation_reason = "no retained worker session was available"
         # Same reservation as the review-red bounce: the round the rework head belongs to is fixed
         # on disk with the intent, so an adoption resumes it instead of the round the gate closed.
-        return self._restart_gate_red_worker(
+        return self._restart_red_worker(
             moved, record, records, payload, attempt_id,
             continuation_reason=continuation_reason, phase=phase, worker_stopped=worker_stopped,
         )
@@ -3509,6 +3542,7 @@ class DispatcherRuntime:
         payload: dict[str, Any], attempt_id: str, *, phase: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        step = "review" if phase == "review" else "gate"
         record.worker_continuation.clear()
         record.state = "claimed"
         rework_round = record.attempt_round + 1
@@ -3520,24 +3554,33 @@ class DispatcherRuntime:
         records[ref] = record
         self.save_records(payload, records)
         return {
-            "status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id,
+            "status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id,
             "action": f"{phase}-red-reused-worker",
         }
 
-    def _restart_gate_red_worker(
+    def _restart_red_worker(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
         payload: dict[str, Any], attempt_id: str, *, continuation_reason: str, phase: str,
         worker_stopped: bool = False,
     ) -> dict[str, Any]:
-        """Launch the red-gate fallback only after its worker was conclusively stopped."""
+        """Launch the red-verdict fallback only after its worker was conclusively stopped.
+
+        Both red verdicts land here when the round's own session cannot take the continuation: a
+        red mechanical gate and a red review differ in the request identities they dedupe on and in
+        the step they report, not in what they have to guarantee before a second head opens.
+        """
         ref = task["ref"]
+        review = phase == "review"
+        step = "review" if review else "gate"
+        blocked_kind = "rework-blocked" if review else f"{phase}-red-blocked"
+        action = "rework-started" if review else f"{phase}-red-rework"
         continuation = "replacement"
         # This is intentionally unconditional.  A record written by an older dispatcher, or one
         # adopted after a crash, may not carry the retained timestamp even while its old worker is
         # still alive.  Lack of that field is ambiguous, never permission for a second writer.
         if not worker_stopped:
             unconfirmed = self._stop_worker_confirmed(
-                record, ref, step="gate", attempt_id=attempt_id
+                record, ref, step=step, attempt_id=attempt_id
             )
             if unconfirmed is not None:
                 return unconfirmed
@@ -3547,7 +3590,7 @@ class DispatcherRuntime:
         )
         if failure is not None:
             return _launch_intent_unwritable(
-                step="gate",
+                step=step,
                 ref=ref,
                 attempt_id=record.attempt_id or attempt_id,
                 role=WORKER_ROLE,
@@ -3559,10 +3602,10 @@ class DispatcherRuntime:
             records,
             payload,
             attempt_id,
-            step="gate",
+            step=step,
             blocked_reason="rework bring-up failed",
             blocked_request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{phase}-red-blocked", ref
+                record.attempt_id or attempt_id, blocked_kind, ref
             ),
         )
         if launched is None:
@@ -3576,12 +3619,12 @@ class DispatcherRuntime:
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
         self.save_records(payload, records)
-        return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": f"{phase}-red-rework"}
+        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "action": action}
 
     def _record_worker_continuation(
         self, ref: str, record: DispatcherRecord, mode: str, phase: str, reason: str
     ) -> None:
-        """Leave the red-gate ownership decision on the card with its frozen launch snapshot."""
+        """Leave the red-verdict ownership decision on the card with its frozen launch snapshot."""
         run = record.worker_run
         self.writer.comment(
             role="dispatcher",
@@ -3976,6 +4019,20 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
+
+
+def _continuation_prompt(phase: str) -> str:
+    """What the resumed conversation is told. The updated TASK.md carries the detail; this only
+    names which of the two red verdicts sent the card back."""
+    if phase == "review":
+        return (
+            "The review verdict is red. Read the updated TASK.md, address the findings, "
+            "then report through its command."
+        )
+    return (
+        "The mechanical validation gate returned red. Read the updated TASK.md, "
+        "fix the failure, then report through its command."
+    )
 
 
 def _wait_expectation(kind: str) -> str:

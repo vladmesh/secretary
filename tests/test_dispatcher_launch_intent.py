@@ -547,6 +547,25 @@ class LaunchIntentTests(unittest.TestCase):
         continuation = self.reader.show(REF)["comments"][-1]["body"]
         self.assertIn("merge-gate red continuation", continuation)
 
+    def test_a_red_review_delivery_recovery_reuses_the_same_session(self) -> None:
+        """A crash between the red verdict and its delivery replays into the same conversation."""
+        self.host.fail_resume_worker_reason = ""
+        self.tick()
+        record = self.record()
+        assert record is not None
+        record.worker_continuation.begin_retention(time.time())
+        record.worker_continuation.confirm_validation_move()
+        record.worker_continuation.begin_delivery("review", time.time())
+        payload = self.runtime.state.load()
+        payload["records"][REF] = record.to_json()
+        self.runtime.state.save(payload)
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertIn("review red continuation", self.reader.show(REF)["comments"][-1]["body"])
+
     def test_a_freeze_crash_replays_the_validate_move_without_waking_the_worker(self) -> None:
         self.tick()
         self.report_done("worker-done-freeze-crash")
@@ -602,7 +621,12 @@ class LaunchIntentTests(unittest.TestCase):
         recovered = self.tick()
 
         self.assertEqual(recovered["action"], "review-started")
-        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("start_review"))
+        # The worker stays suspended for the reviewer instead of being stopped: the checkout is
+        # still untouched, and a red verdict has a conversation to hand the findings back to.
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertLess(
+            self.host.calls.index("confirm_worker_retained"), len(self.host.calls)
+        )
 
     def test_a_crash_after_red_move_does_not_replay_the_old_validate_handoff(self) -> None:
         """The initial freeze checkpoint must not survive a completed Validate handoff."""
@@ -1577,6 +1601,7 @@ class HostLaunchContourTests(unittest.TestCase):
             worker="w1", workspace=str(self.data_dir), handle="term:worker", head="codex",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
             state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "codex", "codex_mode": "tui", "head": "codex"},
         )
 
         self.host.retain_worker(record)

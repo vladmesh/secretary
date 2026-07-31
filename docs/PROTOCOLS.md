@@ -325,38 +325,40 @@ a new attempt id at that moment, otherwise a repeat claim would land on an alrea
 id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
 new round enters the same workspace.
 
-### Worker retention around the mechanical gate
+### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable worker session before
-moving the card to Validate. The record carries that retained state while the mechanical gate is
-pending or running, so the worker cannot change the checkout during validation. A green gate
-confirms the retained worker has stopped before an independent reviewer starts; the reviewer is
-then the only head allowed to act on that checkout. The handoff stops that worker head and confirms
-its heartbeat has exited; it does not stop every terminal in the worktree, so an existing connected
-pane remains a split anchor for the reviewer.
+moving the card to Validate. A head with no pane handle is not retained: nothing can address it,
+so it is stopped with a confirmed stop instead. The record carries the retained state through the mechanical
+gate and through the review that follows it, so the worker cannot change the checkout while either
+is judging it. Before the reviewer starts, the dispatcher confirms that suspension from the head's
+heartbeat; a session it cannot confirm gets a confirmed stop, and the round loses its continuation.
+Nothing here stops every terminal in the worktree, so the worker's own pane stays the reviewer's
+split anchor.
 
-A red gate first returns the card to In progress and updates `TASK.md` with the failure and the
-next report identity. The dispatcher persists a pending-delivery boundary before SIGCONT, then
-checkpoints confirmation only after the provider durably records the continuation user turn.
-Terminal activity is a recovery hint for records without that boundary, not the delivery proof.
-Recovery after a crash cannot mistake the previous `done` report for a new completion, replay an
-incomplete delivery as if it were confirmed, or overwrite a confirmed continuation. A crash after
-SIGCONT but before delivery replays the prompt, while a turn already underway is checkpointed and
-not sent again. When the retained provider session is still live and accepts delivery, the same
-terminal and session continue the rework. Codex TUI and Claude interactive workers support this
-path; one-shot Codex exec workers do not. The routing record and card comment name this as a reused
-continuation with the worker profile, model, effort, reason and timestamp. A dead session, an
-unavailable continuation transport, or a lost handle is an explicit fallback: the dispatcher
-confirms the old worker has stopped, writes a durable launch intent, and starts exactly one
-replacement. Retention and stop signal the head's private process group, so its helpers are frozen
-too. An unconfirmed stop never permits a second writer in the workspace.
+Both red verdicts return the card to In progress and hand the same session its next round. A red
+mechanical gate does it directly; a red review does it after the reviewer's stop is confirmed. The
+dispatcher updates `TASK.md` with the failure and the next report identity, persists a
+pending-delivery boundary before SIGCONT, then checkpoints confirmation only after the provider
+durably records the continuation user turn. Terminal activity is a recovery hint for records
+without that boundary, not the delivery proof. Recovery after a crash cannot mistake the previous
+`done` report for a new completion, replay an incomplete delivery as if it were confirmed, or
+overwrite a confirmed continuation. A crash after SIGCONT but before delivery replays the prompt,
+while a turn already underway is checkpointed and not sent again. Codex TUI and Claude interactive
+workers accept a continuation; a one-shot Codex exec worker has spent its turn and refuses one. The
+routing record and card comment name the outcome as a reused continuation or a replacement, with
+the worker profile, model, effort, reason and timestamp. A dead session, an unavailable
+continuation transport, or a lost handle is an explicit fallback: the dispatcher confirms the old
+worker has stopped, writes a durable launch intent, and starts exactly one replacement. Retention
+and stop signal the head's private process group, so its helpers are frozen too. An unconfirmed
+stop never permits a second writer in the workspace.
 
-Retention is scoped to the round that reported `done` and to the red mechanical gate that bounces
-it back. Nothing else keeps a worker session. A preempt or requeue back to Ready, a `report:blocked`,
-a move to Blocked, a reconciliation onto another card and a red review verdict all stop the worker
-head and clear the retained state, so the next round starts from a replacement head. A preempt is
-an instruction to end the current attempt, not to pause it; a red review verdict arrives after the
-green gate already stopped the worker for the reviewer.
+Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
+and the red verdict that hands that round back. Nothing else keeps a worker session. A preempt or
+requeue back to Ready, a `report:blocked`, a move to Blocked and a reconciliation onto another card
+all stop the worker head and clear the retained state, so the next round starts from a replacement
+head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends
+the round too: the merge tears the worktree down, waking the suspended head before it is killed.
 
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
