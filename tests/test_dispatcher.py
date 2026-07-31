@@ -64,7 +64,44 @@ from secretary.dispatcher_watchdog import (
     stall_seconds,
     wait_outcome,
 )
+from secretary.dispatcher_worker_lifecycle import WorkerContinuationStage
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+
+
+class WorkerContinuationStateTests(unittest.TestCase):
+    def test_flat_retained_worker_state_is_migrated(self) -> None:
+        record = DispatcherRecord.from_json({
+            "state": "worker_resuming",
+            "worker_retained_at": 10.0,
+            "worker_resume_phase": "merge-gate",
+            "worker_resume_delivery": "pending",
+            "worker_resume_sent_at": 12.0,
+        })
+
+        self.assertEqual(
+            record.worker_continuation.stage,
+            WorkerContinuationStage.DELIVERY_PENDING,
+        )
+        self.assertEqual(record.worker_continuation.phase, "merge-gate")
+        self.assertEqual(record.worker_continuation.retained_at, 10.0)
+        self.assertEqual(record.worker_continuation.sent_at, 12.0)
+
+    def test_flat_pre_validate_checkpoint_is_migrated(self) -> None:
+        record = DispatcherRecord.from_json({
+            "state": "worker_retained",
+            "worker_retained_at": 10.0,
+        })
+
+        self.assertEqual(
+            record.worker_continuation.stage,
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
+        )
+
+    def test_unknown_nested_stage_is_not_silently_discarded(self) -> None:
+        with self.assertRaises(ValueError):
+            DispatcherRecord.from_json({
+                "worker_continuation": {"stage": "future-stage"},
+            })
 
 
 def _clear_env(test: unittest.TestCase, *names: str) -> None:
@@ -398,6 +435,15 @@ class FakeHost:
         self.fail_stop_head_reason = ""
         self.fail_stop_review_reason = ""
         self.fail_freeze_worker_reason = ""
+        self.fail_retain_worker_reason = ""
+        # Most fixture cards use the ordinary exec profile, which has no conversation to resume.
+        # Tests that model a retained Codex TUI clear this explicitly.
+        self.fail_resume_worker_reason = "retained worker session cannot accept a continuation"
+        self.retained_workers: list[str] = []
+        self.resumed_workers: list[str] = []
+        # A retained session the heartbeat can no longer confirm as suspended: set False to model
+        # the head dying while the reviewer judged its checkout.
+        self.retained_worker_alive = True
 
     def _write_head_pid(self, kind: str, reference: str) -> None:
         path = Path(pid_file_path(kind, reference))
@@ -505,7 +551,12 @@ class FakeHost:
             f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace
         )
         try:
-            self.freeze_worker(record)
+            if record.worker_continuation.retained:
+                # Mirror the real host: a retained worker is already suspended, so the reviewer
+                # judges a checkout nothing is editing without ending that conversation.
+                self.confirm_worker_retained(record)
+            else:
+                self.freeze_worker(record)
         except HostError as exc:
             # The reviewer pane is up and the worker would not go: the real host hands the pane
             # back with the failure rather than reporting a bring-up that left nothing running.
@@ -613,6 +664,41 @@ class FakeHost:
             raise HostError(self.fail_freeze_worker_reason)
         if record.handle or record.worker_pid_file:
             self.stop_head(record, "worker")
+
+    def retain_worker(self, record) -> None:
+        self.calls.append("retain_worker")
+        if self.fail_retain_worker_reason:
+            raise HostError(self.fail_retain_worker_reason)
+        if not record.handle and not record.worker_pid_file:
+            raise HostError("worker session is unavailable for retention")
+        if not record.handle:
+            # Like the real host: a head with no pane is unaddressable, so there is nothing to
+            # retain and the caller stops it instead.
+            raise HostError("worker session has no addressable pane to retain")
+        self.retained_workers.append(record.handle)
+
+    def worker_retained_alive(self, record) -> bool:
+        if not record.worker_continuation.retained:
+            return False
+        return bool(self.retained_worker_alive and (record.handle or record.worker_pid_file))
+
+    def confirm_worker_retained(self, record) -> None:
+        self.calls.append("confirm_worker_retained")
+        # `fail_freeze_worker_reason` is the knob for "the host cannot vouch that this worker is
+        # not writing". Suspending it for the reviewer instead of stopping it does not change what
+        # a reviewer launch needs to hear before it takes the checkout.
+        if self.fail_freeze_worker_reason:
+            raise HostError(self.fail_freeze_worker_reason)
+        if not self.worker_retained_alive(record):
+            raise HostError("retained worker session is no longer confirmably suspended")
+
+    def resume_worker(self, task: dict, record) -> None:
+        self.calls.append("resume_worker")
+        if self.fail_resume_worker_reason:
+            raise HostError(self.fail_resume_worker_reason)
+        if not record.handle and not record.worker_pid_file:
+            raise HostError("retained worker session exited")
+        self.resumed_workers.append(record.handle)
 
     def _kill_head(self, kind: str, record) -> None:
         """Drop the heartbeat of a stopped head, the way a closed pty tree does.
@@ -2122,6 +2208,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIsNone(neighbor["claim"]["worker"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
         self.assertEqual(self.host.torn_down, self.host.stopped)
+        # A green round never stops the worker head on its own: it stays suspended from its done
+        # report until the merge tears the whole worktree down.
+        self.assertNotIn("stop_head:worker", self.host.calls)
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
     def _run_worker_to_validate(self, request_id: str = "worker-done") -> None:
@@ -2674,6 +2763,271 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "review-started")
         self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        # The worker is suspended, not stopped: the reviewer is the only head acting on the
+        # checkout, and the round keeps a conversation for a red verdict to continue.
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertIn("confirm_worker_retained", self.host.calls)
+
+    def test_gate_red_reuses_the_retained_worker_conversation(self) -> None:
+        """A live TUI session keeps both its terminal identity and its provider conversation."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        initial = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="worker-done-reused-session",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        retained = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            retained["worker_continuation"]["stage"],
+            WorkerContinuationStage.RETAINED.value,
+        )
+
+        gated = self.runtime.tick(self.selector)
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(gated["action"], "gate-red-reused-worker")
+        self.assertEqual(record["handle"], initial["handle"])
+        self.assertEqual(record["worker_pid_file"], initial["worker_pid_file"])
+        self.assertEqual(record["worker_run"], initial["worker_run"])
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(self.host.resumed_workers, [initial["handle"]])
+        continuation = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("continuation: reused", continuation)
+        self.assertIn("worker profile codex", continuation)
+
+    def test_gate_red_replaces_a_session_that_cannot_continue(self) -> None:
+        """A failed continuation is stopped before exactly one durable replacement is launched."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
+        self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def _review_red(self, request_id: str = "review-red") -> None:
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
+            body="fix the hermetic test", request_id=request_id,
+        )
+
+    def test_red_review_reuses_the_retained_worker_conversation(self) -> None:
+        """The round that wrote the code gets its verdict: same session, same round of work."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        initial = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red()
+
+        reworked = self.runtime.tick(self.selector)
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(reworked["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(self.host.resumed_workers, [initial["handle"]])
+        self.assertEqual(record["handle"], initial["handle"])
+        self.assertEqual(record["worker_run"], initial["worker_run"])
+        self.assertEqual(record["attempt_round"], initial["attempt_round"] + 1)
+        self.assertEqual(
+            self.host.stopped_reviews,
+            ["review:secretary-510-pilot"],
+            "the reviewer's stop is confirmed before its findings are delivered",
+        )
+        self.assertLess(
+            self.host.calls.index("stop_review"), self.host.calls.index("resume_worker")
+        )
+        continuation = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("review red continuation: reused", continuation)
+        self.assertIn("worker profile codex", continuation)
+
+    def test_a_red_review_keeps_the_worker_when_the_rework_report_arrives(self) -> None:
+        """The reused session reports into the next round instead of being waited on forever."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-red-reused-worker")
+        self.host.commit = "review-rework-accepted-c0ffee"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="rework report", request_id="worker-done-after-red-review",
+        )
+
+        advanced = self.runtime.tick(self.selector)
+
+        self.assertEqual(advanced["to"], "validate")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+
+    def test_a_red_review_will_not_deliver_while_the_reviewer_refuses_to_stop(self) -> None:
+        """An unconfirmed reviewer stop is not a checkout the worker may be woken into."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self.host.fail_stop_review_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.runtime.tick(self.selector)
+
+        self.assertEqual(refused["action"], "review-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.resumed_workers, [])
+        self.assertNotIn("restart_worker", self.host.calls)
+
+        self.host.fail_stop_review_reason = ""
+        retried = self.runtime.tick(self.selector)
+
+        self.assertEqual(retried["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+
+    def test_a_red_review_replaces_a_session_that_refuses_the_continuation(self) -> None:
+        """A refused delivery is stopped — confirmed — before one replacement is launched."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+
+        reworked = self.runtime.tick(self.selector)
+
+        self.assertEqual(reworked["action"], "rework-started")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertLess(
+            self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker")
+        )
+        self.assertIn(
+            "review red continuation: replacement",
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
+        )
+
+    def test_a_red_review_retries_an_unconfirmed_stop_before_a_replacement(self) -> None:
+        """A stop the host will not confirm never earns a replacement, only the next tick."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        stopped = self.runtime.tick(self.selector)
+
+        self.assertEqual(stopped["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        # The card is already back with the worker: the delivery boundary on the record is what
+        # the next tick picks the round up from, and it stays on the red-review branch.
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+        self.host.fail_stop_head_reason = ""
+        retried = self.runtime.tick(self.selector)
+
+        self.assertEqual(retried["action"], "rework-started")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertIn(
+            "review red continuation: replacement",
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
+        )
+
+    def test_a_retained_worker_of_unclear_liveness_is_stopped_before_the_reviewer(self) -> None:
+        """Retention is a record; the heartbeat decides. An unclear answer costs the session."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.host.retained_worker_alive = False
+
+        started = self.runtime.tick(self.selector)
+
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(started["action"], "review-started")
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertLess(
+            self.host.calls.index("stop_head:worker"), self.host.calls.index("start_review")
+        )
+        self.assertEqual(record["worker_continuation"], {})
+        self._review_red()
+
+        reworked = self.runtime.tick(self.selector)
+
+        self.assertEqual(reworked["action"], "rework-started")
+        self.assertEqual(self.host.resumed_workers, [])
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_gate_red_with_an_old_record_stops_before_replacement(self) -> None:
+        """A pre-retention record cannot turn unknown worker liveness into a second writer."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        # The head is up and suspended; only the record forgot about it, the way one written by a
+        # dispatcher that predates retention would have.
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_continuation"] = {}
+        self.runtime.state.save(payload)
+        self.host.calls.clear()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
+
+    def test_gate_red_retries_an_unconfirmed_stop_before_a_replacement(self) -> None:
+        """A non-retained worker cannot strand the card after a red gate stop refusal.
+
+        The red transition is already durable and the card is already back with the worker: what
+        the refusal costs is the replacement, and the next tick picks the transition up from the
+        record rather than re-running the gate.
+        """
+        self.start_pilot()
+        self.host.gate_results = [
+            GateResult("red", "local validation failed", "assert False"),
+            GateResult("red", "local validation failed", "assert False"),
+        ]
+        self._run_worker_to_validate()
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_continuation"] = {}
+        self.runtime.state.save(payload)
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        stopped = self.runtime.tick(self.selector)
+
+        self.assertEqual(stopped["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            record["worker_continuation"]["stage"],
+            WorkerContinuationStage.RED_TRANSITION_PENDING.value,
+        )
+
+        self.host.fail_stop_head_reason = ""
+        retried = self.runtime.tick(self.selector)
+
+        self.assertEqual(retried["action"], "gate-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_failed_retention_with_an_unconfirmed_stop_never_enters_validate(self) -> None:
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.fail_retain_worker_reason = "head is gone"
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="worker-done-unconfirmed-retention",
+        )
+
+        outcome = self.runtime.tick(self.selector)
+
+        self.assertEqual(outcome["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
     def test_gate_red_bounces_card_to_worker(self) -> None:
         self.start_pilot()
@@ -2685,7 +3039,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(gated["action"], "gate-red-rework")
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(task["state"], "in_progress")
-        self.assertIn("The mechanical validation gate is red", task["comments"][-1]["body"])
+        self.assertIn("The mechanical validation gate is red", task["comments"][-2]["body"])
+        self.assertIn("continuation: replacement", task["comments"][-1]["body"])
         self.assertEqual(self.host.reviews, [])
         # worker prepared once at claim, once on the gate-red relaunch
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
@@ -2717,7 +3072,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-2]["body"])
 
     def test_repeated_github_gate_red_for_the_same_reason_survives_a_new_sha(self) -> None:
         """secretary-766 review: a GitHub gate's rendered detail always carries the head SHA,
@@ -2753,7 +3108,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         second = self.runtime.tick(self.selector)
 
         self.assertEqual(second["action"], "gate-red-rework")
-        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-2]["body"])
 
     def test_gate_red_with_a_different_local_error_is_not_marked_as_a_repeat(self) -> None:
         """secretary-766 review: two distinct local-gate failures must not be conflated into a
@@ -2869,7 +3224,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.runtime.tick(self.selector)
 
-        body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        body = self.reader.show("secretary-510-pilot")["comments"][-2]["body"]
         self.assertIn("API_TOKEN=<redacted>", body)
         self.assertNotIn("super-secret-value", body)
 
@@ -3382,6 +3737,30 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(history[0].reviewer.head, "codex-reviewer")
         self.assertIsNone(history[1].reviewer)
 
+    def test_a_preempt_out_of_validate_drops_the_retained_session(self) -> None:
+        """Retention follows the attempt, not the workspace. A preempt back to Ready ends the
+        attempt, so the suspended worker is stopped and the next round gets a fresh head rather
+        than the conversation that was frozen for the gate."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        retained = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            retained["worker_continuation"]["stage"], WorkerContinuationStage.RETAINED.value
+        )
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot",
+            target="ready", reason="preempted while validating", request_id="po-preempt-retained",
+        )
+
+        claimed = self.runtime.tick(self.selector)
+
+        self.assertEqual(claimed["step"], "claim")
+        self.assertEqual(self.host.resumed_workers, [])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(record["worker_continuation"], {})
+
     def test_worker_respawn_on_an_unchanged_head_stays_one_record(self) -> None:
         """A respawn inside a round is the same head coming back, not a second worker: the round
         keeps one launch record, and the journal does not read as two heads on one attempt."""
@@ -3471,8 +3850,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
             ["review:secretary-510-pilot"],
             "a red verdict must end the reviewer's pane",
         )
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
         self.assertEqual(
-            self.host.stopped, [], "a red verdict must not stop the whole worktree's terminals"
+            self.host.stopped,
+            [],
+            "the green gate stops the retained worker before review; a red verdict stops only the reviewer",
         )
         self.assertEqual(self.host.torn_down, [], "rework must reuse the workspace, not tear it down")
 
@@ -3510,6 +3892,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.host.split_from,
             ["term:secretary-510-pilot-pilot"],
             "the reviewer pane must be split off the worker's own pane",
+        )
+        self.assertNotIn(
+            "stop_workspace",
+            self.host.calls,
+            "green handoff must leave the worktree's other panes alone",
         )
 
     def test_interrupted_review_tick_reuses_the_existing_pane(self) -> None:
@@ -3591,7 +3978,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.completed, [], "a verdict for another code state must not merge")
         self.assertEqual(self.host.torn_down, [])
-        self.assertIn("a different state of the code", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        comments = self.reader.show("secretary-510-pilot")["comments"]
+        self.assertTrue(any("a different state of the code" in comment["body"] for comment in comments))
+        self.assertIn("continuation: replacement", comments[-1]["body"])
 
     def test_green_verdict_for_a_descendant_checkout_is_not_merged_by_default(self) -> None:
         """A descendant can contain new commits after review; only the instance publish recovery
@@ -6074,7 +6463,7 @@ class PidHeartbeatTests(unittest.TestCase):
 
             status = head_process_status(str(pid_file))
 
-            self.assertEqual(status, {"known": True, "alive": True})
+            self.assertEqual(status, {"known": True, "alive": True, "stopped": False})
 
     def test_a_pid_file_that_has_not_been_written_yet_is_not_known(self) -> None:
         """A fresh launch has not run its `echo $$` yet, and a raw

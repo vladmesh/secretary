@@ -213,6 +213,9 @@ def forget_role_head(record: DispatcherRecord, role: str) -> None:
     record.handle = ""
     record.worker_leaf = ""
     record.worker_pid_file = ""
+    # Nothing is left to resume, but a red transition already opened over that head still owes the
+    # card its replacement and outlives the pointers.
+    record.worker_continuation.drop_session()
 
 
 def mark_launch_aborted(

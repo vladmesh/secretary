@@ -21,7 +21,12 @@ TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S"
 TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
 TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
+_CODEX_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
+# Claude's composer has no Codex `›` marker. Its active turn is a dedicated status line, so a
+# transcript word such as "working" or "thinking" is not enough to say a new turn started.
+_CLAUDE_TURN_RE = re.compile(
+    r"(?im)^\s*[✻✽✢✶·]\s+\S+?(?:…|\.\.\.)\s+\([^\n)]*\)\s*$"
+)
 
 
 class TuiDeliveryError(RuntimeError):
@@ -60,6 +65,59 @@ def deliver_tui_prompt(
         "--json",
     ])
     _confirm_delivered(handle, workspace, prompt, sent_at, run_json=run_json, session_root=session_root)
+
+
+def terminal_turn_started(
+    handle: str,
+    *,
+    run_json: RunJson,
+    workspace: str = "",
+    since: float = 0.0,
+    adapter: str = "",
+) -> bool:
+    """Whether an interactive provider pane already accepted a prompt into a turn.
+
+    Claude and Codex both persist their user turns locally. When recovery knows the delivery
+    boundary, that durable record is the proof; the screen remains a secondary hint for old
+    records that predate the boundary or for terminal-only recovery.
+    """
+    if workspace and since:
+        if adapter == "claude":
+            return bool(latest_claude_user_turn_for(workspace, since))
+        if adapter == "codex":
+            return bool(latest_user_turn_for(workspace, since))
+    return _screen_started_turn(read_terminal_text(handle, run_json=run_json), adapter=adapter)
+
+
+def deliver_interactive_prompt(
+    handle: str,
+    workspace: str,
+    prompt: str,
+    *,
+    run_json: RunJson,
+) -> None:
+    """Deliver a Claude-style terminal prompt and confirm the provider started a turn.
+
+    Terminal send succeeding only means Orca accepted keystrokes. Wait for the terminal to be
+    idle first, then require visible turn activity, retrying Enter when the prompt was swallowed
+    during a repaint. Failure reaches the caller so the dispatcher can take the replacement path.
+    """
+    run_json([
+        "orca", "terminal", "wait",
+        "--terminal", handle,
+        "--for", "tui-idle",
+        "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS),
+        "--json",
+    ])
+    sent_at = time.time()
+    run_json([
+        "orca", "terminal", "send",
+        "--terminal", handle,
+        "--text", prompt,
+        "--enter",
+        "--json",
+    ])
+    _confirm_interactive_turn(handle, workspace, sent_at, run_json=run_json)
 
 
 def close_terminal(handle: str, *, run_json: RunJson) -> None:
@@ -118,6 +176,36 @@ def _confirm_delivered(
     )
 
 
+def _confirm_interactive_turn(handle: str, workspace: str, sent_at: float, *, run_json: RunJson) -> None:
+    deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
+    next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
+    resends = 0
+    last_reason = "no-user-turn"
+    while time.monotonic() < deadline:
+        if latest_claude_user_turn_for(workspace, sent_at):
+            return
+        turn_visible = terminal_turn_started(handle, run_json=run_json, adapter="claude")
+        if turn_visible:
+            last_reason = "turn-visible-awaiting-user-turn"
+        else:
+            last_reason = "no-user-turn"
+        if not turn_visible and resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
+            run_json([
+                "orca", "terminal", "send",
+                "--terminal", handle,
+                "--text", "",
+                "--enter",
+                "--json",
+            ])
+            resends += 1
+            next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
+        time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
+    raise TuiDeliveryError(
+        f"interactive prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
+        f"(reason={last_reason}, resends={resends})"
+    )
+
+
 def read_terminal_text(handle: str, *, run_json: RunJson) -> str:
     data = run_json(["orca", "terminal", "read", "--terminal", handle, "--json"])
     terminal = data.get("terminal") if isinstance(data.get("terminal"), dict) else data
@@ -162,6 +250,43 @@ def latest_user_turn_for(
         except OSError:
             continue
     return latest
+
+
+def latest_claude_user_turn_for(workspace: str, since: float) -> float | None:
+    """Return the newest Claude user record for this workspace after ``since``."""
+    latest: float | None = None
+    for path in _claude_session_paths_for(workspace):
+        try:
+            with path.open(encoding="utf-8", errors="replace") as source:
+                for line in source:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict) or record.get("type") != "user":
+                        continue
+                    timestamp = _record_timestamp(record)
+                    if timestamp is None or timestamp <= since:
+                        continue
+                    if latest is None or timestamp > latest:
+                        latest = timestamp
+        except OSError:
+            continue
+    return latest
+
+
+def _claude_session_paths_for(workspace: str):
+    root = _claude_projects_root()
+    project = str(Path(workspace).resolve(strict=False)).replace("/", "-")
+    try:
+        yield from (root / project).glob("*.jsonl")
+    except OSError:
+        return
+
+
+def _claude_projects_root() -> Path:
+    configured = os.environ.get("SECRETARY_CLAUDE_PROJECTS") or os.environ.get("TA_CLAUDE_PROJECTS")
+    return Path(configured) if configured else Path.home() / ".claude" / "projects"
 
 
 def _session_paths_for(workspace: str, *, session_root: Path | None = None):
@@ -269,7 +394,9 @@ def _prompt_still_in_codex_composer(screen: str, prompt: str) -> bool:
     return bool(signature and signature in screen[marker:])
 
 
-def _screen_started_turn(screen: str) -> bool:
+def _screen_started_turn(screen: str, *, adapter: str = "") -> bool:
+    if adapter == "claude":
+        return bool(_CLAUDE_TURN_RE.search(screen))
     marker = screen.rfind("\u203a")
     status_area = screen[:marker] if marker >= 0 else screen
-    return bool(_WORKING_RE.search(status_area))
+    return bool(_CODEX_WORKING_RE.search(status_area))

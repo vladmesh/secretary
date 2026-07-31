@@ -2103,6 +2103,23 @@ class RealHostStopObserverTests(unittest.TestCase):
             [["worktree", "show"], ["terminal", "stop"], ["worktree", "rm"]],
         )
 
+    def test_a_session_wrapped_observer_is_confirmed_dead_before_its_worktree_is_removed(self) -> None:
+        """Terminal stop cannot kill a `setsid` head by tty alone."""
+        record = ObserverRecord(
+            sprint="sprint:1", head="observer", handle="term-1",
+            workspace="/ws/observers/sprint-1", head_possible=True, pid_file="/tmp/observer.pid",
+        )
+        confirmed: list[str] = []
+        with mock.patch.object(
+            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
+        ), mock.patch.object(
+            self.host, "_confirm_head_process_gone", lambda path: confirmed.append(path)
+        ):
+            self.host.stop_observer(record)
+
+        self.assertEqual(confirmed, ["/tmp/observer.pid"])
+        self.assertEqual(self.calls[-1][1:3], ["worktree", "rm"])
+
     def test_a_record_without_a_workspace_still_closes_its_pane(self) -> None:
         """Records written before the launch intent named a workspace: the handle is all there is."""
         legacy = ObserverRecord(sprint="sprint:1", head="observer", handle="term-1")

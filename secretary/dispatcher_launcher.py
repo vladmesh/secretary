@@ -484,6 +484,9 @@ def with_pid_heartbeat(command: str, pid_file: str) -> str:
     assignments before it execs the real program in place, so the pid captured above still ends up
     belonging to the head once `env` hands off to it.
     """
+    # The terminal already puts its foreground head in a process group. Keeping that terminal
+    # session matters for interactive heads: they need /dev/tty, resize signals and normal pane
+    # teardown. CommandHostRuntime signals that existing group when it is safe to do so.
     return f'echo "$$" > {shlex.quote(pid_file)}; exec env {command}'
 
 

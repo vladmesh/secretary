@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import write_json
+from secretary.dispatcher_worker_lifecycle import WorkerContinuation
 
 
 class DispatcherStateError(Exception):
@@ -77,6 +78,9 @@ class DispatcherRecord:
     # from an unrelated shell in the same worktree must not keep a broken head alive.
     worker_started_at: float = 0.0
     worker_progress_at: float = 0.0
+    # Durable worker ownership while validation has the checkout. This is deliberately one typed
+    # state value rather than four optional fields whose combinations callers would have to infer.
+    worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -143,6 +147,7 @@ class DispatcherRecord:
             "worker_pid_file": self.worker_pid_file,
             "review_pid_file": self.review_pid_file,
             "worker_progress_at": self.worker_progress_at,
+            "worker_continuation": self.worker_continuation.to_json(),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
@@ -184,6 +189,11 @@ class DispatcherRecord:
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
+            worker_continuation=(
+                WorkerContinuation.from_json(payload.get("worker_continuation"))
+                if "worker_continuation" in payload
+                else WorkerContinuation.from_legacy_record(payload)
+            ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),
