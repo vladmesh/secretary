@@ -66,13 +66,12 @@ python3 -m secretary task create --role po --project PROJECT --type code --title
 ```
 
 `create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
-On a Pipeline with the Issues column, a new execution task requires `--sprint`: the sprint must be
-open and the task project must be one of its reservations. A closed sprint and an unreserved project
-are separate errors, both before the first backend write. Tasks never accept product priority;
-`--priority` is rejected rather than ignored. Execution tasks are created in Ready, never in Issues.
-Old task-shaped Ideas remain readable after the supported board migration but are fail-closed: only
-the PO may explicitly triage one to Ready, which marks it as a task without inventing Product, issue
-kind or priority. `--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
+A new execution task requires `--sprint`: the sprint must be open and the task project must be one
+of its reservations. A closed sprint and an unreserved project are separate errors, both before the
+first backend write. Tasks never accept product priority; `--priority` is rejected rather than
+ignored. Execution tasks are created in Ready, never in Issues; the worker, reviewer and retro roles
+create nothing but a proposal in Issues, which a PO later triages to Ready.
+`--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
 override, launch mode comes from the head profile.
 
 `archive` closes an execution task in the backend and removes it from ordinary active listings without
@@ -84,7 +83,7 @@ anything. It cannot close a Product or Issue: use `secretary issue close` for th
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (the full new text, not
 a diff), `--head`, `--review-head`. PO, dispatcher and observer may edit, but an ordinary card is only
-editable in Ideas, Ready or Blocked: on an active card the worker is working against a snapshot of the
+editable in Ready or Blocked: on an active card the worker is working against a snapshot of the
 task document, so an edit goes through preempt and requeue rather than a silent swap. The `edited` audit
 event records the old and new digests; the full text of past versions is recoverable from the Git history
 of the board export in the checkpoint. Comments stay the dialogue of an attempt; the spec lives only in

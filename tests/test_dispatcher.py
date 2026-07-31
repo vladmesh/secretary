@@ -119,7 +119,7 @@ class FakeKanboard:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.columns = [
-            {"id": 1, "title": "Ideas"},
+            {"id": 1, "title": "Issues"},
             {"id": 2, "title": "Ready"},
             {"id": 3, "title": "In progress"},
             {"id": 4, "title": "Validate"},
@@ -986,7 +986,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "production")
         self.assertEqual(list(payload["records"]), ["secretary-510-pilot"])
 
-    def test_production_tick_reconciles_a_record_left_behind_by_a_move_to_ideas(self) -> None:
+    def test_production_tick_reconciles_a_record_left_behind_by_a_move_to_issues(self) -> None:
         self.commit_cutover()
         self.runtime.production_tick()
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
@@ -994,9 +994,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
             role="po",
             actor="operator",
             reference="secretary-510-pilot",
-            target="ideas",
+            target="issues",
             reason="PO pulled it back out of the cycle",
-            request_id="move-to-ideas",
+            request_id="move-to-issues",
         )
         self.host.calls.clear()
         self.host.prepared.clear()
@@ -1008,7 +1008,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         action = reconcile_actions[0]
         self.assertEqual(action["ref"], "secretary-510-pilot")
         self.assertEqual(action["action"], "record-removed")
-        self.assertEqual(action["card_state"], "ideas")
+        self.assertEqual(action["card_state"], "issues")
         payload = self.runtime.production_state.load()
         self.assertNotIn("secretary-510-pilot", payload["records"])
         # The record owns the live head. It must be stopped before the record can disappear, or a
@@ -1142,16 +1142,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.production_tick()
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         # This race concerns an execution card already in the dispatcher cycle. It is not an
-        # unclassified legacy Ideas card, whose only supported exit is PO triage to Ready.
+        # card the PO moved back to the Issues backlog.
         self.board.metadata[12]["record_type"] = "task"
 
         self.writer.move(
             role="po",
             actor="operator",
             reference="secretary-510-pilot",
-            target="ideas",
+            target="issues",
             reason="PO pulled it back out of the cycle",
-            request_id="move-to-ideas-race",
+            request_id="move-to-issues-race",
         )
         self.host.calls.clear()
         self.host.prepared.clear()
@@ -1232,9 +1232,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
             role="po",
             actor="operator",
             reference="secretary-510-pilot",
-            target="ideas",
+            target="issues",
             reason="PO pulled it back out of the cycle",
-            request_id="move-to-ideas-2",
+            request_id="move-to-issues-2",
         )
 
         result = self.runtime.production_tick()

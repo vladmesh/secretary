@@ -82,7 +82,7 @@ class StatusCliTests(unittest.TestCase):
                             "reason": "active_claim_mismatch",
                             "status": "closed",
                             "closed_at": "2026-07-02T00:00:00Z",
-                            "closed_reason": "card left the active dispatcher cycle (state=ideas)",
+                            "closed_reason": "card left the active dispatcher cycle (state=issues)",
                         },
                     ],
                 }), encoding="utf-8"

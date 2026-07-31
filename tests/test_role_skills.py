@@ -106,17 +106,13 @@ class CanonicalRegistryTests(unittest.TestCase):
     def test_no_target_root_is_nested_in_another_of_the_same_shell(self) -> None:
         self.assertEqual(find_overlapping_target_roots(self.registry), [])
 
-    def test_the_interactive_secretary_keeps_its_own_sprint_skill(self) -> None:
-        """The double loop is deliberate: the observer skill does not replace `run-sprint`."""
-        self.assertIn("run-sprint", self.manifest["roles"]["secretary"]["skills"])
-        self.assertTrue((roles_root(MANIFEST) / "secretary" / "run-sprint" / "SKILL.md").is_file())
-
-    def test_the_document_loop_stays_next_to_the_entity_loop(self) -> None:
-        """`open-sprint` is added beside `start-sprint`, not instead of it."""
+    def test_the_document_sprint_loop_is_gone(self) -> None:
+        """A sprint is an entity with an observer; the document loop is not shipped."""
         skills = self.manifest["roles"]["secretary"]["skills"]
 
-        self.assertIn("start-sprint", skills)
-        self.assertTrue((roles_root(MANIFEST) / "secretary" / "start-sprint" / "SKILL.md").is_file())
+        for skill in ("start-sprint", "run-sprint"):
+            self.assertNotIn(skill, skills)
+            self.assertFalse((roles_root(MANIFEST) / "secretary" / skill).exists())
 
     def test_the_secretary_role_owns_the_sprint_entity_skill(self) -> None:
         self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["secretary"]["skills"])

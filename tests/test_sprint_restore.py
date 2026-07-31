@@ -28,7 +28,10 @@ from tests.test_sprints import ProductSprintKanboard, _write_project_registry
 CARD_EXPORT = {
     "id": 12, "reference": "secretary-12", "title": "Linked card", "description": "card body",
     "column": "Ready", "swimlane": "", "position": 1, "task_type": "code", "project": "secretary",
-    "metadata": {"complexity": "standard", "family_preference": "auto"}, "comments": [],
+    "metadata": {
+        "record_type": "task", "complexity": "standard", "family_preference": "auto",
+    },
+    "comments": [],
 }
 RESUME = {
     "selected_step": "restore the entity", "selected_why": "the checkpoint carries it",
