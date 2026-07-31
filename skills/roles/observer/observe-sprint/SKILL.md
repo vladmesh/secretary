@@ -220,7 +220,13 @@ When you see RED or Blocked evidence, classify the finding from the report evide
 - a local defect inside the card may return for supported rework or retry;
 - evidence that the planned architecture or card cut is wrong closes or preempts this attempt and is recut
   differently; the next cut may be smaller, larger or a different approach;
-- hardening or compatibility outside the sprint is deferred or taken to the user.
+- hardening or compatibility outside the sprint is deferred or taken to the user;
+- blockers that the previous round's own repairs introduced are none of the above. Approving another
+  ordinary round there buys one more moved defect: each repair is locally right and shifts the problem.
+  Stop and fix the structure instead. Name the single place that must enforce the invariant, state the
+  order it enforces and what takes precedence during recovery, and require the worker to exhibit in its
+  report that every path reaches it. You will not always see the whole rule at once, and refining it after
+  a round is normal; what is not normal is approving a third round on the same moving defect.
 
 The dispatcher may already have started the first automatic rework before you wake. Do not promise or
 assume otherwise. You make the final classification because you have the sprint context. A reviewer provides

@@ -82,6 +82,17 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertNotIn("Before an ordinary RED goes back for another worker round", text)
         self.assertIn("Apply the same classification to the Blocked evidence", text)
 
+    def test_observer_skill_stops_a_round_that_only_moves_the_defect(self) -> None:
+        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn("blockers that the previous round's own repairs introduced", text)
+        self.assertIn("each repair is locally right and shifts the problem", text)
+        self.assertIn("Name the single place that must enforce the invariant", text)
+        self.assertIn("what takes precedence during recovery", text)
+        self.assertIn("exhibit in its", text)
+        self.assertIn("refining it after", text)
+
     def test_the_observer_skill_reaches_the_shell_its_head_runs_in(self) -> None:
         """`role_defaults.observer` is a codex profile, so the codex shell must carry the skill."""
         shells = {

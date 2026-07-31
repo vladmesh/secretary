@@ -1817,6 +1817,19 @@ class CommandHostRuntime:
             "boundary. Difficulty or size alone is not a reason to stop. In a blocked report, name the",
             "conflict and the observer decision needed. Do not silently expand the supported boundary.",
             "",
+            # A worker once ran a live sync from its workspace and published unmerged skills into
+            # the homes the running agents read, silently reverting a merged safeguard.
+            "Your checks read the live installation; they never write to it. Do not run a command",
+            "that deploys, syncs, provisions or reconciles live state from this workspace: it would",
+            "publish unmerged work into the homes the running agents read. Where a check has a",
+            "candidate-scoped form, use it (for example `--product-root .`). Where it has none, say",
+            "in your report what you could not verify rather than running the live-writing form.",
+            "",
+            "Do not change or weaken an existing test to make a failure go away. If a test really",
+            "does encode behaviour this card changes, say so in the report: name the test, what it",
+            "asserted, and why the new contract is the right one. A silently rewritten assertion is",
+            "treated as a defect of this round.",
+            "",
             "Before reporting done, stage AND commit everything on the worker branch: run",
             "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
             "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
@@ -1857,6 +1870,13 @@ class CommandHostRuntime:
             "the defect or it was pre-existing, and whether the repair appears local or would change",
             "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
             "evidence; do not silently widen the supported boundary or decide sprint scope.",
+            "",
+            # Two live-breaking defects once shipped under a full green suite because the fixtures
+            # encoded the same wrong assumption about the backend as the code did.
+            "When a change depends on how an external backend behaves, a passing fixture is not",
+            "evidence: it can encode the same wrong assumption as the code under review. Say which",
+            "real behaviour you verified and how. If no end-to-end check against the real backend",
+            "was possible, write plainly that it was not done and which assumption stays unverified.",
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),

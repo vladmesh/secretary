@@ -4331,6 +4331,29 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("Difficulty or size alone is not a reason to stop", doc)
         self.assertIn("conflict and the observer decision needed", doc)
 
+    def test_worker_prompt_forbids_writing_to_the_live_installation(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("read the live installation; they never write to it", doc)
+        self.assertIn("deploys, syncs, provisions or reconciles live state", doc)
+        self.assertIn("--product-root .", doc)
+        self.assertIn("what you could not verify", doc)
+
+    def test_worker_prompt_makes_an_existing_test_change_reportable(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("Do not change or weaken an existing test", doc)
+        self.assertIn("name the test, what it", doc)
+        self.assertIn("silently rewritten assertion", doc)
+
+    def test_review_prompt_refuses_a_fixture_as_backend_evidence(self) -> None:
+        doc = self.host._review_prompt(self.task, "attempt-1", 3)
+
+        self.assertIn("a passing fixture is not", doc)
+        self.assertIn("same wrong assumption as the code", doc)
+        self.assertIn("no end-to-end check against the real backend", doc)
+        self.assertIn("which assumption stays unverified", doc)
+
     def test_review_prompt_requires_evidence_for_every_red_blocker(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
 
