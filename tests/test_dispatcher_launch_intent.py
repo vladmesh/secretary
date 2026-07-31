@@ -2157,6 +2157,53 @@ class HostLaunchContourTests(unittest.TestCase):
         self.assertTrue(any(command[2] == "wait" for command in calls))
         self.assertTrue(any(command[2] == "send" for command in calls))
 
+    def test_a_visible_claude_turn_confirms_the_continuation_it_delivered(self) -> None:
+        """The worker criterion is its own head's turn having started, and the caller passes it.
+
+        Nothing writes a session record here, so the only proof of delivery is the pane showing a
+        turn underway. That is the criterion this role has always used, and the shared delivery
+        path takes it from the caller rather than choosing one itself.
+        """
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(head.kill)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "claude", "head": "claude-opus"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="gate",
+                retained_at=time.time(),
+                sent_at=time.time(),
+            ),
+        )
+        os.kill(head.pid, signal.SIGSTOP)
+        time.sleep(0.05)
+        calls: list[list[str]] = []
+        sent = False
+
+        def run_json(command: list[str]) -> dict:
+            nonlocal sent
+            calls.append(command)
+            if command[2] == "send":
+                sent = True
+            if command[2] == "read":
+                return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"] if sent else [""]}}
+            return {}
+
+        with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(self.data_dir / "none")}), \
+             mock.patch.object(self.host, "_run_json", run_json), \
+             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 1), \
+             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+
+        sends = [command for command in calls if command[2] == "send"]
+        self.assertEqual(len(sends), 1)
+        self.assertNotIn("", [command[command.index("--text") + 1] for command in sends])
+        # The pane, not a session record, is what confirmed it.
+        self.assertTrue(any(command[2] == "read" for command in calls))
+
     def test_a_running_retained_claude_recovers_from_its_durable_user_turn(self) -> None:
         """A Claude JSONL user record proves delivery after a crash without terminal guessing."""
         head = subprocess.Popen(["sleep", "30"])

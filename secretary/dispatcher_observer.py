@@ -47,7 +47,6 @@ dead afterwards.
 from __future__ import annotations
 
 import os
-import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -76,13 +75,15 @@ OBSERVER_PROMPT_FILE = "SPRINT.md"
 # the dispatcher's: the prompt points at the file and never restates it.
 OBSERVER_SKILL = "observe-sprint"
 
-# A finished Codex TUI keeps its wrapper process alive. Its screen is the positive signal needed
-# to nudge it for a new durable card event. A card in Ready, In progress or Validate is always an
-# ordinary wait, never an idle queue.
+# A head that has finished its turn keeps its wrapper process alive. Orca reporting the pane ready
+# for input is the positive signal needed to nudge it for a new durable card event. A card in
+# Ready, In progress or Validate is always an ordinary wait, never an idle head.
 OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS = 30 * 60
 OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
-_OBSERVER_QUEUE_FINISHED_RE = re.compile(r"\bWorked for\s+\d", re.IGNORECASE)
+# How many refused deliveries of one batch are retried on the live head before the sprint pays for
+# a replacement instead. Backoff alone would keep an unreachable head forever.
+OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT = 3
 
 # Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
 # so a respawn after a dead pid is readable in the log without joining it against the record.
@@ -303,7 +304,8 @@ class ObserverRecord:
     deferred_reason: str = ""
     stopped_reason: str = ""
     paused_at: float = 0.0
-    # The last confirmed queue-end explains why a live head is waiting for a card event.
+    # The last time the pane was confirmed ready explains why a live head is waiting for a card
+    # event.
     idle_since: float = 0.0
     idle_reason: str = ""
     # The event cursor is dispatcher-owned state. A resume entry stays its established six-field
@@ -464,19 +466,16 @@ def observer_event_watchdog_seconds() -> int:
     return value if value > 0 else OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
 
 
-def observer_queue_finished(screen: str) -> bool:
-    """Whether a Codex TUI is back at its empty composer after completing a turn.
-
-    `Worked for …` is Codex's completion footer.  Requiring a composer after it avoids treating a
-    historical footer in a transcript as the current state.  Codex 0.145 sometimes leaves the
-    framed footer as the final visible line instead of repainting the composer, so that final-line
-    form is equally terminal.  This is intentionally only a positive signal: an unknown adapter or
-    an unreadable screen remains live rather than being guessed idle.
-    """
-    composer = screen.rfind("›")
-    if composer >= 0 and not screen[composer + 1:].strip():
-        return bool(_OBSERVER_QUEUE_FINISHED_RE.search(screen[:composer]))
-    return bool(re.search(r"\bWorked for\s+\d[^\n]*$", screen.rstrip(), re.IGNORECASE))
+def observer_wake_max_attempts() -> int:
+    """How many refused wake deliveries of one batch are retried before the head is replaced."""
+    try:
+        value = int(
+            os.environ.get("SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS", "")
+            or OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
+        )
+    except ValueError:
+        return OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
+    return value if value > 0 else OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
 
 
 def reconcile_observers(
@@ -776,9 +775,19 @@ def _reset_delivery_to_idle(
 def _acknowledge_delivery_from_resume(
     delivery: ObserverDelivery, resumes: list[dict[str, Any]]
 ) -> None:
-    """Advance only when the active batch's marker was written by its observer."""
+    """Advance only when the active batch's marker was written by its observer.
 
-    if delivery.stage not in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}:
+    A refused delivery counts here too. The marker only exists in a prompt that reached the head,
+    so a resume naming it is proof of the turn whatever the dispatcher managed to observe of the
+    send: a wake refused after the prompt landed must not be sent a second time once its own
+    resume is on the board.
+    """
+
+    if delivery.stage not in {
+        DeliveryStage.DELIVERY_INTENT,
+        DeliveryStage.AWAITING_ACK,
+        DeliveryStage.RETRY_DEFERRED,
+    }:
         return
     if not delivery.delivery_id or not delivery.through_event:
         return
@@ -881,6 +890,58 @@ def _defer_delivery(record: ObserverRecord, ref: str, reason: str) -> dict[str, 
     }
 
 
+def _fail_delivery(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Refuse one wake, retry it a bounded number of times, then replace the head.
+
+    A pane that takes none of its prompts is not woken by asking it again forever, and the batch
+    would otherwise sit in a growing backoff instead of reaching the head that can act on it. Once
+    the retries are spent the delivery goes to the replacement path every other unreachable head
+    already takes: it stops this head before it opens the next one, and carries the same
+    `delivery_id` and `through_event` into the new launch, so a resume still acknowledges exactly
+    the batch that was owed.
+    """
+    outcome = _defer_delivery(record, ref, reason)
+    if record.delivery.attempts < observer_wake_max_attempts():
+        return outcome
+    attempts = record.delivery.attempts
+    # The replacement opens its own delivery attempt count: the next failing batch gets the same
+    # bounded retries before it costs the sprint another head.
+    record.delivery.attempts = 0
+    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    unlaunched = str(replaced.get("reason") or "")
+    replaced["reason"] = f"{reason}; the observer head was replaced after {attempts} failed wakes"
+    if unlaunched:
+        replaced["reason"] += f"; that replacement did not come up: {unlaunched}"
+    return replaced
+
+
+def _resume_acknowledged(runtime: Any, ref: str, record: ObserverRecord) -> bool:
+    """Whether this sprint's audit already carries the resume that closes the active delivery.
+
+    This is the observer's delivery criterion, handed to the delivery path so a role that proves
+    its own delivery causally does not need a code path of its own. A turn that started proves
+    nothing here: only a resume written by the observer and naming this delivery does.
+    """
+    try:
+        events = runtime.audit.events()
+    except (TaskError, HostError, OSError, ValueError, TypeError):
+        return False
+    resumes = [
+        event for event in events
+        if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded"
+    ]
+    _acknowledge_delivery_from_resume(record.delivery, resumes)
+    return record.delivery.stage == DeliveryStage.IDLE
+
+
 def _wake_for_event(
     runtime: Any,
     payload: dict[str, Any],
@@ -931,12 +992,15 @@ def _wake_for_event(
                 resume_cursor=str(event.get("latest_resume_id") or ""),
                 now=now,
             )
-        return _defer_delivery(record, ref, f"observer terminal could not be read: {exc}")
-    if not isinstance(status, dict) or not status.get("queue_finished"):
+        return _fail_delivery(
+            runtime, payload, observers, ref, record, event,
+            f"observer terminal could not be read: {exc}",
+        )
+    if not isinstance(status, dict) or not status.get("idle"):
         if delivery.stage == DeliveryStage.IDLE:
-            _set_delivery_waiting(delivery, event, reason="observer has not confirmed a completed queue")
+            _set_delivery_waiting(delivery, event, reason="observer terminal is not ready for a prompt")
         elif delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
-            delivery.reason = "observer has not confirmed a completed queue"
+            delivery.reason = "observer terminal is not ready for a prompt"
         _set_observer_state(record, "waiting", reason=delivery.reason)
         return {
             "status": "ok",
@@ -979,9 +1043,27 @@ def _wake_for_event(
     if not _persist_quietly(runtime, payload, observers):
         return _defer_delivery(record, ref, "observer wake intent could not be persisted")
     try:
-        runtime.host.nudge_observer(record)
+        # The criterion travels with the call: this batch is closed by the observer's own resume
+        # naming it, never by the pane merely starting a turn.
+        runtime.host.nudge_observer(
+            record, confirm=lambda _sent_at: _resume_acknowledged(runtime, ref, record)
+        )
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
-        return _defer_delivery(record, ref, f"observer wake failed: {exc}")
+        return _fail_delivery(
+            runtime, payload, observers, ref, record, event, f"observer wake failed: {exc}"
+        )
+    if delivery.stage == DeliveryStage.IDLE:
+        # The resume for this batch landed while the prompt was being delivered.
+        _set_observer_state(record, "running")
+        return {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-nudged",
+            "head": record.head,
+            "delivery_id": delivery.acknowledged_delivery_id,
+            "event_id": delivery.acknowledged_through,
+        }
     delivery.stage = DeliveryStage.AWAITING_ACK
     delivery.sent_at = now
     delivery.deadline = now + observer_event_watchdog_seconds()
@@ -1002,8 +1084,10 @@ def _wake_for_event(
 def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Classify the live observer without turning an ordinary card wait into a restart.
 
-    A confirmed completed turn means the observer is idle even while a card is in flight. The
-    card's next durable transition, not a periodic idle check, provides its next model turn.
+    A pane Orca reports ready for input means the observer is idle even while a card is in flight.
+    The card's next durable transition, not a periodic idle check, provides its next model turn.
+    Readiness is the same signal the delivery path waits on, so this does not depend on which
+    provider the observer head runs.
     """
     try:
         runtime.sprints.show(ref)
@@ -1013,8 +1097,8 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError):
         return {"state": "unknown", "reason": "the observer terminal could not be read for idle recovery"}
-    if not isinstance(status, dict) or not status.get("queue_finished"):
-        return {"state": "unknown", "reason": "the observer terminal has no confirmed completed queue"}
+    if not isinstance(status, dict) or not status.get("idle"):
+        return {"state": "unknown", "reason": "the observer terminal is not ready for a prompt"}
     try:
         last_activity = float(status.get("last_activity"))
     except (TypeError, ValueError):
@@ -1024,7 +1108,7 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
         "state": "idle",
         "since": last_activity,
         "reason": (
-            "Codex completed its queue and the observer terminal has been quiet for "
+            "the observer head finished its turn and its terminal has been quiet for "
             f"{int(age)}s with no unacknowledged significant card event"
         ),
     }

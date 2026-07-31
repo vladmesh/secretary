@@ -411,6 +411,8 @@ class FakeHost:
         # reads as alive; point it at a free pid to model a head that died.
         self.observers: list[str] = []
         self.observer_nudges: list[str] = []
+        # The delivery criterion each wake was handed, so a test can prove the lifecycle passes one.
+        self.observer_wake_confirms: list = []
         self.stopped_observers: list[str] = []
         # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
         self.observer_terminals: dict[str, str] = {}
@@ -518,13 +520,17 @@ class FakeHost:
     def observer_status(self, _record) -> dict:
         if self.observer_status_result is not None:
             return dict(self.observer_status_result)
-        return {"last_activity": time.time(), "queue_finished": False}
+        return {"last_activity": time.time(), "idle": False}
 
-    def nudge_observer(self, record) -> None:
+    def nudge_observer(self, record, *, confirm=None) -> str:
         self.calls.append("nudge_observer")
         if self.fail_observer_reason:
             raise HostError(self.fail_observer_reason)
         self.observer_nudges.append(str(record.sprint))
+        # Like the real host: the pane took the prompt, and the delivery criterion the lifecycle
+        # passed in is what decides whether the batch is closed.
+        self.observer_wake_confirms.append(confirm)
+        return "confirmed" if confirm is not None and confirm(time.time()) else "accepted"
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")

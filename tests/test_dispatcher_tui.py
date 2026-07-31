@@ -10,7 +10,21 @@ from unittest import mock
 from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import deliver_interactive_prompt, terminal_turn_started
+from secretary.dispatcher_tui import (
+    READINESS_BLOCKED,
+    READINESS_BUSY,
+    READINESS_READY,
+    READINESS_UNKNOWN,
+    deliver_interactive_prompt,
+    latest_claude_user_turn_for,
+    terminal_readiness,
+    terminal_turn_started,
+)
+from tests.test_dispatcher_observer import (
+    BLOCKED_PANE_WAIT_BODY,
+    STALE_HANDLE_WAIT_FAILURE,
+    TIMEOUT_WAIT_FAILURE,
+)
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -29,6 +43,55 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             ]}}
 
         self.assertFalse(terminal_turn_started("term-claude", adapter="claude", run_json=completed_run_json))
+
+    def test_readiness_tells_a_busy_pane_from_one_that_cannot_be_probed(self) -> None:
+        """A refused probe is its own answer: it is neither a ready pane nor a working one."""
+        def answer(payload: dict | Exception):
+            def run_json(_command: list[str]) -> dict:
+                if isinstance(payload, Exception):
+                    raise payload
+                return payload
+
+            return run_json
+
+        self.assertEqual(
+            terminal_readiness("term", run_json=answer({"wait": {"satisfied": True}})),
+            READINESS_READY,
+        )
+        # A pane Orca reports as held in a dialog answers, and answers "not ready, not working":
+        # a prompt sent to it went nowhere, so the delivery path re-enters it.
+        self.assertEqual(
+            terminal_readiness(
+                "term", run_json=answer({"wait": {"satisfied": False, "blockedReason": "modal"}})
+            ),
+            READINESS_BLOCKED,
+        )
+        # A pane that is simply working answers the same way, without a reason.
+        self.assertEqual(
+            terminal_readiness("term", run_json=answer({"wait": {"satisfied": False}})),
+            READINESS_BUSY,
+        )
+        # The condition not being met in time comes back as a failed command carrying its code.
+        self.assertEqual(
+            terminal_readiness("term", run_json=answer(HostError(TIMEOUT_WAIT_FAILURE))),
+            READINESS_BUSY,
+        )
+        # So does a pane Orca looked at and could not call ready: the CLI exits non-zero for it
+        # too, and the answer survives only in the body it printed.
+        self.assertEqual(
+            terminal_readiness(
+                "term",
+                run_json=answer(HostError(f"orca terminal wait failed: {BLOCKED_PANE_WAIT_BODY}")),
+            ),
+            READINESS_BLOCKED,
+        )
+        for failure in (
+            HostError(STALE_HANDLE_WAIT_FAILURE),
+            HostError("orca terminal wait failed: [Errno 2] No such file or directory: 'orca'"),
+        ):
+            self.assertEqual(
+                terminal_readiness("term", run_json=answer(failure)), READINESS_UNKNOWN
+            )
 
     def test_claude_delivery_accepts_its_durable_user_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,7 +113,12 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 return {}
 
             with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
-                deliver_interactive_prompt("term-claude", str(workspace), "Read TASK.md", run_json=run_json)
+                deliver_interactive_prompt(
+                    "term-claude",
+                    "Read TASK.md",
+                    run_json=run_json,
+                    confirm=lambda sent_at: bool(latest_claude_user_turn_for(str(workspace), sent_at)),
+                )
 
         self.assertTrue(any(command[2] == "send" for command in calls))
 
@@ -102,7 +170,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertEqual(delivered, "The full task is in TASK.md. Read it first.")
         self.assertNotIn("full spec body", delivered)
 
-    def test_tui_delivery_resends_enter_when_prompt_stays_in_composer(self) -> None:
+    def test_tui_delivery_resends_enter_when_the_pane_did_not_take_the_prompt(self) -> None:
+        """A Codex launch is delivered by the shared path, and re-entered the same way.
+
+        Replaces the composer-text check this used to make: the prompt is entered again because
+        Orca says the pane took nothing, here the update dialog that swallows the first Enter, and
+        it is confirmed by this role's own criterion, its turn having started.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
@@ -111,6 +185,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 [
                     {"terminal": {"tail": ["\u203a Read TASK.md"]}},
                     {"terminal": {"tail": ["thinking"]}},
+                ],
+                waits=[
+                    {"wait": {"satisfied": True}},
+                    {"wait": {"satisfied": False, "blockedReason": "codex-update-prompt"}},
                 ],
             )
 
@@ -291,12 +369,27 @@ class ActivityCatalog:
 
 
 class RecordingTuiHost(CommandHostRuntime):
-    def __init__(self, root: Path, reads: list[dict], *, fail_ops: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        reads: list[dict],
+        *,
+        fail_ops: set[str] | None = None,
+        waits: list[dict] | None = None,
+    ) -> None:
         self.catalog = TuiCatalog()
         super().__init__(self.catalog, root, mode="real")  # type: ignore[arg-type]
         self.calls: list[list[str]] = []
         self.reads = list(reads)
+        # What Orca answers each `terminal wait`, the last one repeating. The default is a pane it
+        # calls ready, which is how a prompt that was not taken looks.
+        self.waits = list(waits or [])
         self.fail_ops = fail_ops or set()
+
+    def _next(self, answers: list[dict], default: dict) -> dict:
+        if not answers:
+            return default
+        return answers.pop(0) if len(answers) > 1 else answers[0]
 
     def _run_json(self, args: list[str]) -> dict:
         self.calls.append(args)
@@ -306,8 +399,8 @@ class RecordingTuiHost(CommandHostRuntime):
             raise HostError("terminal wait failed")
         if args[:3] == ["orca", "terminal", "send"] and "send" in self.fail_ops:
             raise HostError("terminal send failed")
+        if args[:3] == ["orca", "terminal", "wait"]:
+            return self._next(self.waits, {})
         if args[:3] == ["orca", "terminal", "read"]:
-            if len(self.reads) > 1:
-                return self.reads.pop(0)
-            return self.reads[0] if self.reads else {"terminal": {"tail": []}}
+            return self._next(self.reads, {"terminal": {"tail": []}})
         return {}

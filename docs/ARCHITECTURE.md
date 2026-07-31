@@ -167,20 +167,48 @@ The reason lands in the observer record and is visible in the external summary. 
 instructions would improvise a sprint from a single entity, which is worse than a sprint waiting for
 the next tick.
 
-Liveness uses the same pid heartbeat as worker and reviewer. A live Codex TUI can still have finished its
-agent queue, so the dispatcher also reads its completed-turn footer and terminal output time. A positive
-footer exposes `idle-grace` in the observer record, but does not relaunch it by itself. A committed,
+Liveness uses the same pid heartbeat as worker and reviewer. A live head can still have finished its
+turn, so the dispatcher also asks Orca whether the pane is ready for input and reads its terminal
+output time. Readiness is `tui-idle`, the same signal the delivery path waits on before it sends to
+any head, so the answer does not depend on which provider the observer profile names. It has three
+answers, not two: ready, busy (a pane that is working, or the condition unmet before the probe's
+deadline), blocked (a pane held in a dialog, which is not ready and is not working on a prompt
+either) and unanswerable. Orca leaves the command with a non-zero status for a busy pane as well as
+for a failure, so the answer is read from the body it printed rather than from the outcome. A pane
+nothing can be sent to at all, because the record has no handle, because Orca no longer lists that
+terminal or because it is disconnected, is not a busy head either: it enters the same bounded
+failure path. A probe that cannot be answered is not a busy head; it enters the
+same bounded failure path as a refused delivery, because a head nobody can ask about is not one the
+sprint can wait on. A ready pane exposes `idle-grace` in the observer record, but does not relaunch
+it by itself. A committed,
 successful non-routing, non-guard-denied event on a linked card opens one durable delivery batch. Its immutable high-water mark is
 written before a nudge or replacement launch, and only an observer resume carrying that delivery's exact audit
-marker can acknowledge the specific batch. Events
+marker can acknowledge the specific batch, including one whose delivery was refused: that marker
+only exists in a prompt that reached the head, so its resume ends the batch rather than earning a
+second turn. Events
 that arrive before the intent coalesce; later events wait for the next batch. A dead head is replaced only for
 pending work. An unacknowledged batch receives the same recovery attempt after 30 minutes by default. Failed
-wakes carry their reason and bounded retry time in the observer record.
+wakes carry their reason and bounded retry time in the observer record, and a batch that has spent
+those retries is delivered by replacing the head rather than by retrying it again.
 
-An active card does not itself create another observer turn. Once Codex reports a completed queue,
+An active card does not itself create another observer turn. Once the pane is ready for input again,
 the head is `idle-grace` even if its linked card remains active; the next significant durable card
-event wakes it. If that event arrived while the queue was still running, the dispatcher keeps the
-pending event and checks again on later ticks, delivering the nudge as soon as the queue finishes.
+event wakes it. If that event arrived while the head was still working, the dispatcher keeps the
+pending event and checks again on later ticks, delivering the nudge as soon as the pane is ready.
+
+The wake itself goes through the one delivery path every interactive head has, whatever provider it
+runs and whichever role owns it: a Codex launch, a worker or reviewer continuation and an observer
+wake are the same primitive. Wait for the pane, send, re-enter the prompt while Orca says the pane
+took nothing, which is what carries it past a dialog that swallowed the first Enter, and refuse
+upwards when the retries run out. What closes the delivery is the caller's, and the path has no
+criterion of its own: every caller passes one. A worker or reviewer continuation is delivered once
+its own head's turn has visibly started, which is that role's long-standing criterion; an observer
+batch is closed only by a resume naming that delivery. A wake the pane never took reaches the tick outcome and the
+delivery record as an explicit failure with its reason. That failure is retried on the live head a
+bounded number of times (`SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS`, 3 by default) on the existing
+backoff; once they are spent, the batch goes to the ordinary replacement path, which stops that head
+before it opens the next one and carries the same delivery marker into the new launch, so the resume
+that finally arrives still acknowledges the batch that was owed.
 
 All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
 by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a
