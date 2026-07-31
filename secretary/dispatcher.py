@@ -8,7 +8,7 @@ import shutil
 import signal
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -3606,11 +3606,17 @@ class DispatcherRuntime:
         # The launch intent takes the transition over from here: it is durable, it reserves the
         # rework round, and recovery adopts or relaunches exactly one head from it. Handing the
         # record over in the same write is what keeps the two from both owing this card a worker.
+        # The handover is only real if it reached the disk. `write_launch_intent` restores the
+        # intent fields it touched, but the transition it was meant to take over lives here, and a
+        # tick that returns still saves this record: dropping it on a failed write would leave the
+        # card In progress with nothing durable owing it a worker.
+        held_transition = replace(record.worker_continuation)
         record.worker_continuation.clear()
         failure = self._worker_relaunch_intent(
             payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
         )
         if failure is not None:
+            record.worker_continuation = held_transition
             return _launch_intent_unwritable(
                 step=step,
                 ref=ref,

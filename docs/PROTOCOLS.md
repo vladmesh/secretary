@@ -369,7 +369,10 @@ workers accept a continuation; a one-shot Codex exec worker has spent its turn a
 routing record and card comment name the outcome as a reused continuation or a replacement, with
 the worker profile, model, effort, reason and timestamp. A dead session, an unavailable
 continuation transport, or a lost handle is an explicit fallback: the dispatcher confirms the old
-worker has stopped, writes a durable launch intent, and starts exactly one replacement. Retention
+worker has stopped, writes a durable launch intent, and starts exactly one replacement. That intent
+is where the transition changes hands, so it changes hands only once the write succeeds: an intent
+the state plane refuses leaves the red transition on the record, and the next tick finishes it and
+starts that one replacement. Retention
 and stop signal the head's private process group, so its helpers are frozen too. An unconfirmed
 stop never permits a second writer in the workspace.
 

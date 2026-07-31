@@ -903,6 +903,92 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
 
+    def assert_replacement_still_owed(self) -> None:
+        """The board moved for a red verdict and no head was launched: something must still owe one.
+
+        The launch intent was to take the transition over, and the write that would have made that
+        handover durable refused. What is left on disk is the only thing a next tick can read.
+        """
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.stored_intent(), {})
+        stranded = self.record()
+        assert stranded is not None
+        self.assertIn(
+            stranded.worker_continuation.stage,
+            {
+                WorkerContinuationStage.RED_TRANSITION_PENDING,
+                WorkerContinuationStage.DELIVERY_PENDING,
+            },
+        )
+        self.assertFalse(
+            stranded.worker_continuation.retained, "the old session was stopped, not kept"
+        )
+
+    def assert_one_replacement_on_the_rework_round(self, action: str) -> None:
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], action)
+        self.assertNotIn("to", recovered, "the closed round's report is never a new completion")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self.record()
+        assert record is not None
+        self.assertEqual((record.state, record.attempt_round), ("claimed", 2))
+        self.assertIn("red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"])
+
+    def test_a_gate_red_replacement_that_cannot_write_its_intent_keeps_its_transition(self) -> None:
+        """A refused handover is not a completed one.
+
+        The intent write is where the red transition is meant to change hands. When it fails the
+        transition has gone nowhere, and dropping it from the record would leave the card In
+        progress with nothing durable owing it a worker: no rework round, no replacement, and no
+        continuation entry on the card.
+        """
+        self.without_a_retained_session()
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.fail_launch_intent_save():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-intent-unwritable")
+        self.assert_replacement_still_owed()
+        self.assert_one_replacement_on_the_rework_round("gate-red-rework")
+
+    def test_a_review_red_replacement_that_cannot_write_its_intent_keeps_its_transition(self) -> None:
+        self.without_a_retained_session()
+        self.rework_after_red_review()
+
+        with self.fail_launch_intent_save():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-intent-unwritable")
+        self.assert_replacement_still_owed()
+        self.assert_one_replacement_on_the_rework_round("rework-started")
+
+    def test_a_refused_gate_continuation_that_cannot_write_its_intent_keeps_its_transition(self) -> None:
+        """The same window, entered from the other fallback: the session refused the continuation."""
+        self.run_to_validate()
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+
+        with self.fail_launch_intent_save():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-intent-unwritable")
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assert_replacement_still_owed()
+        self.assert_one_replacement_on_the_rework_round("gate-red-rework")
+
+    def test_a_refused_review_continuation_that_cannot_write_its_intent_keeps_its_transition(self) -> None:
+        self.rework_after_red_review()
+
+        with self.fail_launch_intent_save():
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-launch-intent-unwritable")
+        self.assert_replacement_still_owed()
+        self.assert_one_replacement_on_the_rework_round("rework-started")
+
     def test_a_dead_rework_intent_relaunches_inside_the_round_it_reserved(self) -> None:
         """The reservation outlives the head the rework never got.
 
