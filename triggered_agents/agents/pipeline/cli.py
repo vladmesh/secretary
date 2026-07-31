@@ -11,9 +11,9 @@ move's per-role matrix. `move --reason` records a comment on the moved card. ste
 transition (via move/ready) plus one more: Blocked -> Done, which additionally needs a non-empty
 reason in the same call, see model.STEWARD_OVERRIDE and ops.move_card. steward escalations to
 Blocked also need a non-empty reason. idea is reviewer-, retro-, or steward-only: it files a proposal
-into the board's first column while it is still the legacy Ideas. Steward may then move its new card to
-Blocked; reviewer and retro never move anything. On a board whose first column is already Issues the call
-fails closed, see ops._proposal_column.
+into the board's first column (`Issues`, or a legacy `Ideas` before the migration) as a
+record_type=task card awaiting PO triage. Steward may then move its new card to Blocked or Ready;
+reviewer and retro never move anything. See ops._proposal_column.
 setup/list/show/probe need no role. Guards live in model/ops; this layer only wires argv to them
 and maps failures to exit codes.
 
@@ -181,7 +181,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verdict.add_argument("--body")
     p_verdict.add_argument("--body-file")
 
-    p_idea = sub.add_parser("idea")           # reviewer: file a finding as an Ideas card
+    p_idea = sub.add_parser("idea")           # reviewer/retro/steward: file a proposal card
     p_idea.add_argument("--project", required=True)
     p_idea.add_argument("--title", required=True)
     p_idea.add_argument("--type", default="code", dest="task_type")
@@ -296,8 +296,8 @@ def main(argv=None) -> int:
         if args.cmd == "idea":
             if not _need_role(role, ("reviewer", "retro", "steward")):
                 return 2
-            # Agent proposals always use the legacy Ideas column, never Ready or Issues. Steward
-            # may move its own newly created proposal to Blocked as an escalation.
+            # Agent proposals always land in the board's first column, never straight in Ready.
+            # Steward may then move its own new proposal on to Blocked or Ready.
             desc = _text_arg(args.description, args.description_file)
             fn = {
                 "reviewer": ops.reviewer_idea,

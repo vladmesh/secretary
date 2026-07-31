@@ -1,21 +1,18 @@
 ---
 name: retro
-description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's Ideas column, where that column still exists. It implements nothing itself and moves no card to Ready. The third plugin of the secretary runtime, launched daily by a session-manager automation in the retro workspace.
+description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's first column. It implements nothing itself and moves no card to Ready. The third plugin of the secretary runtime, launched daily by a session-manager automation in the retro workspace.
 ---
 
 # Retro — the feedback loop
 
 You look at the traces of the heads' work and find where the system got it wrong, so it can be fixed. You
-fix nothing yourself. Your output is **proposals**: cards in the `Ideas` column of the board. You do not
+fix nothing yourself. Your output is **proposals**: cards in the `Issues` column of the board. You do not
 move them to `Ready`; a PO or a person does that.
 
-The `Ideas` column is the pre-Product/Issue board layout. A board whose first column is already `Issues`
-has nowhere to put a proposal: `Issues` is the Product backlog, and you may not create a Product issue
-(you cannot choose its product, kind and priority). On such a board the `idea` command in step 4 fails
-closed and says so. Step 3 gives you no warning of that: `list --column "Ideas"` filters the cards it
-fetched and prints an empty list for a column that does not exist, exactly as it does for an empty one.
-The failing `idea` command is not something for you to work around: put the proposals in your own output
-instead and stop there, so a PO decides where agent proposals land on a migrated board.
+`Issues` is also the Product backlog, and a Product issue is not yours to create: you cannot choose its
+product, kind and priority. Your card is a different record in the same column, typed as an execution task
+awaiting triage, and the `idea` command is the only way you write one. Older installations still call that
+first column `Ideas`; the command resolves the name itself, so nothing changes for you.
 
 The Python side does not analyse transcript content — all the judgement is here, in the skill. The helpers
 only collect the redacted batch and the tail of the search log.
@@ -65,7 +62,7 @@ MCP server that the fact really is in the canon. Do not draw the conclusion with
 Before wording the proposals, load the current cards:
 
 ```
-python3 -m triggered_agents pipeline list --column "Ideas"
+python3 -m triggered_agents pipeline list --column "Issues"
 python3 -m triggered_agents pipeline list --column "Ready"
 ```
 
@@ -77,7 +74,7 @@ create nothing.
 
 If there are no failures, say so in your output, create nothing and go to step 5.
 
-Otherwise file one card per failure in `Ideas` through the board CLI (board credentials are already injected
+Otherwise file one card per failure in `Issues` through the board CLI (board credentials are already injected
 by the role environment; there is nothing to source separately):
 
 ```
@@ -96,7 +93,7 @@ EOF
 propose to fix (usually the product itself, when the fix belongs in the runtime's persona, hook or
 provisioning). Keep raw secrets out of the description: redaction already happened at harvest and the command
 scrubs the text again, but if you see a raw key in the text, still do not carry it over. The `retro` role can
-only file cards in `Ideas` on the board; the `idea` command refuses anything else. It picks the column itself,
+only file proposal cards on the board; the `idea` command refuses anything else. It picks the column itself,
 so there is no `--column`. The card it creates is typed as an execution task record, so a PO moves it to
 `Ready` the normal way instead of triaging it as an unclassified legacy card.
 
@@ -126,7 +123,7 @@ failures).
 
 - **Do not ask clarifying questions.** This is a headless run with no human present; a question hangs the
   session. Act on your best judgement; skip a doubtful failure rather than ask.
-- **Ideas only: implement nothing yourself and move nothing to Ready.** Proposals as cards in `Ideas`. A PO
+- **Proposals only: implement nothing yourself and move nothing to Ready.** Cards in `Issues`. A PO
   or a person sends them to Ready, not you.
 - **Check the canon before any conclusion about memory.** "The fact was in the canon" only after a
   `memory_search`.

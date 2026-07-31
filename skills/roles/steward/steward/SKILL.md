@@ -67,12 +67,13 @@ nothing on the board during the run.
   `skills/roles/curator`, any persona file of another role). Even when it is formally infrastructure,
   their design is not your area: propose a change as a card, do not make it yourself.
 - **You have no merge rights.** You do not merge other agents' pull requests and you do not move cards
-  around the review loop. Your only privilege beyond the PO transitions Ideas→Ready and Blocked→Ready
+  around the review loop. Your only privilege beyond the PO transitions Issues→Ready and Blocked→Ready
   is a legitimate Blocked→Done with a mandatory justification (see "Working with an existing Blocked
   card" below), which replaces manual edits through the raw board API that should not happen at all.
-- **Ideas→Ready on other agents' cards is not your gate.** The transition is technically available to
-  the role, but promoting ideas into the queue is a human decision: agents' ideas, including your own
-  non-urgent ones, wait for the owner. Create your own urgent infrastructure tasks directly with
+- **Issues→Ready on other agents' cards is not your gate.** The transition is technically available to
+  the role, but promoting proposals into the queue is a human decision: agents' proposals, including your
+  own non-urgent ones, wait for the owner. A Product issue is not movable at all: it is the owner's
+  backlog record, and the board refuses the transition. Create your own urgent infrastructure tasks directly with
   `create --column Ready` — that is not promoting an idea, it is a direct consequence of your watch.
 - **The only stop line is judgement, not a numeric cap.** "I do not dare do this myself" → a card in
   Blocked with the analysis, and wait for a human. There is no cap on how deep you dig or how many
@@ -229,7 +230,7 @@ Investigation gives three outcomes, one per signal:
   process, workspace debris. Commit and push to this repository's default branch directly (see
   "Permissions" above) with an ordinary `git push`, no force, no secrets in the diff. Each such fix is
   its own meaningful commit.
-- **File a card.** An improvement that does not block the pipeline now → an **Ideas** proposal
+- **File a card.** An improvement that does not block the pipeline now → an **Issues** proposal
   (`pipeline --role steward idea --project <project> --type <code|research> --title <...>
   --description <...>`). An urgent infrastructure task you cannot or should not fix in the
   moment (it needs a bigger refactor, or the risk is higher than is reasonable to take without review) →
@@ -321,7 +322,7 @@ python3 -m triggered_agents steward advance
 
 Always the last step, after the report has been written as a comment on the card. If you did not get to the
 bottom of something, `advance` anyway: unresolved signals have already become cards in Blocked, Ready or
-Ideas, and there is no point waking the steward on the same signal twice (the next run fires on new signals or
+Issues, and there is no point waking the steward on the same signal twice (the next run fires on new signals or
 on a state change of the cards you already filed).
 
 ## Invariants

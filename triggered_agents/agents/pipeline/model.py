@@ -44,6 +44,11 @@ BOARD_NAME = os.environ.get("TA_PIPELINE_BOARD", "Pipeline")
 
 COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Blocked", "Done"]
 LEGACY_ISSUE_COLUMNS = {"Ideas", "\u0418\u0434\u0435\u0438"}
+# Where an agent proposal lands: the board's first column, under either the current name or a
+# legacy one. The card is stamped record_type=task, so it reads as an execution card awaiting PO
+# triage and never as a Product issue: an agent still cannot choose product, kind and priority,
+# so `issue create` stays closed to it.
+PROPOSAL_COLUMNS = {COLUMNS[0]} | LEGACY_ISSUE_COLUMNS
 
 ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 

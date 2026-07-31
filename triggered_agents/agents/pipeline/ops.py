@@ -97,24 +97,21 @@ def _column_title(pid: int, column_id: int) -> str:
 def _proposal_column(pid: int) -> str:
     """Return the column an agent proposal goes into, or raise if the board has none.
 
-    A proposal is not a Product issue: an agent cannot pick product, kind and priority, so it may
-    not create one, and the Issues column takes nothing else. The route therefore survives only on
-    the legacy layout, where the board's first column is still Ideas (the same tolerance
-    `secretary task create --state ideas` keeps), and fails closed on a migrated board until a PO
-    decides where an agent proposal lands there. Only that first column counts: a board whose
-    first column is already Issues is migrated, and a leftover Ideas column further along it is
-    not a route the PO decision opened.
+    The PO decision (2026-07-31) puts a proposal in the board's first column on both layouts: the
+    Product backlog `Issues` after the migration, and `Ideas` under either legacy name before it.
+    A proposal is still not a Product issue, and the card carries that distinction itself: it is
+    stamped record_type=task, so a PO reads it as an execution card awaiting triage, while
+    `issue create` (which needs product, kind and priority) stays closed to every agent. Only the
+    first column counts, so a leftover legacy column further along the order is not a target.
     """
     columns = sorted(call("getColumns", project_id=pid) or [], key=lambda c: int(c.get("position") or 0))
-    first = columns[0]["title"] if columns else ""
-    if first in model.LEGACY_ISSUE_COLUMNS:
-        return str(first)
+    first = str(columns[0]["title"]) if columns else ""
+    if first in model.PROPOSAL_COLUMNS:
+        return first
     raise model.GuardError(
-        "this board's first column is not the legacy 'Ideas', so an agent proposal has "
-        "nowhere to go: "
-        "'Issues' is the Product backlog and an agent may not create a Product issue (it cannot "
-        "choose product, kind and priority). A PO has to decide where an agent proposal lands on a "
-        "migrated board; until then, report the proposal in the verdict or the retro output instead."
+        f"this board's first column is {first!r}, which is neither the Product backlog 'Issues' "
+        "nor a legacy 'Ideas', so an agent proposal has nowhere to go. Run `pipeline setup` to "
+        "reconcile the board, or report the proposal in the verdict or the retro output instead."
     )
 
 
@@ -342,10 +339,10 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
                 own_ref: str | None = None) -> dict:
     """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
 
-    Ready is the only default column. A PO may explicitly create a task in the first legacy Ideas
-    column; _proposal_column verifies that the board still has that layout and otherwise fails
-    closed. `Issues` is the Product backlog. The agent proposal helpers are the only other callers
-    that may create in legacy Ideas.
+    Ready is the only default column. A PO may explicitly create a task in the board's first
+    column; _proposal_column resolves it under either the current or a legacy name. Such a card is
+    an untriaged proposal, not a Product issue. The agent proposal helpers are the only other
+    callers that may create outside Ready.
 
     `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
     (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
@@ -367,7 +364,7 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller (po, and
     the proposal helpers, which scrub themselves before _create_proposal_card) passes no role
     and stays verbatim, unchanged from before."""
-    proposal = role == "po" and column in model.LEGACY_ISSUE_COLUMNS
+    proposal = role == "po" and column in model.PROPOSAL_COLUMNS
     if proposal:
         column = _proposal_column(board_id())
     return _create_card(project=project, task_type=task_type, title=title, description=description,
@@ -399,8 +396,10 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     """Shared card-create body; see create_card and _create_proposal_card for the two entrypoints."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
-    if column != "Ready" and not (proposal and column in model.LEGACY_ISSUE_COLUMNS):
-        raise model.GuardError("execution cards are created only in 'Ready'; Issues is Product backlog")
+    if column != "Ready" and not (proposal and column in model.PROPOSAL_COLUMNS):
+        raise model.GuardError(
+            "execution cards are created only in 'Ready'; the first column takes proposals only"
+        )
     if slug is not None and not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
     if head:
@@ -785,10 +784,9 @@ def verdict(reference: str, kind: str, body: str = "") -> dict:
 def reviewer_idea(project: str, title: str, description: str = "", task_type: str = "code",
                   ref: str | None = None, head: str | None = None,
                   slug: str | None = None) -> dict:
-    """Reviewer-only: file an out-of-scope finding as an Ideas card (the reviewer's single
+    """Reviewer-only: file an out-of-scope finding as a proposal card (the reviewer's single
     code-creation exception). Title and description are scrubbed for the same reason as a verdict.
-    Needs the board's legacy first column; _proposal_column explains why and what happens without
-    it."""
+    The card goes to the board's first column; _proposal_column resolves it."""
     return _create_proposal_card(project=project, task_type=task_type,
                                  title=worker.scrub_secrets(title),
                                  description=worker.scrub_secrets(description),
@@ -798,7 +796,7 @@ def reviewer_idea(project: str, title: str, description: str = "", task_type: st
 def retro_idea(project: str, title: str, description: str = "", task_type: str = "code",
                ref: str | None = None, head: str | None = None,
                slug: str | None = None) -> dict:
-    """Retro-only: file a fail-pattern proposal as an Ideas card — retro's only board write,
+    """Retro-only: file a fail-pattern proposal card, retro's only board write,
     same shape as reviewer_idea (never Ready, title/description scrubbed). Retro quotes redacted
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
@@ -811,11 +809,11 @@ def retro_idea(project: str, title: str, description: str = "", task_type: str =
 def steward_idea(project: str, title: str, description: str = "", task_type: str = "code",
                  ref: str | None = None, head: str | None = None,
                  slug: str | None = None) -> dict:
-    """Steward-only: file a discovered anomaly as a legacy Ideas proposal before escalating it.
+    """Steward-only: file a discovered anomaly as a proposal card before escalating it.
 
     Steward reads raw system output, so redact title and description before the shared proposal
-    route creates the task record. On a migrated board the route fails closed rather than creating
-    a Product issue.
+    route creates the task record. The card is stamped record_type=task, which is also what lets
+    steward move it on to Blocked or Ready afterwards.
     """
     return _create_proposal_card(project=project, task_type=task_type,
                                  title=worker.scrub_secrets(title),

@@ -1,9 +1,9 @@
 """Agent proposal route (secretary-900, secretary-901).
 
-Reviewer, retro, and steward file proposal cards only on the legacy board layout, where the first
-column is still `Ideas`. A PO may also explicitly create a task there through `create --column Ideas`.
-On a migrated board `Issues` is the Product backlog and no agent may create a Product issue, so the
-routes fail closed instead of guessing a column. The default create column stays `Ready`.
+Reviewer, retro, and steward file proposal cards into the board's first column, under either its
+current name `Issues` or a legacy `Ideas`. A PO may create a task there explicitly through
+`create --column ...`. The card is stamped record_type=task, so it is an untriaged execution card
+and never a Product issue, which no agent may create. The default create column stays `Ready`.
 """
 from __future__ import annotations
 
@@ -47,17 +47,20 @@ UNTRANSLATED_COLUMNS = [
 ]
 MIGRATED_COLUMNS = [dict(LEGACY_COLUMNS[0], title="Issues"), *LEGACY_COLUMNS[1:]]
 # A migrated board someone extended by hand: `Issues` leads, an old `Ideas` column survives later
-# in the order. The PO decision opened the route only while the first column itself is legacy.
+# in the order. Only the first column is a proposal target, so the leftover one is never used.
 MIGRATED_WITH_LATER_IDEAS = [
     *MIGRATED_COLUMNS[:2],
     {"id": 7, "title": "Ideas", "position": 3},
     *[dict(column, position=int(column["position"]) + 1) for column in MIGRATED_COLUMNS[2:]],
 ]
+# A board nobody reconciled: the first column is neither name the route knows.
+UNKNOWN_FIRST_COLUMN = [dict(LEGACY_COLUMNS[0], title="Backlog"), *LEGACY_COLUMNS[1:]]
 
 
 class ProposalRouteTests(unittest.TestCase):
-    def test_legacy_board_takes_agent_proposals_typed_as_tasks(self):
-        for columns in (LEGACY_COLUMNS, UNTRANSLATED_COLUMNS):
+    def test_first_column_takes_agent_proposals_typed_as_tasks(self):
+        for columns in (LEGACY_COLUMNS, UNTRANSLATED_COLUMNS, MIGRATED_COLUMNS,
+                        MIGRATED_WITH_LATER_IDEAS):
             for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
                 with self.subTest(column=columns[0]["title"], route=file_proposal.__name__):
                     calls = []
@@ -76,24 +79,21 @@ class ProposalRouteTests(unittest.TestCase):
                     self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
                     self.assertEqual(values[model.META_PROJECT], "secretary")
 
-    def test_migrated_board_fails_closed_and_names_the_po_decision(self):
-        # Including the hand-extended layout: an `Ideas` column that is no longer the first one is
-        # not the legacy layout, so the route stays closed there too.
-        for columns in (MIGRATED_COLUMNS, MIGRATED_WITH_LATER_IDEAS):
-            for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
-                with self.subTest(layout=[c["title"] for c in columns], route=file_proposal.__name__):
-                    calls = []
-                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)):
-                        with self.assertRaises(model.GuardError) as raised:
-                            file_proposal(project="secretary", title="proposal", description="body")
+    def test_unreconciled_board_fails_closed_and_names_the_column(self):
+        for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
+            with self.subTest(route=file_proposal.__name__):
+                calls = []
+                with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)):
+                    with self.assertRaises(model.GuardError) as raised:
+                        file_proposal(project="secretary", title="proposal", description="body")
 
-                    message = str(raised.exception)
-                    self.assertIn("first column is not the legacy 'Ideas'", message)
-                    self.assertIn("A PO has to decide", message)
-                    self.assertNotIn("createTask", [method for method, _ in calls])
-                    self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
+                message = str(raised.exception)
+                self.assertIn("first column is 'Backlog'", message)
+                self.assertIn("pipeline setup", message)
+                self.assertNotIn("createTask", [method for method, _ in calls])
+                self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
 
-    def test_steward_can_escalate_its_legacy_proposal_to_blocked_with_a_reason(self):
+    def test_steward_moves_its_own_proposal_to_blocked_with_a_reason_and_to_ready(self):
         task = {
             "id": 41, "reference": "secretary-901", "column_id": 1, "swimlane_id": 1,
         }
@@ -105,7 +105,7 @@ class ProposalRouteTests(unittest.TestCase):
             if method == "getAllProjects":
                 return [{"id": 2, "name": ops.model.BOARD_NAME}]
             if method == "getColumns":
-                return LEGACY_COLUMNS
+                return MIGRATED_COLUMNS
             if method == "getActiveSwimlanes":
                 return [{"id": 1, "name": "secretary"}]
             if method == "createTask":
@@ -132,7 +132,7 @@ class ProposalRouteTests(unittest.TestCase):
                 project="secretary", title="unresolved anomaly", description="analysis",
                 ref="secretary-901",
             )
-            self.assertEqual(created["column"], "Ideas")
+            self.assertEqual(created["column"], "Issues")
             self.assertEqual(metadata[model.META_RECORD_TYPE], model.RECORD_TASK)
 
             with self.assertRaisesRegex(model.GuardError, "non-empty escalation reason"):
@@ -150,7 +150,36 @@ class ProposalRouteTests(unittest.TestCase):
         comment = next(params for method, params in calls if method == "createComment")
         self.assertIn("needs an owner decision", comment["content"])
 
-    def test_po_can_explicitly_create_a_legacy_ideas_task(self):
+        # The other half of the steward's two accesses: its own proposal back out to Ready.
+        task["column_id"] = 1
+        with mock.patch.object(ops, "call", side_effect=fake_call), \
+             mock.patch.object(ops, "_sync_head_tags"):
+            promoted = ops.move_card("steward", "secretary-901", "Ready")
+        self.assertEqual(promoted["from"], "Issues")
+        self.assertEqual(task["column_id"], 2)
+
+    def test_po_can_explicitly_create_a_proposal_task_under_either_column_name(self):
+        for columns, requested, expected in (
+            (LEGACY_COLUMNS, "Ideas", "Ideas"),
+            (MIGRATED_COLUMNS, "Issues", "Issues"),
+            (MIGRATED_COLUMNS, "Ideas", "Issues"),
+        ):
+            with self.subTest(layout=columns[0]["title"], requested=requested):
+                calls = []
+                with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)), \
+                     mock.patch.object(ops, "_sync_head_tags"):
+                    result = ops.create_card(
+                        project="secretary", task_type="code", title="agent idea",
+                        column=requested, role="po",
+                    )
+
+                self.assertEqual(result["column"], expected)
+                created = next(params for method, params in calls if method == "createTask")
+                self.assertEqual(created["column_id"], 1)
+                values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
+                self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
+
+    def test_po_create_keeps_the_record_type_on_the_legacy_layout(self):
         calls = []
         with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)), \
              mock.patch.object(ops, "_sync_head_tags"):
@@ -164,23 +193,25 @@ class ProposalRouteTests(unittest.TestCase):
         values = next(params for method, params in calls if method == "saveTaskMetadata")["values"]
         self.assertEqual(values[model.META_RECORD_TYPE], model.RECORD_TASK)
 
-    def test_only_po_can_create_in_legacy_ideas(self):
-        for role in (*model.ROLES, None):
-            if role == "po":
-                continue
-            with self.subTest(role=role):
-                calls = []
-                with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, calls)):
-                    with self.assertRaisesRegex(model.GuardError, "created only in 'Ready'"):
-                        ops.create_card(
-                            project="secretary", task_type="code", title="t", column="Ideas", role=role,
-                        )
-                self.assertNotIn("createTask", [method for method, _ in calls])
+    def test_only_po_can_create_in_the_first_column(self):
+        for columns in (LEGACY_COLUMNS, MIGRATED_COLUMNS):
+            for role in (*model.ROLES, None):
+                if role == "po":
+                    continue
+                with self.subTest(layout=columns[0]["title"], role=role):
+                    calls = []
+                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, calls)):
+                        with self.assertRaisesRegex(model.GuardError, "created only in 'Ready'"):
+                            ops.create_card(
+                                project="secretary", task_type="code", title="t",
+                                column=columns[0]["title"], role=role,
+                            )
+                    self.assertNotIn("createTask", [method for method, _ in calls])
 
-    def test_po_legacy_ideas_create_fails_closed_on_a_migrated_board(self):
+    def test_po_proposal_create_fails_closed_on_an_unreconciled_board(self):
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(MIGRATED_COLUMNS, calls)):
-            with self.assertRaisesRegex(model.GuardError, "first column is not the legacy 'Ideas'"):
+        with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)):
+            with self.assertRaisesRegex(model.GuardError, "first column is 'Backlog'"):
                 ops.create_card(
                     project="secretary", task_type="code", title="agent idea", column="Ideas", role="po",
                 )
@@ -196,7 +227,7 @@ class ProposalRouteTests(unittest.TestCase):
         created = next(params for method, params in calls if method == "createTask")
         self.assertEqual(created["column_id"], 2)
 
-    def test_cli_po_creates_legacy_ideas_and_defaults_to_ready(self):
+    def test_cli_po_creates_a_proposal_and_defaults_to_ready(self):
         for column, expected in (("Ideas", "Ideas"), (None, "Ready")):
             with self.subTest(column=column):
                 calls = []
@@ -215,39 +246,43 @@ class ProposalRouteTests(unittest.TestCase):
                 self.assertEqual(json.loads(out.getvalue())["column"], expected)
 
         out, err, calls = io.StringIO(), io.StringIO(), []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(MIGRATED_COLUMNS, calls)), \
+        with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main([
                 "--role", "po", "create", "--project", "secretary", "--type", "code",
                 "--title", "agent idea", "--column", "Ideas", "--description", "body",
             ])
         self.assertEqual(code, 3)
-        self.assertIn("first column is not the legacy 'Ideas'", err.getvalue())
+        self.assertIn("first column is 'Backlog'", err.getvalue())
         self.assertNotIn("createTask", [method for method, _ in calls])
 
 
-    def test_cli_idea_reports_success_on_legacy_and_a_guard_exit_on_a_migrated_board(self):
+    def test_cli_idea_reports_the_first_column_and_a_guard_exit_without_one(self):
         for role in ("reviewer", "retro", "steward"):
-            with self.subTest(role=role):
-                argv = [
+            for columns in (LEGACY_COLUMNS, MIGRATED_COLUMNS):
+                with self.subTest(role=role, layout=columns[0]["title"]):
+                    argv = [
+                        "--role", role, "idea", "--project", "secretary",
+                        "--title", "proposal", "--description", "body",
+                    ]
+                    out, err = io.StringIO(), io.StringIO()
+                    with mock.patch.object(ops, "call", side_effect=_fake_board(columns, [])), \
+                         mock.patch.object(ops, "_sync_head_tags"), \
+                         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        code = cli.main(argv)
+                    self.assertEqual(code, 0, err.getvalue())
+                    self.assertEqual(json.loads(out.getvalue())["column"], columns[0]["title"])
+
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, [])), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main([
                     "--role", role, "idea", "--project", "secretary",
                     "--title", "proposal", "--description", "body",
-                ]
-                out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(ops, "call", side_effect=_fake_board(LEGACY_COLUMNS, [])), \
-                     mock.patch.object(ops, "_sync_head_tags"), \
-                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    code = cli.main(argv)
-                self.assertEqual(code, 0, err.getvalue())
-                self.assertEqual(json.loads(out.getvalue())["column"], "Ideas")
-
-                out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(ops, "call", side_effect=_fake_board(MIGRATED_COLUMNS, [])), \
-                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    code = cli.main(argv)
-                self.assertEqual(code, 3)
-                self.assertEqual(out.getvalue(), "")
-                self.assertIn("first column is not the legacy 'Ideas'", err.getvalue())
+                ])
+            self.assertEqual(code, 3)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("first column is 'Backlog'", err.getvalue())
 
 
 if __name__ == "__main__":
