@@ -16,6 +16,10 @@ from secretary.dispatcher_launcher import CODEX_HOME_DEFAULT
 RunJson = Callable[[list[str]], dict[str, Any]]
 
 TUI_IDLE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000")))
+# Orca decides `tui-idle` from the pane's agent status and, failing that, from a quiescence window
+# it polls. A probe shorter than that window would report every quiet pane as busy, so it is set
+# above both rather than tuned for the fastest answer.
+TUI_IDLE_PROBE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_PROBE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_PROBE_TIMEOUT_MS", "6000")))
 TUI_DELIVERY_RETRIES = int(os.environ.get("SECRETARY_TUI_DELIVERY_RETRIES", os.environ.get("TA_TUI_DELIVERY_RETRIES", "2")))
 TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_DELIVERY_TIMEOUT_S", "12")))
 TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
@@ -31,6 +35,12 @@ _CLAUDE_TURN_RE = re.compile(
 
 class TuiDeliveryError(RuntimeError):
     pass
+
+
+# What one delivery attempt achieved. `accepted` means the pane took the prompt into a turn while
+# the caller's own proof of delivery is expected to arrive later, outside this call.
+DELIVERY_CONFIRMED = "confirmed"
+DELIVERY_ACCEPTED = "accepted"
 
 
 def deliver_tui_prompt(
@@ -49,13 +59,7 @@ def deliver_tui_prompt(
             prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
-    run_json([
-        "orca", "terminal", "wait",
-        "--terminal", handle,
-        "--for", "tui-idle",
-        "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS),
-        "--json",
-    ])
+    wait_for_tui_idle(handle, run_json=run_json)
     sent_at = time.time()
     run_json([
         "orca", "terminal", "send",
@@ -65,6 +69,44 @@ def deliver_tui_prompt(
         "--json",
     ])
     _confirm_delivered(handle, workspace, prompt, sent_at, run_json=run_json, session_root=session_root)
+
+
+def wait_for_tui_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> None:
+    """Wait until Orca reports the pane ready for input. A refusal reaches the caller."""
+    run_json([
+        "orca", "terminal", "wait",
+        "--terminal", handle,
+        "--for", "tui-idle",
+        "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS if timeout_ms is None else timeout_ms),
+        "--json",
+    ])
+
+
+def terminal_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> bool:
+    """Whether the pane is ready for input right now, on Orca's signal rather than on its screen.
+
+    This is the one readiness question the product asks about an interactive head, whatever
+    provider runs in it: the runtime derives it from the pane's own agent status and falls back to
+    a quiescence window. A pane Orca will not answer for, or one it reports as blocked behind a
+    dialog, is deliberately not idle: an unreadable head stays live rather than being guessed
+    quiet.
+    """
+    try:
+        data = run_json([
+            "orca", "terminal", "wait",
+            "--terminal", handle,
+            "--for", "tui-idle",
+            "--timeout-ms", str(TUI_IDLE_PROBE_TIMEOUT_MS if timeout_ms is None else timeout_ms),
+            "--json",
+        ])
+    except Exception:
+        # A timeout is how Orca says "not idle", and it comes back as a failed command. Every other
+        # refusal reads the same way here, because none of them is evidence of a quiet pane.
+        return False
+    wait = data.get("wait") if isinstance(data, dict) and isinstance(data.get("wait"), dict) else data
+    if isinstance(wait, dict) and "satisfied" in wait:
+        return bool(wait.get("satisfied"))
+    return True
 
 
 def terminal_turn_started(
@@ -95,20 +137,21 @@ def deliver_interactive_prompt(
     prompt: str,
     *,
     run_json: RunJson,
-) -> None:
-    """Deliver a Claude-style terminal prompt and confirm the provider started a turn.
+    confirm: Callable[[], bool] | None = None,
+    ack_out_of_band: bool = False,
+) -> str:
+    """Deliver a prompt into a live interactive head, on one path for every role that has one.
 
-    Terminal send succeeding only means Orca accepted keystrokes. Wait for the terminal to be
-    idle first, then require visible turn activity, retrying Enter when the prompt was swallowed
-    during a repaint. Failure reaches the caller so the dispatcher can take the replacement path.
+    Terminal send succeeding only means Orca accepted keystrokes. Wait for the pane to be ready,
+    send, then keep re-entering the prompt while the pane stays idle, which is what a swallowed
+    prompt looks like. Exhausting the retries raises, so the caller can take its own failure path.
+
+    What closes the delivery is the caller's business, not this function's. `confirm` defaults to
+    the head's own durable user turn, which is the worker and reviewer criterion. A caller whose proof
+    arrives later (an observer resume naming this delivery) passes that criterion here and sets
+    `ack_out_of_band`, and gets `DELIVERY_ACCEPTED` as soon as the pane has taken the prompt.
     """
-    run_json([
-        "orca", "terminal", "wait",
-        "--terminal", handle,
-        "--for", "tui-idle",
-        "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS),
-        "--json",
-    ])
+    wait_for_tui_idle(handle, run_json=run_json)
     sent_at = time.time()
     run_json([
         "orca", "terminal", "send",
@@ -117,7 +160,14 @@ def deliver_interactive_prompt(
         "--enter",
         "--json",
     ])
-    _confirm_interactive_turn(handle, workspace, sent_at, run_json=run_json)
+    return _confirm_interactive_turn(
+        handle,
+        workspace,
+        sent_at,
+        run_json=run_json,
+        confirm=confirm,
+        ack_out_of_band=ack_out_of_band,
+    )
 
 
 def close_terminal(handle: str, *, run_json: RunJson) -> None:
@@ -176,20 +226,31 @@ def _confirm_delivered(
     )
 
 
-def _confirm_interactive_turn(handle: str, workspace: str, sent_at: float, *, run_json: RunJson) -> None:
+def _confirm_interactive_turn(
+    handle: str,
+    workspace: str,
+    sent_at: float,
+    *,
+    run_json: RunJson,
+    confirm: Callable[[], bool] | None = None,
+    ack_out_of_band: bool = False,
+) -> str:
+    confirmed = confirm or (lambda: bool(latest_claude_user_turn_for(workspace, sent_at)))
     deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
     next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
     resends = 0
-    last_reason = "no-user-turn"
+    accepted = False
     while time.monotonic() < deadline:
-        if latest_claude_user_turn_for(workspace, sent_at):
-            return
-        turn_visible = terminal_turn_started(handle, run_json=run_json, adapter="claude")
-        if turn_visible:
-            last_reason = "turn-visible-awaiting-user-turn"
-        else:
-            last_reason = "no-user-turn"
-        if not turn_visible and resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
+        if confirmed():
+            return DELIVERY_CONFIRMED
+        if not terminal_idle(handle, run_json=run_json):
+            # The pane went to work on something: the prompt is in, whether or not the caller's
+            # own proof of it has appeared yet.
+            accepted = True
+            if ack_out_of_band:
+                return DELIVERY_ACCEPTED
+        elif resends < TUI_DELIVERY_RETRIES and time.monotonic() >= next_resend_at:
+            accepted = False
             run_json([
                 "orca", "terminal", "send",
                 "--terminal", handle,
@@ -202,7 +263,8 @@ def _confirm_interactive_turn(handle: str, workspace: str, sent_at: float, *, ru
         time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
     raise TuiDeliveryError(
         f"interactive prompt delivery was not confirmed after {TUI_DELIVERY_TIMEOUT_S:.1f}s "
-        f"(reason={last_reason}, resends={resends})"
+        f"(reason={'accepted-but-unconfirmed' if accepted else 'pane-stayed-idle'}, "
+        f"resends={resends})"
     )
 
 

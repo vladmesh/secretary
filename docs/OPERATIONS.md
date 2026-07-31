@@ -390,14 +390,15 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-launched` — an open sprint with no record got a head;
 - `observer-live` — the head is alive, the tick did nothing;
 - `observer-waiting` — the observer is working and no durable event needs a new turn;
-- `observer-idle` — the live Codex TUI has completed its queue with no unacknowledged linked-card event;
+- `observer-idle` — the live head is ready for input with no unacknowledged linked-card event;
 - `observer-nudged` — a committed linked-card event woke one idle observer turn;
 - `observer-wake-pending` — a delivery batch was already sent and awaits its own acknowledgement;
-- `observer-wake-waiting` — an event arrived while the observer was working; its next tick after
-  Codex finishes delivers one nudge, without waiting for the watchdog;
+- `observer-wake-waiting` — an event arrived while the observer was working; the next tick after its
+  pane is ready again delivers one nudge, without waiting for the watchdog;
 - `observer-watchdog-woke` — an event remained unacknowledged for
   `SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS` (30 minutes by default), so the fallback woke the observer;
-- `observer-wake-deferred` — the event wake failed; the observer row carries its reason and bounded retry;
+- `observer-wake-deferred` — the event wake failed, including a prompt the pane never took after its
+  retries; the observer row carries its reason and bounded retry;
 - `observer-relaunched` — a head with unacknowledged work had a dead pid and was replaced;
 - `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
 - `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in

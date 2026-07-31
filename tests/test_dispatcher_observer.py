@@ -31,7 +31,6 @@ from secretary.dispatcher_observer import (
     ObserverRecord,
     load_observers,
     observer_pid_file,
-    observer_queue_finished,
     put_observers,
     observer_request_id,
     render_observer_prompt,
@@ -67,18 +66,22 @@ def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
     """
     manifest = root / "registry" / "manifest.toml"
     shell_root = root / "registry" / "codex-shell"
+    claude_root = root / "registry" / "claude-shell"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         '[roles.observer]\nskills = ["observe-sprint"]\n\n'
         '[targets.codex-test]\nshell = "codex"\n'
-        f'root = "{shell_root}"\nroles = ["observer"]\n',
+        f'root = "{shell_root}"\nroles = ["observer"]\n\n'
+        '[targets.claude-test]\nshell = "claude"\n'
+        f'root = "{claude_root}"\nroles = ["observer"]\n',
         encoding="utf-8",
     )
     (root / "registry" / "instance").mkdir(parents=True, exist_ok=True)
     skill = shell_root / "observe-sprint" / "SKILL.md"
     if delivered:
-        skill.parent.mkdir(parents=True, exist_ok=True)
-        skill.write_text("# canonical observer skill\n", encoding="utf-8")
+        for target in (skill, claude_root / "observe-sprint" / "SKILL.md"):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# canonical observer skill\n", encoding="utf-8")
     return skill
 
 
@@ -217,14 +220,14 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {
             "last_activity": time.time() - 31 * 60,
-            "queue_finished": True,
+            "idle": True,
         }
 
         result = self.runtime.production_tick()
 
         action = self.actions(result)[0]
         self.assertEqual(action["action"], "observer-idle")
-        self.assertIn("completed its queue", action["reason"])
+        self.assertIn("finished its turn", action["reason"])
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.host.stopped_observers, [])
         self.assertEqual(self.host.observer_nudges, [])
@@ -234,15 +237,132 @@ class ObserverLifecycleTests(unittest.TestCase):
         status = status_observers(self.runtime.production_state.load())[0]
         self.assertEqual(status["state"], "idle-grace")
         self.assertIsNotNone(status["idle_since"])
-        self.assertIn("completed its queue", status["idle_reason"])
+        self.assertIn("finished its turn", status["idle_reason"])
         sprint_status = self.runtime.sprints.status("sprint:1", observer=status)
         self.assertEqual(sprint_status["observer"]["state"], "idle-grace")
 
-        self.host.observer_status_result = {"last_activity": time.time(), "queue_finished": False}
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         resumed = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(resumed)], ["observer-live"])
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].state, "running")
+
+    def test_a_claude_head_is_nudged_and_acknowledges_with_its_causal_marker(self) -> None:
+        """The gap this closes: a claude observer never showed Codex's completed-queue screen.
+
+        Both halves run against the real host: readiness and delivery come from Orca's `tui-idle`,
+        so the pane is never read for a vendor marker, and the batch is closed only by the
+        observer's own resume naming this delivery.
+        """
+        self.catalog.profiles["claude-observer"] = {
+            "adapter": "claude", "model": "opus", "resource": "claude-sub",
+        }
+        self.catalog.role_defaults["observer"] = "claude-observer"
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.assertEqual(self.observers()["sprint:1"].head, "claude-observer")
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+        sends: list[list[str]] = []
+        busy = [False]
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "send"]:
+                sends.append(args)
+                busy[0] = True
+                return {}
+            if args[1:3] == ["terminal", "wait"]:
+                # Ready for input until the wake lands, working on it afterwards.
+                return {"wait": {"condition": "tui-idle", "satisfied": not busy[0]}}
+            raise AssertionError(args)
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="claude-observer-event",
+        )
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+            woke = self.runtime.production_tick()
+
+            self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
+            delivery = self.observers()["sprint:1"].delivery
+            self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
+            message = sends[0][sends[0].index("--text") + 1]
+            self.assertIn(f"--delivery-id {delivery.delivery_id}", message)
+            self.assertIn(f"--through-event {delivery.through_event}", message)
+
+            entry = {
+                "selected_step": "read board", "selected_why": "card changed",
+                "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+                "dod_state": "open", "next_safe_step": "resume",
+            }
+            self.acknowledge_delivery(entry, request_id="claude-observer-ack")
+            busy[0] = False
+            acknowledged = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.IDLE)
+        self.assertTrue(delivery.acknowledged_delivery_id)
+        self.assertTrue(delivery.acknowledged_resume_id)
+        self.assertEqual(len(sends), 1)
+
+    def test_a_wake_the_pane_never_took_is_an_explicit_refusal(self) -> None:
+        """Retry exhaustion reaches the tick and the delivery record instead of being silent."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+        sends: list[list[str]] = []
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "send"]:
+                sends.append(args)
+                return {}
+            if args[1:3] == ["terminal", "wait"]:
+                # The pane stays ready however often the prompt is entered: it took none of them.
+                return {"wait": {"condition": "tui-idle", "satisfied": True}}
+            raise AssertionError(args)
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="swallowed-wake-event",
+        )
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json), \
+             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
+             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+            result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-wake-deferred")
+        self.assertEqual(action["status"], "degraded")
+        self.assertIn("observer wake was not delivered", action["reason"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+        self.assertIn("observer wake was not delivered", delivery.reason)
+        self.assertEqual(delivery.attempts, 1)
+        self.assertEqual(self.observers()["sprint:1"].state, "wake-deferred")
+        # The prompt and both retries were entered before the delivery was given up on.
+        self.assertEqual(len(sends), 3)
 
     def test_finished_observer_queue_is_nudged_once_for_a_linked_card_event(self) -> None:
         self.open_sprint()
@@ -250,7 +370,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
-            "queue_finished": True,
+            "idle": True,
         }
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
@@ -275,7 +395,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time(), "queue_finished": False}
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="card changed while observer was working", request_id="event-during-active-turn",
@@ -289,7 +409,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertTrue(record.delivery.pending_from)
         self.assertEqual(self.host.observer_nudges, [])
 
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         delivered = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(delivered)], ["observer-nudged"])
@@ -302,7 +422,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="card changed", request_id="ack-event",
@@ -332,7 +452,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="card changed", request_id="marker-event",
@@ -374,7 +494,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="card changed", request_id="crash-before-nudge-event",
@@ -410,7 +530,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         same_second = _now()
         entry = {
             "selected_step": "wait", "selected_why": "board is quiet", "rejected_alternatives": "relaunch",
@@ -438,7 +558,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="first", request_id="first-wake-event",
@@ -464,7 +584,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="first", request_id="burst-first",
@@ -520,7 +640,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         launch_prompt = (Path(record.workspace) / "SPRINT.md").read_text(encoding="utf-8")
         self.assertIn(record.delivery.delivery_id, launch_prompt)
         self.assertIn(record.delivery.through_event, launch_prompt)
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
 
         repeated = self.runtime.production_tick()
 
@@ -531,7 +651,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         for request_id in ("burst-one", "burst-two"):
             self.writer.comment(
                 role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
@@ -562,13 +682,13 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="crash boundary", request_id="crash-boundary-event",
         )
 
-        def crash_after_send(record) -> None:
+        def crash_after_send(record, *, confirm=None) -> None:
             self.host.observer_nudges.append(str(record.sprint))
             raise KeyboardInterrupt("simulated dispatcher crash")
 
@@ -600,7 +720,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
             body="retry delivery", request_id="retry-delivery-event",
@@ -639,7 +759,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.audit.append("old-event", {
             "event_id": "evt_old_event", "request_id": "old-event", "ref": "secretary-510-pilot",
             "kind": "commented", "outcome": "success", "occurred_at": "2000-01-01T00:00:00Z",
@@ -655,7 +775,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         # The dispatcher claim in the initial tick is a real card transition. Acknowledge its
         # delivery first, then prove the later routing-only audit line starts no additional turn.
         self.assertEqual(
@@ -687,7 +807,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.board.tasks[0]["column_id"] = 6
         self.runtime.production_tick()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "queue_finished": True}
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         for request_id, kind, outcome in (
             ("denied-card-event", "sprint_guard_denied", "denied"),
             ("guard-success-event", "sprint_guard_denied", "success"),
@@ -708,7 +828,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observer_nudges, [])
 
-    def test_rotated_observer_handle_still_reports_a_finished_queue(self) -> None:
+    def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
         """Orca may rotate the handle while retaining leafId, so status must read the alias."""
         self.open_sprint()
         self.runtime.production_tick()
@@ -725,8 +845,8 @@ class ObserverLifecycleTests(unittest.TestCase):
                     "handle": "observer:rotated", "leafId": record.leaf,
                     "connected": True, "lastOutputAt": stale_output,
                 }]}
-            if args[1:3] == ["terminal", "read"]:
-                return {"terminal": {"tail": ["Worked for 2h 00m 46s", "› "]}}
+            if args[1:3] == ["terminal", "wait"]:
+                return {"wait": {"condition": "tui-idle", "satisfied": True}}
             raise AssertionError(args)
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json):
@@ -734,9 +854,9 @@ class ObserverLifecycleTests(unittest.TestCase):
             grace = self.runtime.production_tick()
             self.assertEqual([row["action"] for row in self.actions(grace)], ["observer-idle"])
             self.assertEqual(self.observers()["sprint:1"].state, "idle-grace")
-        reads = [args for args in calls if args[1:3] == ["terminal", "read"]]
-        self.assertTrue(reads)
-        self.assertEqual(reads[0][reads[0].index("--terminal") + 1], "observer:rotated")
+        waits = [args for args in calls if args[1:3] == ["terminal", "wait"]]
+        self.assertTrue(waits)
+        self.assertEqual(waits[0][waits[0].index("--terminal") + 1], "observer:rotated")
 
     def test_active_card_does_not_relaunch_a_finished_observer_without_a_new_event(self) -> None:
         self.open_sprint()
@@ -745,7 +865,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
-            "queue_finished": True,
+            "idle": True,
         }
         # The initial dispatcher tick claims the linked card after the observer comes up. That
         # transition gets one nudge; the completed turn below is then quiet despite the active
@@ -1852,12 +1972,6 @@ class ObserverLifecycleTests(unittest.TestCase):
 
 
 class ObserverConfigurationTests(unittest.TestCase):
-    def test_codex_completed_queue_requires_a_terminal_footer(self) -> None:
-        self.assertTrue(observer_queue_finished("Worked for 2h 00m 46s\n› "))
-        self.assertTrue(observer_queue_finished("─ Worked for 2h 00m 46s ─"))
-        self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s\n› continue"))
-        self.assertFalse(observer_queue_finished("Worked for 2h 00m 46s\nstill working"))
-
     def test_the_observer_head_comes_from_its_own_role_default(self) -> None:
         canonical = canonical_heads(Path(__file__).resolve().parents[1])
         role_defaults = canonical["role_defaults"]
@@ -1992,17 +2106,98 @@ class ObserverTerminalStatusTests(unittest.TestCase):
                     return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
                 if args[1:3] == ["terminal", "send"]:
                     return {}
+                if args[1:3] == ["terminal", "wait"]:
+                    # Ready before the send, working after it: the pane took the prompt.
+                    sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
+                    return {"wait": {"condition": "tui-idle", "satisfied": not sends}}
                 raise AssertionError(args)
 
             with mock.patch.object(host, "_run_json", side_effect=run_json):
-                host.nudge_observer(record)
+                outcome = host.nudge_observer(record)
 
         sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
         message = sent[sent.index("--text") + 1]
         self.assertIn("--delivery-id delivery-1", message)
         self.assertIn("--through-event evt-card-1", message)
+        # The pane started a turn, and that alone does not close an observer delivery.
+        self.assertEqual(outcome, "accepted")
+        self.assertEqual(
+            [call[1:3] for call in calls],
+            [["terminal", "list"], ["terminal", "wait"], ["terminal", "send"], ["terminal", "wait"]],
+        )
 
-    def test_real_host_reads_the_completed_queue_and_output_timestamp(self) -> None:
+    def test_real_host_nudge_on_a_claude_head_needs_no_screen_marker(self) -> None:
+        """The gap this closes: a claude pane shows none of Codex's screen forms.
+
+        Nothing here answers `terminal read` at all. The wake still goes out, because readiness and
+        acceptance both come from Orca's `tui-idle`, and it is refused only by a caller criterion.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1",
+                workspace="/workspace",
+                handle="observer:sprint:1",
+                delivery=ObserverDelivery(delivery_id="delivery-2", through_event="evt-card-2"),
+            )
+            calls: list[list[str]] = []
+            acknowledged: list[bool] = [False]
+
+            def run_json(args: list[str]) -> dict:
+                calls.append(args)
+                if args[1:3] == ["terminal", "list"]:
+                    return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
+                if args[1:3] == ["terminal", "send"]:
+                    # The head answers: its resume for this delivery reaches the audit log.
+                    acknowledged[0] = True
+                    return {}
+                if args[1:3] == ["terminal", "wait"]:
+                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
+                raise AssertionError(args)
+
+            with mock.patch.object(host, "_run_json", side_effect=run_json):
+                outcome = host.nudge_observer(record, confirm=lambda: acknowledged[0])
+
+        self.assertEqual(outcome, "confirmed")
+        self.assertEqual([call for call in calls if call[1:3] == ["terminal", "read"]], [])
+
+    def test_real_host_nudge_refuses_a_wake_the_pane_never_took(self) -> None:
+        """A pane that stays idle swallowed the prompt: retries, then an explicit failure."""
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1",
+                workspace="/workspace",
+                handle="observer:sprint:1",
+                delivery=ObserverDelivery(delivery_id="delivery-3", through_event="evt-card-3"),
+            )
+            calls: list[list[str]] = []
+
+            def run_json(args: list[str]) -> dict:
+                calls.append(args)
+                if args[1:3] == ["terminal", "list"]:
+                    return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
+                if args[1:3] == ["terminal", "send"]:
+                    return {}
+                if args[1:3] == ["terminal", "wait"]:
+                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
+                raise AssertionError(args)
+
+            with mock.patch.object(host, "_run_json", side_effect=run_json), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2), \
+                 self.assertRaises(HostError) as raised:
+                host.nudge_observer(record, confirm=lambda: False)
+
+        self.assertIn("observer wake was not delivered", str(raised.exception))
+        self.assertIn("pane-stayed-idle", str(raised.exception))
+        sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
+        self.assertEqual(len(sends), 3)
+        self.assertEqual([call[call.index("--text") + 1] for call in sends[1:]], ["", ""])
+
+    def test_real_host_reads_readiness_from_tui_idle_and_the_output_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
             record = ObserverRecord(
@@ -2022,15 +2217,15 @@ class ObserverTerminalStatusTests(unittest.TestCase):
                             }
                         ]
                     }
-                if args[1:3] == ["terminal", "read"]:
-                    return {"terminal": {"tail": ["Worked for 2h 00m 46s", "› "]}}
+                if args[1:3] == ["terminal", "wait"]:
+                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
                 raise AssertionError(args)
 
             with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
                 status = host.observer_status(record)
 
-        self.assertEqual(status, {"last_activity": 1_753_456_789.123, "queue_finished": True})
-        self.assertEqual([args[1:3] for args in calls], [["terminal", "list"], ["terminal", "read"]])
+        self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": True})
+        self.assertEqual([args[1:3] for args in calls], [["terminal", "list"], ["terminal", "wait"]])
 
 
 class RealHostStopObserverTests(unittest.TestCase):
