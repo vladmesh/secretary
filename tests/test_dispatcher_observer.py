@@ -166,6 +166,14 @@ class ObserverLifecycleTests(unittest.TestCase):
             through_event=delivery.through_event,
         )
 
+    def expire_wake_retry(self, reference: str = "sprint:1") -> None:
+        """Age a deferred wake past its backoff so the next tick retries the delivery."""
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers[reference].delivery.next_at = time.time() - 1
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
     def expire_launch_retry(self, reference: str = "sprint:1") -> None:
         payload = self.runtime.production_state.load()
         observers = load_observers(payload)
@@ -352,17 +360,106 @@ class ObserverLifecycleTests(unittest.TestCase):
             self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
             result = self.runtime.production_tick()
 
-        action = self.actions(result)[0]
-        self.assertEqual(action["action"], "observer-wake-deferred")
-        self.assertEqual(action["status"], "degraded")
-        self.assertIn("observer wake was not delivered", action["reason"])
+            action = self.actions(result)[0]
+            self.assertEqual(action["action"], "observer-wake-deferred")
+            self.assertEqual(action["status"], "degraded")
+            self.assertIn("observer wake was not delivered", action["reason"])
+            delivery = self.observers()["sprint:1"].delivery
+            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+            self.assertIn("observer wake was not delivered", delivery.reason)
+            self.assertEqual(delivery.attempts, 1)
+            self.assertEqual(self.observers()["sprint:1"].state, "wake-deferred")
+            # The prompt and both retries were entered before the delivery was given up on.
+            self.assertEqual(len(sends), 3)
+            owed = (delivery.delivery_id, delivery.through_event)
+
+            # Retries are bounded: the last one hands the batch to the replacement path instead of
+            # growing the backoff on a head that takes none of its prompts.
+            self.expire_wake_retry()
+            second = self.runtime.production_tick()
+            self.assertEqual(
+                [row["action"] for row in self.actions(second)], ["observer-wake-deferred"]
+            )
+            self.assertEqual(self.observers()["sprint:1"].delivery.attempts, 2)
+
+            self.expire_wake_retry()
+            replaced = self.runtime.production_tick()
+
+        action = self.actions(replaced)[0]
+        self.assertEqual(action["action"], "observer-relaunched")
+        self.assertIn("replaced after 3 failed wakes", action["reason"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 2)
+        self.assertEqual(record.state, "running")
+        # The replacement carries the batch that was owed, so a resume still acknowledges it.
+        self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual((record.delivery.delivery_id, record.delivery.through_event), owed)
+        self.assertEqual(record.delivery.method, "launch")
+        self.assertEqual(record.delivery.attempts, 0)
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_LAUNCHED, EVENT_RELAUNCHED],
+        )
+
+    def test_a_terminal_orca_will_not_answer_for_also_ends_in_a_replacement(self) -> None:
+        """The other external failure of a wake: bounded retries, then the same replacement path."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="unreadable-terminal-event",
+        )
+
+        with mock.patch.object(
+            self.host, "observer_status", side_effect=HostError("orca terminal list failed")
+        ):
+            first = self.runtime.production_tick()
+            self.assertEqual(
+                [row["action"] for row in self.actions(first)], ["observer-wake-deferred"]
+            )
+            self.expire_wake_retry()
+            self.runtime.production_tick()
+            self.expire_wake_retry()
+            replaced = self.runtime.production_tick()
+
+        action = self.actions(replaced)[0]
+        self.assertEqual(action["action"], "observer-relaunched")
+        self.assertIn("observer terminal could not be read", action["reason"])
+        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
+
+    def test_a_replacement_that_cannot_come_up_keeps_both_reasons(self) -> None:
+        """The escalation does not hide why the wake failed nor why its replacement did not launch."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="failed-replacement-event",
+        )
+
+        with mock.patch.object(
+            self.host, "observer_status", side_effect=HostError("orca terminal list failed")
+        ):
+            self.runtime.production_tick()
+            self.expire_wake_retry()
+            self.runtime.production_tick()
+            self.expire_wake_retry()
+            self.host.fail_observer_reason = "orca worktree create failed"
+            replaced = self.runtime.production_tick()
+
+        action = self.actions(replaced)[0]
+        self.assertEqual(action["action"], "observer-launch-deferred")
+        self.assertIn("observer terminal could not be read", action["reason"])
+        self.assertIn("that replacement did not come up", action["reason"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        # The batch is not lost with the failed replacement: it goes back on the bounded retry.
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
-        self.assertIn("observer wake was not delivered", delivery.reason)
         self.assertEqual(delivery.attempts, 1)
-        self.assertEqual(self.observers()["sprint:1"].state, "wake-deferred")
-        # The prompt and both retries were entered before the delivery was given up on.
-        self.assertEqual(len(sends), 3)
 
     def test_finished_observer_queue_is_nudged_once_for_a_linked_card_event(self) -> None:
         self.open_sprint()

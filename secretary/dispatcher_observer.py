@@ -81,6 +81,9 @@ OBSERVER_SKILL = "observe-sprint"
 OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS = 30 * 60
 OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
+# How many refused deliveries of one batch are retried on the live head before the sprint pays for
+# a replacement instead. Backoff alone would keep an unreachable head forever.
+OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT = 3
 
 # Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
 # so a respawn after a dead pid is readable in the log without joining it against the record.
@@ -461,6 +464,18 @@ def observer_event_watchdog_seconds() -> int:
     except ValueError:
         return OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
     return value if value > 0 else OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+
+
+def observer_wake_max_attempts() -> int:
+    """How many refused wake deliveries of one batch are retried before the head is replaced."""
+    try:
+        value = int(
+            os.environ.get("SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS", "")
+            or OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
+        )
+    except ValueError:
+        return OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
+    return value if value > 0 else OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
 
 
 def reconcile_observers(
@@ -865,6 +880,39 @@ def _defer_delivery(record: ObserverRecord, ref: str, reason: str) -> dict[str, 
     }
 
 
+def _fail_delivery(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Refuse one wake, retry it a bounded number of times, then replace the head.
+
+    A pane that takes none of its prompts is not woken by asking it again forever, and the batch
+    would otherwise sit in a growing backoff instead of reaching the head that can act on it. Once
+    the retries are spent the delivery goes to the replacement path every other unreachable head
+    already takes: it stops this head before it opens the next one, and carries the same
+    `delivery_id` and `through_event` into the new launch, so a resume still acknowledges exactly
+    the batch that was owed.
+    """
+    outcome = _defer_delivery(record, ref, reason)
+    if record.delivery.attempts < observer_wake_max_attempts():
+        return outcome
+    attempts = record.delivery.attempts
+    # The replacement opens its own delivery attempt count: the next failing batch gets the same
+    # bounded retries before it costs the sprint another head.
+    record.delivery.attempts = 0
+    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    unlaunched = str(replaced.get("reason") or "")
+    replaced["reason"] = f"{reason}; the observer head was replaced after {attempts} failed wakes"
+    if unlaunched:
+        replaced["reason"] += f"; that replacement did not come up: {unlaunched}"
+    return replaced
+
+
 def _resume_acknowledged(runtime: Any, ref: str, record: ObserverRecord) -> bool:
     """Whether this sprint's audit already carries the resume that closes the active delivery.
 
@@ -934,7 +982,10 @@ def _wake_for_event(
                 resume_cursor=str(event.get("latest_resume_id") or ""),
                 now=now,
             )
-        return _defer_delivery(record, ref, f"observer terminal could not be read: {exc}")
+        return _fail_delivery(
+            runtime, payload, observers, ref, record, event,
+            f"observer terminal could not be read: {exc}",
+        )
     if not isinstance(status, dict) or not status.get("idle"):
         if delivery.stage == DeliveryStage.IDLE:
             _set_delivery_waiting(delivery, event, reason="observer terminal is not ready for a prompt")
@@ -986,7 +1037,9 @@ def _wake_for_event(
         # naming it, never by the pane merely starting a turn.
         runtime.host.nudge_observer(record, confirm=lambda: _resume_acknowledged(runtime, ref, record))
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
-        return _defer_delivery(record, ref, f"observer wake failed: {exc}")
+        return _fail_delivery(
+            runtime, payload, observers, ref, record, event, f"observer wake failed: {exc}"
+        )
     if delivery.stage == DeliveryStage.IDLE:
         # The resume for this batch landed while the prompt was being delivered.
         _set_observer_state(record, "running")

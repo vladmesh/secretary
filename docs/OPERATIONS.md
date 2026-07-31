@@ -398,7 +398,9 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-watchdog-woke` — an event remained unacknowledged for
   `SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS` (30 minutes by default), so the fallback woke the observer;
 - `observer-wake-deferred` — the event wake failed, including a prompt the pane never took after its
-  retries; the observer row carries its reason and bounded retry;
+  retries; the observer row carries its reason and bounded retry. After
+  `SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS` (3 by default) such failures the batch is delivered by
+  replacing the head instead, which reads as `observer-relaunched` with the failure as its reason;
 - `observer-relaunched` — a head with unacknowledged work had a dead pid and was replaced;
 - `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
 - `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in
