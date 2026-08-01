@@ -84,7 +84,10 @@ def _column_id(pid: int, title: str) -> int:
     for c in call("getColumns", project_id=pid) or []:
         if c["title"] == title:
             return int(c["id"])
-    raise KanboardError(f"no column {title!r} on board (run `pipeline setup`)")
+    raise KanboardError(
+        f"no column {title!r} on board (an empty board is reconciled by `pipeline setup`; a board "
+        "that holds cards needs `python3 -m secretary board migrate-assessment`)"
+    )
 
 
 def _column_title(pid: int, column_id: int) -> str:
@@ -109,8 +112,10 @@ def _proposal_column(pid: int) -> str:
         return first
     raise model.GuardError(
         f"this board's first column is {first!r}, not the Product backlog "
-        f"{model.PROPOSAL_COLUMN!r}, so an agent proposal has nowhere to go. Run `pipeline setup` "
-        "to reconcile the board, or report the proposal in the verdict or the retro output instead."
+        f"{model.PROPOSAL_COLUMN!r}, so an agent proposal has nowhere to go. An empty board is "
+        "reconciled by `pipeline setup`; a board that holds cards is repaired by hand or by "
+        "`python3 -m secretary board migrate-assessment`. Report the proposal in the verdict or "
+        "the retro output instead."
     )
 
 
@@ -122,14 +127,38 @@ def _ensure_swimlane(pid: int, name: str) -> int:
     return int(call("addSwimlane", project_id=pid, name=name))
 
 
+def _board_holds_cards(pid: int) -> bool:
+    """Whether the board holds any card at all, open or closed.
+
+    Kanboard 1.2 has no complete-set status, so both are asked for. A closed card counts: it still
+    sits in a column and a rename would silently restate what it meant.
+    """
+    return any(call("getAllTasks", project_id=pid, status_id=status) or [] for status in (1, 0))
+
+
 def ensure_structure() -> dict:
     """Idempotently reconcile the board's columns with model.COLUMNS.
 
     Rename in place, append missing, drop extras beyond len(COLUMNS). Swimlanes are left alone here — a card gets its project swimlane created on
     demand at create time, and the default swimlane stays.
+
+    It reshapes an empty board only. Reconciling by index on a board that holds cards would rename
+    a column under the cards standing in it (`Blocked` becoming `Assessment`, once a column is
+    inserted ahead of it) and trash whatever stands in a dropped extra, so a populated board is
+    accepted when its layout already matches and refused otherwise: reshaping it is a migration
+    with its own command, not a reconcile.
     """
     pid = board_id()
     current = sorted(call("getColumns", project_id=pid) or [], key=lambda c: c["position"])
+    titles = [str(c["title"]) for c in current]
+    if titles != list(model.COLUMNS) and _board_holds_cards(pid):
+        raise model.GuardError(
+            f"board has cards but its columns are {', '.join(titles)} "
+            f"(expected: {', '.join(model.COLUMNS)}). Reconciling by index here would rename "
+            "columns under the cards standing in them. Run `python3 -m secretary board "
+            "migrate-assessment` if the board carries the earlier six-column layout; any other "
+            "layout is a manual repair."
+        )
     for i, title in enumerate(model.COLUMNS):
         if i < len(current):
             if current[i]["title"] != title:

@@ -80,6 +80,7 @@ _STATE_BY_COLUMN = {
     "Ready": "ready",
     "In progress": "in_progress",
     "Validate": "validate",
+    "Assessment": "assessment",
     "Blocked": "blocked",
     "Done": "done",
 }
@@ -102,7 +103,11 @@ _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
 _PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}
 _EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ready", "blocked"}
-_STATES = ("issues", "ready", "in_progress", "validate", "blocked", "done")
+# `assessment` is a durable wait: a card parked there has no running head and no mechanical
+# gate left to run, and it leaves only when the observer (or the PO) decides release, rework or
+# reslice. Nothing routes a card into it yet; the dispatcher edges below are the seam a later
+# card uses.
+_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 _TRANSITIONS = {
     # PO is the human operator and may move a card between any two states.
     "po": {(source, target) for source in _STATES for target in _STATES if source != target},
@@ -110,6 +115,8 @@ _TRANSITIONS = {
         ("in_progress", "validate"), ("in_progress", "blocked"),
         ("in_progress", "ready"), ("validate", "in_progress"),
         ("validate", "blocked"), ("validate", "done"),
+        ("validate", "assessment"), ("assessment", "in_progress"),
+        ("assessment", "done"), ("assessment", "blocked"),
     },
     "observer": {(source, target) for source in _STATES for target in _STATES if source != target},
     "worker": set(), "reviewer": set(), "retro": set(),
@@ -117,6 +124,7 @@ _TRANSITIONS = {
         ("blocked", "ready"), ("blocked", "done"),
         ("in_progress", "done"), ("ready", "blocked"),
         ("in_progress", "blocked"), ("validate", "blocked"),
+        ("assessment", "blocked"),
     },
 }
 _READY_RESET_METADATA = {

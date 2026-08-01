@@ -42,13 +42,22 @@ import os
 # Env override exists so the e2e can drive a throwaway board without touching the real one.
 BOARD_NAME = os.environ.get("TA_PIPELINE_BOARD", "Pipeline")
 
-COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Blocked", "Done"]
+COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Assessment", "Blocked", "Done"]
 # Where an agent proposal lands: the board's first column. The card is stamped record_type=task,
 # so it reads as an execution card awaiting PO triage and never as a Product issue: an agent
 # still cannot choose product, kind and priority, so `issue create` stays closed to it.
 PROPOSAL_COLUMN = COLUMNS[0]
 
 ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
+
+# The board's decision column: a card waits there for a person, not for a machine. `secretary`
+# owns the Pipeline board schema and the role/transition model; this surface is a consumer of that
+# board, not a second authority over it, so the po and observer releases out of Assessment are not
+# restated here. They go through `python3 -m secretary task move`, which is the authoritative
+# writer. Two role tables for one board is what produced the defect this rule exists to prevent.
+# The one edge kept here is the steward escalation below, because this is the surface the steward
+# actually moves cards with.
+ASSESSMENT = "Assessment"
 
 # Two types along one axis: does the card change code. A code card produces a PR (and takes part in
 # the per-project claim gate); a research card only produces a report. A third "debug" type was
@@ -121,6 +130,10 @@ STEWARD_ESCALATIONS = {
     ("Ready", "Blocked"),
     ("In progress", "Blocked"),
     ("Validate", "Blocked"),
+    # Assessment is a wait on the observer, not on a head, so nothing times it out on its own.
+    # The steward's escape hatch has to reach it too, or a card whose observer never came back
+    # would sit there with no way out short of a human editing Kanboard by hand.
+    ("Assessment", "Blocked"),
 }
 
 # Allowed (from, to) column moves per role, for the generic `move` command. Claim owns the
@@ -249,6 +262,14 @@ def check_move(role: str, from_col: str, to_col: str) -> None:
             raise GuardError(f"unknown column {col!r} (columns: {', '.join(COLUMNS)})")
     if (from_col, to_col) in TRANSITIONS[role]:
         return
+    # A move in or out of Assessment that is not the steward escalation is a release, rework or
+    # reslice decision. That decision has one writer, and it is not this surface.
+    if ASSESSMENT in (from_col, to_col):
+        raise GuardError(
+            f"role {role!r} may not move {from_col!r} -> {to_col!r} here: moves in and out of "
+            f"{ASSESSMENT!r} other than the steward escalation to 'Blocked' go through "
+            "`python3 -m secretary task move`, which owns the role matrix for that column"
+        )
     # Validate->In progress is a legit rework transition (in the matrix); any OTHER move into
     # In progress is the fresh-claim case, which must go through `claim`, not `move`.
     if to_col == IN_PROGRESS:

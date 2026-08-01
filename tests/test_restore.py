@@ -17,7 +17,14 @@ from secretary.cli import main as cli_main
 from secretary.backup import create_backup, verify_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
-from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
+from secretary.checkpoint import _validate_board
+from secretary.data import (
+    DataExport,
+    export_board,
+    export_memory,
+    init_layout,
+    normalize_board_card,
+)
 from secretary.host import CollectResult, HostInventory, build_plan
 from secretary.host_apply import resolve_packaged
 import secretary.restore_commands as restore_commands
@@ -35,6 +42,8 @@ from secretary.restore import (
 )
 from secretary.restore import _normalized_cards
 from secretary.product_issues import ProductIssueValidationError, validate_product_issue_records
+from secretary.tasks import TaskReader
+from tests.test_sprints import SprintKanboard
 from tests.test_tasks import WriteKanboard
 
 
@@ -81,6 +90,45 @@ class RestoreTests(unittest.TestCase):
             "record_type": "product", "product_id": "secretary", "product_projects": projects,
         }
         return card
+
+    def test_assessment_card_round_trips_through_export_validation_and_restore(self):
+        """secretary-1025: a card parked in Assessment survives the durability path intact."""
+        live_card = {
+            "id": 42, "reference": "secretary-1025", "title": "Parked",
+            "description": "waiting for the observer", "column": "Assessment",
+            "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+            "metadata": {"record_type": "task", "project": "secretary", "task_type": "code"},
+            "comments": [{"ts": "10", "text": "[reviewer]\nverdict"}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            with mock.patch(
+                "secretary.data.subprocess.run",
+                side_effect=lambda *_args, **_kwargs: mock.Mock(
+                    stdout=json.dumps([live_card]), stderr="", returncode=0
+                ),
+            ):
+                export = export_board(data_dir, command=["pipeline"], sprint_client=SprintKanboard())
+
+            self.assertEqual(export.count, 1)
+            exported = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
+            self.assertEqual(exported["cards"][0]["column"], "Assessment")
+
+            # The checkpoint validates the staged export before it is published.
+            _validate_board(data_dir / "board", registered_project_ids=set())
+
+            client = _EmptyWriteKanboard()
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+
+            restored = TaskReader(client).show("secretary-1025")
+            self.assertEqual(restored["state"], "assessment")
+            self.assertEqual(restored["title"], "Parked")
+            self.assertEqual(restored["comments"][0]["body"], "[reviewer]\nverdict")
+            # A second run is the retry path: parity, not a duplicate card.
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(len(client.tasks), 1)
 
     def test_restore_refuses_a_card_without_a_record_type(self):
         """A card with no kind cannot be placed, so the export is refused by reference."""

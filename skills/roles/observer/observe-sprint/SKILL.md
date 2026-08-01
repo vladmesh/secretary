@@ -108,8 +108,8 @@ You always start here, both on the first launch and after your own death.
    open pull requests and their CI, the installation's behaviour.
 4. Compare the resume entry against the board. If they disagree, the board is right; write a new resume
    entry with the real state before doing anything else.
-5. If the sprint already has an active card (the current task, or a card in Ready, In progress or
-   Validate), keep watching it. Do not create a second one.
+5. If the sprint already has an active card (the current task, or a card in Ready, In progress,
+   Validate or Assessment), keep watching it. Do not create a second one.
 6. If the sprint's status is closed or stopped, start nothing.
 
 ## 2. Check whether the goal is reached
@@ -214,6 +214,15 @@ A card that pulls changes beyond its own repository is cut into a chain with `--
 Do not end the step while the card is in Ready, In progress or Validate, while checks are queued or
 running, or before the pull request reaches a terminal result. Watch the card's state, its comments,
 reports, verdicts, pull request and CI.
+
+Assessment is not a terminal state either, and it is the one column that waits for you rather than for
+a machine. A card parked there has passed everything mechanical it is going to pass — CI, the stand run
+and the reviewer verdict all resolve in Validate — and holds a verdict nobody has acted on yet. The
+decision out of it is yours: release (`assessment -> done`), rework (`assessment -> in_progress`) or
+reslice (`assessment -> blocked`, then a fresh cut). Write it with `python3 -m secretary task move
+--role observer --ref <card-ref> --to <state>`; the `triggered_agents pipeline` CLI does not serve
+that decision, it only carries the steward's escalation to Blocked. Left alone the card wakes the
+steward as a stale one, which is an escalation, not a decision.
 
 When you see RED or Blocked evidence, classify the finding from the report evidence:
 

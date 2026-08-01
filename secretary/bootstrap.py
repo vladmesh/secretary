@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
+
 import yaml
 
 from secretary._fsutil import write_text_atomic
@@ -38,7 +40,20 @@ ORCA_APPIMAGE_URL = (
     "https://github.com/stablyai/orca/releases/download/"
     f"{ORCA_VERSION}/orca-linux.AppImage"
 )
-PIPELINE_COLUMNS = ("Issues", "Ready", "In progress", "Validate", "Blocked", "Done")
+PIPELINE_COLUMNS = (
+    "Issues", "Ready", "In progress", "Validate", "Assessment", "Blocked", "Done",
+)
+# The layout every live board carried before `Assessment` existed. It is not a supported
+# schema: it is the one older layout `board migrate-assessment` knows how to repair in place,
+# so a populated board sitting on it gets a pointer at that command instead of the generic
+# refusal below.
+LEGACY_PIPELINE_COLUMNS = ("Issues", "Ready", "In progress", "Validate", "Blocked", "Done")
+ASSESSMENT_COLUMN = "Assessment"
+ASSESSMENT_POSITION = PIPELINE_COLUMNS.index(ASSESSMENT_COLUMN) + 1
+# The one half-finished layout the migration itself can leave behind: Kanboard appends a new
+# column at the end, so a committed `addColumn` whose answer was lost, or a reposition that then
+# failed, leaves the six known columns plus a trailing `Assessment`. The next run finishes it.
+PARTIAL_PIPELINE_COLUMNS = (*LEGACY_PIPELINE_COLUMNS, ASSESSMENT_COLUMN)
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
@@ -120,9 +135,13 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             # the trash.  Such a board is a migration job for a human, so name both layouts.
             tasks = all_project_cards(api, board_id)
             if tasks:
+                hint = ""
+                if titles == list(LEGACY_PIPELINE_COLUMNS):
+                    hint = "; run `secretary board migrate-assessment` to add it in place"
                 raise BootstrapError(
                     "Pipeline board has cards but an incompatible column schema: "
-                    f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)})"
+                    f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)}; "
+                    f"migratable: {', '.join(LEGACY_PIPELINE_COLUMNS)})" + hint
                 )
             for index, title in enumerate(PIPELINE_COLUMNS):
                 if index < len(columns) and isinstance(columns[index], dict) and columns[index].get("id"):
@@ -141,6 +160,114 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
         for name in sorted(_project_lanes(instance) - known):
             api.call("addSwimlane", project_id=board_id, name=name)
         return board_id
+    except TaskError as exc:
+        raise BootstrapError(exc.message) from None
+
+
+def _assessment_column_id(columns: list[Any]) -> int:
+    """The id of the trailing `Assessment` column an interrupted migration left behind."""
+    for column in columns:
+        if isinstance(column, dict) and str(column.get("title") or "") == ASSESSMENT_COLUMN:
+            try:
+                identifier = int(column["id"])
+            except (KeyError, TypeError, ValueError):
+                break
+            if identifier > 0:
+                return identifier
+    raise BootstrapError(f"Kanboard returned no usable id for the {ASSESSMENT_COLUMN} column")
+
+
+def _card_placement(api: KanboardClient, board_id: int) -> dict[int, tuple[int, int]]:
+    """Where every card sits right now: {task id: (column id, position)}.
+
+    Read before and after the migration so a column insert that silently reshuffles or
+    trashes a card is caught here instead of on the board.
+    """
+    placement: dict[int, tuple[int, int]] = {}
+    for card in all_project_cards(api, board_id):
+        try:
+            identifier = int(card.get("id"))
+        except (TypeError, ValueError):
+            raise BootstrapError("Kanboard returned a Pipeline card without an id") from None
+        placement[identifier] = (
+            int(card.get("column_id") or 0), int(card.get("position") or 0),
+        )
+    return placement
+
+
+def migrate_assessment_column(*, client: KanboardClient | None = None) -> dict[str, object]:
+    """Add the `Assessment` column to a populated Pipeline board, in place.
+
+    `ensure_pipeline_board` refuses to reshape a board that holds cards, on purpose: a rename
+    changes what a column's cards mean and a removal trashes them. This is the one repair that
+    is safe on a live board, because it only appends a column and slides it into position.
+
+    Every outcome is retryable. A run that already finished is a no-op; a run whose `addColumn`
+    committed but whose answer was lost (or whose reposition then failed) leaves the board on the
+    one partial layout below, and the next run finishes that column instead of adding a second one.
+    """
+    try:
+        api = client or KanboardClient()
+        board = api.call("getProjectByName", name="Pipeline")
+        if not isinstance(board, dict) or not board.get("id"):
+            raise BootstrapError("Pipeline board does not exist")
+        board_id = int(board["id"])
+        columns = api.call("getColumns", project_id=board_id) or []
+        if not isinstance(columns, list):
+            raise BootstrapError("Kanboard returned invalid Pipeline columns")
+        titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
+        if titles == list(PIPELINE_COLUMNS):
+            return {
+                "ok": True, "action": "board migrate-assessment", "status": "unchanged",
+                "board_id": board_id, "columns": titles,
+            }
+        before = _card_placement(api, board_id)
+        if titles == list(LEGACY_PIPELINE_COLUMNS):
+            status = "migrated"
+            added = api.call("addColumn", project_id=board_id, title=ASSESSMENT_COLUMN)
+            if not isinstance(added, int) or added <= 0:
+                raise BootstrapError(f"Kanboard did not add the {ASSESSMENT_COLUMN} column")
+        elif titles == list(PARTIAL_PIPELINE_COLUMNS):
+            # The column is on the board but never reached position 5: an earlier run added it and
+            # lost the answer, or the reposition that followed failed. Finish that column rather
+            # than adding a second one.
+            status = "resumed"
+            added = _assessment_column_id(columns)
+        else:
+            raise BootstrapError(
+                "Pipeline board has an unexpected column schema: "
+                f"{', '.join(titles)} (migratable: {', '.join(LEGACY_PIPELINE_COLUMNS)}; "
+                f"resumable: {', '.join(PARTIAL_PIPELINE_COLUMNS)}; "
+                f"expected after migration: {', '.join(PIPELINE_COLUMNS)})"
+            )
+        if not api.call(
+            "changeColumnPosition",
+            project_id=board_id,
+            column_id=added,
+            position=ASSESSMENT_POSITION,
+        ):
+            raise BootstrapError(
+                f"Kanboard did not move {ASSESSMENT_COLUMN} to position {ASSESSMENT_POSITION}"
+            )
+        current = api.call("getColumns", project_id=board_id) or []
+        titles = [
+            str(column.get("title") or "") for column in current if isinstance(column, dict)
+        ]
+        if titles != list(PIPELINE_COLUMNS):
+            raise BootstrapError(
+                "Pipeline columns after the migration are "
+                f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)})"
+            )
+        after = _card_placement(api, board_id)
+        if after != before:
+            raise BootstrapError(
+                "the migration moved or lost Pipeline cards: "
+                f"{len(before)} card(s) before, {len(after)} after"
+            )
+        return {
+            "ok": True, "action": "board migrate-assessment", "status": status,
+            "board_id": board_id, "columns": titles, "cards": len(after),
+        }
     except TaskError as exc:
         raise BootstrapError(exc.message) from None
 

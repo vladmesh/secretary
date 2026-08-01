@@ -51,7 +51,7 @@ def add_task_subcommands(subparsers) -> None:
     task_list.add_argument(
         "--state",
         action="append",
-        choices=("issues", "ready", "in_progress", "validate", "blocked", "done"),
+        choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
     )
     task_list.add_argument("--project")
     task_list.add_argument("--sprint")
@@ -107,7 +107,9 @@ def add_task_subcommands(subparsers) -> None:
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "move":
-            command.add_argument("--to", required=True, choices=("issues", "ready", "in_progress", "validate", "blocked", "done"))
+            # `--target` is the spelling the restore commands use for the same idea, and the one
+            # operators reach for. Both names write the same dest, so neither is a second contract.
+            command.add_argument("--to", "--target", dest="to", required=True, choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"))
             command.add_argument("--reason-file")
             _add_sprint_override_args(command)
         if name == "archive":

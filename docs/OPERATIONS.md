@@ -623,6 +623,28 @@ the row or the board comment of that request already exists. A document that is 
 comes back with `secretary product transaction adopt --path FILE`, which files it under its own request id
 and removes the copy, after which `retry` and `discard` see it again.
 
+## Board column schema
+
+Install creates the Pipeline columns and then refuses to reshape a board that already holds cards:
+renaming a column in place would change what its cards mean, and removing one moves every card it
+holds to the trash. A live board that predates a column therefore needs one explicit repair:
+
+```bash
+python3 -m secretary board migrate-assessment
+```
+
+It adds the `Assessment` column at position 5 of a board that carries the earlier six-column layout,
+without moving, reordering or trashing a card and without renaming an existing column. It reads the
+Kanboard credentials from the runtime environment, like `secretary task`. Every outcome is
+retryable: a finished board reports `unchanged`, a run whose `addColumn` committed but whose answer
+was lost leaves the six columns plus a trailing `Assessment` and the next run finishes that column
+(`resumed`) instead of adding a second one, and any layout that is none of those three is refused
+with all of them named. Every run proves that each card's column and position are unchanged before
+it reports success. After it runs, install accepts the board unchanged.
+
+`python3 -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
+by index, so it refuses a board that holds cards unless the layout already matches, and points here.
+
 ## Recovery
 
 The Git-backed checkpoint and the full recovery sequence are documented in

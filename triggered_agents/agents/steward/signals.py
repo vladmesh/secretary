@@ -35,7 +35,10 @@ STATE = AgentState("steward")
 # Columns where a long dwell is itself worth a look. "Issues" (backlog, not yet triaged into Ready)
 # and "Done" (terminal) are excluded — sitting there indefinitely is the expected shape, not an
 # anomaly.
-STALE_COLUMNS = ("Ready", "In progress", "Validate", "Blocked")
+# "Assessment" is in for the opposite reason: it waits on the observer rather than on a head, so
+# no watchdog times it out. If the observer never comes back to decide release, rework or reslice,
+# this signal is the only thing that notices.
+STALE_COLUMNS = ("Ready", "In progress", "Validate", "Assessment", "Blocked")
 STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
 
 WORKSPACES_ROOT = shared_state.WORKSPACES_ROOT

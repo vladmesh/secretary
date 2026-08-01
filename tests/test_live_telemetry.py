@@ -1420,5 +1420,51 @@ class StewardPipelineSignalTests(unittest.TestCase):
         self.assertIn("production dispatcher", steward_signals.render_markdown(batch))
 
 
+_LONG_AGO = 1_600_000_000  # a Kanboard date_moved far beyond any stale threshold
+
+
+class StewardStaleColumnsTests(unittest.TestCase):
+    """secretary-1025: Assessment is an active column for the stale detector.
+
+    Nothing else watches it. A card in Assessment has no head and no gate running, so no
+    watchdog can time it out; if the observer never comes back to decide, the stale signal is
+    the only thing that notices.
+    """
+
+    def test_an_assessment_card_past_the_threshold_is_reported_stale(self) -> None:
+        looked_at: list[str] = []
+
+        def list_cards(column: str | None = None, **_kwargs: object) -> list[dict]:
+            looked_at.append(str(column))
+            if column != "Assessment":
+                return []
+            return [{"reference": "secretary-1025", "date_moved": _LONG_AGO}]
+
+        with mock.patch.object(steward_signals.pipeline_ops, "list_cards", side_effect=list_cards):
+            hits, notified = steward_signals._stale_signals({"notified_stale": {}})
+
+        self.assertEqual(
+            hits, [{"reference": "secretary-1025", "column": "Assessment", "since": _LONG_AGO}]
+        )
+        self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
+        self.assertIn("Assessment", looked_at)
+        # Issues and Done stay out: an untriaged proposal and a finished card may sit forever.
+        self.assertNotIn("Issues", looked_at)
+        self.assertNotIn("Done", looked_at)
+
+    def test_a_stale_assessment_card_fires_only_once_per_dwell(self) -> None:
+        with mock.patch.object(
+            steward_signals.pipeline_ops, "list_cards",
+            side_effect=lambda column=None, **_kwargs: (
+                [{"reference": "secretary-1025", "date_moved": _LONG_AGO}]
+                if column == "Assessment" else []
+            ),
+        ):
+            hits, notified = steward_signals._stale_signals({"notified_stale": {"secretary-1025": _LONG_AGO}})
+
+        self.assertEqual(hits, [])
+        self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
+
+
 if __name__ == "__main__":
     unittest.main()
