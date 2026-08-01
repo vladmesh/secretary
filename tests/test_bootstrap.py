@@ -17,6 +17,7 @@ from secretary.bootstrap import (
     ensure_pipeline_board,
     migrate_assessment_column,
 )
+from secretary.tasks import TaskError
 
 
 class Board:
@@ -163,6 +164,94 @@ class AssessmentMigrationTests(unittest.TestCase):
 
         board.call = declined  # type: ignore[method-assign]
         with self.assertRaisesRegex(BootstrapError, "did not move Assessment"):
+            migrate_assessment_column(client=board)
+
+    def test_a_retry_finishes_a_column_whose_add_response_was_lost(self) -> None:
+        """The ambiguous write: Kanboard committed addColumn and the answer never came back."""
+        board = _legacy_board()
+        before = [dict(task) for task in board.tasks]
+
+        def lost_reply(method: str, **params: object) -> object:
+            result = Board.call(board, method, **params)
+            if method == "addColumn":
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+            return result
+
+        board.call = lost_reply  # type: ignore[method-assign]
+        with self.assertRaisesRegex(BootstrapError, "unavailable"):
+            migrate_assessment_column(client=board)
+        self.assertEqual(
+            [column["title"] for column in board.columns],
+            [*LEGACY_PIPELINE_COLUMNS, "Assessment"],
+        )
+
+        board.call = lambda method, **params: Board.call(board, method, **params)  # type: ignore[method-assign,assignment]
+        board.calls.clear()
+        result = migrate_assessment_column(client=board)
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
+        self.assertEqual(board.tasks, before)
+        # The existing column is finished, never a second one.
+        self.assertNotIn("addColumn", board.calls)
+        self.assertEqual([column["title"] for column in board.columns].count("Assessment"), 1)
+
+    def test_a_retry_finishes_a_reposition_that_failed(self) -> None:
+        board = _legacy_board()
+        before = [dict(task) for task in board.tasks]
+
+        def declined(method: str, **params: object) -> object:
+            if method == "changeColumnPosition":
+                board.calls.append(method)
+                return False
+            return Board.call(board, method, **params)
+
+        board.call = declined  # type: ignore[method-assign]
+        with self.assertRaises(BootstrapError):
+            migrate_assessment_column(client=board)
+
+        board.call = lambda method, **params: Board.call(board, method, **params)  # type: ignore[method-assign,assignment]
+        result = migrate_assessment_column(client=board)
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
+        self.assertEqual(board.tasks, before)
+
+    def test_a_reposition_whose_response_was_lost_retries_as_unchanged(self) -> None:
+        """The board is already correct; the second run must recognise that, not repair it."""
+        board = _legacy_board()
+
+        def lost_reply(method: str, **params: object) -> object:
+            result = Board.call(board, method, **params)
+            if method == "changeColumnPosition":
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+            return result
+
+        board.call = lost_reply  # type: ignore[method-assign]
+        with self.assertRaisesRegex(BootstrapError, "unavailable"):
+            migrate_assessment_column(client=board)
+
+        board.call = lambda method, **params: Board.call(board, method, **params)  # type: ignore[method-assign,assignment]
+        board.calls.clear()
+        result = migrate_assessment_column(client=board)
+
+        self.assertEqual(result["status"], "unchanged")
+        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
+        self.assertNotIn("addColumn", board.calls)
+        self.assertNotIn("changeColumnPosition", board.calls)
+
+    def test_a_resume_still_refuses_when_a_card_moved_underneath_it(self) -> None:
+        board = _legacy_board()
+        board.columns.append({"id": 7, "title": "Assessment"})
+
+        def moves_a_card(method: str, **params: object) -> object:
+            result = Board.call(board, method, **params)
+            if method == "changeColumnPosition":
+                board.tasks[0]["column_id"] = 3
+            return result
+
+        board.call = moves_a_card  # type: ignore[method-assign]
+        with self.assertRaisesRegex(BootstrapError, "moved or lost"):
             migrate_assessment_column(client=board)
 
     def test_refuses_a_missing_board(self) -> None:

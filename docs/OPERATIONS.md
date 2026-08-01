@@ -635,9 +635,15 @@ python3 -m secretary board migrate-assessment
 
 It adds the `Assessment` column at position 5 of a board that carries the earlier six-column layout,
 without moving, reordering or trashing a card and without renaming an existing column. It reads the
-Kanboard credentials from the runtime environment, like `secretary task`. Running it again is a
-no-op that still reports success, and it refuses any layout that is neither the six-column one nor
-the current seven-column one, naming both. After it runs, install accepts the board unchanged.
+Kanboard credentials from the runtime environment, like `secretary task`. Every outcome is
+retryable: a finished board reports `unchanged`, a run whose `addColumn` committed but whose answer
+was lost leaves the six columns plus a trailing `Assessment` and the next run finishes that column
+(`resumed`) instead of adding a second one, and any layout that is none of those three is refused
+with all of them named. Every run proves that each card's column and position are unchanged before
+it reports success. After it runs, install accepts the board unchanged.
+
+`python3 -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
+by index, so it refuses a board that holds cards unless the layout already matches, and points here.
 
 ## Recovery
 

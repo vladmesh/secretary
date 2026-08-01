@@ -50,6 +50,15 @@ PROPOSAL_COLUMN = COLUMNS[0]
 
 ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 
+# The board's decision column: a card waits there for a person, not for a machine. `secretary`
+# owns the Pipeline board schema and the role/transition model; this surface is a consumer of that
+# board, not a second authority over it, so the po and observer releases out of Assessment are not
+# restated here. They go through `python3 -m secretary task move`, which is the authoritative
+# writer. Two role tables for one board is what produced the defect this rule exists to prevent.
+# The one edge kept here is the steward escalation below, because this is the surface the steward
+# actually moves cards with.
+ASSESSMENT = "Assessment"
+
 # Two types along one axis: does the card change code. A code card produces a PR (and takes part in
 # the per-project claim gate); a research card only produces a report. A third "debug" type was
 # removed: it produced a PR like a code card but did not count towards the gate, so two PR cards of
@@ -138,12 +147,6 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
         ("Validate", "In progress"),
         ("Validate", "Blocked"),
         ("Validate", "Done"),
-        # The reviewer/observer seam. Nothing routes a card into Assessment yet; these edges
-        # mirror secretary.tasks._TRANSITIONS so both engines read the board the same way.
-        ("Validate", "Assessment"),
-        ("Assessment", "In progress"),
-        ("Assessment", "Done"),
-        ("Assessment", "Blocked"),
     },
     "worker": set(),
     # The layer-3 reviewer never moves cards (the dispatcher acts on its verdict, like it does on
@@ -259,6 +262,14 @@ def check_move(role: str, from_col: str, to_col: str) -> None:
             raise GuardError(f"unknown column {col!r} (columns: {', '.join(COLUMNS)})")
     if (from_col, to_col) in TRANSITIONS[role]:
         return
+    # A move in or out of Assessment that is not the steward escalation is a release, rework or
+    # reslice decision. That decision has one writer, and it is not this surface.
+    if ASSESSMENT in (from_col, to_col):
+        raise GuardError(
+            f"role {role!r} may not move {from_col!r} -> {to_col!r} here: moves in and out of "
+            f"{ASSESSMENT!r} other than the steward escalation to 'Blocked' go through "
+            "`python3 -m secretary task move`, which owns the role matrix for that column"
+        )
     # Validate->In progress is a legit rework transition (in the matrix); any OTHER move into
     # In progress is the fresh-claim case, which must go through `claim`, not `move`.
     if to_col == IN_PROGRESS:

@@ -63,6 +63,12 @@ card from Assessment to Blocked with a reason, its usual escalation when nobody 
 decision; workers and reviewers move nothing, there as everywhere else. A card left in Assessment
 past the steward's stale threshold is reported like any other stuck card.
 
+`secretary task move` is the writer for that decision. The board has one role and transition model,
+this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries only
+the steward's `Assessment -> Blocked` escalation, so a PO or observer release, rework or reslice
+goes through `python3 -m secretary task move --role po --ref REF --to done` (or `in_progress`, or
+`blocked`) rather than through that surface.
+
 ```bash
 python3 -m secretary task list --project PROJECT
 python3 -m secretary task show --ref PROJECT-N

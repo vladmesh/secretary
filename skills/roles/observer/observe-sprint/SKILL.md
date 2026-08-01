@@ -219,8 +219,10 @@ Assessment is not a terminal state either, and it is the one column that waits f
 a machine. A card parked there has passed everything mechanical it is going to pass — CI, the stand run
 and the reviewer verdict all resolve in Validate — and holds a verdict nobody has acted on yet. The
 decision out of it is yours: release (`assessment -> done`), rework (`assessment -> in_progress`) or
-reslice (`assessment -> blocked`, then a fresh cut). Left alone it wakes the steward as a stale card,
-which is an escalation, not a decision.
+reslice (`assessment -> blocked`, then a fresh cut). Write it with `python3 -m secretary task move
+--role observer --ref <card-ref> --to <state>`; the `triggered_agents pipeline` CLI does not serve
+that decision, it only carries the steward's escalation to Blocked. Left alone the card wakes the
+steward as a stale one, which is an escalation, not a decision.
 
 When you see RED or Blocked evidence, classify the finding from the report evidence:
 
