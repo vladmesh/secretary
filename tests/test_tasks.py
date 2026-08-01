@@ -1133,12 +1133,64 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(escalated["task"]["state"], "blocked")
         self.assertEqual(self.writer.reader.show("secretary-468")["state"], "blocked")
 
+    def _move_cli(self, *arguments: str) -> tuple[int, str, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main([
+                "task", "move", "--ref", "secretary-468",
+                "--data-dir", str(Path(self.tmpdir.name) / "data"), *arguments,
+            ])
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_cli_move_target_assessment_moves_the_card(self) -> None:
+        """Criterion 3 spells this `--target`; `--to` is the same argument under another name."""
+        self.client.tasks[0]["column_id"] = 4  # Validate
+        code, output, errors = self._move_cli(
+            "--role", "dispatcher", "--target", "assessment", "--request-id", "cli-target",
+        )
+
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual(json.loads(output)["action"], "moved")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+        code, output, errors = self._move_cli(
+            "--role", "dispatcher", "--to", "done", "--request-id", "cli-to",
+        )
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual(self.client.tasks[0]["column_id"], 6)
+
+    def test_cli_move_target_assessment_is_refused_for_a_forbidden_role(self) -> None:
+        self.client.tasks[0]["column_id"] = 4
+        code, output, errors = self._move_cli(
+            "--role", "worker", "--target", "assessment", "--request-id", "cli-forbidden",
+        )
+
+        self.assertEqual((code, output), (3, ""))
+        self.assertEqual(json.loads(errors)["error"]["code"], "transition_forbidden")
+        self.assertEqual(self.client.tasks[0]["column_id"], 4)
+
     def test_cli_choice_lists_accept_assessment_where_a_state_is_legal(self) -> None:
         """`list --state` and `move --to` take it; `create --state` still cannot open a card there."""
         choices = _task_state_choices()
         self.assertIn("assessment", choices[("list", "state")])
         self.assertIn("assessment", choices[("move", "to")])
         self.assertEqual(choices[("create", "state")], ("issues", "ready"))
+        # One argument, two spellings: `--target` is not a second option with its own dest.
+        self.assertEqual(sorted(_move_target_option_strings()), ["--target", "--to"])
+
+
+def _move_target_option_strings() -> list[str]:
+    """Every flag `task move` accepts for the destination state."""
+    from secretary.task_commands import add_task_subcommands
+
+    parser = argparse.ArgumentParser()
+    add_task_subcommands(parser.add_subparsers(dest="command"))
+    task = parser._subparsers._group_actions[0].choices["task"]  # type: ignore[union-attr]
+    move = task._subparsers._group_actions[0].choices["move"]  # type: ignore[union-attr]
+    return [
+        option for action in move._actions if action.dest == "to" for option in action.option_strings
+    ]
 
 
 def _task_state_choices() -> dict[tuple[str, str], tuple[str, ...]]:

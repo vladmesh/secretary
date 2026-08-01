@@ -67,7 +67,8 @@ past the steward's stale threshold is reported like any other stuck card.
 this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries only
 the steward's `Assessment -> Blocked` escalation, so a PO or observer release, rework or reslice
 goes through `python3 -m secretary task move --role po --ref REF --to done` (or `in_progress`, or
-`blocked`) rather than through that surface.
+`blocked`) rather than through that surface. `--target` is accepted as a second spelling of `--to`
+on that command; both name the same destination state.
 
 ```bash
 python3 -m secretary task list --project PROJECT
