@@ -42,6 +42,11 @@ class StatusCliTests(unittest.TestCase):
     # routes that discovery to the repo fixture for every test by default, so
     # this class no longer needs its own patch (secretary-705, secretary-738,
     # secretary-748).
+    #
+    # status's sprint read also builds a Kanboard client. tests/__init__.py
+    # routes that to a zero-network fake by default (secretary-1026), so a
+    # test only patches secretary.status.KanboardClient locally when it needs
+    # specific sprint content (see the FakeKanboard-backed tests below).
 
     def test_status_json_has_the_documented_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
