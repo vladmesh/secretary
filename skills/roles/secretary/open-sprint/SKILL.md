@@ -130,6 +130,7 @@ python3 -m secretary sprint create --role po --actor <you> \
   --goal "<one sentence about the end product state>" \
   --dod-file /tmp/dod.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
+  --observer <head-profile|none> \
   --repository <repo> --repository <repo>
 ```
 
@@ -140,6 +141,9 @@ python3 -m secretary sprint create --role po --actor <you> \
 - `--project` is repeated once per registered project the sprint reserves. While the sprint is open, no
   other sprint may reserve them, and the installation holds only this one open sprint.
 - `--repository` is repeated once per repository.
+- `--observer` is required and has no default: either one head profile from `heads.yaml`, matched to the
+  difficulty of the work, or `none` for a sprint simple enough not to pay for one. It cannot be changed
+  by editing a running sprint; `reopen` is where a sprint states it again.
 - Do not set `--ref`: the entity gets its own `sprint:<ID>`. If you do set it, the value must start with
   `sprint:` and must clash with neither an existing sprint nor a card.
 - Instead of `--dod-file` there is a `--definition-of-done` string; use the file for multi-line text.

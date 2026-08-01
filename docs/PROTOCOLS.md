@@ -172,7 +172,7 @@ reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` ca
 ```bash
 python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
-  --repository REPO --request-id REQUEST_ID
+  --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID
 python3 -m secretary sprint list --status open
 python3 -m secretary sprint show --ref sprint:ID
 python3 -m secretary sprint status --ref sprint:ID
@@ -180,12 +180,12 @@ python3 -m secretary sprint comment --role worker --ref sprint:ID --body-file NO
 python3 -m secretary sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
 python3 -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
 python3 -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
-python3 -m secretary sprint reopen --role po --ref sprint:ID
+python3 -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
 python3 -m secretary sprint close --role po --ref sprint:ID
 ```
 
 Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
-the reserved projects, open/closed/stopped status, a
+the reserved projects, open/closed/stopped status, the declared observer, a
 budget counter by event type, the current card and a structured resume entry. The six valid budget event
 types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
 them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
@@ -275,6 +275,49 @@ not part of the six stored resume fields. `secretary status --json` exposes the
 same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.
+
+### The declared observer
+
+A sprint carries exactly one observer value in `sprint_observer`. There is no dynamic default, no
+value inherited from `role_defaults.observer`, no missing-field fallback and no permanent
+tri-state. Four tagged forms exist, and only the first two are executable:
+
+| form | meaning |
+| --- | --- |
+| `{"kind": "head", "profile": "claude-observer"}` | the sprint is observed by that one head profile |
+| `{"kind": "none"}` | the sprint runs without an observer |
+| `{"kind": "historical", "profile": HEAD, "source": "observer_lifecycle_audit", "event_id": EVT}` | a closed row whose head the migration recovered from durable lifecycle events |
+| `{"kind": "historical", "profile": null, "source": "migration_unknown"}` | a closed row that never launched an observer, so there is nothing honest to recover |
+
+A `historical` value is provenance of what ran, never a declaration of what to run. An open sprint
+carrying one is corrupt in exactly the way a missing value is.
+
+`create` and `reopen` both require `--observer`, spelled either `none` or one head profile from
+`heads.yaml`. Absent, null, empty, `default` and `inherited` are not interpretations this model has.
+`reopen` writes the fresh choice while the sprint is still closed and only then changes its status,
+so the row is never readable open under a value the reopening caller did not choose; `create` writes
+it with the rest of the fields, before the reference publishes the row.
+
+After the migration below has run, the reader is strict: an open sprint whose observer metadata is
+missing, unreadable, historical, or names a profile the registry does not have is corrupt. It is not
+launched from `role_defaults.observer`, its cards do not move, and it does not silently become
+observer-free. Restore validates the whole exported set before its first backend write and refuses
+rather than publishing part of it.
+
+### The observer fence
+
+The production tick checks every open sprint's observer before it reconciles records, advances
+active cards or claims Ready. The check is pure: it reads the sprint board, the head registry and
+the observer records, and launches nothing.
+
+A sprint is fenced when its declared head has not been launched, is dead, does not match the running
+record, is parked behind a failed bring-up, or when its declaration is corrupt. Fencing is
+project-local: it excludes that sprint's reserved projects and linked cards from reconciliation,
+active advancement and Ready claims, and leaves every other project running. `{"kind": "none"}`
+passes with no launch and no probe. The fence writes one durable `observer_fence_raised` event with
+`outcome: critical` per reason, and clears with `observer_fence_cleared` once a head on the declared
+profile is confirmed adopted, which is normally a later tick: the launch that adopts it happens
+after the fence in the same tick.
 
 `task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
 `task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives its

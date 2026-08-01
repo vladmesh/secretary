@@ -374,6 +374,16 @@ class InstanceCatalog:
         self._head_profile(head)
         return head
 
+    def observer_profile(self, head: str) -> dict[str, Any]:
+        """The registry entry for a head a sprint declares, or `HostError`.
+
+        The declaration is durable and the registry is not: a sprint can name a profile that was
+        removed from `heads.yaml` after it was declared. That is the sprint being unrunnable, not
+        an invitation to substitute the role default, so the resolution is one lookup with no
+        fallback and the fence answers for the failure.
+        """
+        return self._head_profile(head)
+
     def observer_run(self, head: str, *, workspace: str = "") -> HeadRun:
         """The launch record for an observer head, read from the same snapshot as its command."""
         profile = self._head_profile(head)

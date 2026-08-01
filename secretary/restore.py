@@ -27,6 +27,7 @@ from secretary.backup_verify import _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary import state_repo
 from secretary.data import init_layout
+from secretary.sprint_observer import encode_observer, is_executable, parse_observer
 from secretary._fsutil import file_lock, write_text_atomic
 from secretary.tasks import (
     _STATE_BY_COLUMN,
@@ -211,6 +212,7 @@ def _import_sprints(
     unexpected = set(existing) - {sprint["reference"] for sprint in sprints}
     if unexpected:
         raise RestoreError("sprint board is not empty or does not match normalized restore data")
+    _check_restored_observers(sprints)
     for sprint in sprints:
         reference = sprint["reference"]
         if reference not in existing:
@@ -218,6 +220,11 @@ def _import_sprints(
                 goal=sprint["goal"], definition_of_done=sprint["definition_of_done"],
                 repositories=list(sprint["repositories"]), reference=reference,
                 request_id=f"{prefix}sprint-create:{reference}",
+                # Status and observer land with the fields, before the reference makes the row
+                # readable: recovery must not publish an open sprint that momentarily declares
+                # no observer, which is the one shape the strict reader calls corrupt.
+                observer=sprint.get("observer"),
+                status=str(sprint["status"]),
             )
         writer.restore(
             reference=reference, values=_restore_sprint_metadata(sprint),
@@ -245,8 +252,38 @@ def _import_sprints(
 
 SPRINT_PARITY_FIELDS = (
     "reference", "goal", "definition_of_done", "repositories", "product", "issues",
-    "reservations", "status", "budget", "current_task", "resume", "audit",
+    "reservations", "status", "budget", "current_task", "resume", "audit", "observer",
 )
+
+
+def _check_restored_observers(sprints: list[dict[str, Any]]) -> None:
+    """Validate every exported observer value before the first backend write.
+
+    Per row rather than per write, and before any of them: a set validated as it is written
+    would leave the rows before the bad one already on the board, and one of those may be the
+    open sprint.  A restore that cannot produce a valid installation must not produce half of one.
+    """
+    problems: list[str] = []
+    for sprint in sprints:
+        reference = str(sprint.get("reference") or "?")
+        if "observer" not in sprint:
+            # A checkpoint older than the observer field restores as it was taken: the rows come
+            # back unmigrated, the strict reader is not active for them, and the migration is the
+            # supported way forward.  Silently inventing a value here would be recovery guessing.
+            continue
+        value = parse_observer(sprint.get("observer"))
+        if value is None:
+            problems.append(f"{reference}: observer value is not one of the tagged forms")
+            continue
+        if str(sprint.get("status") or "") == "open" and not is_executable(value):
+            problems.append(
+                f"{reference}: an open sprint may not carry migration provenance "
+                f"({value.get('source')})"
+            )
+    if problems:
+        raise RestoreError("sprint observer metadata is invalid: " + "; ".join(problems))
+
+
 # A checkpoint written before a sprint owned a product carries none of the ownership
 # keys, and the restored entity has to read back with none of them either.  Absence is
 # its own value here: a target that gained an empty `product` the source never had is a
@@ -300,6 +337,10 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             json.dumps(resume, sort_keys=True, separators=(",", ":")) if resume else ""
         ),
         "sprint_source_audit": json.dumps(sprint["audit"], sort_keys=True, separators=(",", ":")),
+        **(
+            {"sprint_observer": encode_observer(sprint["observer"])}
+            if "observer" in sprint else {}
+        ),
     }
 
 

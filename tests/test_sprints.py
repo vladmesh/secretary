@@ -13,6 +13,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.data import normalize_sprint_entity
+from secretary.sprint_observer import head_choice, none_choice
 from secretary.sprints import (
     BUDGET_EVENT_TYPES,
     SprintReader,
@@ -199,6 +200,7 @@ class SprintFixture(unittest.TestCase):
         for field, value in (
             ("role", "po"), ("actor", "operator"), ("product", "secretary"),
             ("issues", ["issue:open"]), ("projects", ["secretary"]),
+            ("observer", head_choice("codex-observer")),
         ):
             kwargs.setdefault(field, value)
         return self.writer.create(**kwargs)
@@ -297,7 +299,7 @@ class SprintOwnershipTests(SprintFixture):
                 outcomes[name] = writer.create(
                     role="po", actor="operator", goal="one delivery", reference="sprint:once",
                     product="secretary", issues=["issue:open"], projects=["secretary"],
-                    request_id="same-delivery",
+                    observer=head_choice("codex-observer"), request_id="same-delivery",
                 )
             except TaskError as exc:
                 outcomes[name] = exc
@@ -499,6 +501,7 @@ class SprintOwnershipTests(SprintFixture):
                 outcomes[name] = writer.create(
                     role="po", actor="operator", goal=name, reference=f"sprint:{name}",
                     product="secretary", issues=["issue:open"], projects=[project],
+                    observer=head_choice("codex-observer"),
                 )
             except TaskError as exc:
                 outcomes[name] = exc
@@ -525,7 +528,7 @@ class SprintOwnershipTests(SprintFixture):
         self.writer.close(role="po", actor="operator", reference=ref)
 
         for name, call in (
-            ("reopen", lambda: self.writer.reopen(role="po", actor="operator", reference=ref)),
+            ("reopen", lambda: self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref)),
             ("create", lambda: self._create(goal="second", reference="sprint:second")),
         ):
             done = threading.Event()
@@ -580,7 +583,7 @@ class SprintOwnershipTests(SprintFixture):
         self.writer.close(role="po", actor="operator", reference=legacy)
 
         with self.assertRaisesRegex(TaskError, "predates sprint ownership") as raised:
-            self.writer.reopen(role="po", actor="operator", reference=legacy)
+            self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=legacy)
 
         self.assertEqual(raised.exception.code, "validation")
         reread = SprintReader(self.client).show(legacy, include_cards=False)  # type: ignore[arg-type]
@@ -592,8 +595,8 @@ class SprintOwnershipTests(SprintFixture):
         ref = self._create(goal="reopened", reference="sprint:reopened")["sprint"]["ref"]
         self.writer.close(role="po", actor="operator", reference=ref)
 
-        first = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-once")
-        second = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-once")
+        first = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-once")
+        second = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-once")
 
         self.assertEqual(first["sprint"]["status"], "open")
         self.assertEqual(first["event_id"], second["event_id"])
@@ -610,7 +613,7 @@ class SprintOwnershipTests(SprintFixture):
         self.client.calls.clear()
 
         with self.assertRaisesRegex(TaskError, "request id belongs to another operation") as raised:
-            self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reused-id")
+            self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reused-id")
 
         self.assertEqual(raised.exception.code, "validation")
         self.assertFalse(any(method == "saveTaskMetadata" for method, _params in self.client.calls))
@@ -623,14 +626,14 @@ class SprintOwnershipTests(SprintFixture):
 
         with self._refuse_metadata("sprint_status"):
             with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-repair")
+                self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-repair")
 
         self.assertEqual(pending.exception.code, "audit_pending")
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         self.assertEqual([event["kind"] for event in self._events()], ["created", "closed"])
 
-        repaired = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-repair")
-        replay = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-repair")
+        repaired = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-repair")
+        replay = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-repair")
 
         self.assertEqual(repaired["action"], "reopened")
         self.assertEqual(repaired["sprint"]["status"], "open")
@@ -643,12 +646,12 @@ class SprintOwnershipTests(SprintFixture):
         self.writer.close(role="po", actor="operator", reference=ref)
         with self._refuse_metadata("sprint_status"):
             with self.assertRaisesRegex(TaskError, "pending repair"):
-                self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-resumed")
+                self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-resumed")
         issue = next(task for task in self.client.tasks if task["reference"] == "issue:open")
         issue["is_active"] = 0
         self.client.metadata[issue["id"]]["issue_closed_reason"] = "resolved"
 
-        repaired = self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-resumed")
+        repaired = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-resumed")
 
         self.assertEqual(repaired["sprint"]["status"], "open")
         self.assertEqual([event["kind"] for event in self._events()], ["created", "closed", "reopened"])
@@ -658,13 +661,13 @@ class SprintOwnershipTests(SprintFixture):
         self.writer.close(role="po", actor="operator", reference=ref)
         with self._refuse_metadata("sprint_status"):
             with self.assertRaisesRegex(TaskError, "pending repair"):
-                self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-lost")
+                self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-lost")
         winner = self._create(
             goal="winner", reference="sprint:winner", projects=["secretary-instance"],
         )["sprint"]["ref"]
 
         with self.assertRaisesRegex(TaskError, winner) as raised:
-            self.writer.reopen(role="po", actor="operator", reference=ref, request_id="reopen-lost")
+            self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-lost")
 
         self.assertEqual(raised.exception.code, "sprint_conflict")
         self.assertEqual(
@@ -679,7 +682,7 @@ class SprintOwnershipTests(SprintFixture):
         self.client.metadata[issue["id"]]["issue_closed_reason"] = "resolved"
 
         with self.assertRaisesRegex(TaskError, "is closed"):
-            self.writer.reopen(role="po", actor="operator", reference=ref)
+            self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref)
 
     def test_board_layout_without_issues_column_fails_closed(self) -> None:
         self.client.columns[7][0] = {"id": 1, "title": "Backlog"}
@@ -809,6 +812,7 @@ class SprintTests(SprintFixture):
         ref = writer.create(
             role="po", actor="operator", goal="hard limit", product="secretary",
             issues=["issue:open"], projects=["secretary"],
+            observer=head_choice("codex-observer"),
         )["sprint"]["ref"]
 
         writer.record_budget(
@@ -984,6 +988,7 @@ class SprintTests(SprintFixture):
                 "--instance", str(self.instance), "--goal", "CLI sprint",
                 "--repository", "secretary", "--product", "secretary", "--issue", "issue:open",
                 "--project", "secretary", "--request-id", "cli-create",
+                "--observer", "codex-observer",
             ])
         self.assertEqual(code, 0)
         self.assertEqual(errors.getvalue(), "")

@@ -344,6 +344,13 @@ class FakeCatalog:
             raise HostError(f"unknown head {head!r}")
         return head
 
+    def observer_profile(self, head: str) -> dict:
+        # Same rule as InstanceCatalog: one lookup for a head a sprint declared, no fallback. A
+        # profile that has left the registry makes the sprint unrunnable, and the fence says so.
+        if head not in self.profiles:
+            raise HostError(f"unknown head {head!r}")
+        return self.profiles[head]
+
     def observer_run(self, head: str, *, workspace: str = "") -> HeadRun:
         profile = self.profiles.get(head, {"adapter": "codex", "resource": "openai-sub"})
         return head_run_from_profile(

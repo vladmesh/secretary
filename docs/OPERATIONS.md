@@ -343,6 +343,7 @@ The entity is created by the product command, as the `po` role:
 python3 -m secretary sprint create --role po --actor <actor> \
   --goal "<one sentence>" --dod-file DOD.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
+  --observer <head-profile|none> \
   --repository <repo> [--repository <repo>]
 python3 -m secretary sprint show --ref sprint:<ID>
 python3 -m secretary sprint status --ref sprint:<ID>
@@ -644,6 +645,62 @@ it reports success. After it runs, install accepts the board unchanged.
 
 `python3 -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
 by index, so it refuses a board that holds cards unless the layout already matches, and points here.
+
+## Sprint observer cutover
+
+Before this migration a sprint declared no observer and the dispatcher picked a head from
+`role_defaults.observer`. After it every sprint row carries one explicit value and the reader is
+strict. Those two facts cannot hold at different moments on a running installation: a strict reader
+let loose on a row that predates the field calls the live sprint corrupt and fences its projects. So
+the migration is one ordered sequence that stops the pipeline, and it is an operator action.
+
+Look first, from anywhere, without stopping anything:
+
+```bash
+python3 -m secretary sprint migrate-observer --instance INSTANCE --dry-run
+```
+
+It prints the value it would write for every row: `{"kind":"head",…}` for the open sprint,
+recovered provenance for each closed row whose last successful `observer_launched` /
+`observer_relaunched` event names a head, and `migration_unknown` for a closed row that never
+launched one. Read that list before going further; a closed row whose provenance looks wrong is
+worth resolving now rather than after it is on the board.
+
+Then the cutover proper:
+
+```bash
+python3 -m secretary pause freeze --instance INSTANCE --reason "observer cutover"
+python3 -m secretary pause-status --instance INSTANCE   # confirm every head is stopped
+python3 -m secretary sprint migrate-observer --instance INSTANCE
+```
+
+The freeze must carry no `--exclude-workspace`: a head left running keeps writing to the board this
+migration rewrites. The command refuses before its first write if the pipeline is not frozen, if the
+freeze carries exclusions, or if any worker, reviewer or observer record still holds a terminal
+handle. It then runs, in this order and no other:
+
+1. pre-migration checkpoint, written and pushed while the tolerant reader is still in force, so
+   there is a state to roll back to that describes the installation as it ran;
+2. the immutable versioned inventory and journal, persisted under
+   `DATA_DIR/sprints/observer-migration/`;
+3. one idempotent write per row, under a request id derived from the inventory digest and the ref;
+4. a strict full rescan of every row, plus a post-migration checkpoint;
+5. activation of the strict reader, `DATA_DIR/sprints/observer-strict.json`;
+6. resume.
+
+Any step that refuses leaves the freeze in force and the strict reader off. Rerun the same command:
+provenance is read back from the journal rather than recomputed, a row that already carries exactly
+the selected value is skipped without a backend write, and a row carrying a *different* value stops
+the migration for an operator to resolve by hand. Pass `--no-resume` to keep the freeze after a
+successful cutover and lift it yourself with `secretary resume --instance INSTANCE`.
+
+The one case the command cannot decide is an open sprint whose running head it cannot prove: no
+tracked observer record and no successful launch event, or the two disagreeing. It names the sprint
+and refuses. Settle which head is running, then rerun.
+
+After the cutover, `secretary sprint create` and `secretary sprint reopen` both require
+`--observer`, and an open sprint with missing or unreadable metadata fences its own projects with a
+critical outcome instead of falling back to a role default.
 
 ## Recovery
 

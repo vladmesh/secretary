@@ -18,6 +18,7 @@ from unittest import mock
 
 from secretary.data import export_board, init_layout, normalize_sprint_entity
 from secretary.restore import RestoreError, import_normalized_board, restore_findings, restore_state
+from secretary.sprint_observer import head_choice
 from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
 from secretary.tasks import TaskWriter
 
@@ -64,7 +65,7 @@ class SprintRestoreTests(unittest.TestCase):
             definition_of_done="restore rebuilds the entity", reference="sprint:entity",
             repositories=["secretary", "secretary-instance"], product="secretary",
             issues=["issue:open"], projects=["secretary", "secretary-instance"],
-            request_id="seed-create",
+            observer=head_choice("codex-observer"), request_id="seed-create",
         )["sprint"]["ref"]
         card = TaskWriter(self.source, data_dir=self.source_data).create(  # type: ignore[arg-type]
             # The sprint holds `secretary`, so its own observer is the writer of its cards.
@@ -146,6 +147,57 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(restore_findings(self.target_data), ["memory index has not been rebuilt",
                                                              "managed reconcile has not been applied"])
 
+    def test_the_observer_declaration_survives_a_round_trip(self) -> None:
+        client, _ = self._restore()
+
+        live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
+        self.assertEqual(live["observer"], head_choice("codex-observer"))
+        self.assertEqual(self._exported_sprint()["observer"], head_choice("codex-observer"))
+
+    def test_an_invalid_observer_value_stops_the_restore_before_the_first_write(self) -> None:
+        """Validated as a set, so a bad row cannot leave the rows before it on the board."""
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        payload["sprints"][0]["observer"] = {"kind": "default"}
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(RestoreError, "not one of the tagged forms"):
+            import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
+
+        board = ensure_sprint_board(client)  # type: ignore[arg-type]
+        self.assertEqual([task for task in client.tasks if task["project_id"] == board], [])
+
+    def test_an_open_row_is_refused_when_its_export_carries_provenance(self) -> None:
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        payload["sprints"][0]["observer"] = {
+            "kind": "historical", "profile": None, "source": "migration_unknown",
+        }
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(RestoreError, "may not carry migration provenance"):
+            import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+
+    def test_an_open_row_is_never_published_without_its_observer(self) -> None:
+        """Status and observer are on the row before the reference makes it readable."""
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        client, _ = self._restore()
+
+        order = [
+            method for method, params in client.calls  # type: ignore[attr-defined]
+            if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
+            or (method == "updateTask" and params.get("reference") == self.ref)
+        ]
+        self.assertEqual(order[:2], ["saveTaskMetadata", "updateTask"])
+
     def test_checkpoint_without_sprint_ownership_restores_as_it_was(self) -> None:
         """A sprint closed before a sprint owned a Product keeps every path working.
 
@@ -178,7 +230,8 @@ class SprintRestoreTests(unittest.TestCase):
             sorted(key for key in client.metadata[row["id"]] if key.startswith("sprint_")),  # type: ignore[attr-defined]
             [
                 "sprint_budget", "sprint_current_task", "sprint_definition_of_done", "sprint_goal",
-                "sprint_repositories", "sprint_resume", "sprint_source_audit", "sprint_status",
+                "sprint_observer", "sprint_repositories", "sprint_resume", "sprint_source_audit",
+                "sprint_status",
             ],
         )
         # Its own export is stable: a second checkpoint of the restored entity still
@@ -292,8 +345,12 @@ class SprintRestoreTests(unittest.TestCase):
         def lossy(method: str, **params: object) -> object:
             # Only the rewrite of the exported fields is lossy: the create of the row
             # verifies its own metadata and would refuse before parity is ever reached.
+            # The dropped field is the reservations rather than the status, because
+            # status and observer now land with the create, so that the row is never
+            # published in a shape nobody chose. Ownership is written only here, so it is
+            # what a lossy rewrite can still lose.
             if method == "saveTaskMetadata" and "sprint_source_audit" in dict(params["values"]):  # type: ignore[arg-type]
-                values = {k: v for k, v in dict(params["values"]).items() if k != "sprint_status"}  # type: ignore[arg-type]
+                values = {k: v for k, v in dict(params["values"]).items() if k != "sprint_reservations"}  # type: ignore[arg-type]
                 return original(method, task_id=params["task_id"], values=values)
             return original(method, **params)
 

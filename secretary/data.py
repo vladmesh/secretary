@@ -325,6 +325,10 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
             {"reservations": [str(project) for project in sprint["reservations"] or []]}
             if "reservations" in sprint else {}
         ),
+        # A row the observer migration has not reached carries no observer key at all, and the
+        # record keeps it absent.  A key present and `None` is a value that is not one of the four
+        # tagged forms: restore refuses the whole set on it rather than guessing a repair.
+        **({"observer": sprint["observer"]} if "observer" in sprint else {}),
         "status": str(sprint.get("status") or ""),
         "budget": {"by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())}},
         "current_task": str(sprint.get("current_task") or ""),

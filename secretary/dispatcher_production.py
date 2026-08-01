@@ -16,6 +16,7 @@ from secretary.dispatcher_observer import (
     reconcile_observers,
     retry_pending_observer_stops,
 )
+from secretary.dispatcher_observer_fence import fenced_task, observer_fence
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -379,17 +380,36 @@ def _production_tick_body(
     payload.setdefault("owner_acquired_at", now_rfc3339())
     payload["last_tick_started_at"] = now_rfc3339()
 
-    active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
-    active_refs = {str(task.get("ref") or "") for task in active_tasks}
-    reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
     observer_errors: list[dict[str, str]] = []
+    # Before anything moves. A sprint whose declared observer is corrupt, dead or unresolvable
+    # holds its own reservations, and the cards in them are not advanced, reconciled or claimed
+    # this tick. Pure: it reads the board and the records, and launches nothing.
+    try:
+        fence = observer_fence(runtime, payload)
+    except Exception as exc:
+        observer_errors.append(_unexpected_error("", exc))
+        fence = {"sprints": set(), "projects": set(), "refs": set(), "outcomes": []}
+    fence_outcomes = list(fence.get("outcomes") or [])
+
+    cycle = _production_tasks(runtime, {"in_progress", "validate"})
+    active_tasks = [task for task in cycle if not fenced_task(fence, task)]
+    active_refs = {str(task.get("ref") or "") for task in active_tasks}
+    # A fenced card drops out of `active_refs`, which is exactly the shape reconciliation reads as
+    # an orphaned record and settles. Its refs are handed over separately so the record survives
+    # the fence untouched instead of being cleaned up as work that left the cycle.
+    fenced_refs = set(fence.get("refs") or ()) | {
+        str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
+    }
+    reconcile_outcomes = _reconcile_production(
+        runtime, records, payload, active_refs, fenced_refs=fenced_refs
+    )
     # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
     # reconciliation did: those are stamped by every tick regardless of code version, so a
     # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
     # on the strength of a field that predates the reconciliation pass itself.
     payload["last_reconciled_at"] = now_rfc3339()
     outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
-    outcomes = reconcile_outcomes + outcomes
+    outcomes = fence_outcomes + reconcile_outcomes + outcomes
     try:
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:
@@ -407,7 +427,7 @@ def _production_tick_body(
     claims_allowed = pause.get("mode") != "drain"
     if claims_allowed and not active_blocked:
         try:
-            ready_outcome = _production_claim_ready(runtime, records, payload)
+            ready_outcome = _production_claim_ready(runtime, records, payload, fence=fence)
         except Exception as exc:
             errors.append(_unexpected_error("", exc))
         else:
@@ -864,6 +884,7 @@ def _reconcile_production(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     active_refs: set[str],
+    fenced_refs: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile records and controlled divergences against the current board.
 
@@ -878,13 +899,16 @@ def _reconcile_production(
     """
     outcomes: list[dict[str, Any]] = []
     state_cache: dict[str, str | None] = {}
+    # A fenced sprint's records are left exactly as they are. Reconciliation stops heads and
+    # removes records, and both are mutations of work the fence exists to hold still.
+    fenced_refs = fenced_refs or set()
 
     def card_state(ref: str) -> str | None:
         if ref not in state_cache:
             state_cache[ref] = _current_card_state(runtime, ref)
         return state_cache[ref]
 
-    for ref in sorted(ref for ref in records if ref not in active_refs):
+    for ref in sorted(ref for ref in records if ref not in active_refs and ref not in fenced_refs):
         # `active_refs` is a snapshot taken before this pass; the board can move the card back
         # into the active cycle between that snapshot and this loop (a PO race). The snapshot is
         # only ever a reason to look, never proof of anything: only the live state fetched right
@@ -920,7 +944,7 @@ def _reconcile_production(
         for divergence in divergences
         if isinstance(divergence, dict) and divergence_is_open(divergence)
     } if isinstance(divergences, list) else set()
-    for ref in sorted(open_refs - active_refs):
+    for ref in sorted(open_refs - active_refs - fenced_refs):
         state = card_state(ref)
         if state is None or state in ("in_progress", "validate"):
             continue
@@ -1127,7 +1151,9 @@ def _production_claim_ready(
     runtime: Any,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
+    fence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    fence = fence or {"sprints": set(), "projects": set(), "refs": set()}
     active_code_projects = {
         str(task.get("project") or "")
         for task in _production_tasks(runtime, {"in_progress", "validate"})
@@ -1139,6 +1165,12 @@ def _production_claim_ready(
     for task in _production_tasks(runtime, {"ready"}):
         if is_steward_report(task):
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
+            continue
+        if fenced_task(fence, task):
+            skipped.append({
+                "ref": task["ref"],
+                "reason": "the sprint holding this project has no working declared observer",
+            })
             continue
         sprint_ref = str(task.get("sprint") or "")
         if sprint_ref:
