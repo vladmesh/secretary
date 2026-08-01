@@ -1,18 +1,25 @@
-"""Hermetic default for the unit-test run: Orca discovery never leaves the repo.
+"""Hermetic defaults for the unit-test run: Orca discovery and Kanboard reads
+never leave the repo/process.
 
 ``python -m unittest`` imports this package before it imports any ``test_*``
-module, so the two patches below are live before a single test can reach
+module, so the patches below are live before a single test can reach
 ``resolve_systemd_layout``/``resolve_packaged`` and discover a real host
-executable. Without this, the same checkout is green on a developer box with
+executable, or reach ``secretary.status.collect_status`` and dial a real
+Kanboard. Without this, the same checkout is green on a developer box with
 Orca installed and red on a bare CI runner (or vice versa) purely from
-process discovery order (secretary-705, secretary-738, secretary-748).
+process discovery order (secretary-705, secretary-738, secretary-748), and a
+worker/reviewer/operator shell that inherits a live installation's
+``KANBOARD_*`` variables turns the unit suite into a client of that board
+(secretary-1026).
 
-A test that needs real host resolution opts in locally, the same way the
-rest of the suite already overrides other host-apply seams: wrap the call in
-its own ``mock.patch("secretary.host_apply.find_orca_executable", ...)`` (or
-``...pinned_orca_executable``) with whatever value the scenario needs. That
-local patch simply shadows the process-wide default for the duration of the
-``with`` block; nothing needs to be undone.
+A test that needs real host resolution or a real sprint board opts in
+locally, the same way the rest of the suite already overrides other
+host-facing seams: wrap the call in its own
+``mock.patch("secretary.host_apply.find_orca_executable", ...)`` (or
+``...pinned_orca_executable``, or ``mock.patch("secretary.status.KanboardClient", return_value=FakeKanboard())``)
+with whatever value the scenario needs. That local patch simply shadows the
+process-wide default for the duration of the ``with`` block; nothing needs
+to be undone.
 
 If a test fails with "Orca executable for <user> is unavailable", it means
 production code reached real host discovery without going through either
@@ -26,6 +33,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from unittest import mock
+
+from tests.kanboard_fixtures import OfflineKanboard
 
 _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
 
@@ -42,6 +51,16 @@ _pinned_orca_patcher = mock.patch(
     "secretary.host_apply.pinned_orca_executable", return_value=None
 )
 _pinned_orca_patcher.start()
+
+# secretary.status.collect_status's sprint read builds a KanboardClient()
+# from bare os.environ with no test seam of its own. Route it to an
+# in-memory, zero-network fake by default so ambient KANBOARD_* credentials
+# (real or live-looking) can never make a unit test read or write a real
+# board (secretary-1026). See tests/kanboard_fixtures.py.
+_status_kanboard_patcher = mock.patch(
+    "secretary.status.KanboardClient", return_value=OfflineKanboard()
+)
+_status_kanboard_patcher.start()
 
 # `git fetch` ends with `git maintenance run --auto`, and gc detaches by default,
 # so a repository a test built in a temporary directory can still be written to

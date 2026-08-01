@@ -19,8 +19,16 @@ python3 -m pip install '.[memory]'
 python3 -m unittest
 ```
 
-The unit suite is hermetic: it does not need Kanboard, Orca, a network or a configured instance.
-Tests that need a live stack are better documented as operator runbooks than added to the unit suite.
+The unit suite is hermetic: it does not need Kanboard, Orca, a network or a configured instance. That
+holds even when the process inherits a live installation's `KANBOARD_*` variables, for example in a
+worker, reviewer or operator shell: `tests/__init__.py` routes `secretary status`'s sprint read to a
+zero-network fake by default (see `tests/README.md`), so credentials present in the environment cannot
+make a unit test read or write a real board by accident. This matters beyond the unit suite too: during
+sprint:1024 review, a reviewer session inherited live `KANBOARD_*` credentials and an exploratory CLI
+smoke command ended up migrating the production board (secretary-1026) — the same class of ambient-
+credential risk that hermetic tests protect against. A live canary belongs in an operator runbook or an
+explicit, separately opted-in integration test against a disposable endpoint, never disguised as a
+`test_*` module the default run discovers.
 
 ## Preparing a change for merge
 
