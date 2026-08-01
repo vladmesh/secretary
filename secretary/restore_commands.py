@@ -50,6 +50,15 @@ def add_restore_subcommands(subparsers) -> None:
     board.add_argument("--instance", required=True)
     board.set_defaults(handler=run_restore_board)
 
+    live_board = subparsers.add_parser("board", help="repair the live Pipeline board schema")
+    live_board_subcommands = live_board.add_subparsers(dest="board_command")
+    migrate_assessment = live_board_subcommands.add_parser(
+        "migrate-assessment",
+        help="add the Assessment column to a Pipeline board that already holds cards",
+    )
+    migrate_assessment.set_defaults(handler=run_board_migrate_assessment)
+    live_board.set_defaults(handler=_board_subcommand_required)
+
     reconcile = subparsers.add_parser("restore-reconcile", help="verify live managed reconcile after restore")
     reconcile.add_argument("--instance", required=True)
     reconcile.set_defaults(handler=run_restore_reconcile)
@@ -97,6 +106,24 @@ def run_restore_board(args: argparse.Namespace) -> int:
         return 2
     sprints = restore_state(data_dir).get("sprint_count", 0)
     _print_json({"ok": True, "action": "restore-board", "cards": count, "sprints": sprints})
+    return 0
+
+
+def _board_subcommand_required(args: argparse.Namespace) -> int:
+    _print_json({"ok": False, "action": "board", "error": "board subcommand required"})
+    return 2
+
+
+def run_board_migrate_assessment(args: argparse.Namespace) -> int:
+    """Add the Assessment column to the live board. Reads Kanboard credentials from env."""
+    from secretary.bootstrap import BootstrapError, migrate_assessment_column
+
+    try:
+        result = migrate_assessment_column()
+    except BootstrapError as exc:
+        _print_json({"ok": False, "action": "board migrate-assessment", "error": str(exc)})
+        return 2
+    _print_json(result)
     return 0
 
 

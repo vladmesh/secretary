@@ -111,8 +111,11 @@ JSON with five kinds of signal, each of them a reason you were woken at all:
   - Separate events of the same kind: a missing production state or missing tick telemetry (the
     telemetry cannot be read, which is blindness rather than "all quiet") and a telemetry reset (the
     state file was replaced and the counter history started over).
-- `stale` — cards stuck in one column (Ready, In progress, Validate, Blocked) for longer than
-  `TA_STEWARD_STALE_HOURS` (24h by default).
+- `stale` — cards stuck in one column (Ready, In progress, Validate, Assessment, Blocked) for longer
+  than `TA_STEWARD_STALE_HOURS` (24h by default). Assessment is on that list because nothing else
+  watches it: a card there waits on the observer's release / rework / reslice decision, with no head
+  running and no watchdog that could time it out. Your way out of it is the ordinary escalation,
+  `move --to Blocked` with a reason; deciding the card's fate is the observer's call, not yours.
 - `resource_flip` — a resource's health status changed since the previous run. Both a flip to red and a
   recovery to green are worth investigating after the fact. The source is the same live data plane as
   `pipeline_ticks`: the cache of verdicts the production dispatcher writes before launching a head. The

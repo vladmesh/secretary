@@ -42,7 +42,7 @@ import os
 # Env override exists so the e2e can drive a throwaway board without touching the real one.
 BOARD_NAME = os.environ.get("TA_PIPELINE_BOARD", "Pipeline")
 
-COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Blocked", "Done"]
+COLUMNS = ["Issues", "Ready", "In progress", "Validate", "Assessment", "Blocked", "Done"]
 # Where an agent proposal lands: the board's first column. The card is stamped record_type=task,
 # so it reads as an execution card awaiting PO triage and never as a Product issue: an agent
 # still cannot choose product, kind and priority, so `issue create` stays closed to it.
@@ -121,6 +121,10 @@ STEWARD_ESCALATIONS = {
     ("Ready", "Blocked"),
     ("In progress", "Blocked"),
     ("Validate", "Blocked"),
+    # Assessment is a wait on the observer, not on a head, so nothing times it out on its own.
+    # The steward's escape hatch has to reach it too, or a card whose observer never came back
+    # would sit there with no way out short of a human editing Kanboard by hand.
+    ("Assessment", "Blocked"),
 }
 
 # Allowed (from, to) column moves per role, for the generic `move` command. Claim owns the
@@ -134,6 +138,12 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
         ("Validate", "In progress"),
         ("Validate", "Blocked"),
         ("Validate", "Done"),
+        # The reviewer/observer seam. Nothing routes a card into Assessment yet; these edges
+        # mirror secretary.tasks._TRANSITIONS so both engines read the board the same way.
+        ("Validate", "Assessment"),
+        ("Assessment", "In progress"),
+        ("Assessment", "Done"),
+        ("Assessment", "Blocked"),
     },
     "worker": set(),
     # The layer-3 reviewer never moves cards (the dispatcher acts on its verdict, like it does on

@@ -47,9 +47,21 @@ The public path to the board is `secretary task`. A card carries a `ref`, projec
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
-Issues → ready → in_progress → validate → done
-                         └────────────→ blocked
+Issues → ready → in_progress → validate → assessment → done
+                         └───────────────────────────→ blocked
 ```
+
+The board columns are `Issues, Ready, In progress, Validate, Assessment, Blocked, Done`, in that
+order.
+
+`assessment` is a durable wait for a decision, not for a machine. A card sits there with no running
+head and no gate left to run; it leaves when the observer (or the PO) decides release, rework or
+reslice, and the dispatcher performs that decision as `assessment -> done`, `assessment ->
+in_progress` or `assessment -> blocked`. Mechanical gate outcomes never pass through it: CI, the
+stand run and the layer-3 reviewer verdict all still resolve in Validate. The steward may move a
+card from Assessment to Blocked with a reason, its usual escalation when nobody comes back for a
+decision; workers and reviewers move nothing, there as everywhere else. A card left in Assessment
+past the steward's stale threshold is reported like any other stuck card.
 
 ```bash
 python3 -m secretary task list --project PROJECT

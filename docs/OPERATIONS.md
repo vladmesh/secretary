@@ -623,6 +623,22 @@ the row or the board comment of that request already exists. A document that is 
 comes back with `secretary product transaction adopt --path FILE`, which files it under its own request id
 and removes the copy, after which `retry` and `discard` see it again.
 
+## Board column schema
+
+Install creates the Pipeline columns and then refuses to reshape a board that already holds cards:
+renaming a column in place would change what its cards mean, and removing one moves every card it
+holds to the trash. A live board that predates a column therefore needs one explicit repair:
+
+```bash
+python3 -m secretary board migrate-assessment
+```
+
+It adds the `Assessment` column at position 5 of a board that carries the earlier six-column layout,
+without moving, reordering or trashing a card and without renaming an existing column. It reads the
+Kanboard credentials from the runtime environment, like `secretary task`. Running it again is a
+no-op that still reports success, and it refuses any layout that is neither the six-column one nor
+the current seven-column one, naming both. After it runs, install accepts the board unchanged.
+
 ## Recovery
 
 The Git-backed checkpoint and the full recovery sequence are documented in

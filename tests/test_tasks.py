@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import io
@@ -24,6 +25,9 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    _STATE_BY_COLUMN,
+    _STATES,
+    _TRANSITIONS,
 )
 
 
@@ -238,6 +242,7 @@ class WriteKanboard(FakeKanboard):
             return [
                 {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
                 {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                {"id": 7, "title": "Assessment"},
                 {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
             ]
         if method == "createComment":
@@ -1040,6 +1045,115 @@ class TaskWriterTests(unittest.TestCase):
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
             export_board(Path(self.tmpdir.name), command=["pipeline"])
+
+
+class AssessmentStateTests(unittest.TestCase):
+    """secretary-1025: the durable wait between a reviewer verdict and the observer's decision.
+
+    Nothing routes a card into `assessment` yet, so these tests pin the model itself: who may
+    move a card in and out of it, and that the column round-trips through the state map.
+    """
+
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
+
+    def test_column_order_and_state_map(self) -> None:
+        self.assertEqual(
+            _STATES,
+            ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
+        )
+        self.assertEqual(_STATE_BY_COLUMN["Assessment"], "assessment")
+        self.assertEqual(
+            list(_STATE_BY_COLUMN),
+            ["Issues", "Ready", "In progress", "Validate", "Assessment", "Blocked", "Done"],
+        )
+
+    def test_dispatcher_transitions_are_exact(self) -> None:
+        """Pinned exactly: a later card must widen this table deliberately, not by accident."""
+        self.assertEqual(
+            _TRANSITIONS["dispatcher"],
+            {
+                ("in_progress", "validate"), ("in_progress", "blocked"),
+                ("in_progress", "ready"), ("validate", "in_progress"),
+                ("validate", "blocked"), ("validate", "done"),
+                ("validate", "assessment"), ("assessment", "in_progress"),
+                ("assessment", "done"), ("assessment", "blocked"),
+            },
+        )
+
+    def test_worker_and_reviewer_stay_out_of_assessment(self) -> None:
+        self.assertEqual(_TRANSITIONS["worker"], set())
+        self.assertEqual(_TRANSITIONS["reviewer"], set())
+        for role in ("po", "observer"):
+            self.assertIn(("validate", "assessment"), _TRANSITIONS[role])
+            self.assertIn(("assessment", "ready"), _TRANSITIONS[role])
+        self.assertEqual(
+            {edge for edge in _TRANSITIONS["steward"] if "assessment" in edge},
+            {("assessment", "blocked")},
+        )
+
+    def test_dispatcher_moves_a_card_into_and_out_of_assessment(self) -> None:
+        self.client.tasks[0]["column_id"] = 4  # Validate
+        entered = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468",
+            target="assessment", reason="", request_id="into-assessment",
+        )
+        self.assertEqual(entered["task"]["state"], "assessment")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+        left = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468",
+            target="in_progress", reason="", request_id="out-of-assessment",
+        )
+        self.assertEqual(left["task"]["state"], "in_progress")
+        self.assertEqual(self.client.tasks[0]["column_id"], 3)
+
+    def test_worker_may_not_move_a_card_out_of_assessment(self) -> None:
+        self.client.tasks[0]["column_id"] = 7
+        with self.assertRaisesRegex(TaskError, "may not move") as raised:
+            self.writer.move(
+                role="worker", actor="w", reference="secretary-468", target="done", reason="",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
+    def test_steward_escalates_an_assessment_card_with_a_reason(self) -> None:
+        self.client.tasks[0]["column_id"] = 7
+        with self.assertRaisesRegex(TaskError, "non-empty reason"):
+            self.writer.move(
+                role="steward", actor="s", reference="secretary-468", target="blocked", reason="",
+            )
+        escalated = self.writer.move(
+            role="steward", actor="s", reference="secretary-468", target="blocked",
+            reason="the observer never came back", request_id="assessment-escalation",
+        )
+        self.assertEqual(escalated["task"]["state"], "blocked")
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "blocked")
+
+    def test_cli_choice_lists_accept_assessment_where_a_state_is_legal(self) -> None:
+        """`list --state` and `move --to` take it; `create --state` still cannot open a card there."""
+        choices = _task_state_choices()
+        self.assertIn("assessment", choices[("list", "state")])
+        self.assertIn("assessment", choices[("move", "to")])
+        self.assertEqual(choices[("create", "state")], ("issues", "ready"))
+
+
+def _task_state_choices() -> dict[tuple[str, str], tuple[str, ...]]:
+    """{(task subcommand, argument dest): its choices} for every state-valued task argument."""
+    from secretary.task_commands import add_task_subcommands
+
+    parser = argparse.ArgumentParser()
+    add_task_subcommands(parser.add_subparsers(dest="command"))
+    task = parser._subparsers._group_actions[0].choices["task"]  # type: ignore[union-attr]
+    found: dict[tuple[str, str], tuple[str, ...]] = {}
+    for name, sub in task._subparsers._group_actions[0].choices.items():  # type: ignore[union-attr]
+        for action in sub._actions:
+            if action.dest in {"state", "to"} and action.choices:
+                found[(name, action.dest)] = tuple(action.choices)
+    return found
 
 
 _READ_METHODS = {
