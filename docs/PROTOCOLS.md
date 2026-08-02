@@ -483,9 +483,13 @@ Nothing here stops every terminal in the worktree, so the worker's own pane stay
 split anchor.
 
 Both red verdicts return the card to In progress through one transition, and both hand the round
-back to the session that wrote the code. A red mechanical gate opens it directly; a red review opens
-it after the reviewer's stop is confirmed. Nothing else moves a card to In progress for rework, and
-the transition always runs the same order, differing only in the phase it records:
+back to the session that wrote the code. What differs is what opens it. A red mechanical gate opens
+it directly, always: nothing about a failed gate is a judgement anyone has to make. A red review on
+a card whose sprint declares a concrete observer opens nothing by itself; the card parks in
+Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs
+a recorded `rework` decision. A red review on a card with no observer to decide opens it directly
+after that same confirmed stop. Nothing else moves a card to In progress for rework, and the
+transition always runs the same order, differing only in the phase it records:
 
 1. The red intent, with its phase, the baseline of the report it closes and the reason the card is
    moving, goes to disk.
@@ -528,7 +532,8 @@ and stop signal the head's private process group, so its helpers are frozen too.
 stop never permits a second writer in the workspace.
 
 Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
-and the red verdict that hands that round back. Nothing else keeps a worker session. A preempt or
+the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker
+session. A preempt or
 requeue back to Ready, a `report:blocked`, a move to Blocked and a reconciliation onto another card
 all stop the worker head and clear the retained state, so the next round starts from a replacement
 head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends

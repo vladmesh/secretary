@@ -78,7 +78,12 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertIn("a local defect inside the card may return for supported rework or retry", text)
         self.assertIn("the planned architecture or card cut is wrong", text)
         self.assertIn("hardening or compatibility outside the sprint is deferred or taken to the user", text)
-        self.assertIn("may already have started the first automatic rework before you wake", text)
+        # A red review no longer reworks on its own: the card parks and waits for the decision.
+        # The guardrail this replaces told the observer the opposite, which is how a head ends up
+        # waiting for a worker that nothing will resume.
+        self.assertIn("A red reviewer verdict on your sprint's card starts no rework on its own", text)
+        self.assertIn("A red mechanical gate is the exception and does rework", text)
+        self.assertNotIn("may already have started the first automatic rework before you wake", text)
         self.assertNotIn("Before an ordinary RED goes back for another worker round", text)
         self.assertIn("Apply the same classification to the Blocked evidence", text)
 

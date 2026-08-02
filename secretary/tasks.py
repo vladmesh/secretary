@@ -955,10 +955,13 @@ class TaskWriter:
         card with `--sprint-override` and a reason, which reads in the audit as the override it
         is rather than as an unmarked decision.
 
-        Which observer is fixed by the same sprint reservation guard `move` carries: an observer
-        decides only about a card whose project its own open sprint holds. Two open sprints
-        cannot reserve one project, so project to sprint to observer is one to one, and a
-        decision on a linked card can only have come from that card's own observer.
+        The same sprint reservation guard `move` carries applies here: a decision is refused on a
+        card whose project no open sprint holds. That guard is positional, not an identity. It
+        binds the card to a sprint and says nothing about the caller: every observer process runs
+        as `--role observer --actor observer`, so nothing here distinguishes one sprint's observer
+        from another's, and an observer that reaches this command can decide on any card whose
+        project is held. Authenticating a caller to a sprint is deliberately not built here, and
+        until it is, no rule elsewhere may treat an observer-authored event as self-authored.
         """
         self._role(role, {"observer"})
         if kind not in _DECISIONS:

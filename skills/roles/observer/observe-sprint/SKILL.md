@@ -259,8 +259,11 @@ When you see RED or Blocked evidence, classify the finding from the report evide
   report that every path reaches it. You will not always see the whole rule at once, and refining it after
   a round is normal; what is not normal is approving a third round on the same moving defect.
 
-The dispatcher may already have started the first automatic rework before you wake. Do not promise or
-assume otherwise. You make the final classification because you have the sprint context. A reviewer provides
+A red reviewer verdict on your sprint's card starts no rework on its own: the card is parked in
+Assessment waiting for you, and the round resumes only when you record `rework`. Do not wait for a
+worker to pick it up, because none will. A red mechanical gate is the exception and does rework
+immediately, so a card that went back to In progress without you is a failed gate, not a review.
+You make the final classification because you have the sprint context. A reviewer provides
 evidence; it does not decide sprint scope. Record the classification and evidence in the card or resume entry.
 
 An ordinary red review and rework are neither a failure of the card nor a reason to intervene when the

@@ -124,6 +124,62 @@ class EnsureStructureTests(unittest.TestCase):
         self.assertIn("updateColumn", [name for name, _ in calls])
 
 
+class LegacyClaimTests(unittest.TestCase):
+    """This surface still exposes `pipeline --role dispatcher claim`, so its own guards have to
+    know that a parked card holds a worker and a project checkout for as long as the decision
+    takes. Counting only In progress and Validate would let a second writer into the checkout a
+    card in Assessment still owns."""
+
+    def _claim(self, parked_meta, cap=3):
+        cards = {
+            7: {"id": 7, "reference": "secretary-1", "column_id": 2, "swimlane_id": 1},
+            8: {"id": 8, "reference": "secretary-2", "column_id": 5, "swimlane_id": 1},
+        }
+        meta = {
+            7: {model.META_TASK_TYPE: "code", model.META_PROJECT: "secretary"},
+            8: dict(parked_meta),
+        }
+
+        def call(method, **params):
+            if method == "getColumns":
+                return CURRENT_COLUMNS
+            if method == "getTaskByReference":
+                return cards[7]
+            if method == "getAllTasks":
+                return list(cards.values())
+            if method == "getTaskMetadata":
+                return meta[int(params["task_id"])]
+            if method in ("saveTaskMetadata", "setTaskTags", "moveTaskPosition"):
+                return True
+            if method == "getTaskTags":
+                return {}
+            raise AssertionError(f"unexpected call {method} {params}")
+
+        with (
+            mock.patch.object(ops, "call", side_effect=call),
+            mock.patch.object(ops, "board_id", return_value=2),
+            mock.patch.object(ops, "_check_head", return_value=None),
+            mock.patch.object(ops.heads, "default_head", return_value="sol"),
+        ):
+            return ops.claim_card("secretary-1", "worker-a", cap=cap)
+
+    def test_a_parked_card_still_holds_its_project_against_a_legacy_claim(self):
+        with self.assertRaises(model.GuardError) as raised:
+            self._claim({model.META_TASK_TYPE: "code", model.META_PROJECT: "secretary"})
+
+        message = str(raised.exception)
+        self.assertIn("one code task per project", message)
+        self.assertIn("Assessment", message)
+
+    def test_a_parked_card_counts_toward_the_legacy_cap(self):
+        """Another project, so the per-project guard says nothing: the parked card still holds a
+        worker session, which is what the cap counts."""
+        with self.assertRaises(model.GuardError) as raised:
+            self._claim({model.META_TASK_TYPE: "code", model.META_PROJECT: "other"}, cap=1)
+
+        self.assertIn("cap reached", str(raised.exception))
+
+
 class AssessmentGuardTests(unittest.TestCase):
     def test_the_steward_escalation_is_the_one_edge_this_surface_owns(self):
         model.check_move("steward", "Assessment", "Blocked")

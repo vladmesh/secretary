@@ -1380,11 +1380,9 @@ class AssessmentStateTests(unittest.TestCase):
         )
         self.assertEqual(performed["task"]["state"], "blocked")
 
-    def test_a_decision_needs_the_observers_own_sprint_to_hold_the_project(self) -> None:
-        """Which observer may decide is settled by the reservation `move` already checks.
-
-        Two open sprints cannot hold one project, so a card's project names exactly one sprint
-        and one observer. Without that guard any observer could record a decision on any card.
+    def test_a_decision_needs_an_open_sprint_to_hold_the_project(self) -> None:
+        """A decision is refused where no open sprint holds the card's project, the reservation
+        `move` already checks. What it does not do is say who the caller is: see the test below.
         """
         self._park()
 
@@ -1405,6 +1403,30 @@ class AssessmentStateTests(unittest.TestCase):
             )
         self.assertEqual(other.exception.code, "sprint_write_forbidden")
         self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
+
+    def test_the_decision_guard_is_positional_and_not_a_caller_identity(self) -> None:
+        """What the guard above does not do, pinned so nothing is built on top of it.
+
+        Every observer process runs as `--role observer --actor observer`, so the writer has no
+        fact that tells one sprint's observer from another's: the guard admits any observer once
+        some open sprint holds the card's project, and the recorded actor is the same either way.
+        This is the accepted behaviour of this card, and it is why no rule may treat an
+        observer-authored event as self-authored until a sprint-bound identity exists.
+        """
+        self._park()
+        self.reserve_project()
+
+        decided = self.writer.decide(
+            role="observer", actor="observer", reference="secretary-468", kind="release",
+            body="deciding from a head this guard cannot place", request_id="decision-positional",
+        )
+
+        self.assertEqual(decided["action"], "decided")
+        event = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")[-1]
+        self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
+        # And nothing in the record names the sprint the caller was observing, which is the fact
+        # a suppression or an authorisation by author would need.
+        self.assertNotIn("sprint", event["payload"])
 
     def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:
         """The escape hatch stays open, and it is recorded as the override it is."""
