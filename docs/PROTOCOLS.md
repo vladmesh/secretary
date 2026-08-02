@@ -482,8 +482,13 @@ with the round: a rework opens the next attempt with its replacement unspent.
 Every path that puts a head up after a death charges it. That is the wait watchdog, and the
 recovery of a launch intent whose head is gone: an intent left behind by a tick that died is
 settled first, and when its head has exited the ordinary path relaunches, which is a replacement
-like any other. A silent head is a different trigger and keeps the wait watchdog's own per-wait
-replacement without touching this budget.
+like any other.
+
+A silent head is a different trigger, and the two ceilings do not borrow from each other. A
+silence respawn comes out of the wait watchdog's own per-wait budget and charges nothing here; it
+also does not consume the replacement a later crash is owed, because a head that went quiet once
+and then died is still a head that died. On a card with no observer, a confirmed death answers to
+the attempt budget and to nothing else.
 
 Neither ceiling binds a card that parks for a decision. The observer is the ceiling there, and a
 counter that fired would be deciding a card the observer is still holding.

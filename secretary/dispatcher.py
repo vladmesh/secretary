@@ -3334,26 +3334,31 @@ class DispatcherRuntime:
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
         dead: bool = False,
     ):
-        # The attempt-wide budget is read before the per-wait ceiling, so a second confirmed death
-        # blocks with the reason that names the budget it ran out of rather than with the generic
-        # stall reason: the first death spent the budget through `_respawn_wait`, which also
-        # leaves the per-wait counter at one, and the operator has to be told which ceiling this
-        # card hit. The charge stays below the per-wait ceiling, so a wait that is about to
-        # escalate anyway does not spend a replacement nothing will use.
-        if dead and self._head_replacement_spent(task, record):
-            round_number = self._replacement_round(task["ref"], record)
-            return self._escalate_wait(
-                task, record, records, payload, attempt_id, kind=kind,
-                stall=_stall_seconds(kind),
-                trigger=(
-                    f"{trigger}, and this card has no observer: attempt {round_number} "
-                    f"already spent its one head replacement"
-                ),
+        # A confirmed death on a card with no observer answers to its own ceiling and to nothing
+        # else. The attempt's one replacement is what bounds it, and the per-wait respawn counter
+        # below neither grants it nor takes it away: that counter is the silence watchdog's, and a
+        # head that went quiet once and then crashed is still a head that crashed, owed the
+        # replacement a crash usually only needs. The budget is read before it is charged, so the
+        # second death of the attempt blocks with the reason naming the budget it ran out of
+        # instead of the generic stall reason.
+        if dead and not self._parks_for_decision(task):
+            if self._head_replacement_spent(task, record):
+                round_number = self._replacement_round(task["ref"], record)
+                return self._escalate_wait(
+                    task, record, records, payload, attempt_id, kind=kind,
+                    stall=_stall_seconds(kind),
+                    trigger=(
+                        f"{trigger}, and this card has no observer: attempt {round_number} "
+                        f"already spent its one head replacement"
+                    ),
+                )
+            self._charge_head_replacement(task, record, trigger)
+            return self._respawn_wait(
+                task, record, records, payload, attempt_id, kind=kind, now=time.time(),
+                trigger=trigger,
             )
         if int(getattr(record, f"{kind}_respawns") or 0) >= 1:
             return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
-        if dead:
-            self._charge_head_replacement(task, record, trigger)
         return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
 
     def _replacement_round(self, ref: str, record: DispatcherRecord) -> int:
