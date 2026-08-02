@@ -12,6 +12,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,7 +25,12 @@ from secretary.sprint_observer import (
     none_choice,
     strict_reader_active,
 )
-from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
+from secretary.sprints import (
+    SprintReader,
+    SprintWriter,
+    ensure_sprint_board,
+    sprint_admission_lock,
+)
 from secretary.tasks import TaskWriter
 
 from tests.restore_fixtures import _EmptyBoardsKanboard
@@ -445,6 +451,99 @@ class SprintRestoreTests(unittest.TestCase):
             sorted(sprint["ref"] for sprint in reader.list(statuses={"open"})),
             ["sprint:collision", "sprint:entity"],
         )
+
+    def _legacy_open_row_beside_the_seeded_one(self) -> None:
+        """The seeded row open, plus an open row from before sprints owned a product.
+
+        The legacy reference sorts after the seeded one, so it is the candidate the set
+        check judges second: the order that used to let it through.
+        """
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        payload["sprints"][0]["observer"] = none_choice()
+        legacy = dict(payload["sprints"][0]) | {
+            "reference": "sprint:z-legacy", "repositories": ["separate-repository"],
+        }
+        for field in ("product", "issues", "reservations"):
+            legacy.pop(field, None)
+        payload["sprints"].append(legacy)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_restore_refuses_a_second_open_row_that_declares_no_product(self) -> None:
+        """Ownership absence is refused on whichever side of the comparison it lands.
+
+        A pre-ownership row is a valid export, and nothing proves it disjoint from the
+        sprint beside it. Judging only the already-admitted side made the answer depend
+        on which reference sorted first, so the same pair was refused one way round and
+        restored the other.
+        """
+        self._set_open_sprint_limit(2)
+        self._legacy_open_row_beside_the_seeded_one()
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(RestoreError, "sprint:z-legacy: this sprint declares no product"):
+            import_normalized_board(
+                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+
+    def test_restore_holds_the_admission_lock_from_its_check_to_its_write(self) -> None:
+        """Recovery publishes open sprints, so it admits a set and must serialize like one.
+
+        A `create` that read the board between restore's check and its write would see no
+        restored sprint, admit itself, and leave the installation holding both.
+        """
+        self._set_open_sprint_limit(2)
+        self._two_open_rows(
+            product="other", reservations=["other"], repositories=["other"],
+            observer=none_choice(),
+        )
+        blocked: list[str] = []
+        contenders: list[threading.Thread] = []
+
+        def contender_blocked() -> bool:
+            """Whether a second admission on this data dir has to wait for the restore."""
+            entered = threading.Event()
+
+            def acquire() -> None:
+                with sprint_admission_lock(self.target_data):
+                    entered.set()
+
+            thread = threading.Thread(target=acquire, daemon=True)
+            contenders.append(thread)
+            thread.start()
+            self.addCleanup(thread.join, 5)
+            return not entered.wait(0.2)
+
+        import secretary.restore as restore_module
+
+        check = restore_module._check_restored_admission
+        publish = restore_module._import_sprints
+
+        def checked(*args: object, **kwargs: object) -> object:
+            blocked.append("check:%s" % contender_blocked())
+            return check(*args, **kwargs)  # type: ignore[arg-type]
+
+        def published(*args: object, **kwargs: object) -> object:
+            blocked.append("publish:%s" % contender_blocked())
+            return publish(*args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(restore_module, "_check_restored_admission", checked), \
+                mock.patch.object(restore_module, "_import_sprints", published):
+            client, _ = self._restore()
+
+        self.assertEqual(blocked, ["check:True", "publish:True"])
+        reader = SprintReader(client, data_dir=self.target_data)  # type: ignore[arg-type]
+        self.assertEqual(
+            sorted(sprint["ref"] for sprint in reader.list(statuses={"open"})),
+            ["sprint:collision", "sprint:entity"],
+        )
+        # And it is released again: the installation is not left unable to admit anything.
+        for thread in list(contenders):
+            thread.join(5)
+        self.assertFalse(contender_blocked())
 
     def test_an_open_row_is_never_published_without_its_observer(self) -> None:
         """Status and observer are on the row before the reference makes it readable."""

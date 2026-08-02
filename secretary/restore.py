@@ -96,8 +96,15 @@ def import_normalized_board(
     Returns the number of restored Pipeline cards; the sprint entities restored
     alongside them are counted in `restore-state.json`.
     """
+    from secretary.sprints import sprint_admission_lock
+
     data_dir = data_dir.expanduser().resolve()
-    with file_lock(data_dir / "board" / ".restore.lock"):
+    # Recovery publishes open sprints, so it is an admission of a set even though it
+    # never asks admission row by row.  Judging the export, reading what the target
+    # already holds and writing the rows have to be one transition against `create` and
+    # `reopen`, or a create that slipped between the read and the write leaves this
+    # installation over its limit with resources two sprints both claim.
+    with file_lock(data_dir / "board" / ".restore.lock"), sprint_admission_lock(data_dir):
         try:
             cards = _normalized_cards(data_dir, registered_project_ids=(registered_projects(instance) if instance else None))
             sprints = _normalized_sprints(data_dir)

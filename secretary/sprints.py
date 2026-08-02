@@ -375,11 +375,22 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
     observer call to the sprint it is about, two heads observing at once would each read
     the other's cards as their own, so at most one open sprint may declare one.
     """
-    product = str(candidate.get("product") or "")
+    product = str(candidate.get("product") or "").strip()
     roots = _canonical_roots(candidate.get("repositories") or [])
     for sprint in sorted(others, key=lambda row: str(row["ref"])):
         reference = str(sprint["ref"])
-        other_product = str(sprint.get("product") or "")
+        other_product = str(sprint.get("product") or "").strip()
+        # Both sides are judged, and the candidate first: a row from before sprints owned
+        # a product carries none, and it is no more disjoint as the sprint being admitted
+        # than as the sprint already open.  Judging only the other side would make the
+        # answer depend on which of the two was looked at first.
+        if not product:
+            raise TaskError(
+                "resource_conflict",
+                "this sprint declares no product, so it cannot be proven disjoint from "
+                f"open sprint {reference}",
+                2,
+            )
         if not other_product:
             raise TaskError(
                 "resource_conflict",
