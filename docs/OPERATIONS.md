@@ -395,9 +395,11 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-nudged` — a committed linked-card event woke one idle observer turn;
 - `observer-wake-pending` — a delivery batch was already sent and awaits its own acknowledgement;
 - `observer-wake-waiting` — an event arrived while the observer was working; the next tick after its
-  pane is ready again delivers one nudge, without waiting for the watchdog;
-- `observer-watchdog-woke` — an event remained unacknowledged for
-  `SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS` (30 minutes by default), so the fallback woke the observer;
+  pane is ready again delivers one nudge, without waiting for either ceiling below;
+- `observer-redelivered` — a batch already on the head was sent again, with the reason on the row: the
+  observer was seen ready for input without having acknowledged it, or its acknowledgement deadline
+  (`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes by default) ran out. The redelivery keeps the
+  original batch, so the resume that follows acknowledges exactly what was owed;
 - `observer-wake-deferred` — the event wake failed, including a prompt the pane never took after its
   retries; the observer row carries its reason and bounded retry. After
   `SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS` (3 by default) such failures the batch is delivered by
@@ -424,6 +426,30 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
   readiness gate nor the host is called, and after a `resume` the next tick launches the head from that same
   record;
 - `sprint-board-unavailable` — the sprints board could not be read, and no live head is stopped.
+
+Two ceilings bound one delivery, and they are not interchangeable. The acknowledgement deadline
+(`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes) is armed when the batch is sent and says how long
+that one delivery may stay unacknowledged before it is sent again. It is never compared against the age of
+the card event: an event that sat on the board for a day, delivered a minute ago, is a delivery a minute
+old. The turn ceiling (`SECRETARY_OBSERVER_TURN_CEILING_SECONDS`, 3 hours) covers the case the deadline
+cannot: a head that is never reported ready for input holds its batch without ever being asked again, since
+a redelivery only ever goes to an idle pane. Once it expires the delivery fails, takes the same bounded
+retries as any other failed wake and then the replacement path.
+
+The two numbers are deliberately far apart. Acting on the deadline costs at most a duplicate prompt to a
+head that is standing at its prompt doing nothing, so 30 minutes is cheap. Acting on the turn ceiling ends
+a delivery held by a head that by every available signal is still working, and the retries behind it end in
+a replacement, so it has to sit above the longest legitimate observer turn on a long card. A ceiling near
+the deadline would tear down working observers mid-turn, which is a failure nothing reports loudly: the
+sprint simply stops being supervised.
+
+Idleness on this path is the pane-readiness signal from the session manager, and a redelivery reads it
+more strictly than a first delivery does. It needs a readable last-output timestamp, and both that
+timestamp and the delivery's own send have to be older than `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` (3
+minutes), the same grace a freshly launched pane gets. A pane that has not yet gone busy from the prompt
+just delivered, or one whose activity cannot be read at all, is not evidence of a finished turn and waits
+for the deadline instead. A card in Ready, In progress or Validate is an ordinary wait throughout and never
+by itself an idle head.
 
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never

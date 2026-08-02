@@ -200,6 +200,25 @@ class ObserverLifecycleTests(unittest.TestCase):
         put_observers(payload, observers)
         self.runtime.production_state.save(payload)
 
+    def age_delivery(
+        self, seconds: float, reference: str = "sprint:1", *, deadline: bool = False
+    ) -> None:
+        """Put this delivery's send and hold that far in the past, as a slow head would.
+
+        The acknowledgement deadline is left where it is unless `deadline` says otherwise, so a
+        test can age a turn without also expiring the clock it is not about.
+        """
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        delivery = observers[reference].delivery
+        delivery.sent_at -= seconds
+        delivery.held_since -= seconds
+        if deadline:
+            delivery.deadline -= seconds
+            delivery.next_at -= seconds
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
     def expire_launch_retry(self, reference: str = "sprint:1") -> None:
         payload = self.runtime.production_state.load()
         observers = load_observers(payload)
@@ -998,7 +1017,7 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(record.delivery.stage, DeliveryStage.IDLE)
         self.assertEqual(record.delivery.acknowledged_through, self.audit.events()[-2]["event_id"])
 
-    def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_deadline(self) -> None:
+    def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_the_deadline(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
@@ -1031,9 +1050,10 @@ class ObserverLifecycleTests(unittest.TestCase):
         put_observers(payload, observers)
         self.runtime.production_state.save(payload)
 
-        watchdog = self.runtime.production_tick()
+        redelivered = self.runtime.production_tick()
 
-        self.assertEqual([row["action"] for row in self.actions(watchdog)], ["observer-watchdog-woke"])
+        self.assertEqual([row["action"] for row in self.actions(redelivered)], ["observer-redelivered"])
+        self.assertIn("acknowledgement deadline expired", self.actions(redelivered)[0]["reason"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1", "sprint:1"])
 
     def test_failed_nudge_retries_with_the_same_delivery_after_restart(self) -> None:
@@ -1075,7 +1095,8 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(delivery.delivery_id, delivery_id)
         self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
 
-    def test_overdue_unacknowledged_event_uses_the_watchdog_wake(self) -> None:
+    def test_an_old_event_alone_does_not_redeliver_a_live_delivery(self) -> None:
+        """The acknowledgement deadline is armed by the delivery, never by the age of the event."""
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
@@ -1085,11 +1106,184 @@ class ObserverLifecycleTests(unittest.TestCase):
             "kind": "commented", "outcome": "success", "occurred_at": "2000-01-01T00:00:00Z",
         })
 
-        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS": "1"}):
-            result = self.runtime.production_tick()
+        first = self.runtime.production_tick()
+        repeated = self.runtime.production_tick()
 
-        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-watchdog-woke"])
+        self.assertEqual([row["action"] for row in self.actions(first)], ["observer-nudged"])
+        self.assertEqual([row["action"] for row in self.actions(repeated)], ["observer-wake-pending"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
+    def test_an_observer_that_becomes_idle_unacknowledged_is_redelivered_at_once(self) -> None:
+        """No acknowledgement and a head back at its prompt: the tick that sees it redelivers."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="idle-redelivery-event",
+        )
+        self.runtime.production_tick()
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
+        # The turn ran and ended without a resume for this batch, well short of the deadline.
+        quiet_for = initial_output_stall_seconds() + 60
+        self.age_delivery(quiet_for)
+        self.host.observer_status_result = {
+            "last_activity": time.time() - quiet_for, "idle": True,
+        }
+
+        redelivered = self.runtime.production_tick()
+
+        action = self.actions(redelivered)[0]
+        self.assertEqual(action["action"], "observer-redelivered")
+        self.assertIn("became idle without acknowledging", action["reason"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1", "sprint:1"])
+        after = self.observers()["sprint:1"].delivery
+        self.assertEqual(after.stage, DeliveryStage.AWAITING_ACK)
+        # The batch is the same one: a redelivery never advances the high-water mark.
+        self.assertEqual(after.through_event, delivery.through_event)
+        self.assertLess(time.time(), after.deadline)
+
+    def test_a_head_mid_sentence_is_not_read_as_idle_by_the_redelivery(self) -> None:
+        """A pane that has not yet gone busy, and one with no readable activity, are both waits."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="mid-sentence-event",
+        )
+        self.runtime.production_tick()
+
+        # Ready for input, but its last output is this delivery's own prompt landing: the head has
+        # not started answering yet, so nothing here says its turn is over.
+        fresh = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(fresh)], ["observer-wake-pending"])
+
+        # Long quiet, but the pane's activity timestamp is missing, then unreadable. Neither is
+        # evidence of an ended turn, so the delivery keeps waiting for its deadline instead.
+        self.age_delivery(initial_output_stall_seconds() + 600)
+        for status in ({"idle": True}, {"idle": True, "last_activity": "never"}):
+            self.host.observer_status_result = status
+            result = self.runtime.production_tick()
+            self.assertEqual(
+                [row["action"] for row in self.actions(result)], ["observer-wake-pending"]
+            )
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
+
+    def test_a_head_that_never_returns_to_idle_ends_at_the_turn_ceiling(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed while the observer was working", request_id="turn-ceiling-event",
+        )
+        waiting = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
+
+        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_TURN_CEILING_SECONDS": "1"}):
+            self.age_delivery(60)
+            ceiling = self.runtime.production_tick()
+
+            action = self.actions(ceiling)[0]
+            self.assertEqual(action["action"], "observer-wake-deferred")
+            self.assertIn("turn ceiling", action["reason"])
+            delivery = self.observers()["sprint:1"].delivery
+            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+            self.assertEqual(delivery.attempts, 1)
+
+            # The retries are bounded, so a head that stays busy costs the sprint a replacement
+            # rather than holding the batch forever.
+            for _ in range(2):
+                self.expire_wake_retry()
+                replaced = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
+        self.assertIn("turn ceiling", self.actions(replaced)[0]["reason"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+
+    def test_a_long_card_mid_turn_is_not_torn_down_by_the_turn_ceiling(self) -> None:
+        """The negative case: a busy head past its acknowledgement deadline is still working."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="a long card to work through", request_id="long-turn-event",
+        )
+        self.runtime.production_tick()
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
+
+        # An hour into the turn: the acknowledgement deadline is long gone, the head is busy the
+        # whole time, and the default turn ceiling is nowhere near.
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        self.age_delivery(60 * 60, deadline=True)
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-wake-waiting")
+        self.assertIn("not ready for a prompt", action["reason"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.host.stopped_observers, [])
+        after = self.observers()["sprint:1"].delivery
+        self.assertEqual(after.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(after.delivery_id, delivery.delivery_id)
+        self.assertEqual(after.attempts, 0)
+
+    def test_a_redelivered_batch_is_still_acknowledged_only_by_its_own_marker(self) -> None:
+        """An idle-triggered redelivery does not loosen the causal acknowledgement."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="redelivery-ack-event",
+        )
+        self.runtime.production_tick()
+        first = self.observers()["sprint:1"].delivery
+        quiet_for = initial_output_stall_seconds() + 60
+        self.age_delivery(quiet_for)
+        self.host.observer_status_result = {"last_activity": time.time() - quiet_for, "idle": True}
+        self.runtime.production_tick()
+        second = self.observers()["sprint:1"].delivery
+        self.assertNotEqual(second.delivery_id, first.delivery_id)
+        self.assertEqual(second.through_event, first.through_event)
+
+        entry = {
+            "selected_step": "read board", "selected_why": "card changed",
+            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+            "dod_state": "open", "next_safe_step": "resume",
+        }
+        # The first turn finishes after the second intent was persisted. It names the delivery it
+        # was given, which is no longer the active one, so it credits nothing.
+        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            request_id="older-turn-resume", delivery_id=first.delivery_id,
+            through_event=first.through_event,
+        )
+
+        stale = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(stale)], ["observer-wake-pending"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(self.observers()["sprint:1"].delivery.acknowledged_through, "")
+
+        self.acknowledge_delivery(entry, request_id="active-marker-resume")
+        acknowledged = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        record = self.observers()["sprint:1"].delivery
+        self.assertEqual(record.acknowledged_delivery_id, second.delivery_id)
+        self.assertEqual(record.acknowledged_through, first.through_event)
 
     def test_routing_event_and_closed_sprint_do_not_wake_an_observer(self) -> None:
         self.open_sprint()

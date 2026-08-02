@@ -38,10 +38,18 @@ file: a live pid is adopted as the head of that sprint (its handle is gone, so t
 workspace), a pid that is not there yet waits out the same grace window every fresh head gets, and
 a dead one is relaunched after the workspace's terminals are closed.
 
-Liveness is the same pid heartbeat the worker/reviewer watchdog uses (`head_process_status` over
+Liveness is the same pid heartbeat the worker and reviewer get (`head_process_status` over
 `pid_file_path`). A pid file that does not exist yet is not evidence of death: a head that has just
 been launched has not written it, so an unknown pid counts as alive for a short grace window and as
 dead afterwards.
+
+Two separate ceilings bound an event delivery, and they answer different questions. The
+acknowledgement deadline says how long one delivery may stay unacknowledged before it is sent
+again; it is armed by the delivery and it is never compared against the age of the event. The turn
+ceiling says how long one head may hold a batch without ever being seen ready for input; it is much
+longer, because firing it interrupts a head that by all available evidence is still working. An
+observer seen idle with its batch still unacknowledged does not wait for either: the tick that
+observes the idleness redelivers.
 """
 
 from __future__ import annotations
@@ -74,7 +82,7 @@ from secretary.sprint_observer import (
 from secretary.tasks import TaskError, is_significant_card_event
 
 OBSERVER_ROLE = "observer"
-OBSERVER_WATCHDOG_KIND = "observer"
+OBSERVER_PID_KIND = "observer"
 # Used only when the head registry carries no `role_defaults.observer` key. Named here rather than
 # resolved to the worker's default: an observer must never silently inherit another role's head.
 OBSERVER_HEAD_FALLBACK = "codex-observer"
@@ -87,7 +95,15 @@ OBSERVER_SKILL = "observe-sprint"
 # A head that has finished its turn keeps its wrapper process alive. Orca reporting the pane ready
 # for input is the positive signal needed to nudge it for a new durable card event. A card in
 # Ready, In progress or Validate is always an ordinary wait, never an idle head.
-OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS = 30 * 60
+#
+# How long one delivery may stay unacknowledged before it is sent again. Armed by the delivery, so
+# it measures the silence of this head on this batch and nothing else.
+OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS = 30 * 60
+# How long one head may hold a batch while never being seen ready for input. Deliberately far
+# above the acknowledgement deadline: a resend to an idle head costs a duplicate prompt, while
+# this ceiling ends a delivery held by a head that still looks busy, so it has to outlast the
+# longest legitimate observer turn on a long card.
+OBSERVER_TURN_CEILING_DEFAULT_SECONDS = 3 * 60 * 60
 OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
 # How many refused deliveries of one batch are retried on the live head before the sprint pays for
@@ -110,7 +126,7 @@ PENDING_STOP_STATES = (STATE_STOP_PENDING, STATE_PAUSE_STOP_PENDING)
 
 
 def observer_pid_file(reference: str) -> str:
-    return pid_file_path(OBSERVER_WATCHDOG_KIND, reference)
+    return pid_file_path(OBSERVER_PID_KIND, reference)
 
 
 class ObserverLaunchAborted(HostError):
@@ -167,10 +183,15 @@ class ObserverDelivery:
     through_event: str = ""
     # The newest resume event known when the intent was persisted.  An empty cursor is meaningful:
     # it says there was no resume yet, so the first one appended afterwards can acknowledge this
-    # delivery.  Legacy records set `resume_cursor_known` false and fail closed until watchdog.
+    # delivery.  Legacy records set `resume_cursor_known` false and fail closed until the
+    # acknowledgement deadline.
     resume_cursor: str = ""
     resume_cursor_known: bool = True
     sent_at: float = 0.0
+    # When this batch started being held by a head that has not been seen ready for input.  The
+    # turn ceiling is measured from here, so a batch waiting on a head that never goes idle is
+    # bounded whether or not the prompt was ever delivered.
+    held_since: float = 0.0
     deadline: float = 0.0
     attempts: int = 0
     next_at: float = 0.0
@@ -189,6 +210,7 @@ class ObserverDelivery:
             "resume_cursor": self.resume_cursor,
             "resume_cursor_known": self.resume_cursor_known,
             "sent_at": self.sent_at,
+            "held_since": self.held_since,
             "deadline": self.deadline,
             "attempts": self.attempts,
             "next_at": self.next_at,
@@ -215,6 +237,7 @@ class ObserverDelivery:
             resume_cursor=str(payload.get("resume_cursor") or ""),
             resume_cursor_known=bool(payload.get("resume_cursor_known", True)),
             sent_at=_float(payload.get("sent_at")),
+            held_since=_float(payload.get("held_since")),
             deadline=_float(payload.get("deadline")),
             attempts=_int(payload.get("attempts")),
             next_at=_float(payload.get("next_at")),
@@ -232,20 +255,20 @@ def _legacy_delivery(payload: dict[str, Any]) -> ObserverDelivery:
     next_at = _float(payload.get("wake_next_at"))
     reason = str(payload.get("wake_reason") or "")
     if wake_sent and through:
-        deadline = next_at or time.time() + observer_event_watchdog_seconds()
+        deadline = next_at or time.time() + observer_ack_deadline_seconds()
         return ObserverDelivery(
             stage=DeliveryStage.AWAITING_ACK,
             acknowledged_through=acknowledged,
             delivery_id="legacy-" + uuid.uuid4().hex,
             method="nudge",
             through_event=through,
-            # The old record has no durable resume fence.  Waiting to the watchdog is the only
-            # recovery that cannot falsely credit an earlier resume to this delivery.
+            # The old record has no durable resume fence.  Waiting for the acknowledgement deadline
+            # is the only recovery that cannot falsely credit an earlier resume to this delivery.
             resume_cursor_known=False,
             deadline=deadline,
             attempts=attempts,
             next_at=deadline,
-            reason=reason or "legacy event delivery awaits watchdog recovery",
+            reason=reason or "legacy event delivery awaits its acknowledgement deadline",
         )
     if attempts and through:
         return ObserverDelivery(
@@ -418,7 +441,7 @@ def observer_alive(record: ObserverRecord, *, now: float | None = None) -> dict[
 
     `known: False` means the pid file is not readable — a head that has just been launched has not
     written its pid yet. That is not death, so it reads as alive until the grace window the
-    watchdog already uses for a pane that has produced no output at all has passed.
+    dispatcher already uses for a pane that has produced no output at all has passed.
     """
     now = time.time() if now is None else now
     status = head_process_status(record.pid_file or observer_pid_file(record.sprint))
@@ -463,16 +486,28 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def observer_event_watchdog_seconds() -> int:
-    """Return the explicit maximum age of an unacknowledged card event."""
+def observer_ack_deadline_seconds() -> int:
+    """How long one delivery may stay unacknowledged before it is sent again."""
     try:
         value = int(
-            os.environ.get("SECRETARY_OBSERVER_EVENT_WATCHDOG_SECONDS", "")
-            or OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+            os.environ.get("SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS", "")
+            or OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS
         )
     except ValueError:
-        return OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
-    return value if value > 0 else OBSERVER_EVENT_WATCHDOG_DEFAULT_SECONDS
+        return OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS
+    return value if value > 0 else OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS
+
+
+def observer_turn_ceiling_seconds() -> int:
+    """How long one head may hold a batch while never being seen ready for input."""
+    try:
+        value = int(
+            os.environ.get("SECRETARY_OBSERVER_TURN_CEILING_SECONDS", "")
+            or OBSERVER_TURN_CEILING_DEFAULT_SECONDS
+        )
+    except ValueError:
+        return OBSERVER_TURN_CEILING_DEFAULT_SECONDS
+    return value if value > 0 else OBSERVER_TURN_CEILING_DEFAULT_SECONDS
 
 
 def observer_wake_max_attempts() -> int:
@@ -814,6 +849,7 @@ def _reset_delivery_to_idle(
     delivery.resume_cursor = ""
     delivery.resume_cursor_known = True
     delivery.sent_at = 0.0
+    delivery.held_since = 0.0
     delivery.deadline = 0.0
     delivery.attempts = 0
     delivery.next_at = 0.0
@@ -882,7 +918,10 @@ def _new_delivery_intent(
     delivery.resume_cursor = resume_cursor
     delivery.resume_cursor_known = True
     delivery.sent_at = now
-    delivery.deadline = now + observer_event_watchdog_seconds()
+    # A fresh send is a fresh turn: the head is being asked again, so the ceiling on how long it
+    # may hold this batch without going idle starts over here too.
+    delivery.held_since = now
+    delivery.deadline = now + observer_ack_deadline_seconds()
     delivery.next_at = delivery.deadline
     delivery.reason = f"{method} delivery intent is persisted before external action"
 
@@ -909,6 +948,9 @@ def _set_delivery_waiting(delivery: ObserverDelivery, event: dict[str, Any], *, 
     if delivery.stage == DeliveryStage.IDLE:
         delivery.stage = DeliveryStage.WAITING_FOR_IDLE
         delivery.pending_from = str(event.get("pending_from") or event.get("event_id") or "")
+        # A batch waiting for a busy head is held by it, so the turn ceiling runs from here even
+        # though no prompt has been delivered yet.
+        delivery.held_since = time.time()
     delivery.reason = reason
 
 
@@ -990,6 +1032,78 @@ def _resume_acknowledged(runtime: Any, ref: str, record: ObserverRecord) -> bool
     return record.delivery.stage == DeliveryStage.IDLE
 
 
+def _wake_pending(ref: str, record: ObserverRecord) -> dict[str, Any]:
+    """A delivery that is on the head and still within its acknowledgement deadline."""
+    return {
+        "status": "ok",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-wake-pending",
+        "head": record.head,
+        "delivery_id": record.delivery.delivery_id,
+        "event_id": record.delivery.through_event,
+    }
+
+
+def _redelivery_reason(
+    status: dict[str, Any], delivery: ObserverDelivery, *, now: float
+) -> str:
+    """Why an active delivery is sent again, or an empty string to keep waiting for its deadline.
+
+    The head being idle is the first reason and does not wait the deadline out: a head that took
+    its turn and came back to the prompt without writing a resume for this batch never has to be
+    asked again later than the tick that sees it.
+
+    A pane reported ready is not on its own evidence of that. A prompt sent a moment ago has not
+    made the pane busy yet, and a `last_activity` that is missing or unreadable is no evidence at
+    all, so this second read of the idle signal is deliberately stricter than the one that decides
+    a first delivery: it needs a readable timestamp, and the same short grace a freshly launched
+    pane already gets, counted from the later of the last output and this delivery's send. Without
+    that a head mid-sentence would be nudged.
+    """
+    if now >= delivery.deadline:
+        return (
+            "the acknowledgement deadline expired with this batch unacknowledged after "
+            f"{int(now - delivery.sent_at)}s"
+        )
+    try:
+        last_activity = float(status.get("last_activity"))
+    except (TypeError, ValueError):
+        return ""
+    quiet_since = max(last_activity, delivery.sent_at)
+    if now - quiet_since < initial_output_stall_seconds():
+        return ""
+    return (
+        "the observer became idle without acknowledging this batch, quiet for "
+        f"{int(now - quiet_since)}s"
+    )
+
+
+def _turn_ceiling_overrun(delivery: ObserverDelivery, *, now: float) -> str:
+    """Why a head that is never ready for input has held this batch too long, or an empty string.
+
+    This is not the acknowledgement deadline under another name. That one ends a silence on a head
+    that is standing at its prompt, where asking again costs a duplicate prompt. This one ends a
+    delivery held by a head that still looks busy, which is why it is much longer: below the
+    longest legitimate turn it would tear down an observer that is working a long card.
+    """
+    if delivery.stage == DeliveryStage.IDLE:
+        return ""
+    if not delivery.held_since:
+        # A record written before this ceiling existed. It runs from the first tick that sees the
+        # head busy, never retroactively over a hold nobody was measuring.
+        delivery.held_since = now
+        return ""
+    held = now - delivery.held_since
+    ceiling = observer_turn_ceiling_seconds()
+    if held < ceiling:
+        return ""
+    return (
+        f"the observer head held this delivery for {int(held)}s without ever being ready for "
+        f"input, past the {ceiling}s turn ceiling"
+    )
+
+
 def _wake_for_event(
     runtime: Any,
     payload: dict[str, Any],
@@ -998,22 +1112,17 @@ def _wake_for_event(
     record: ObserverRecord,
     event: dict[str, Any],
 ) -> dict[str, Any]:
-    """Deliver one immutable event batch to a completed observer queue."""
+    """Deliver one immutable event batch to a completed observer queue.
+
+    A delivery already on the head is repeated for one of two reasons, and never because the event
+    itself has aged: the head was seen idle without having acknowledged the batch, or its
+    acknowledgement deadline ran out. A head that is never seen idle at all is ended by the turn
+    ceiling instead, which is a different and much longer clock.
+    """
     now = time.time()
     delivery = record.delivery
     event_id = str(event["event_id"])
-    overdue = event["age_seconds"] >= observer_event_watchdog_seconds()
     active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
-    if active and now < delivery.deadline:
-        return {
-            "status": "ok",
-            "step": "observer-reconcile",
-            "sprint": ref,
-            "action": "observer-wake-pending",
-            "head": record.head,
-            "delivery_id": delivery.delivery_id,
-            "event_id": delivery.through_event,
-        }
     if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
         return {
             "status": "degraded",
@@ -1032,6 +1141,10 @@ def _wake_for_event(
     try:
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError) as exc:
+        if active and now < delivery.deadline:
+            # A terminal that could not be read says nothing about the head either way, and this
+            # delivery's acknowledgement deadline is still running: waiting costs it nothing.
+            return _wake_pending(ref, record)
         if delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
             _new_delivery_intent(
                 delivery,
@@ -1045,24 +1158,36 @@ def _wake_for_event(
             f"observer terminal could not be read: {exc}",
         )
     if not isinstance(status, dict) or not status.get("idle"):
+        overrun = _turn_ceiling_overrun(delivery, now=now)
+        if overrun:
+            return _fail_delivery(runtime, payload, observers, ref, record, event, overrun)
+        if active and now < delivery.deadline:
+            return _wake_pending(ref, record)
         if delivery.stage == DeliveryStage.IDLE:
             _set_delivery_waiting(delivery, event, reason="observer terminal is not ready for a prompt")
         elif delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
             delivery.reason = "observer terminal is not ready for a prompt"
+        elif active:
+            delivery.reason = (
+                "the acknowledgement deadline expired and the observer terminal is still not ready "
+                "for a prompt"
+            )
         _set_observer_state(record, "waiting", reason=delivery.reason)
         return {
             "status": "ok",
             "step": "observer-reconcile",
             "sprint": ref,
-            "action": "observer-wake-watchdog-waiting" if overdue else "observer-wake-waiting",
+            "action": "observer-wake-waiting",
             "head": record.head,
             "event_id": delivery.through_event or event_id,
             "reason": delivery.reason,
         }
-    watchdog_delivery = active and now >= delivery.deadline
-    if watchdog_delivery:
-        # A watchdog retry keeps the original high-water mark. A newer B may be visible to the
-        # observer, but a resume for this turn still acknowledges only the unconfirmed A batch.
+    redelivery = _redelivery_reason(status, delivery, now=now) if active else ""
+    if active and not redelivery:
+        return _wake_pending(ref, record)
+    if active:
+        # A repeat keeps the original high-water mark. A newer B may be visible to the observer,
+        # but a resume for this turn still acknowledges only the unconfirmed A batch.
         _new_delivery_intent(
             delivery,
             method="nudge",
@@ -1114,19 +1239,23 @@ def _wake_for_event(
         }
     delivery.stage = DeliveryStage.AWAITING_ACK
     delivery.sent_at = now
-    delivery.deadline = now + observer_event_watchdog_seconds()
+    delivery.held_since = now
+    delivery.deadline = now + observer_ack_deadline_seconds()
     delivery.next_at = delivery.deadline
-    delivery.reason = "observer was nudged for an unacknowledged card event"
+    delivery.reason = redelivery or "observer was nudged for an unacknowledged card event"
     _set_observer_state(record, "running")
-    return {
+    outcome = {
         "status": "ok",
         "step": "observer-reconcile",
         "sprint": ref,
-        "action": "observer-watchdog-woke" if overdue or watchdog_delivery else "observer-nudged",
+        "action": "observer-redelivered" if redelivery else "observer-nudged",
         "head": record.head,
         "delivery_id": delivery.delivery_id,
         "event_id": delivery.through_event,
     }
+    if redelivery:
+        outcome["reason"] = redelivery
+    return outcome
 
 
 def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
@@ -1595,7 +1724,8 @@ def _launch_observer(
     if delivery_event_id:
         record.delivery.stage = DeliveryStage.AWAITING_ACK
         record.delivery.sent_at = now
-        record.delivery.deadline = now + observer_event_watchdog_seconds()
+        record.delivery.held_since = now
+        record.delivery.deadline = now + observer_ack_deadline_seconds()
         record.delivery.next_at = record.delivery.deadline
         record.delivery.reason = "replacement launch is pending confirmation for an unacknowledged card event"
     observers[ref] = record
