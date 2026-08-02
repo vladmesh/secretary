@@ -373,25 +373,41 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
     side rather than resolved here, because the tree it names would depend on the working
     directory of whichever process happens to run this check.
 
+    The candidate's own roots are judged before any pairwise comparison, and whether or
+    not another sprint is open: an installation that may hold two open sprints may not
+    hold even the first one under a root the next check would read as a different tree.
+    Recovery publishing a one-row open set, and a reopen with nothing else open, are the
+    two ways such a row arrives.
+
     The observer ceiling is last of the specific refusals: while nothing binds an
     observer call to the sprint it is about, two heads observing at once would each read
     the other's cards as their own, so at most one open sprint may declare one.
     """
     product = str(candidate.get("product") or "").strip()
-    for sprint in sorted(others, key=lambda row: str(row["ref"])):
+    ordered = sorted(others, key=lambda row: str(row["ref"]))
+    # Both sides are judged, and the candidate first: a row from before sprints owned a
+    # product carries none, and it is no more disjoint as the sprint being admitted than
+    # as the sprint already open.  Judging only the other side would make the answer
+    # depend on which of the two was looked at first.
+    if ordered and not product:
+        raise TaskError(
+            "resource_conflict",
+            "this sprint declares no product, so it cannot be proven disjoint from "
+            f"open sprint {str(ordered[0]['ref'])}",
+            2,
+        )
+    roots = _scanned_roots(
+        candidate.get("repositories") or [],
+        refusal=lambda text, why: TaskError(
+            "resource_conflict",
+            f"this sprint declares repository root {text!r}, which {why}, so it cannot be "
+            "proven disjoint from another open sprint",
+            2,
+        ),
+    )
+    for sprint in ordered:
         reference = str(sprint["ref"])
         other_product = str(sprint.get("product") or "").strip()
-        # Both sides are judged, and the candidate first: a row from before sprints owned
-        # a product carries none, and it is no more disjoint as the sprint being admitted
-        # than as the sprint already open.  Judging only the other side would make the
-        # answer depend on which of the two was looked at first.
-        if not product:
-            raise TaskError(
-                "resource_conflict",
-                "this sprint declares no product, so it cannot be proven disjoint from "
-                f"open sprint {reference}",
-                2,
-            )
         if not other_product:
             raise TaskError(
                 "resource_conflict",
@@ -406,15 +422,6 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
                 "a second open sprint needs a different product",
                 2,
             )
-        roots = _scanned_roots(
-            candidate.get("repositories") or [],
-            refusal=lambda text, why: TaskError(
-                "resource_conflict",
-                f"this sprint declares repository root {text!r}, which {why}, so it cannot "
-                f"be proven disjoint from open sprint {reference}",
-                2,
-            ),
-        )
         held_roots = _scanned_roots(
             sprint.get("repositories") or [],
             refusal=lambda text, why: TaskError(
@@ -437,7 +444,7 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
         return
     holder = next(
         (
-            str(sprint["ref"]) for sprint in sorted(others, key=lambda row: str(row["ref"]))
+            str(sprint["ref"]) for sprint in ordered
             if _declares_observer_head(sprint)
         ),
         None,

@@ -487,6 +487,30 @@ class SprintRestoreTests(unittest.TestCase):
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
 
+    def test_restore_refuses_a_lone_open_row_whose_root_is_not_canonical(self) -> None:
+        """One open row is the reachable shape: pre-fix creates could only make one.
+
+        An export of an installation that ran before roots were canonicalized carries a
+        single open sprint declaring `.`.  Judging it only against the other open sprints
+        would inspect nothing at all here, and recovery would publish the row.
+        """
+        self._set_open_sprint_limit(2)
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        payload["sprints"][0]["repositories"] = ["."]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(
+            RestoreError, "repository root '.', which is not an absolute path",
+        ):
+            import_normalized_board(
+                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+
     def _legacy_open_row_beside_the_seeded_one(self) -> None:
         """The seeded row open, plus an open row from before sprints owned a product.
 

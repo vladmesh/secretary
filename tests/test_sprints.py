@@ -1061,6 +1061,31 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
         )
         self.assertEqual(self._open_refs(), [first])
 
+    def test_a_sole_sprint_may_not_be_reopened_under_a_root_nobody_can_place(self) -> None:
+        """The candidate's own roots are judged whether or not another sprint is open.
+
+        Nothing else being open is what makes this reachable: with the pairwise scan as
+        the only check, a row is excluded from its own comparison, the loop over the
+        other open sprints has nothing to run, and a relative root reaches `open`.
+        """
+        self._limit(2)
+        first = self._first()
+        self.writer.close(role="po", actor="operator", reference=first)
+        self._stored_repositories(first, ["."])
+        self.assertEqual(self._open_refs(), [])
+
+        self._assert_refusal_left_nothing(
+            lambda: self.writer.reopen(
+                role="po", actor="operator", reference=first, observer=none_choice(),
+            ),
+            "resource_conflict",
+            "this sprint declares repository root '.', which is not an absolute path",
+        )
+        self.assertEqual(self._open_refs(), [])
+        self.assertEqual(
+            SprintReader(self.client).show(first, include_cards=False)["status"], "closed",  # type: ignore[arg-type]
+        )
+
     def test_the_one_observer_ceiling_admits_a_second_sprint_only_without_a_head(self) -> None:
         """Nothing binds an observer call to a sprint yet, so only one head may run."""
         self._limit(2)
