@@ -410,7 +410,7 @@ def _production_tick_body(
         str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
     }
     reconcile_outcomes = _reconcile_production(
-        runtime, records, payload, active_refs, fenced_refs=fenced_refs
+        runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
     )
     # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
     # reconciliation did: those are stamped by every tick regardless of code version, so a
@@ -925,6 +925,7 @@ def _reconcile_production(
     payload: dict[str, Any],
     active_refs: set[str],
     fenced_refs: set[str] | None = None,
+    fence: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile records and controlled divergences against the current board.
 
@@ -942,13 +943,36 @@ def _reconcile_production(
     # A fenced sprint's records are left exactly as they are. Reconciliation stops heads and
     # removes records, and both are mutations of work the fence exists to hold still.
     fenced_refs = fenced_refs or set()
+    fence = fence or {}
+    task_cache: dict[str, dict[str, Any] | None] = {}
+
+    def card(ref: str) -> dict[str, Any] | None:
+        if ref not in task_cache:
+            task_cache[ref] = _current_card(runtime, ref)
+        return task_cache[ref]
 
     def card_state(ref: str) -> str | None:
         if ref not in state_cache:
-            state_cache[ref] = _current_card_state(runtime, ref)
+            task = card(ref)
+            state_cache[ref] = None if task is None else str(task.get("state") or "unknown")
         return state_cache[ref]
 
-    for ref in sorted(ref for ref in records if ref not in active_refs and ref not in fenced_refs):
+    def fenced(ref: str) -> bool:
+        """Whether this record's card belongs to a fenced sprint, decided a second way.
+
+        `fenced_refs` is the fence's own inventory of the fenced cards. This asks the card the tick
+        has just read, by its sprint link and its project, so a card missing from that inventory —
+        a card created since, or one the fence's read did not see — is still not settled while its
+        sprint is fenced.
+        """
+        if ref in fenced_refs:
+            return True
+        task = card(ref)
+        return task is not None and fenced_task(fence, task)
+
+    for ref in sorted(ref for ref in records if ref not in active_refs):
+        if fenced(ref):
+            continue
         # `active_refs` is a snapshot taken before this pass; the board can move the card back
         # into the active cycle between that snapshot and this loop (a PO race). The snapshot is
         # only ever a reason to look, never proof of anything: only the live state fetched right
@@ -984,7 +1008,9 @@ def _reconcile_production(
         for divergence in divergences
         if isinstance(divergence, dict) and divergence_is_open(divergence)
     } if isinstance(divergences, list) else set()
-    for ref in sorted(open_refs - active_refs - fenced_refs):
+    for ref in sorted(open_refs - active_refs):
+        if fenced(ref):
+            continue
         state = card_state(ref)
         if state is None or state in ("in_progress", "validate"):
             continue
@@ -1064,21 +1090,26 @@ def _close_divergences_for_ref(payload: dict[str, Any], ref: str, card_state: st
     return closed_ids
 
 
-def _current_card_state(runtime: Any, ref: str) -> str | None:
-    """The card's live state, or None when the board could not be asked right now.
+def _current_card(runtime: Any, ref: str) -> dict[str, Any] | None:
+    """The card as the board has it right now, or None when it could not be asked.
 
     A `None` here means "skip this ref this tick", never "treat as gone": a
     transient backend error must not look like the card left the cycle, or a
     Kanboard hiccup would reconcile away a record that is still legitimately
-    in flight.
+    in flight. A card the board says is gone comes back as a `not_found` state.
     """
     try:
-        task = runtime.reader.show(ref)
+        return runtime.reader.show(ref)
     except TaskError as exc:
-        return "not_found" if exc.code == "not_found" else None
+        return {"ref": ref, "state": "not_found"} if exc.code == "not_found" else None
     except Exception:
         return None
-    return str(task.get("state") or "unknown")
+
+
+def _current_card_state(runtime: Any, ref: str) -> str | None:
+    """The card's live state, or None when the board could not be asked right now."""
+    task = _current_card(runtime, ref)
+    return None if task is None else str(task.get("state") or "unknown")
 
 
 def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | None:

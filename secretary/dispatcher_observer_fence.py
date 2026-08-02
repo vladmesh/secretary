@@ -167,11 +167,13 @@ def _blind_fence(
 
 
 def _sprint_linked_cards(runtime: Any) -> dict[str, str]:
-    """Every card that names a sprint, from the Pipeline board. Card ref -> sprint ref."""
-    try:
-        cards = runtime.reader.list()
-    except (TaskError, HostError):
-        return {}
+    """Every card that names a sprint, from the Pipeline board. Card ref -> sprint ref.
+
+    Raises rather than answering `{}` for the same reason as `_fenced_card_refs`: this is the blind
+    path's only view of which cards belong to a sprint, and an empty answer would read as "no card
+    belongs to one".
+    """
+    cards = runtime.reader.list()
     return {
         str(card.get("ref") or ""): str(card.get("sprint") or "")
         for card in cards
@@ -361,16 +363,17 @@ def _fenced_card_refs(runtime: Any, sprints: set[str], projects: set[str]) -> se
     """Every card the fenced sprints hold, by their link and by their reserved projects.
 
     Read once and in full, rather than per sprint, because the set has to be complete: the tick
-    hands it to reconciliation, which decides whether a record is orphaned, and a card missing
-    from here would have its heads settled while the fence is up. An unreadable board yields
-    nothing, and the by-project check on the tick's own task reads still holds.
+    hands it to reconciliation, which decides whether a record is orphaned, and a card missing from
+    here would have its heads settled while the fence is up.
+
+    A read that fails is therefore not an empty set. Backend reads fail independently, so this one
+    can fail while the tick's later reads recover, and an empty answer here would let reconciliation
+    settle exactly the records the fence exists to hold still. It raises, and the tick ends
+    fail-closed on it like any other fence failure.
     """
     if not sprints and not projects:
         return set()
-    try:
-        cards = runtime.reader.list()
-    except (TaskError, HostError):
-        return set()
+    cards = runtime.reader.list()
     return {
         str(card.get("ref") or "")
         for card in cards

@@ -64,6 +64,7 @@ from secretary.sprint_observer import (
     strict_marker_present,
     strict_reader_active,
 )
+from secretary.dispatcher_production import _reconcile_production
 from secretary.sprints import SprintReader, SprintWriter
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
@@ -596,7 +597,7 @@ class ObserverCutoverTests(unittest.TestCase):
             [
                 "freeze", "heads-stopped", "pre-migration-checkpoint", "inventory", "backfill",
                 "strict-scan", "migration-completed", "post-migration-checkpoint",
-                "strict-reader", "resume",
+                "migration-activated", "strict-reader", "resume",
             ],
         )
         self.assertTrue(strict_reader_active(self.data_dir))
@@ -636,6 +637,92 @@ class ObserverCutoverTests(unittest.TestCase):
         self.assertEqual(self.metadata_writes(), 0)
         self.assertEqual(self.runtime.checkpoint.calls, 0)
         self.assertEqual(self.pause.payload["mode"], "freeze")
+
+    def test_every_head_identity_a_freeze_can_leave_behind_is_refused(self) -> None:
+        """A handle is not the only thing that names a head, and it is not the likeliest one.
+
+        A head adopted from a launch intent never had a handle; a stop the host refused leaves the
+        record pointing at its head deliberately. `pause freeze` stops by all of these identities,
+        so the migration has to confirm all of them stopped or it rewrites the board under a live
+        head.
+        """
+        base = {
+            "worker": "w1", "workspace": "/tmp/w1", "handle": "", "head": "codex",
+            "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
+            "review_baseline": 0, "state": "adopted", "claimed_at": 0.0,
+        }
+        identities = {
+            "worker pid heartbeat": {"worker_pid_file": "/tmp/w.pid"},
+            "worker pane leaf": {"worker_leaf": "leaf-1"},
+            "reviewer pid heartbeat": {"review_pid_file": "/tmp/r.pid"},
+            "reviewer pane leaf": {"review_leaf": "leaf-2"},
+            "reviewer handle": {"review_handle": "term_r"},
+            "unresolved launch intent": {
+                "launch_intent": {"role": "worker", "action": "claim", "workspace": "/tmp/w1"},
+            },
+        }
+        for name, extra in identities.items():
+            with self.subTest(identity=name):
+                self.setUp()
+                self.state.payload = {
+                    "records": {"secretary-1": {**base, **extra}}, "observers": {},
+                }
+
+                with self.assertRaisesRegex(BackfillError, "still running under the freeze"):
+                    self.cutover()
+
+                self.assertEqual(self.metadata_writes(), 0)
+                self.assertIsNone(read_inventory(self.data_dir))
+                self.assertFalse(strict_reader_active(self.data_dir))
+
+    def test_an_observer_head_without_a_handle_is_refused(self) -> None:
+        """A bring-up that registered its workspace before the host answered still owns a head."""
+        for name, record in {
+            "workspace of an unresolved bring-up": ObserverRecord(
+                sprint=OPEN_SPRINT, head=OPEN_HEAD, head_possible=True,
+                workspace="/tmp/observer-ws",
+            ),
+            "abandoned terminal": ObserverRecord(
+                sprint=OPEN_SPRINT, head=OPEN_HEAD, handle="term_o", abandoned_handle=True,
+            ),
+        }.items():
+            with self.subTest(identity=name):
+                self.setUp()
+                self.state.payload = {"observers": {OPEN_SPRINT: record.to_json()}, "records": {}}
+
+                with self.assertRaisesRegex(BackfillError, "still running under the freeze"):
+                    self.cutover()
+
+                self.assertEqual(self.metadata_writes(), 0)
+
+    def test_an_observer_pid_that_is_still_alive_is_refused(self) -> None:
+        pid_file = self.data_dir / "observer.pid"
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        record = ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD, pid_file=str(pid_file))
+        self.state.payload = {"observers": {OPEN_SPRINT: record.to_json()}, "records": {}}
+
+        with self.assertRaisesRegex(BackfillError, "still running under the freeze"):
+            self.cutover()
+
+        self.assertEqual(self.metadata_writes(), 0)
+
+    def test_a_settled_record_with_no_identity_left_does_not_block(self) -> None:
+        """The other half of the rule: a freeze that confirmed its stops clears the way."""
+        self.state.payload = {
+            "records": {
+                "secretary-1": {
+                    "worker": "w1", "workspace": "/tmp/w1", "handle": "", "head": "codex",
+                    "review_head": "codex-reviewer", "attempt_id": "att-1",
+                    "comment_baseline": 0, "review_baseline": 0, "state": "adopted",
+                    "claimed_at": 0.0,
+                }
+            },
+            "observers": {OPEN_SPRINT: ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD).to_json()},
+        }
+
+        result = self.cutover()
+
+        self.assertEqual(len(result["rows"]), 17)
 
     def test_a_head_the_freeze_could_not_stop_is_refused(self) -> None:
         record = ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD, handle="term_1")
@@ -1030,6 +1117,44 @@ class MigrationDurabilityTests(unittest.TestCase):
         self.assertFalse((recovered / "sprints" / "observer-migration").exists())
         self.assertTrue(strict_reader_active(recovered))
 
+    def test_a_damaged_latch_does_not_take_strictness_away(self) -> None:
+        """The latch is a convenience over a durable fact, never the thing holding it up.
+
+        The inventory is deliberately retained after a successful cutover — a retry reads it
+        instead of recomputing provenance — so "an inventory exists" cannot mean "in flight". The
+        activation event in the append-only log is what closed the interval, and a local file that
+        is lost or corrupted cannot unsay it.
+        """
+        marker = self.data_dir / "sprints" / "observer-strict.json"
+        self.assertTrue(marker.is_file())
+        self.assertTrue((self.data_dir / "sprints" / "observer-migration" / "inventory.json").is_file())
+        self.assertTrue(strict_reader_active(self.data_dir))
+
+        for damage in ("", "{not json", '{"version": 1, "strict": false}'):
+            with self.subTest(damage=damage):
+                marker.write_text(damage, encoding="utf-8")
+                forget_migration_state(self.data_dir)
+                self.assertFalse(strict_marker_present(self.data_dir))
+                self.assertFalse(cutover_in_flight(self.data_dir))
+                self.assertTrue(strict_reader_active(self.data_dir))
+
+        marker.unlink()
+        forget_migration_state(self.data_dir)
+        self.assertTrue(strict_reader_active(self.data_dir))
+
+    def test_a_corrupt_row_still_fences_after_the_latch_is_lost(self) -> None:
+        """The consequence that matters: no missing field reaches the role default."""
+        (self.data_dir / "sprints" / "observer-strict.json").unlink()
+        forget_migration_state(self.data_dir)
+        row = next(item for item in self.board.sprints if item["reference"] == OPEN_SPRINT)
+        self.board.metadata[int(row["id"])].pop("sprint_observer")
+
+        with self.assertRaises(ObserverMetadataError) as raised:
+            executable_observer(self.sprint_reader.show(OPEN_SPRINT, include_cards=False))
+
+        self.assertEqual(raised.exception.reason, REASON_MISSING)
+        self.assertEqual(scan_rows(self.sprint_reader.export()), [f"{OPEN_SPRINT}: no observer metadata"])
+
     def test_a_host_recovered_from_a_pre_migration_checkpoint_stays_tolerant(self) -> None:
         pre = Path(self.tmp.name) / "pre"
         (pre / "board").mkdir(parents=True)
@@ -1317,6 +1442,72 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(self.host.observers, [])
         telemetry = self.runtime.production_state.load()["tick_telemetry"]
         self.assertFalse(telemetry["last"]["healthy"])
+
+    def test_one_failed_card_list_does_not_let_reconciliation_settle_a_fenced_record(self) -> None:
+        """Backend reads fail independently, so the fence's own read can fail and the rest recover.
+
+        An empty ref set there would hand reconciliation a fenced project's record as an orphan and
+        it would stop its heads and remove it — the exact mutation the fence exists to prevent.
+        """
+        self.go_strict()
+        self.declare("{not json")
+        # An unlinked card of the reserved project, out of the active cycle, with a live record:
+        # what reconciliation settles when nothing tells it the card is fenced.
+        self.board.tasks[1]["column_id"] = 5
+        payload = self.runtime.production_state.load()
+        payload["records"] = {
+            "secretary-510-neighbor": {
+                "worker": "w1", "workspace": "/tmp/w1", "handle": "term_w", "head": "codex",
+                "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
+                "review_baseline": 0, "state": "adopted", "claimed_at": time.time(),
+            }
+        }
+        self.runtime.production_state.save(payload)
+        real_list = self.runtime.reader.list
+        failures = [TaskError("backend_error", "transient", 1)]
+
+        def list_once_broken(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return real_list(*args, **kwargs)
+
+        with mock.patch.object(self.runtime.reader, "list", side_effect=list_once_broken):
+            result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "critical")
+        self.assertEqual(result["action"], "observer-fence-unavailable")
+        self.assertIn(
+            "secretary-510-neighbor", self.runtime.production_state.load()["records"]
+        )
+        self.assertEqual(
+            [action for action in result["actions"] if action.get("step") == "production-reconcile"],
+            [],
+        )
+
+    def test_reconciliation_classifies_the_card_it_reads_against_the_fence(self) -> None:
+        """The second line: a card absent from the fence's inventory is still fenced by its sprint."""
+        self.go_strict()
+        self.declare("{not json")
+        self.board.tasks[1]["column_id"] = 5
+        self.board.metadata[13]["sprint_ref"] = "sprint:1"
+        payload = self.runtime.production_state.load()
+        payload["records"] = {
+            "secretary-510-neighbor": {
+                "worker": "w1", "workspace": "/tmp/w1", "handle": "term_w", "head": "codex",
+                "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
+                "review_baseline": 0, "state": "adopted", "claimed_at": time.time(),
+            }
+        }
+        self.runtime.production_state.save(payload)
+        fence = observer_fence(self.runtime, self.runtime.production_state.load())
+        fence["refs"] = set()  # the inventory misses it; the sprint link still holds
+
+        outcomes = _reconcile_production(
+            self.runtime, self.runtime.production_state.records(payload), payload,
+            set(), fenced_refs=set(), fence=fence,
+        )
+
+        self.assertEqual(outcomes, [])
 
     def test_a_launched_head_that_has_not_written_its_pid_keeps_the_fence_up(self) -> None:
         """A pid that is merely not written yet is not confirmed adoption.

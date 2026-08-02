@@ -15,6 +15,7 @@ So the whole thing is one ordered sequence, and the order is the contract:
     -> strict rescan
     -> the durable completion event
     -> checkpoint, pushed again, now carrying that event
+    -> the durable activation event, which closes this cutover's open interval
     -> latch the strict-reader marker
     -> resume
 
@@ -27,11 +28,15 @@ Provenance is selected once and written down before the first backend write.  Th
 a retry reads: recomputing it would re-derive history from an audit log that the migration's own
 events have grown, and two runs would then disagree about what a closed sprint's observer was.
 
-What makes the installation strict is the completion event in the audit log, not the marker file
-beside it.  The log is checkpoint canon and comes back with a recovered host; a local file does
-not, and a replacement host rebuilt from a post-migration checkpoint would otherwise be strict
-before the disaster and tolerant after it.  Both checkpoints are pushed rather than committed
-locally, because a recovery point that never left the machine is not one.
+What makes the installation strict lives in the audit log, not in the marker file beside it.  The
+log is checkpoint canon and comes back with a recovered host; a local file does not, and a
+replacement host rebuilt from a post-migration checkpoint would otherwise be strict before the
+disaster and tolerant after it.  Two events, because two different facts are needed: the completion
+event says this installation's rows are migrated, and the activation event says this host's cutover
+reached the recovery point the order requires.  Neither can be taken away by losing a local file.
+
+Both checkpoints are pushed rather than committed locally, because a recovery point that never left
+the machine is not one.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from secretary.sprint_observer import (
     CUTOVER_DIR,
     CUTOVER_INVENTORY,
     CUTOVER_JOURNAL,
+    MIGRATION_ACTIVATED_KIND,
     MIGRATION_COMPLETED_KIND,
     ObserverMetadataError,
     activate_strict_reader,
@@ -328,21 +334,37 @@ def scan_rows(sprints: list[dict[str, Any]], profiles: set[str] | None = None) -
 
 
 def running_heads(runtime: Any, payload: dict[str, Any]) -> list[str]:
-    """The heads a freeze left running. Empty when the installation is genuinely quiet.
+    """Every head still named by a record. Empty when the installation is genuinely quiet.
 
-    A freeze stops heads and clears the handle of each one it confirmed gone, so a handle still on
-    a record is a head the freeze could not stop.  That head keeps its board writes coming, and
-    this migration rewrites the field the observer machinery reads.
+    A head is here whenever anything still names it, which is the same rule the freeze itself
+    stops by: a pane handle, a pane leaf, a pid heartbeat, or an unresolved launch intent. Reading
+    only the handle would miss exactly the heads the freeze is most likely to have left behind —
+    one adopted from a launch intent has no handle at all, and a stop the host refused leaves the
+    record pointing at its head on purpose. Both keep writing to the board this migration rewrites.
+
+    `DispatcherRecord.owns_head` is that rule for worker and reviewer, and it is used rather than
+    re-listed here so the two can never drift apart.
     """
-    from secretary.dispatcher_observer import load_observers
+    from secretary.dispatcher_launch import launch_intent
+    from secretary.dispatcher_observer import load_observers, observer_alive
 
     running: list[str] = []
     for reference, record in sorted(runtime.production_state.records(payload).items()):
-        for role, handle in (("worker", record.handle), ("reviewer", record.review_handle)):
-            if handle:
+        intent = launch_intent(record)
+        if intent:
+            role = str(intent.get("role") or "worker")
+            running.append(f"unresolved {role} launch intent of {reference}")
+        for role in ("worker", "review"):
+            if record.owns_head(role):
                 running.append(f"{role} head of {reference}")
     for reference, record in sorted(load_observers(payload).items()):
-        if record.handle and not record.abandoned_handle:
+        # The observer's own identities: a handle, or the workspace a bring-up registered before
+        # the host answered, or a pid heartbeat that is still alive. An abandoned handle counts
+        # too — that terminal is up, it simply never received its sprint.
+        if record.handle or (record.head_possible and record.workspace):
+            running.append(f"observer head of {reference}")
+            continue
+        if record.pid_file and observer_alive(record)["alive"]:
             running.append(f"observer head of {reference}")
     return running
 
@@ -389,13 +411,38 @@ def push_now(runtime: Any, label: str) -> dict[str, Any]:
 def record_migration_completed(
     runtime: Any, inventory: dict[str, Any], *, rows: int, at: str,
 ) -> str:
-    """Write the one durable event that makes this installation migrated.
+    """The durable fact that this installation's rows are migrated.
 
-    Staged then committed, like every other durable effect, and keyed on the inventory digest so a
-    retry of the same cutover finds its own event rather than writing a second one.
+    Written after the strict rescan and before the post-migration checkpoint, so the snapshot a
+    replacement host is rebuilt from carries it.
+    """
+    return _record_cutover_event(
+        runtime, MIGRATION_COMPLETED_KIND, inventory, at=at, extra={"rows": int(rows)}
+    )
+
+
+def record_migration_activated(runtime: Any, inventory: dict[str, Any], *, at: str) -> str:
+    """The durable fact that this cutover reached its post-migration checkpoint.
+
+    It closes the open interval the retained inventory would otherwise keep open forever, and it
+    does so in the audit log rather than in a local file: the latch beside it can be lost, and a
+    finished installation must not fall back to the tolerant reader when it is.
+    """
+    return _record_cutover_event(runtime, MIGRATION_ACTIVATED_KIND, inventory, at=at)
+
+
+def _record_cutover_event(
+    runtime: Any, kind: str, inventory: dict[str, Any], *, at: str,
+    extra: dict[str, Any] | None = None,
+) -> str:
+    """Stage then commit one cutover event, keyed on the inventory this cutover is writing.
+
+    The request id carries the digest, so a retry of the same cutover finds its own event rather
+    than writing a second one, and a later cutover over a changed board writes its own.
     """
     audit = runtime.audit
-    request_id = f"observer-migration-completed:{inventory.get('digest') or ''}"
+    digest = str(inventory.get("digest") or "")
+    request_id = f"{kind}:{digest}"
     committed = audit.committed_event(request_id)
     if committed is not None:
         return str(committed.get("event_id") or "")
@@ -404,16 +451,13 @@ def record_migration_completed(
         "schema_version": 1,
         "occurred_at": str(at),
         "actor": {"role": "steward", "id": "observer-migration"},
-        "kind": MIGRATION_COMPLETED_KIND,
+        "kind": kind,
         "outcome": "success",
         "task_id": "",
         "ref": "",
         "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
         "request_id": request_id,
-        "payload": {
-            "inventory_digest": str(inventory.get("digest") or ""),
-            "rows": int(rows),
-        },
+        "payload": {"inventory_digest": digest, **(extra or {})},
     }
     audit.stage(request_id, event)
     return str(audit.append(request_id, event))
@@ -535,6 +579,12 @@ def run_cutover(
         "step": "post-migration-checkpoint", "status": "ok",
         "checkpoint": after, "push": after_push,
     })
+
+    # The recovery point exists now, so the ordered sequence is satisfied and this cutover's open
+    # interval is closed. Durable, and before the latch: the latch is a convenience over this fact,
+    # never the thing that holds it up.
+    activation = record_migration_activated(runtime, stored, at=now)
+    steps.append({"step": "migration-activated", "status": "ok", "event_id": activation})
 
     marker = activate_strict_reader(
         data_dir,

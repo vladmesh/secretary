@@ -53,6 +53,15 @@ BACKFILL_EVENT_KIND = "observer_backfilled"
 # it, and a recovered host would go back to interpreting an absent field as a role default.
 MIGRATION_COMPLETED_KIND = "observer_migration_completed"
 
+# The audit kind written after the post-migration checkpoint has been taken and pushed, naming the
+# inventory it finished. It is what closes the cutover's open interval on the host that ran it.
+#
+# It is an audit event rather than a second local file for the same reason the completion event is:
+# a local file can be lost or damaged, and if the retained inventory then read as an open interval,
+# a finished installation would fall back to the tolerant reader and the role default. The
+# append-only log cannot take strictness away from an installation that earned it.
+MIGRATION_ACTIVATED_KIND = "observer_migration_activated"
+
 # Written by the last step of the cutover, after a full rescan proved every row migrated. It is a
 # latch over the same fact the log already carries, not a second source of truth: it makes the
 # common answer a stat instead of a scan of the whole audit log, and it is never the reason strict
@@ -265,12 +274,12 @@ def strict_marker_path(data_dir: str | Path) -> Path:
 def strict_reader_active(data_dir: str | Path | None) -> bool:
     """Whether this installation reads observer metadata strictly.
 
-    Three states, and the two signals that tell them apart:
+    Three states, and the signals that tell them apart:
 
-      not migrated          no completion event                    -> tolerant
-      migrating, this host  completion event + the cutover's own   -> tolerant
-                            local working set, no latch
-      migrated              the latch, or a completion event with  -> strict
+      not migrated          no completion event                      -> tolerant
+      migrating, this host  completion event, an inventory on this   -> tolerant
+                            host, and no activation naming it
+      migrated              the latch, or a completion event with    -> strict
                             no cutover in flight
 
     The completion event is the *durable* signal: `state/board/events.ndjson` is checkpoint canon
@@ -281,11 +290,13 @@ def strict_reader_active(data_dir: str | Path | None) -> bool:
     But the event alone is written before the post-migration checkpoint is taken and pushed, so on
     the host running the cutover there is a live interval in which the event exists and the ordered
     sequence has not finished. Strict there would be strict before the recovery point the order
-    requires. The cutover's own working set — the inventory it persists under `sprints/` — is what
-    marks that interval, and it is local by construction: it is not checkpoint canon, so a recovered
-    host never has it and is never mistaken for a host mid-cutover.
+    requires. `cutover_in_flight` is what marks that interval, from the inventory this host holds
+    and the activation event that closes it. Both halves of that answer are durable: a recovered
+    host has no inventory and is never mistaken for a host mid-cutover, and a host whose latch was
+    damaged still has the activation event and stays strict.
 
-    The latch settles the finished case without either read: the cutover writes it last.
+    The latch settles the finished case without any of it: the cutover writes it last, so the
+    ordinary read is one stat.
     """
     if data_dir is None:
         return False
@@ -306,77 +317,105 @@ def strict_marker_present(data_dir: str | Path) -> bool:
 
 
 def cutover_in_flight(data_dir: str | Path) -> bool:
-    """Whether this host is between the start of a cutover and its latch.
+    """Whether this host is inside a cutover that has not reached its post-migration checkpoint.
 
-    The inventory is written before the first backend write and the latch after the last step, so
-    an inventory without a latch is exactly the open interval. Both live under the data directory
-    and neither is checkpoint canon, so this answers only for the host that ran the cutover.
+    The inventory is written before the first backend write and is deliberately never removed: it
+    is what a retry reads instead of recomputing provenance. So its presence alone cannot mean
+    "in flight" — after a successful cutover it is retained, and reading that as an open interval
+    would make the latch the single thing holding strictness up, which a damaged local file could
+    then take away from a migrated installation.
+
+    The activation event closes the interval instead. It is written after the post-migration
+    checkpoint has been taken and pushed, it names the inventory it finished, and it is in the
+    append-only audit log rather than in a file that can be edited or lost. An inventory with no
+    activation naming it is a run that has not got that far; an inventory with one is the retained
+    working set of a finished cutover.
     """
-    if strict_marker_present(data_dir):
+    digest = _inventory_digest(data_dir)
+    if digest is None:
         return False
-    return (Path(data_dir) / CUTOVER_DIR / CUTOVER_INVENTORY).is_file()
+    return digest not in cutover_activations(data_dir)
 
 
-# Migration is a one-way transition, so a positive answer is remembered for the life of the
-# process. A negative one is re-derived whenever the log has grown, which is what makes the very
-# tick that finishes the cutover see the new state without a restart.
-_MIGRATION_SCAN: dict[str, tuple[int, int]] = {}
-_MIGRATED: set[str] = set()
+def _inventory_digest(data_dir: str | Path) -> str | None:
+    """The digest of the cutover inventory on this host, or None when there is none."""
+    try:
+        raw = json.loads(
+            (Path(data_dir) / CUTOVER_DIR / CUTOVER_INVENTORY).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    digest = raw.get("digest")
+    return str(digest) if digest else None
 
 
-def migration_recorded(data_dir: str | Path) -> bool:
-    """Whether the committed audit log carries this installation's completed observer migration."""
+# One pass over the log answers both questions, and the answer is memoized on the file's size and
+# mtime: the log grows on a live installation, so a tick that appended re-reads and one that did
+# not pays nothing. The latch short-circuits before any of this in the ordinary case.
+_MIGRATION_SCAN: dict[str, tuple[tuple[int, int], bool, frozenset[str]]] = {}
+
+
+def _cutover_audit(data_dir: str | Path) -> tuple[bool, frozenset[str]]:
+    """`(migration completed, inventory digests whose activation is recorded)`."""
     key = str(Path(data_dir).expanduser())
-    if key in _MIGRATED:
-        return True
     events_path = Path(key) / "board" / "events.ndjson"
     try:
         stat = events_path.stat()
     except OSError:
-        return False
+        return False, frozenset()
     fingerprint = (stat.st_size, stat.st_mtime_ns)
-    if _MIGRATION_SCAN.get(key) == fingerprint:
-        return False
-    _MIGRATION_SCAN[key] = fingerprint
-    if _scan_for_completion(events_path):
-        _MIGRATED.add(key)
-        return True
-    return False
-
-
-def _scan_for_completion(events_path: Path) -> bool:
+    cached = _MIGRATION_SCAN.get(key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1], cached[2]
+    completed = False
+    activated: set[str] = set()
     try:
         with events_path.open(encoding="utf-8") as events:
             for line in events:
-                # The kind is matched on the raw line before the record is parsed: the log holds
-                # every event this installation ever wrote, and parsing all of them to find one
-                # kind would put a full JSON decode of the whole history on the tick.
-                if MIGRATION_COMPLETED_KIND not in line:
+                # The kinds are matched on the raw line before the record is parsed: the log holds
+                # every event this installation ever wrote, and decoding all of them to find two
+                # kinds would put a full JSON parse of the whole history on the tick.
+                if MIGRATION_COMPLETED_KIND not in line and MIGRATION_ACTIVATED_KIND not in line:
                     continue
                 try:
                     event = json.loads(line)
                 except ValueError:
                     continue
-                if (
-                    isinstance(event, dict)
-                    and event.get("kind") == MIGRATION_COMPLETED_KIND
-                    and event.get("outcome") == "success"
-                ):
-                    return True
+                if not isinstance(event, dict) or event.get("outcome") != "success":
+                    continue
+                kind = event.get("kind")
+                if kind == MIGRATION_COMPLETED_KIND:
+                    completed = True
+                elif kind == MIGRATION_ACTIVATED_KIND:
+                    payload = event.get("payload")
+                    digest = (payload or {}).get("inventory_digest") if isinstance(payload, dict) else None
+                    if digest:
+                        activated.add(str(digest))
     except OSError:
-        return False
-    return False
+        return False, frozenset()
+    result = (completed, frozenset(activated))
+    _MIGRATION_SCAN[key] = (fingerprint, *result)
+    return result
+
+
+def migration_recorded(data_dir: str | Path) -> bool:
+    """Whether the committed audit log carries this installation's completed observer migration."""
+    return _cutover_audit(data_dir)[0]
+
+
+def cutover_activations(data_dir: str | Path) -> frozenset[str]:
+    """Inventory digests whose cutover reached its post-migration checkpoint, from the audit log."""
+    return _cutover_audit(data_dir)[1]
 
 
 def forget_migration_state(data_dir: str | Path | None = None) -> None:
     """Drop the process-level memo. For tests, and for a caller that rebuilt the data directory."""
     if data_dir is None:
-        _MIGRATED.clear()
         _MIGRATION_SCAN.clear()
         return
-    key = str(Path(data_dir).expanduser())
-    _MIGRATED.discard(key)
-    _MIGRATION_SCAN.pop(key, None)
+    _MIGRATION_SCAN.pop(str(Path(data_dir).expanduser()), None)
 
 
 def activate_strict_reader(
