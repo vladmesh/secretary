@@ -250,7 +250,7 @@ def run_migrate_observer(args: argparse.Namespace) -> int:
         return 2
     try:
         if args.dry_run:
-            result = plan_cutover(runtime, data_dir=data_dir)
+            result = plan_cutover(runtime, data_dir=data_dir, instance=args.instance)
         else:
             result = run_cutover(
                 runtime,
@@ -258,6 +258,7 @@ def run_migrate_observer(args: argparse.Namespace) -> int:
                     KanboardClient(), data_dir=data_dir, thresholds=_thresholds(args),
                 ),
                 data_dir=data_dir,
+                instance=args.instance,
                 now=now_rfc3339(),
                 resume=not args.no_resume,
             )
@@ -268,7 +269,9 @@ def run_migrate_observer(args: argparse.Namespace) -> int:
         }, sort_keys=True))
         return 2
     print(json.dumps(result, sort_keys=True, default=str))
-    return 0
+    # A dry run that names refusals is not a green light: the real run would stop on them, and an
+    # operator scripting the cutover has to see that before they freeze the pipeline.
+    return 0 if result.get("ok", True) else 1
 
 
 def run_close(args: argparse.Namespace) -> int:

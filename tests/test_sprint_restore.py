@@ -99,7 +99,36 @@ class SprintRestoreTests(unittest.TestCase):
 
     def _restore(self, client: object | None = None) -> tuple[object, int]:
         client = client or _EmptyBoardsKanboard()
-        return client, import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
+        return client, import_normalized_board(
+            self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+        )
+
+    def _carry_audit_log(self) -> None:
+        """Bring the source's audit log along, as the real checkpoint does.
+
+        `state/board/events.ndjson` is checkpoint canon and recovery materializes it back. The
+        fixture's own `_export` copies only the normalized card and sprint JSON, so a test that
+        needs the log — recovering an open row's head, or the migration's completion event — puts
+        it there explicitly.
+        """
+        shutil.copy(
+            self.source_data / "board" / "events.ndjson",
+            self.target_data / "board" / "events.ndjson",
+        )
+        forget_migration_state(self.target_data)
+
+    def _record_observer_launch(self, head: str) -> None:
+        events = self.source_data / "board" / "events.ndjson"
+        with events.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "event_id": "evt_launch_" + head.replace("-", "_"), "schema_version": 1,
+                "occurred_at": "2026-07-20T00:00:00Z",
+                "actor": {"role": "dispatcher", "id": "dispatcher"},
+                "kind": "observer_launched", "outcome": "success", "task_id": "",
+                "ref": self.ref,
+                "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
+                "request_id": "req-launch-" + head, "payload": {"head": head, "launches": 1},
+            }, sort_keys=True) + "\n")
 
     def test_export_carries_the_sprint_set_next_to_the_cards(self) -> None:
         summary = json.loads((self.source_data / "board" / "export.json").read_text(encoding="utf-8"))
@@ -208,13 +237,8 @@ class SprintRestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RestoreError, "completed the observer migration"):
             import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
 
-    def test_a_pre_migration_export_restores_as_it_was_and_stays_tolerant(self) -> None:
-        """Recovery of an unmigrated checkpoint brings back the rows and the tolerant reader.
-
-        The two recover together, because both come from the same log: the strict reader is never
-        activated against rows it would call corrupt, and recovery never invents an executable
-        choice that nobody ever made.
-        """
+    def _pre_migration_open_export(self) -> None:
+        """A checkpoint from before the cutover: an open row that declares nothing."""
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0].pop("observer")
         payload["sprints"][0]["status"] = "open"
@@ -223,12 +247,72 @@ class SprintRestoreTests(unittest.TestCase):
         )
         forget_migration_state(self.target_data)
 
+    def test_a_pre_migration_open_row_is_republished_with_its_recovered_head(self) -> None:
+        """Recovery may neither publish an open observer-less row nor invent a choice.
+
+        It does not have to do either: the checkpoint carries the same durable lifecycle log the
+        migration recovers a head from, so the head this sprint actually ran is recoverable by the
+        migration's own rule and is written before the reference publishes the row.
+
+        The installation still comes back tolerant — no completion event was written and the closed
+        rows are still the cutover's work — but its one open row carries an executable value.
+        """
+        self._record_observer_launch("claude-observer")
+        self._export()
+        self._pre_migration_open_export()
+        self._carry_audit_log()
+
         client, _ = self._restore()
 
         live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
-        self.assertNotIn("observer", live)
+        self.assertEqual(live["observer"], head_choice("claude-observer"))
         self.assertEqual(live["status"], "open")
         self.assertFalse(strict_reader_active(self.target_data))
+        # Written with the fields, so the row was never readable open declaring nothing.
+        order = [
+            method for method, params in client.calls  # type: ignore[attr-defined]
+            if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
+            or (method == "updateTask" and params.get("reference") == self.ref)
+        ]
+        self.assertEqual(order[:2], ["saveTaskMetadata", "updateTask"])
+
+    def test_a_pre_migration_open_row_with_nothing_to_recover_is_refused(self) -> None:
+        """The narrow refusal: no successful launch anywhere in the log this checkpoint carries."""
+        self._pre_migration_open_export()
+        self._carry_audit_log()
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(RestoreError, "no successful observer launch"):
+            import_normalized_board(  # type: ignore[arg-type]
+                self.target_data, client=client, instance=self.instance,
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+
+    def test_a_recovered_head_the_registry_no_longer_has_is_refused(self) -> None:
+        self._record_observer_launch("retired-observer")
+        self._export()
+        self._pre_migration_open_export()
+        self._carry_audit_log()
+
+        with self.assertRaisesRegex(RestoreError, "not a profile of this installation"):
+            self._restore()
+
+    def test_a_declared_head_the_registry_no_longer_has_is_refused(self) -> None:
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        payload["sprints"][0]["observer"] = {"kind": "head", "profile": "retired-observer"}
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(RestoreError, "not a profile of this installation"):
+            import_normalized_board(  # type: ignore[arg-type]
+                self.target_data, client=client, instance=self.instance,
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
 
     def test_a_second_disaster_keeps_the_migrated_strict_state(self) -> None:
         """The checkpoint of a migrated installation recovers a migrated installation."""
@@ -258,7 +342,7 @@ class SprintRestoreTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RestoreError, "may not carry migration provenance"):
-            import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+            self._restore()
 
     def test_an_open_row_is_never_published_without_its_observer(self) -> None:
         """Status and observer are on the row before the reference makes it readable."""

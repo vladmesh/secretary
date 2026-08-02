@@ -294,6 +294,12 @@ carrying one is corrupt in exactly the way a missing value is.
 
 `create` and `reopen` both require `--observer`, spelled either `none` or one head profile from
 `heads.yaml`. Absent, null, empty, `default` and `inherited` are not interpretations this model has.
+A named profile is resolved against this installation's head snapshot — the same registry the
+dispatcher launches from — at every boundary that can put one on a row: create, reopen, the restore
+preflight, and the migration's rescan. A sprint is never opened, reopened or republished on a head
+that does not exist, because the fence would stop its projects on the first tick and the operator
+would be reading a critical outcome instead of a validation error. Registry drift *after* the
+declaration is what the fence is for.
 `reopen` writes the fresh choice while the sprint is still closed and only then changes its status,
 so the row is never readable open under a value the reopening caller did not choose; `create` writes
 it with the rest of the fields, before the reference publishes the row.
@@ -311,7 +317,15 @@ strict rescan, so the strict reader is never active against rows the cutover has
 Restore validates the whole exported set before the first backend write of any set, cards included,
 and refuses rather than publishing part of it. What it accepts follows the same signal: an export
 from a migrated installation must carry a value on every row, and one from an unmigrated
-installation carries none and restores as it was.
+installation carries none.
+
+An unmigrated export's closed rows come back without the field, and the installation comes back
+tolerant, which is the state it was in. Its one open row is different, because an open sprint may
+never be published without an executable value: its head is recovered from the same durable
+lifecycle log the migration reads, which the checkpoint carries, and written before the reference
+publishes the row. A row with nothing to recover, or whose recovered head has left the registry, is
+named and refused; the repair is to declare the value in the checkpoint's `sprints.json` before
+restoring.
 
 ### The observer fence
 

@@ -66,7 +66,7 @@ from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
 from tests.test_dispatcher_observer import DEAD_PID, install_skill_registry
-from tests.test_sprints import SprintFixture
+from tests.test_sprints import SprintFixture, _write_head_registry
 
 
 # The live inventory, as the PO audit of 2026-08-01T22:03:13Z fixed it. Closed rows carry the head
@@ -179,6 +179,44 @@ class SprintDeclarationTests(SprintFixture):
             with self.subTest(observer=observer):
                 with self.assertRaises(TaskError):
                     self._create(goal="not a value", observer=observer)
+
+    def test_create_refuses_a_head_the_registry_does_not_have(self) -> None:
+        """A sprint may not be opened on a head that does not exist.
+
+        The fence would stop its projects on the very first tick, and an operator would be reading
+        a critical outcome about a sprint they had just opened instead of a validation error.
+        """
+        with self.assertRaisesRegex(TaskError, "not a profile of this installation"):
+            self._create(goal="ghost head", observer=head_choice("retired-observer"))
+
+        self.assertEqual(TaskAudit(self.tmp.name).events(), [])
+
+    def test_reopen_refuses_a_head_the_registry_does_not_have(self) -> None:
+        reference = self._create(goal="reopen onto a ghost")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=reference, request_id="close")
+
+        with self.assertRaisesRegex(TaskError, "not a profile of this installation"):
+            self.writer.reopen(
+                role="po", actor="operator", reference=reference,
+                observer=head_choice("retired-observer"), request_id="reopen",
+            )
+
+        self.assertEqual(
+            self.writer.reader.show(reference, include_cards=False)["status"], "closed"
+        )
+
+    def test_an_unreadable_registry_refuses_rather_than_accepting_the_declaration(self) -> None:
+        (self.instance / "heads" / "heads.yaml").write_text("profiles: []\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(TaskError, "head registry"):
+            self._create(goal="no registry", observer=head_choice("codex-observer"))
+
+    def test_none_needs_no_profile(self) -> None:
+        (self.instance / "heads" / "heads.yaml").unlink()
+
+        result = self._create(goal="unobserved", observer=none_choice())
+
+        self.assertEqual(result["sprint"]["observer"], none_choice())
 
     def test_the_observer_lands_before_the_reference_publishes_the_row(self) -> None:
         self._create(goal="ordered", reference="sprint:ordered")
@@ -420,6 +458,7 @@ class StubPause:
 class StubProductionState:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
+        self.path = Path("/nonexistent/dispatcher/production-state.json")
 
     def load(self) -> dict:
         return dict(self.payload)
@@ -506,6 +545,8 @@ class ObserverCutoverTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name)
+        self.instance = Path(self.tmp.name) / "instance"
+        _write_head_registry(self.instance)
         self.board = ObserverBoard()
         self.board.seed_inventory(self.data_dir)
         self.sprint_reader = SprintReader(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
@@ -528,7 +569,7 @@ class ObserverCutoverTests(unittest.TestCase):
     def cutover(self, **kwargs):
         return run_cutover(
             self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
-            now="2026-08-02T00:00:00Z", resume=False, **kwargs,
+            instance=self.instance, now="2026-08-02T00:00:00Z", resume=False, **kwargs,
         )
 
     def metadata_writes(self) -> int:
@@ -576,6 +617,23 @@ class ObserverCutoverTests(unittest.TestCase):
 
         self.assertFalse(strict_reader_active(self.data_dir))
 
+    def test_an_unreadable_production_state_is_refused(self) -> None:
+        """An empty decode is not evidence that every head is stopped.
+
+        `pause freeze` sets the flag and stops nothing when the records are unreadable, so this is
+        exactly the state in which a live head is most likely and least visible.
+        """
+        self.state.payload = {"version": 1, "phase": "unavailable"}
+
+        with self.assertRaisesRegex(BackfillError, "production state cannot be read"):
+            self.cutover()
+
+        self.assertFalse(strict_reader_active(self.data_dir))
+        self.assertIsNone(read_inventory(self.data_dir))
+        self.assertEqual(self.metadata_writes(), 0)
+        self.assertEqual(self.runtime.checkpoint.calls, 0)
+        self.assertEqual(self.pause.payload["mode"], "freeze")
+
     def test_a_head_the_freeze_could_not_stop_is_refused(self) -> None:
         record = ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD, handle="term_1")
         self.state.payload = {"observers": {OPEN_SPRINT: record.to_json()}, "records": {}}
@@ -620,6 +678,48 @@ class ObserverCutoverTests(unittest.TestCase):
 
         self.assertFalse(strict_reader_active(self.data_dir))
 
+    def test_a_head_that_left_the_registry_stops_the_scan_before_activation(self) -> None:
+        """Registry drift between the freeze and the cutover is caught by the rescan.
+
+        Activating the strict reader over a row it would immediately fence is not a successful
+        migration, so the scan resolves an open row's head the same way the reader will.
+        """
+        _write_head_registry(self.instance)
+        registry = (self.instance / "heads" / "heads.yaml").read_text(encoding="utf-8")
+        (self.instance / "heads" / "heads.yaml").write_text(
+            registry.replace("  claude-observer:\n    adapter: claude\n    resource: claude-sub\n", ""),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(BackfillError, "post-migration scan refused"):
+            self.cutover()
+
+        self.assertFalse(strict_reader_active(self.data_dir))
+        self.assertFalse(strict_marker_present(self.data_dir))
+
+    def test_an_unreadable_registry_stops_the_cutover_before_any_write(self) -> None:
+        (self.instance / "heads" / "heads.yaml").write_text("profiles: []\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(BackfillError, "cannot validate declared heads"):
+            self.cutover()
+
+        self.assertEqual(self.metadata_writes(), 0)
+        self.assertIsNone(read_inventory(self.data_dir))
+        self.assertEqual(self.runtime.checkpoint.calls, 0)
+
+    def test_the_dry_run_names_a_head_that_has_left_the_registry(self) -> None:
+        registry = (self.instance / "heads" / "heads.yaml").read_text(encoding="utf-8")
+        (self.instance / "heads" / "heads.yaml").write_text(
+            registry.replace("  claude-observer:\n    adapter: claude\n    resource: claude-sub\n", ""),
+            encoding="utf-8",
+        )
+
+        plan = plan_cutover(self.runtime, data_dir=self.data_dir, instance=self.instance)
+
+        self.assertFalse(plan["ok"])
+        self.assertEqual(len(plan["refusals"]), 1)
+        self.assertIn("claude-observer", plan["refusals"][0])
+
     def test_a_second_cutover_does_nothing_and_says_so(self) -> None:
         self.cutover()
 
@@ -631,7 +731,7 @@ class ObserverCutoverTests(unittest.TestCase):
         with mock.patch("secretary.dispatcher_pause_ops.resume") as lifted:
             result = run_cutover(
                 self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
-                now="2026-08-02T00:00:00Z",
+                instance=self.instance, now="2026-08-02T00:00:00Z",
             )
         self.assertEqual(lifted.call_count, 1)
         self.assertEqual(result["steps"][-1]["step"], "resume")
@@ -778,7 +878,7 @@ class ObserverCutoverTests(unittest.TestCase):
         with mock.patch("secretary.dispatcher_pause_ops.resume") as lifted:
             again = run_cutover(
                 self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
-                now="2026-08-02T00:00:00Z",
+                instance=self.instance, now="2026-08-02T00:00:00Z",
             )
         # A finished cutover is not re-run, so the operator lifts the freeze themselves.
         self.assertEqual(again["status"], "already-migrated")
@@ -823,7 +923,7 @@ class ObserverCutoverTests(unittest.TestCase):
     def test_a_dry_run_writes_nothing_and_needs_no_freeze(self) -> None:
         self.pause.payload = {"mode": ""}
 
-        plan = plan_cutover(self.runtime, data_dir=self.data_dir)
+        plan = plan_cutover(self.runtime, data_dir=self.data_dir, instance=self.instance)
 
         self.assertEqual(len(plan["rows"]), 17)
         self.assertFalse(plan["strict_reader_active"])
@@ -844,6 +944,8 @@ class MigrationDurabilityTests(unittest.TestCase):
         forget_migration_state()
         self.data_dir = Path(self.tmp.name) / "data"
         self.data_dir.mkdir(parents=True)
+        self.instance = Path(self.tmp.name) / "instance"
+        _write_head_registry(self.instance)
         self.board = ObserverBoard()
         self.board.seed_inventory(self.data_dir)
         self.sprint_reader = SprintReader(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
@@ -863,7 +965,8 @@ class MigrationDurabilityTests(unittest.TestCase):
         run_cutover(
             self.runtime,
             sprint_writer=SprintWriter(self.board, data_dir=self.data_dir),  # type: ignore[arg-type]
-            data_dir=self.data_dir, now="2026-08-02T00:00:00Z", resume=False,
+            data_dir=self.data_dir, instance=self.instance, now="2026-08-02T00:00:00Z",
+            resume=False,
         )
 
     def recovered_data_dir(self) -> Path:

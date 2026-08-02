@@ -676,15 +676,24 @@ python3 -m secretary sprint migrate-observer --instance INSTANCE
 
 The freeze must carry no `--exclude-workspace`: a head left running keeps writing to the board this
 migration rewrites. The command refuses before its first write if the pipeline is not frozen, if the
-freeze carries exclusions, or if any worker, reviewer or observer record still holds a terminal
-handle. It then runs, in this order and no other:
+freeze carries exclusions, if any worker, reviewer or observer record still holds a terminal handle,
+if the production state cannot be decoded, or if the head registry cannot be read.
+
+The unreadable-state refusal matters more than it looks: `pause freeze` sets the flag and stops
+*nothing* when the records are unreadable, so an empty decode is the one case where a live head is
+both most likely and least visible. Repair
+`DATA_DIR/dispatcher/production-state.json` first.
+
+It then runs, in this order and no other:
 
 1. pre-migration checkpoint, written and pushed to the remote while the tolerant reader is still in
    force, so there is a state to roll back to that describes the installation as it ran;
 2. the immutable versioned inventory and journal, persisted under
    `DATA_DIR/sprints/observer-migration/`;
 3. one idempotent write per row, under a request id derived from the inventory digest and the ref;
-4. a strict full rescan of every row;
+4. a strict full rescan of every row, including resolving each open row's declared head against
+   the head registry, so a profile removed between the freeze and the cutover stops the migration
+   instead of activating a reader that would fence the row it just migrated;
 5. the durable `observer_migration_completed` audit event, which is what makes the installation
    migrated;
 6. post-migration checkpoint, pushed again, now carrying that event;
@@ -706,7 +715,8 @@ sequence stopped and reports `already-migrated` only once the latch at step 7 is
 
 The one case the command cannot decide is an open sprint whose running head it cannot prove: no
 tracked observer record and no successful launch event, or the two disagreeing. It names the sprint
-and refuses. Settle which head is running, then rerun.
+and refuses. Settle which head is running, then rerun. `--dry-run` reports the same refusals under
+`refusals`, so a head that has left the registry is visible before the pipeline is stopped.
 
 After the cutover, `secretary sprint create` and `secretary sprint reopen` both require
 `--observer`, and an open sprint with missing or unreadable metadata fences its own projects with a
@@ -724,10 +734,21 @@ never the reason strict mode is off.
 
 The same rule decides what recovery accepts. A checkpoint taken *after* the migration must carry an
 observer value on every row; one missing it is a corrupt export and the restore refuses before its
-first backend write. A checkpoint taken *before* the migration carries none, and comes back exactly
-as it was — unmigrated rows on an installation whose reader is tolerant, with this migration still
-the way forward. The rows and the reader recover together, so recovery never has to invent an
-executable choice nobody made.
+first backend write.
+
+A checkpoint taken *before* the migration carries none. Its closed rows come back as they were, and
+the installation comes back tolerant, with this migration still the way forward. Its one open row is
+the exception, because an open sprint may never be published without an executable value: the
+restore recovers that sprint's head from `state/board/events.ndjson`, which the checkpoint carries,
+by the same latest-successful-launch rule the migration uses, and writes it before the reference
+publishes the row. It is a per-row recovery of a fact, not the migration: no completion event is
+written and the reader stays tolerant.
+
+If that open row has no successful observer launch anywhere in the log, or its recovered head has
+since left the head registry, the restore names the sprint and refuses. The repair is to declare the
+value by hand in the checkpoint's `state/board/sprints.json` before restoring — add
+`"observer": {"kind": "head", "profile": "<profile>"}` or `"observer": {"kind": "none"}` to that
+row — and run the restore again.
 
 ## Recovery
 

@@ -206,6 +206,51 @@ def executable_observer(sprint: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def installed_observer_profiles(instance: str | Path | None) -> set[str]:
+    """The head profiles this installation runs off, or `ObserverMetadataError`.
+
+    The same snapshot the dispatcher resolves a declared head against (`InstanceCatalog` reads
+    `installed_heads` too), so "valid profile" means one thing at every boundary: the transition
+    that declares it, the recovery that republishes it, the migration that activates the strict
+    reader, and the fence that judges it at a tick.
+
+    A registry that cannot be read is a refusal, never a pass.  Accepting a declaration nobody
+    could check is how an open sprint ends up fenced the moment it opens.
+    """
+    if instance is None:
+        raise ObserverMetadataError(
+            REASON_UNKNOWN_PROFILE,
+            "the head registry is needed to validate an observer profile, and no instance "
+            "directory was given",
+        )
+    from secretary.head_registry import HeadRegistryConfigError, installed_heads
+
+    try:
+        profiles = installed_heads(Path(instance)).get("profiles")
+    except HeadRegistryConfigError as exc:
+        raise ObserverMetadataError(
+            REASON_UNKNOWN_PROFILE, f"the head registry could not be read: {exc}"
+        ) from None
+    if not isinstance(profiles, dict):
+        raise ObserverMetadataError(
+            REASON_UNKNOWN_PROFILE, "the head registry has no profiles table"
+        )
+    return {str(name) for name in profiles}
+
+
+def check_observer_profile(value: dict[str, Any], profiles: set[str], *, subject: str) -> None:
+    """Refuse a declared head the registry does not have. `none` and provenance have no profile."""
+    if not isinstance(value, dict) or value.get("kind") != KIND_HEAD:
+        return
+    profile = str(value.get("profile") or "")
+    if profile not in profiles:
+        raise ObserverMetadataError(
+            REASON_UNKNOWN_PROFILE,
+            f"{subject} declares observer head {profile!r}, which is not a profile of this "
+            "installation's head registry",
+        )
+
+
 def strict_marker_path(data_dir: str | Path) -> Path:
     return Path(data_dir) / STRICT_MARKER
 

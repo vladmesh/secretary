@@ -178,7 +178,39 @@ def _write_project_registry(root: Path, *projects: str) -> Path:
     (instance / "projects").mkdir(parents=True, exist_ok=True)
     for project in projects:
         (instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+    _write_head_registry(instance)
     return instance
+
+
+# Opening a sprint resolves its declared observer against this installation's head snapshot, the
+# same file the dispatcher launches from, so the fixture instance owns a real one. `retired-observer`
+# is deliberately absent: it is the profile the tests declare when they want an unknown one.
+HEAD_SNAPSHOT = "\n".join([
+    "resources:",
+    "  openai-sub:",
+    "    account: openai-subscription",
+    "  claude-sub:",
+    "    account: claude-subscription",
+    "profiles:",
+    "  codex-observer:",
+    "    adapter: codex",
+    "    resource: openai-sub",
+    "  claude-observer:",
+    "    adapter: claude",
+    "    resource: claude-sub",
+    "role_defaults:",
+    "  new_card: codex-observer",
+    "  reviewer: codex-observer",
+    "  observer: codex-observer",
+    "",
+])
+
+
+def _write_head_registry(instance: Path) -> Path:
+    (instance / "heads").mkdir(parents=True, exist_ok=True)
+    path = instance / "heads" / "heads.yaml"
+    path.write_text(HEAD_SNAPSHOT, encoding="utf-8")
+    return path
 
 
 class SprintFixture(unittest.TestCase):

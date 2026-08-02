@@ -28,7 +28,10 @@ from secretary.config import ConfigError, load_config, validate_instance
 from secretary import state_repo
 from secretary.data import init_layout
 from secretary.sprint_observer import (
+    ObserverMetadataError,
+    check_observer_profile,
     encode_observer,
+    installed_observer_profiles,
     is_executable,
     migration_recorded,
     parse_observer,
@@ -102,7 +105,7 @@ def import_normalized_board(
             # installation must not produce half of one, and the sprint entities are written after
             # every Pipeline card: validating them at their own step would leave the whole card
             # board already restored behind a refusal.
-            _check_restored_observers(data_dir, sprints)
+            recovered_observers = _check_restored_observers(data_dir, sprints, instance)
             client = client or KanboardClient()
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
@@ -153,7 +156,9 @@ def import_normalized_board(
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed")
-            _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
+            _import_sprints(
+                data_dir, client, sprints, existing_sprints, prefix, recovered_observers
+            )
         except TaskError as exc:
             raise RestoreError(exc.message) from None
         _update_restore_state(
@@ -203,6 +208,7 @@ def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
 def _import_sprints(
     data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]],
     existing: dict[str, dict[str, Any]], prefix: str,
+    recovered_observers: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Recreate the sprint entities and prove they match the export.
 
@@ -232,7 +238,7 @@ def _import_sprints(
                 # Status and observer land with the fields, before the reference makes the row
                 # readable: recovery must not publish an open sprint that momentarily declares
                 # no observer, which is the one shape the strict reader calls corrupt.
-                observer=sprint.get("observer"),
+                observer=sprint.get("observer", (recovered_observers or {}).get(reference)),
                 status=str(sprint["status"]),
             )
         writer.restore(
@@ -254,9 +260,26 @@ def _import_sprints(
                 request_id=f"{prefix}sprint-comment:{reference}:{index}",
             )
     live = {entity["reference"]: entity for entity in map(normalize_sprint_entity, reader.export())}
-    if any(_sprint_core(live.get(sprint["reference"], {})) != _sprint_core(sprint) for sprint in sprints):
+    if any(
+        _sprint_core(live.get(sprint["reference"], {}))
+        != _sprint_core(_expected_sprint(sprint, recovered_observers))
+        for sprint in sprints
+    ):
         _update_restore_state(data_dir, sprints="failed", sprint_parity="failed")
         raise RestoreError("sprint parity check failed")
+
+
+def _expected_sprint(
+    sprint: dict[str, Any], recovered_observers: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """What the restored row must equal: the export, plus the one value recovery had to add.
+
+    Only the open row of a pre-migration checkpoint takes this branch. Its export carries no
+    observer and the restored row carries the recovered head, so parity has to compare against
+    what was actually written or every such recovery would report itself failed.
+    """
+    value = (recovered_observers or {}).get(str(sprint.get("reference") or ""))
+    return {**sprint, "observer": value} if value is not None else sprint
 
 
 SPRINT_PARITY_FIELDS = (
@@ -265,7 +288,46 @@ SPRINT_PARITY_FIELDS = (
 )
 
 
-def _check_restored_observers(data_dir: Path, sprints: list[dict[str, Any]]) -> None:
+def _recover_open_observer(
+    data_dir: Path, sprint: dict[str, Any], profiles: set[str],
+) -> dict[str, Any]:
+    """The executable value a pre-migration open row is republished with.
+
+    Recovery may not publish an open sprint that declares nothing, and it may not invent a choice
+    either.  It does not have to: the checkpoint carries `state/board/events.ndjson`, which is the
+    same durable lifecycle log the migration recovers a head from, so the head this sprint actually
+    ran is recoverable here by exactly the migration's rule — the latest successful launch.
+
+    This is a per-row recovery of a fact, not the migration: no completion event is written, the
+    reader stays tolerant, and the closed rows are still the cutover's work.
+
+    A row with nothing to recover, or one whose recovered head has left the registry, is refused by
+    name.  The repair is an operator declaring the value in the checkpoint's `sprints.json` before
+    the restore, which is documented in OPERATIONS.md.
+    """
+    from secretary.observer_backfill import recover_observer
+    from secretary.sprint_observer import head_choice
+
+    reference = str(sprint.get("reference") or "?")
+    recovered = recover_observer(reference, TaskAudit(data_dir).events())
+    profile = str((recovered or {}).get("profile") or "")
+    if not profile:
+        raise RestoreError(
+            f"sprint observer metadata is invalid: {reference}: an open sprint predating the "
+            "observer migration has no successful observer launch to recover its head from; "
+            "declare its observer in the checkpoint before restoring"
+        )
+    if profile not in profiles:
+        raise RestoreError(
+            f"sprint observer metadata is invalid: {reference}: the head {profile!r} recovered "
+            "for this open sprint is not a profile of this installation's head registry"
+        )
+    return head_choice(profile)
+
+
+def _check_restored_observers(
+    data_dir: Path, sprints: list[dict[str, Any]], instance: Path | None,
+) -> dict[str, dict[str, Any]]:
     """Validate the whole exported observer set before the first backend write of any set.
 
     What counts as valid depends on which installation the export was taken from, and the export
@@ -276,13 +338,27 @@ def _check_restored_observers(data_dir: Path, sprints: list[dict[str, Any]]) -> 
     is a corrupt export, not an old one, and restoring it would publish a row the strict reader
     this installation comes back with immediately calls corrupt.
 
-    A set taken *before* the migration carries no values at all, and comes back exactly as it was:
-    unmigrated rows on an installation whose reader is tolerant, which is the state it was in.
-    That is the whole point of deriving strictness from the same log — the reader and the rows
-    recover together, so recovery never has to invent an executable choice nobody ever made, and
-    the migration stays the one supported way forward.
+    A set taken *before* the migration carries no values at all.  Its closed rows come back as they
+    were, and the installation comes back tolerant, which is the state it was in; the migration is
+    still what completes them.  Its one open row is different: an open sprint may never be published
+    without an executable value, so its head is recovered here from the very log the checkpoint
+    carries, and written before the reference publishes the row.
+
+    Returns the values recovered that way, keyed by reference, for the import to write at create.
+    Nothing is written by this function: it is the preflight, and its whole job is to decide the
+    entire set before the first backend write of any of it.
     """
     migrated = migration_recorded(data_dir)
+    profiles: set[str] = set()
+    if any(str(sprint.get("status") or "") == "open" for sprint in sprints):
+        # Only an open row is ever executed, so only an open row needs a head the registry has.
+        # A recovery of nothing but closed rows must not be refused because this host has no
+        # registry yet — that is the ordinary shape of restoring an archive of finished work.
+        try:
+            profiles = installed_observer_profiles(instance)
+        except ObserverMetadataError as exc:
+            raise RestoreError(f"sprint observer metadata cannot be validated: {exc.message}") from None
+    recovered: dict[str, dict[str, Any]] = {}
     problems: list[str] = []
     for sprint in sprints:
         reference = str(sprint.get("reference") or "?")
@@ -293,6 +369,8 @@ def _check_restored_observers(data_dir: Path, sprints: list[dict[str, Any]]) -> 
                     f"{reference}: this installation has completed the observer migration, so a "
                     "row without observer metadata is a corrupt export"
                 )
+            elif status == "open":
+                recovered[reference] = _recover_open_observer(data_dir, sprint, profiles)
             continue
         value = parse_observer(sprint.get("observer"))
         if value is None:
@@ -303,8 +381,18 @@ def _check_restored_observers(data_dir: Path, sprints: list[dict[str, Any]]) -> 
                 f"{reference}: an open sprint may not carry migration provenance "
                 f"({value.get('source')})"
             )
+            continue
+        if status == "open":
+            # A declared head has to exist here too: a checkpoint can name a profile the
+            # registry has since lost, and republishing it would open a sprint the fence
+            # stops on its first tick.
+            try:
+                check_observer_profile(value, profiles, subject=reference)
+            except ObserverMetadataError as exc:
+                problems.append(exc.message)
     if problems:
         raise RestoreError("sprint observer metadata is invalid: " + "; ".join(problems))
+    return recovered
 
 
 # A checkpoint written before a sprint owned a product carries none of the ownership

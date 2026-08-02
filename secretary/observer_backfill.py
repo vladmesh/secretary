@@ -44,7 +44,10 @@ from typing import Any
 
 from secretary.sprint_observer import (
     MIGRATION_COMPLETED_KIND,
+    ObserverMetadataError,
     activate_strict_reader,
+    check_observer_profile,
+    installed_observer_profiles,
     encode_observer,
     head_choice,
     historical_recovered,
@@ -287,12 +290,14 @@ def apply_backfill(
     return results
 
 
-def scan_rows(sprints: list[dict[str, Any]]) -> list[str]:
+def scan_rows(sprints: list[dict[str, Any]], profiles: set[str] | None = None) -> list[str]:
     """Every reason the board is not ready for the strict reader, or an empty list.
 
     This is the strict reader's own judgement run once, deliberately, before it is switched on:
     what it would refuse at a tick is what it refuses here, while the pipeline is still frozen and
-    an operator is watching.
+    an operator is watching.  That includes resolving an open row's declared head against the head
+    registry — a profile removed between the freeze and the cutover would otherwise let the
+    migration activate a reader that immediately fences the sprint it just migrated.
     """
     problems: list[str] = []
     for sprint in sorted(sprints, key=lambda item: str(item.get("ref") or "")):
@@ -304,8 +309,16 @@ def scan_rows(sprints: list[dict[str, Any]]) -> list[str]:
         if value is None:
             problems.append(f"{reference}: observer metadata is not one of the tagged forms")
             continue
-        if str(sprint.get("status") or "") == "open" and not is_executable(value):
+        if str(sprint.get("status") or "") != "open":
+            continue
+        if not is_executable(value):
             problems.append(f"{reference}: open sprint carries non-executable {value.get('source')}")
+            continue
+        if profiles is not None:
+            try:
+                check_observer_profile(value, profiles, subject=reference)
+            except ObserverMetadataError as exc:
+                problems.append(exc.message)
     return problems
 
 
@@ -406,6 +419,7 @@ def run_cutover(
     *,
     sprint_writer: Any,
     data_dir: str | Path,
+    instance: str | Path | None,
     now: str,
     resume_actor: str = "observer-migration",
     resume: bool = True,
@@ -439,6 +453,14 @@ def run_cutover(
             "the pipeline is not frozen: run `secretary dispatcher pause --mode freeze` first, "
             "with no workspace exclusions"
         )
+    # Resolved before anything is written, so a registry this cutover cannot read stops it while
+    # the board is still untouched rather than at the scan after seventeen writes.
+    try:
+        profiles = installed_observer_profiles(instance)
+    except ObserverMetadataError as exc:
+        raise BackfillError(
+            f"the observer migration cannot validate declared heads: {exc.message}"
+        ) from None
     excluded = pause_state.get("excluded_worker")
     if isinstance(excluded, list) and excluded:
         raise BackfillError(
@@ -448,12 +470,22 @@ def run_cutover(
     steps.append({"step": "freeze", "status": "ok"})
 
     payload = runtime.production_state.load()
+    # A state nobody can decode attests to nothing. `pause freeze` says so itself: it sets the
+    # flag and stops no head when the records are unreadable, so an empty decode here would be
+    # read as "every head is stopped" precisely when the opposite may be true, and the migration
+    # would rewrite the board under a live head.
+    phase = str(payload.get("phase") or "")
+    if phase == "unavailable":
+        raise BackfillError(
+            "the production state cannot be read, so no head can be confirmed stopped; repair "
+            f"{runtime.production_state.path} before migrating"
+        )
     still_running = running_heads(runtime, payload)
     if still_running:
         raise BackfillError(
             "heads are still running under the freeze: " + ", ".join(still_running)
         )
-    steps.append({"step": "heads-stopped", "status": "ok"})
+    steps.append({"step": "heads-stopped", "status": "ok", "phase": phase})
 
     # Taken while the tolerant reader is still the one in force, so the checkpoint this cutover
     # can be rolled back to describes the installation as it ran, not as it is being rewritten.
@@ -479,7 +511,7 @@ def run_cutover(
     written = apply_backfill(sprint_writer, data_dir, stored)
     steps.append({"step": "backfill", "status": "ok", "rows": len(written)})
 
-    problems = scan_rows(runtime.sprints.export())
+    problems = scan_rows(runtime.sprints.export(), profiles)
     if problems:
         raise BackfillError("the post-migration scan refused the board: " + "; ".join(problems))
     steps.append({"step": "strict-scan", "status": "ok"})
@@ -525,23 +557,42 @@ def run_cutover(
     }
 
 
-def plan_cutover(runtime: Any, *, data_dir: str | Path) -> dict[str, Any]:
+def plan_cutover(
+    runtime: Any, *, data_dir: str | Path, instance: str | Path | None = None,
+) -> dict[str, Any]:
     """What the cutover would write, without writing or freezing anything.
 
     The dry run is a read of the same three sources the real run selects from, so an operator can
-    check the provenance of every closed row before the pipeline is stopped for it.
+    check the provenance of every closed row before the pipeline is stopped for it.  It also names
+    what the real run would refuse, so a head that has left the registry is visible before the
+    pipeline is stopped rather than after.
     """
     payload = runtime.production_state.load()
     inventory = build_inventory(
         runtime.sprints.export(), runtime.audit.events(), running_observer_heads(payload)
     )
+    refusals: list[str] = []
+    try:
+        profiles = installed_observer_profiles(instance)
+    except ObserverMetadataError as exc:
+        refusals.append(exc.message)
+        profiles = None
+    if profiles is not None:
+        for row in inventory["rows"]:
+            if str(row.get("status") or "") != "open":
+                continue
+            try:
+                check_observer_profile(row["observer"], profiles, subject=str(row["ref"]))
+            except ObserverMetadataError as exc:
+                refusals.append(exc.message)
     return {
-        "ok": True,
+        "ok": not refusals,
         "action": "sprint migrate-observer",
         "status": "planned",
         "strict_reader_active": strict_reader_active(data_dir),
         "digest": inventory["digest"],
         "rows": inventory["rows"],
+        "refusals": refusals,
     }
 
 

@@ -12,8 +12,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from secretary.sprint_observer import (
+    KIND_HEAD,
     OBSERVER_FIELD,
+    ObserverMetadataError,
+    check_observer_profile,
     encode_observer,
+    installed_observer_profiles,
     is_executable,
     parse_observer,
 )
@@ -523,9 +527,8 @@ class SprintWriter:
             ),
         }
 
-    @staticmethod
     def _observer_intent(
-        observer: dict[str, Any] | None, *, executable: bool,
+        self, observer: dict[str, Any] | None, *, executable: bool,
     ) -> dict[str, Any] | None:
         """The observer value a create writes, refused here rather than at the backend.
 
@@ -534,6 +537,11 @@ class SprintWriter:
         back to and the create is a validation error.  Recovery is the other caller, and
         it reproduces whatever its export carried, including the migration provenance of
         a closed row, which is not executable and must not be turned into one here.
+
+        A declared profile is resolved against the installation's head registry, the same
+        one the dispatcher launches from.  A sprint may not be opened on a head that does
+        not exist: the fence would stop its projects on the very first tick, and an
+        operator would be reading a critical outcome instead of a validation error.
         """
         if observer is None:
             if executable:
@@ -547,13 +555,24 @@ class SprintWriter:
         value = parse_observer(observer)
         if value is None:
             raise TaskError("validation", "sprint observer is not a valid observer value", 2)
-        if executable and not is_executable(value):
+        if not executable:
+            return value
+        if not is_executable(value):
             raise TaskError(
                 "validation",
                 "sprint observer must be a concrete head profile or none; migration provenance "
                 "is a record of what ran and can never be declared",
                 2,
             )
+        if value["kind"] == KIND_HEAD:
+            # Only a concrete head needs the registry. `none` declares no profile, so a sprint
+            # that runs without an observer is not held up by a registry it never asks about.
+            try:
+                check_observer_profile(
+                    value, installed_observer_profiles(self.instance), subject="sprint",
+                )
+            except ObserverMetadataError as exc:
+                raise TaskError("validation", exc.message, 2) from None
         return value
 
     def _begin_create(self, request_id: str, intent: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
