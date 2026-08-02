@@ -365,7 +365,8 @@ cards must not.
 are refused after a sprint is closed. `current-task` additionally requires that the selected card already
 carries this sprint reference.
 
-An open sprint holds all of its `repositories`: only its observer may create a card in such a project, and
+An open sprint holds every project in its `reservations`: only its observer may create a card in such a
+project, and
 only with `--sprint` naming that sprint. Observer and dispatcher may move and edit linked cards, so the
 ordinary claim, report and review cycle gains no extra step. The PO may create, move or edit only with an
 explicit `--sprint-override` plus a non-empty `--sprint-override-reason-file`; the reason text is stored
@@ -374,7 +375,9 @@ steward and every other role. The refusal names the holding sprint and asks the 
 its entity. The refusal itself is audited as `sprint_guard_denied` and is not duplicated when the same
 request id is retried.
 
-The index of open sprint repositories is kept locally next to the audit log. For a project outside any open
+The index of the projects open sprints reserve is kept locally next to the audit log, keyed by project id.
+An index written in an older key space is rebuilt from the sprints board before it answers. For a project
+outside any open
 sprint it triggers no read of the sprints board. For a write into a held project the sprint is re-read
 live: an unreachable board returns `sprint_guard_unavailable` rather than allowing the write. Closing or
 stopping a sprint releases the hold.

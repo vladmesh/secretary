@@ -18,8 +18,10 @@ from secretary.sprints import (
     BUDGET_EVENT_TYPES,
     SprintReader,
     SprintWriter,
+    active_sprint_projects,
     budget_thresholds,
     ensure_sprint_board,
+    refresh_active_sprint_projects,
     sprint_admission_lock,
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
@@ -869,7 +871,7 @@ class SprintTests(SprintFixture):
         ref = self._create(goal="link")["sprint"]["ref"]
         task_writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         task_writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="linked-card",
         )
         self.assertEqual(TaskReader(self.client).list(sprint=ref)[0]["sprint"], ref)  # type: ignore[arg-type]
@@ -885,8 +887,12 @@ class SprintTests(SprintFixture):
         ref = self._create(goal="binding") ["sprint"]["ref"]
         writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
 
+        # An unlinked card in a project the sprint reserves is answered by the reservation
+        # guard, not by the admission rule; the admission rule is what a project outside every
+        # reservation still meets.
         for kwargs, code in (
-            ({}, "validation"),
+            ({"project": "other"}, "validation"),
+            ({}, "sprint_write_forbidden"),
             ({"sprint": ref, "project": "other"}, "sprint_project_unreserved"),
             ({"sprint": ref, "priority": "P1"}, "validation"),
         ):
@@ -908,11 +914,11 @@ class SprintTests(SprintFixture):
         ref = self._create(goal="close") ["sprint"]["ref"]
         writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         done = writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            role="observer", actor="observer", project="secretary", task_type="code", title="done",
             target="ready", sprint=ref, request_id="close-done",
         )["task"]
         open_task = writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="open",
+            role="observer", actor="observer", project="secretary", task_type="code", title="open",
             target="ready", sprint=ref, request_id="close-open",
         )["task"]
         writer.claim(
@@ -952,7 +958,7 @@ class SprintTests(SprintFixture):
         ref = self._create(goal="repair") ["sprint"]["ref"]
         writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         done = writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            role="observer", actor="observer", project="secretary", task_type="code", title="done",
             target="ready", sprint=ref, request_id="repair-done",
         )["task"]
         writer.claim(
@@ -995,7 +1001,7 @@ class SprintTests(SprintFixture):
         ref = self._create(goal="terminal refusal")["sprint"]["ref"]
         writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         done = writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="done",
+            role="observer", actor="observer", project="secretary", task_type="code", title="done",
             target="ready", sprint=ref, request_id="terminal-done",
         )["task"]
         done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
@@ -1034,7 +1040,7 @@ class SprintTests(SprintFixture):
     def test_cli_observer_can_set_current_task(self) -> None:
         ref = self._create(goal="observer current task")["sprint"]["ref"]
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref,
         )["task"]
         output, errors = io.StringIO(), io.StringIO()
@@ -1064,7 +1070,7 @@ class SprintTests(SprintFixture):
         self.assertTrue(fresh["resume_freshness"]["fresh"])
         task_writer = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         task = task_writer.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="resume-card",
         )["task"]
         task_writer.comment(role="po", actor="operator", reference=task["ref"], body="meaningful", request_id="later")
@@ -1085,7 +1091,7 @@ class SprintTests(SprintFixture):
         sprint = next(item for item in self.client.tasks if item["reference"] == ref)
         self.client.metadata[int(sprint["id"])] ["sprint_resume"] = json.dumps(entry)
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(
-            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="naive-card",
         )["task"]
         TaskWriter(self.client, data_dir=self.tmp.name).comment(
@@ -1130,7 +1136,7 @@ class SprintTests(SprintFixture):
     def test_resume_freshness_ignores_denied_and_failed_card_events(self) -> None:
         ref = self._create(goal="event predicate")["sprint"]["ref"]
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
-            role="po", actor="operator", project="secretary", task_type="code", title="linked", target="ready",
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="predicate-card",
         )["task"]
         entry = {
@@ -1176,6 +1182,9 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         )["sprint"]["ref"]
         sprint = next(task for task in self.client.tasks if task["reference"] == self.ref)
         self.client.metadata[int(sprint["id"])]["sprint_reservations"] = json.dumps(["secretary", "other"])
+        # The reservations landed on the board behind the writer's back, so the index is
+        # re-seeded from it the way a live installation seeds it.
+        refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
 
     def test_observer_must_link_to_its_open_sprint_and_other_roles_are_denied(self) -> None:
         card = self.tasks.create(
@@ -1350,7 +1359,7 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             self.tasks.create(role="po", actor="operator", project="secretary", task_type="code", title="blocked")
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
-    def test_pending_sprint_recovery_rebuilds_its_repository_index(self) -> None:
+    def test_pending_sprint_recovery_rebuilds_its_project_index(self) -> None:
         """A create that could not commit its audit is finished by its own request id."""
         create = dict(
             goal="recovered", repositories=["recovered"], reference="sprint:recovered",
@@ -1374,6 +1383,14 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             ]),
             1,
         )
+        # `restore_create` reproduces the row; the reservations arrive with the second
+        # write recovery always makes, and that is the write the index follows.
+        self.sprints.restore(
+            reference="sprint:recovered",
+            values={"sprint_reservations": json.dumps(["recovered"])},
+            request_id="recover-sprint-reservations",
+        )
+
         with self.assertRaisesRegex(TaskError, "sprint:recovered") as denied:
             self.tasks.create(
                 role="po", actor="operator", project="recovered", task_type="code", title="blocked",
@@ -1403,6 +1420,106 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         )["task"]
 
         self.assertEqual(card["sprint"], other_ref)
+
+
+class SprintReservedProjectGuardTests(unittest.TestCase):
+    """The guards compare a card's project against reservations, not repository paths.
+
+    A live sprint's `repositories` are filesystem paths and its `reservations` are project
+    ids, so a fixture where the two lists differ is what tells the two key spaces apart.
+    """
+
+    def setUp(self) -> None:
+        self.client = SprintKanboard()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.ref = self.sprints.restore_create(
+            reference="sprint:reserved", goal="reserved projects",
+            repositories=["/home/dev/secretary"], request_id="seed-reserved-sprint",
+        )["sprint"]["ref"]
+        sprint = next(task for task in self.client.tasks if task["reference"] == self.ref)
+        self.client.metadata[int(sprint["id"])]["sprint_reservations"] = json.dumps(["secretary"])
+        refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
+
+    def _card(self, title: str = "owned") -> dict:
+        return self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code",
+            title=title, sprint=self.ref,
+        )["task"]
+
+    def test_index_is_keyed_by_reserved_project(self) -> None:
+        self.assertEqual(active_sprint_projects(self.tmp.name), {"secretary": [self.ref]})
+
+    def test_a_stale_repository_keyed_index_is_rebuilt_before_it_answers(self) -> None:
+        path = Path(self.tmp.name) / "sprints" / "active-repositories.json"
+        path.write_text(
+            json.dumps({"version": 1, "repositories": {"/home/dev/secretary": [self.ref]}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(active_sprint_projects(self.tmp.name), {})
+
+        with self.assertRaises(TaskError) as denied:
+            self.tasks.create(
+                role="retro", actor="retro", project="secretary", task_type="research",
+                title="finding", target="issues",
+            )
+
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {
+            "version": 2, "projects": {"secretary": [self.ref]},
+        })
+
+    def test_observer_moves_and_edits_a_card_of_its_reserved_project(self) -> None:
+        card = self._card()
+
+        moved = self.tasks.move(
+            role="observer", actor="observer", reference=card["ref"], target="blocked",
+            reason="waiting on review",
+        )
+        edited = self.tasks.edit(
+            role="observer", actor="observer", reference=card["ref"], description="revised spec",
+        )
+
+        self.assertEqual(moved["task"]["state"], "blocked")
+        self.assertEqual(edited["task"]["description"], "revised spec")
+
+    def test_observer_may_not_move_a_card_of_an_unreserved_project(self) -> None:
+        outside = self.tasks.create(
+            role="retro", actor="retro", project="other", task_type="research", title="outside",
+            target="issues",
+        )["task"]
+
+        with self.assertRaises(TaskError) as denied:
+            self.tasks.move(
+                role="observer", actor="observer", reference=outside["ref"], target="ready", reason="",
+            )
+
+        self.assertEqual(denied.exception.code, "role_forbidden")
+
+    def test_the_reservation_guard_denies_an_unauthorized_write(self) -> None:
+        with self.assertRaisesRegex(TaskError, self.ref) as denied:
+            self.tasks.create(
+                role="retro", actor="retro", project="secretary", task_type="research",
+                title="finding", target="issues", request_id="retro-denied",
+            )
+
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+        events = [
+            event for event in TaskAudit(self.tmp.name).events()
+            if event["kind"] == "sprint_guard_denied"
+        ]
+        self.assertEqual([event["payload"]["sprint"] for event in events], [self.ref])
+
+    def test_a_project_no_sprint_reserves_is_unaffected(self) -> None:
+        created = self.tasks.create(
+            role="retro", actor="retro", project="other", task_type="research", title="finding",
+            target="issues",
+        )
+
+        self.assertEqual(created["task"]["project"], "other")
+        self.assertEqual(active_sprint_projects(self.tmp.name), {"secretary": [self.ref]})
 
 
 if __name__ == "__main__":

@@ -368,7 +368,7 @@ The same production tick, in the same reconciliation pass, keeps one observer he
 sprints board. An observer takes no part in claiming cards: it occupies no project slot, appears in no card
 record and does not affect the Ready queue.
 
-While a sprint is open, its repositories belong to that head as the only product writer: the observer creates
+While a sprint is open, the projects it reserves belong to that head as the only product writer: the observer creates
 only cards linked to it and drives them through board changes. The dispatcher keeps the normal cycle of cards
 that are already linked. If an operator needs to intervene, the PO passes `--sprint-override` and a non-empty
 `--sprint-override-reason-file` to `secretary task create`, `move` or `edit`; the reason stays in the durable
