@@ -3352,10 +3352,12 @@ class DispatcherRuntime:
                         f"already spent its one head replacement"
                     ),
                 )
-            self._charge_head_replacement(task, record, trigger)
+            # The charge itself happens inside the respawn, once that path has proved the dead
+            # head is down and has nothing left to refuse it. Charging here would spend the
+            # replacement on a tick that turns out to start no head at all.
             return self._respawn_wait(
                 task, record, records, payload, attempt_id, kind=kind, now=time.time(),
-                trigger=trigger,
+                trigger=trigger, charge_replacement=True,
             )
         if int(getattr(record, f"{kind}_respawns") or 0) >= 1:
             return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
@@ -3394,10 +3396,16 @@ class DispatcherRuntime:
         comes back on a restart, so blocking on the first death would make the no-observer mode
         brittle; a second death in the same attempt is a question for a person.
 
+        One ordered sequence owns the budget, and every path that replaces a dead head walks it:
+        establish the death on a card with no observer, confirm the old head is stopped, charge
+        here, then launch. A tick that cannot confirm the stop ends before this call and retries,
+        so a host that merely refuses cannot spend the replacement it never put up.
+
         Charged before the head is replaced, never after. A tick that dies between the two leaves
         the budget spent and the next death blocks the card, which is the side of the ceiling that
         cannot burn quota. Charging twice in one attempt is impossible rather than merely unlikely:
-        the callers ask `_head_replacement_spent` first and block instead.
+        the callers ask `_head_replacement_spent` first and block instead, and the charge is keyed
+        on a request id that makes a repeated tick a no-op.
         """
         if self._parks_for_decision(task):
             return
@@ -3462,7 +3470,18 @@ class DispatcherRuntime:
         kind: str,
         now: float,
         trigger: str,
+        charge_replacement: bool = False,
     ) -> dict[str, Any]:
+        """Put a replacement head up for a stalled or dead wait.
+
+        `charge_replacement` says this respawn answers a confirmed death on a card with no
+        observer, so it spends that attempt's one head replacement. Both roles charge at the same
+        point of the sequence `_charge_head_replacement` describes: after the stop of the dead head
+        is confirmed, and immediately before the host is asked for the new one. For the worker that
+        also puts it after the durable launch intent, which is the last thing before the host call
+        that can still refuse. A stop or an intent write that fails returns above the charge, so
+        the budget survives for the next tick.
+        """
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
         if kind == "review":
@@ -3474,6 +3493,8 @@ class DispatcherRuntime:
             )
             if unconfirmed is not None:
                 return unconfirmed
+            if charge_replacement:
+                self._charge_head_replacement(task, record, trigger)
             # One bring-up path for the reviewer: the same helper the normal launch and the
             # recovery path use, so its error handling can't drift from theirs.
             outcome = _start_review(
@@ -3501,6 +3522,8 @@ class DispatcherRuntime:
                     role=WORKER_ROLE,
                     reason=failure,
                 )
+            if charge_replacement:
+                self._charge_head_replacement(task, record, trigger)
             launched, failed = self._bring_up_worker_head(
                 task,
                 record,

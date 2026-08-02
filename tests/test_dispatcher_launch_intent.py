@@ -356,6 +356,44 @@ class LaunchIntentTests(unittest.TestCase):
             self.reader.show(REF)["comments"][-1]["body"],
         )
 
+    def test_a_refused_intent_stop_charges_nothing_and_still_owes_a_replacement(self) -> None:
+        """The launch-intent mirror of the wait watchdog's rule: charge only behind a stop.
+
+        This path settles the dead head through `stop_launch_intent`, which can be refused exactly
+        like the role-scoped stops the watchdog uses. A refusal ends the tick before the budget is
+        read, so nothing is charged and nothing is launched, and the tick after the stop succeeds
+        still puts the one replacement up.
+        """
+        self.unobserved_card()
+        self.host.head_pid = DEAD_PID
+        with self.state_dies_after("prepare_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+
+        unconfirmed = self.tick()
+
+        self.assertEqual(unconfirmed["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.host.prepared, [REF], "no replacement while the stop is refused")
+        self.assertEqual(
+            [comment for comment in self.reader.show(REF)["comments"]
+             if "Dispatcher head replacement" in comment["body"]],
+            [],
+            "an unconfirmed stop charges nothing",
+        )
+
+        self.host.fail_stop_workspace_reason = ""
+        self.host.head_pid = os.getpid()
+        relaunched = self.tick()
+
+        self.assertEqual(relaunched["step"], "claim")
+        self.assertEqual(self.host.prepared, [REF, REF])
+        self.assertEqual(
+            len([comment for comment in self.reader.show(REF)["comments"]
+                 if "Dispatcher head replacement" in comment["body"]]),
+            1,
+        )
+
     def test_a_dead_intent_on_an_observed_card_charges_nothing(self) -> None:
         """The other side: with an observer the ceiling is the observer's judgement, so the
         recovery relaunch is unchanged and leaves no budget record behind."""

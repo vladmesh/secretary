@@ -5096,6 +5096,66 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
 
+    def test_a_refused_worker_stop_charges_nothing_and_still_owes_a_replacement(self) -> None:
+        """The budget is spent only when a replacement is actually put up.
+
+        The head is dead but the host will not confirm its stop, so the tick starts nothing. It
+        must also charge nothing: a charge here would leave the attempt with its one replacement
+        spent and no head to show for it, and the next death would block a card that never got
+        the restart a crash is owed. The tick after the stop succeeds launches that replacement.
+        """
+        self._unobserved_card_in_progress()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        unconfirmed = self.runtime.tick(self.selector)
+
+        self.assertEqual(unconfirmed["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self._replacement_charges(), [], "an unconfirmed stop charges nothing")
+
+        self.host.fail_stop_head_reason = ""
+        replaced = self.runtime.tick(self.selector)
+
+        self.assertEqual(replaced["action"], "worker-respawned")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(len(self._replacement_charges()), 1)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_refused_reviewer_stop_charges_nothing_and_still_owes_a_replacement(self) -> None:
+        """The reviewer half of the same rule, on the same ordered sequence."""
+        self._unobserved_card_in_progress()
+        self.host.commit = "before-review-death-c0ffee"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="worker-done-before-review-death",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.host.review_status_result = {"known": True, "live": False, "reason": "process-exited"}
+        self.host.fail_stop_review_reason = "Orca cannot confirm terminal stop"
+
+        unconfirmed = self.runtime.tick(self.selector)
+
+        self.assertEqual(unconfirmed["action"], "review-stop-unconfirmed")
+        self.assertEqual(len(self.host.reviews), 1, "no second reviewer beside the dead one")
+        self.assertEqual(self._replacement_charges(), [])
+
+        self.host.fail_stop_review_reason = ""
+        replaced = self.runtime.tick(self.selector)
+
+        self.assertEqual(replaced["action"], "review-respawned")
+        self.assertEqual(len(self.host.reviews), 2)
+        self.assertEqual(len(self._replacement_charges()), 1)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def _replacement_charges(self) -> list[dict]:
+        """The durable marks of a spent head replacement, in board order."""
+        return [
+            comment for comment in self.reader.show("secretary-510-pilot")["comments"]
+            if "Dispatcher head replacement" in comment["body"]
+        ]
+
     def test_the_replacement_budget_survives_a_dispatcher_restart(self) -> None:
         """The budget is in the audit, not on the record: a restart that lost the records adopts
         the card, recovers its round from the same journal, and still sees the budget spent."""

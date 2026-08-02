@@ -475,14 +475,19 @@ reason naming the spent budget, and that reason is read before the wait watchdog
 ceiling so the operator is told which of the two ended the card. A crashed head usually comes back
 on a restart, so blocking on the first death would make the mode brittle, and one extra head per
 attempt bounds the burn. The budget is charged in the audit under an id keyed by the card and its
-attempt round, before the replacement is launched, so a dispatcher restart that lost its records
+attempt round, after the dead head's stop is confirmed and before the replacement is launched, so
+a dispatcher restart that lost its records
 adopts the card, recovers the round from the journal and still sees the budget spent. It resets
 with the round: a rework opens the next attempt with its replacement unspent.
 
-Every path that puts a head up after a death charges it. That is the wait watchdog, and the
-recovery of a launch intent whose head is gone: an intent left behind by a tick that died is
-settled first, and when its head has exited the ordinary path relaunches, which is a replacement
-like any other.
+Every path that puts a head up after a death charges it, and each walks the same order: establish
+the death, confirm the old head is stopped, charge, launch. That is the wait watchdog for a worker
+and for a reviewer, and the recovery of a launch intent whose head is gone: an intent left behind
+by a tick that died is settled first, and when its head has exited the ordinary path relaunches,
+which is a replacement like any other. A tick whose stop is refused ends before the charge and
+retries, so a host that will not confirm cannot spend a replacement it never put up. A tick that
+dies between the charge and the launch leaves the budget spent, which is the side of the ceiling
+that cannot burn quota.
 
 A silent head is a different trigger, and the two ceilings do not borrow from each other. A
 silence respawn comes out of the wait watchdog's own per-wait budget and charges nothing here; it
