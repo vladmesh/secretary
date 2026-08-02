@@ -451,6 +451,31 @@ instance file, not the working directory, so a call from another project's works
 directory there. If the data directory cannot be resolved, the command fails with a usage error rather than
 writing next to the process.
 
+### The no-observer ceiling
+
+A card whose sprint declares a concrete observer is bounded by that observer's judgement: the
+verdict parks and a person decides how many rounds it is worth. A card with no observer (no
+sprint, a sprint that declares `none`, a closed sprint, a sprint board that cannot be read) has
+nobody to say stop, so a ceiling on substantive red reviews says it instead.
+
+The count is the card's own `review:red` comments, so it needs no sprint to live in, survives
+anything the dispatcher forgets, and is idempotent without bookkeeping: a retried verdict write
+dedupes on its request id and leaves no second comment. A red mechanical gate and a red CI rollup
+leave dispatcher comments with no verdict marker and are not counted, the same separation the
+sprint budget makes between `red_review` and `red_ci`. The third red review moves the card to
+Blocked with a reason naming the ceiling instead of opening another worker round. Only the
+terminals are stopped: the workspace and the branch stay as the round left them, and coming back
+is one explicit transition. Three is early on purpose. Blocking a card nobody is watching is a
+question to a person, not lost work, and it is cheaper than letting the card eat five rounds
+unattended.
+
+The ceiling does not bind a card that parks for a decision. The observer is the ceiling there, and
+a counter that fired would be deciding a card the observer is still holding.
+
+The other half of the rule, that a dead head on an unobserved card gets one replacement per
+attempt and the second death blocks, is not implemented. A dead head is answered by the wait
+watchdog's own per-kind respawn ceiling, on an unobserved card as on any other.
+
 ### Routing telemetry per attempt
 
 A card does not keep routing history: the resolved review head is cleared when it leaves Validate, and the
@@ -488,7 +513,8 @@ it directly, always: nothing about a failed gate is a judgement anyone has to ma
 a card whose sprint declares a concrete observer opens nothing by itself; the card parks in
 Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs
 a recorded `rework` decision. A red review on a card with no observer to decide opens it directly
-after that same confirmed stop. Nothing else moves a card to In progress for rework, and the
+after that same confirmed stop, up to the no-observer ceiling above, which blocks the card instead
+of opening the round. Nothing else moves a card to In progress for rework, and the
 transition always runs the same order, differing only in the phase it records:
 
 1. The red intent, with its phase, the baseline of the report it closes and the reason the card is

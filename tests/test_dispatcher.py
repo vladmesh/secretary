@@ -32,6 +32,7 @@ from secretary.dispatcher import (
     default_data_dir,
 )
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_helpers import RED_REVIEW_CEILING, red_review_count
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     ObserverRecord,
@@ -4845,6 +4846,158 @@ class DispatcherRuntimeTests(unittest.TestCase):
             [comment["marker"] for comment in task["comments"]],
             ["dispatcher", "report:done", "dispatcher"],
         )
+
+    # the no-observer ceiling (secretary-1033) --------------------------------
+
+    def _unobserved_card_in_progress(self) -> None:
+        """A claimed card whose sprint has nobody to decide for it, worker up and running."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.unobserved_card()
+        self.runtime.tick(self.selector)
+
+    def _red_round(self, index: int) -> dict:
+        """Drive the running worker round to a red review and hand back the tick that acts on it.
+
+        Each round reports a fresh commit: a done report at the SHA the previous round's verdict
+        rejected is bounced by the stale-done check and never reaches a reviewer.
+        """
+        self.host.commit = f"round{index}-c0ffee1234"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id=f"worker-done-{index}",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(f"review-red-{index}")
+        return self.runtime.tick(self.selector)
+
+    def test_third_red_review_blocks_a_card_with_no_observer(self) -> None:
+        """Criterion: a card nobody decides for consumes a bounded number of rounds and stops.
+
+        The first two reds open another round exactly as before. The third does not: it names the
+        ceiling, leaves the checkout and the branch where the round left them, and asks a person.
+        """
+        self.assertEqual(RED_REVIEW_CEILING, 3, "this test drives the ceiling by hand")
+        self._unobserved_card_in_progress()
+        workspace = self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
+
+        self.assertEqual(self._red_round(1)["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self._red_round(2)["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+        third = self._red_round(3)
+
+        self.assertEqual(third["status"], "blocked")
+        self.assertEqual(third["reason"], "red review ceiling reached")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        blocked_reason = task["comments"][-1]["body"]
+        self.assertIn("3 substantive red reviews", blocked_reason)
+        self.assertIn("no-observer ceiling", blocked_reason)
+        # The ceiling stops the card; it does not throw the round's work away.
+        self.assertTrue(workspace.is_dir(), "the workspace survives the ceiling")
+        self.assertEqual(self.host.torn_down, [], "the checkout is kept for whoever unblocks it")
+        self.assertEqual(
+            self.host.calls.count("resume_worker"), 2, "the third red opened no further round"
+        )
+        # The verdict still happened: it is recorded against the heads that earned it.
+        verdicts = [
+            event for event in self.audit_events()
+            if event["kind"] == "routing" and event["payload"]["phase"] == "verdict"
+        ]
+        self.assertEqual([event["payload"]["outcome"] for event in verdicts], ["red", "red", "red"])
+
+    def test_a_replayed_red_verdict_does_not_advance_the_counter_twice(self) -> None:
+        """Idempotence: the same verdict is one red however many times it is written or read.
+
+        A verdict retried under its own request id creates no second comment, and a tick that
+        re-reads the board counts the same comments, so the second round still opens.
+        """
+        self._unobserved_card_in_progress()
+        self._red_round(1)
+        self._red_round(2)
+        # The reviewer's client retried the same verdict, and the dispatcher tick ran again.
+        self._review_red("review-red-2")
+        self._review_red("review-red-2")
+        task = self.reader.show("secretary-510-pilot")
+
+        self.assertEqual(red_review_count(task), 2)
+
+        third = self._red_round(3)
+
+        self.assertEqual(third["status"], "blocked")
+        self.assertEqual(third["reason"], "red review ceiling reached")
+
+    def test_the_red_counter_survives_a_dispatcher_restart(self) -> None:
+        """The count is on the card, so a dispatcher that lost every record still finds it.
+
+        Two reds, then the records are dropped and the attempt id is fresh: the tick that adopts
+        the card re-reads its comments, counts the third red as the third, and blocks. Nothing
+        restart-local is consulted.
+        """
+        self._unobserved_card_in_progress()
+        self._red_round(1)
+        self._red_round(2)
+
+        self._drop_records_and_restart_attempt()
+
+        third = self._red_round(3)
+
+        self.assertEqual(third["status"], "blocked")
+        self.assertEqual(third["reason"], "red review ceiling reached")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertIn("3 substantive red reviews", task["comments"][-1]["body"])
+
+    def test_a_mechanical_gate_red_does_not_count_toward_the_ceiling(self) -> None:
+        """The separation the sprint budget already makes: a red gate is not a red review.
+
+        Two red reviews with a red gate bounce between them leaves the counter at two, so the
+        card gets its third worker round instead of being blocked by CI's opinion.
+        """
+        self._unobserved_card_in_progress()
+        self._red_round(1)
+        self.host.commit = "gate-red-c0ffee1234"
+        self.host.gate_results = [GateResult("red", "pytest failed", "E   assert False")]
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="worker-done-gate-red",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        gated = self.runtime.tick(self.selector)
+        self.assertIn("gate-red", gated["action"])
+
+        self.assertEqual(red_review_count(self.reader.show("secretary-510-pilot")), 1)
+
+        self.assertEqual(self._red_round(2)["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_an_observed_card_is_never_blocked_by_the_red_review_counter(self) -> None:
+        """Criterion: with an observer the ceiling is the observer's judgement.
+
+        Three reds with a rework decision on each: the card parks every time and never blocks,
+        because a counter that fired here would be deciding a card the observer is still holding.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        for index in (1, 2, 3):
+            self.host.commit = f"round{index}-c0ffee1234"
+            self.writer.report(
+                role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+                body="done", request_id=f"worker-done-{index}",
+            )
+            self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+            self.runtime.tick(self.selector)
+            self._review_red(f"review-red-{index}")
+            reworked = self._park_and_decide("rework", request_id=f"decision-rework-{index}")
+            self.assertEqual(reworked["action"], "review-red-reused-worker")
+
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(red_review_count(task), 3)
+        self.assertEqual(task["state"], "in_progress", "the observer decides, not the counter")
 
 
 class HeadPromptTests(unittest.TestCase):

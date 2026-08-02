@@ -33,6 +33,29 @@ def _last_marker(task: dict[str, Any], baseline: int, markers: set[str]) -> str 
     return result
 
 
+# How many substantive red reviews a card with nobody to decide for it may collect before it
+# stops asking for another worker round (secretary-1033). Three is deliberately early and will
+# fire on cards that were about to converge: without an observer, Blocked is a question to a
+# person rather than lost work, and it is cheaper to ask than to let a card eat five rounds.
+RED_REVIEW_CEILING = 3
+
+
+def red_review_count(task: dict[str, Any]) -> int:
+    """The card's own count of substantive red reviews.
+
+    A reviewer's red verdict is one comment marked `review:red` and the board keeps it for the
+    life of the card, so the count is durable, needs no sprint to live in, and is idempotent
+    without any bookkeeping: a replayed verdict write dedupes on its request id and creates no
+    second comment, and a replayed dispatcher tick reads the same comments and gets the same
+    number. A red mechanical gate and a red CI rollup leave dispatcher comments with no verdict
+    marker and are not counted, which is the separation the sprint budget already makes between
+    `red_review` and `red_ci`.
+    """
+    return sum(
+        1 for comment in (task.get("comments") or []) if comment.get("marker") == "review:red"
+    )
+
+
 _GATE_RED_PREFIX = "The mechanical validation gate is red"
 # Hidden marker line carrying the SHA-independent failure fingerprint (secretary-766): a visible
 # GitHub `detail` always contains the head SHA, which changes on every rework commit, so repeat
