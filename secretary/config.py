@@ -17,7 +17,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from secretary.contract_migrations import migrate_contract_dir
-from secretary.sprints import budget_thresholds
+from secretary.sprints import budget_thresholds, open_sprint_limit_invalid
 from secretary.tasks import TaskError
 
 # schema name -> file in secretary/schemas/
@@ -238,6 +238,15 @@ def validate_instance(path: Path) -> InstanceReport:
             budget_thresholds(instance)
         except TaskError:
             errors.append(SchemaError(instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"))
+        # The schema says which values are accepted; this says what the installation
+        # does with one it refuses, because failing closed is silent otherwise: the
+        # limit stays at one open sprint and an operator who set 3 sees no effect.
+        if open_sprint_limit_invalid(instance):
+            errors.append(SchemaError(
+                instance_file.name,
+                "open_sprint_limit",
+                "must be the integer 1 or 2; this installation holds one open sprint until it is",
+            ))
     name = instance.get("name", "") if isinstance(instance, dict) else ""
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     if not isinstance(host, dict):

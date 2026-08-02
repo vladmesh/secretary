@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from secretary.sprint_observer import (
     KIND_HEAD,
+    KIND_NONE,
     OBSERVER_FIELD,
     ObserverMetadataError,
     check_observer_profile,
@@ -63,6 +64,10 @@ BUDGET_EVENT_TYPES = (
 )
 DEFAULT_BUDGET_SIGNAL = 3
 DEFAULT_BUDGET_HARD = 6
+# How many sprints an installation may hold open at once.  One is what this product
+# has always been; two is the pilot, and it is opt-in per installation.
+DEFAULT_OPEN_SPRINT_LIMIT = 1
+MAX_OPEN_SPRINT_LIMIT = 2
 # An observer gets a short window to durably reflect a card transition.  Freshness is
 # based on the transition itself, rather than the time a status reader happens to run,
 # so a timely resume stays fresh until another meaningful transition occurs.
@@ -227,6 +232,34 @@ def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
     if hard < signal:
         raise TaskError("validation", "sprint budget hard threshold must not be below signal threshold", 2)
     return {"signal": signal, "hard": hard}
+
+
+def open_sprint_limit(config: dict[str, Any] | None = None) -> int:
+    """How many sprints this installation may hold open, refusing to widen on bad input.
+
+    An absent setting, an unreadable one and an installation with no config at all all
+    answer one, which is the behaviour every installation has today.  This answers
+    rather than raises, because a malformed value must not be able to stop admission
+    either; `open_sprint_limit_invalid` is what tells the operator the value was refused.
+    """
+    raw = config.get("open_sprint_limit") if isinstance(config, dict) else None
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
+        return DEFAULT_OPEN_SPRINT_LIMIT
+    if not DEFAULT_OPEN_SPRINT_LIMIT <= raw <= MAX_OPEN_SPRINT_LIMIT:
+        return DEFAULT_OPEN_SPRINT_LIMIT
+    return raw
+
+
+def open_sprint_limit_invalid(config: dict[str, Any] | None = None) -> bool:
+    """Whether the setting is present and holds something this installation cannot honour."""
+    if not isinstance(config, dict) or "open_sprint_limit" not in config:
+        return False
+    raw = config["open_sprint_limit"]
+    # `True` is an int to Python and would compare equal to the limit it falls back to,
+    # so the type is judged before the value.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return True
+    return not DEFAULT_OPEN_SPRINT_LIMIT <= raw <= MAX_OPEN_SPRINT_LIMIT
 
 
 def ensure_sprint_board(client: KanboardClient) -> int:
@@ -463,7 +496,7 @@ class SprintWriter:
                 return self._committed_result(SPRINT_CREATED, committed)
             if document is None:
                 self._check_ownership(intent["product"], intent["issues"], intent["reservations"])
-                self._check_conflicts(intent["reservations"], excluding="")
+                self._check_conflicts(intent, excluding="")
                 document, committed = self._begin_create(request_id, intent)
                 if committed is not None:
                     return self._committed_result(SPRINT_CREATED, committed)
@@ -679,7 +712,7 @@ class SprintWriter:
             staged = progress.get("task_id")
             staged_id = staged if isinstance(staged, int) else None
             self._check_reference_claim(str(intent["reference"]), staged_id)
-            self._check_conflicts(list(intent["reservations"]), excluding_id=staged_id)
+            self._check_conflicts(intent, excluding_id=staged_id)
         board_id = ensure_sprint_board(self.client)
         row = self._create_row(document, board_id, admitted=admitted)
         task_id = _positive_int(row.get("id"))
@@ -901,14 +934,32 @@ class SprintWriter:
             2,
         )
 
-    def _check_conflicts(
-        self, reservations: list[str], *, excluding: str = "", excluding_id: int | None = None,
-    ) -> None:
-        """Refuse a second open sprint, and a project another open sprint already holds.
+    def _open_sprint_limit(self) -> int:
+        """This installation's limit, read live at the moment admission runs.
 
-        The resource conflict comes before the singleton rule, because the caller of a
-        colliding reservation has to see which project it is, not only that some sprint
-        is open.
+        An installation the caller did not name, one whose config cannot be read and one
+        that never set the value are the same answer: the singleton limit.  Nothing here
+        can widen the limit, which is what makes a malformed setting harmless.
+        """
+        if self.instance is None:
+            return DEFAULT_OPEN_SPRINT_LIMIT
+        from secretary.config import ConfigError, load_config
+
+        path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
+        try:
+            config = load_config(path)
+        except ConfigError:
+            return DEFAULT_OPEN_SPRINT_LIMIT
+        return open_sprint_limit(config if isinstance(config, dict) else None)
+
+    def _check_conflicts(
+        self, candidate: dict[str, Any], *, excluding: str = "", excluding_id: int | None = None,
+    ) -> None:
+        """Refuse a sprint this installation has no room, or no disjoint room, for.
+
+        Every collision the caller can act on is reported before the generic count
+        refusal, because the caller of a colliding project, product or repository has to
+        see which resource it is, not only that some sprint is open.
 
         A sprint is left out of the scan only when it is proven to be the very row this
         transition is about: the row `reopen` reads by reference, or the row a staged
@@ -921,6 +972,30 @@ class SprintWriter:
                 or (excluding_id is not None and _sprint_number(sprint) == excluding_id)
             )
         ]
+        limit = self._open_sprint_limit()
+        self._check_reservations(
+            [str(project) for project in candidate.get("reservations") or []], others,
+        )
+        if limit > DEFAULT_OPEN_SPRINT_LIMIT:
+            self._check_disjoint(candidate, others)
+        if len(others) < limit:
+            return
+        refs = ", ".join(sorted(str(sprint["ref"]) for sprint in others))
+        if limit == DEFAULT_OPEN_SPRINT_LIMIT:
+            raise TaskError(
+                "sprint_conflict",
+                f"installation already has an open sprint: {refs}; close it before opening another",
+                2,
+            )
+        raise TaskError(
+            "sprint_conflict",
+            f"installation already holds its limit of {limit} open sprints: {refs}; "
+            "close one before opening another",
+            2,
+        )
+
+    def _check_reservations(self, reservations: list[str], others: list[dict[str, Any]]) -> None:
+        """Refuse a project another open sprint already reserves, naming both."""
         held: dict[str, str] = {}
         for sprint in others:
             for project in sprint.get("reservations") or []:
@@ -933,12 +1008,65 @@ class SprintWriter:
                 + ", ".join(f"{project} held by {ref}" for project, ref in sorted(clashes)),
                 2,
             )
-        if others:
+
+    def _check_disjoint(self, candidate: dict[str, Any], others: list[dict[str, Any]]) -> None:
+        """The invariants that make a second open sprint safe, above the reservations.
+
+        Two open sprints may only exist while nothing they work on is shared: a
+        different product, no shared project reservation, and no repository tree either
+        of them contains.  Reservations are checked ahead of this by the caller, because
+        that refusal predates the limit and reads the same at either limit.
+
+        Repository overlap includes nesting, and is judged on canonical paths: two
+        spellings of one working tree are one working tree, and a root that contains
+        another's is the same tree twice.
+
+        The observer ceiling is last of the specific refusals: while nothing binds an
+        observer call to the sprint it is about, two heads observing at once would each
+        read the other's cards as their own, so at most one open sprint may declare one.
+        """
+        product = str(candidate.get("product") or "")
+        roots = _canonical_roots(candidate.get("repositories") or [])
+        for sprint in sorted(others, key=lambda row: str(row["ref"])):
+            reference = str(sprint["ref"])
+            other_product = str(sprint.get("product") or "")
+            if not other_product:
+                raise TaskError(
+                    "resource_conflict",
+                    f"open sprint {reference} declares no product, so a second open sprint "
+                    "cannot be proven disjoint from it",
+                    2,
+                )
+            if other_product == product:
+                raise TaskError(
+                    "resource_conflict",
+                    f"product {product} is already the product of open sprint {reference}; "
+                    "a second open sprint needs a different product",
+                    2,
+                )
+            for held in _canonical_roots(sprint.get("repositories") or []):
+                clash = next((root for root in roots if _roots_overlap(root, held)), None)
+                if clash is not None:
+                    raise TaskError(
+                        "resource_conflict",
+                        f"repository root {clash} overlaps {held}, held by open sprint {reference}",
+                        2,
+                    )
+        observer = candidate.get("observer")
+        if not (isinstance(observer, dict) and observer.get("kind") == KIND_HEAD):
+            return
+        holder = next(
+            (
+                str(sprint["ref"]) for sprint in sorted(others, key=lambda row: str(row["ref"]))
+                if _declares_observer_head(sprint)
+            ),
+            None,
+        )
+        if holder is not None:
             raise TaskError(
                 "sprint_conflict",
-                "installation already has an open sprint: "
-                + ", ".join(sorted(str(sprint["ref"]) for sprint in others))
-                + "; close it before opening another",
+                "the pilot's one-observer ceiling allows one open sprint with an observer head, "
+                f"and {holder} already declares one; open this sprint with observer none",
                 2,
             )
 
@@ -1206,7 +1334,7 @@ class SprintWriter:
                 return self._committed_result(SPRINT_REOPENED, committed)
             if document is None:
                 sprint = self.reader.show(reference, include_cards=False)
-                self._check_reopen(sprint, reference)
+                self._check_reopen(sprint, reference, intent["observer"])
                 event = self._event(
                     SPRINT_REOPENED, role, actor, reference, request_id, {"intent": intent}, sprint,
                 )
@@ -1219,8 +1347,15 @@ class SprintWriter:
                     raise TaskError("audit_pending", "sprint transaction claim is unavailable", 4)
             return self._run_reopen(document)
 
-    def _check_reopen(self, sprint: dict[str, Any], reference: str) -> None:
-        """Every rule an open sprint has to satisfy, read live before any write."""
+    def _check_reopen(
+        self, sprint: dict[str, Any], reference: str, observer: dict[str, Any] | None,
+    ) -> None:
+        """Every rule an open sprint has to satisfy, read live before any write.
+
+        The candidate is the row as it stands, under the observer this reopen declares
+        rather than the one the closed row happens to carry: the ceiling is about the
+        run being opened now.
+        """
         missing = [
             name for name, value in (
                 ("product", sprint.get("product")),
@@ -1242,7 +1377,7 @@ class SprintWriter:
             [str(issue) for issue in sprint.get("issues") or []],
             reservations,
         )
-        self._check_conflicts(reservations, excluding=reference)
+        self._check_conflicts(dict(sprint) | {"observer": observer}, excluding=reference)
 
     def _run_reopen(self, document: dict[str, Any]) -> dict[str, Any]:
         """Drive the staged reopen to its single audit event, or leave it repairable."""
@@ -1253,7 +1388,7 @@ class SprintWriter:
                 # A staged reopen held nothing while it waited for its repeat, so the
                 # installation is measured again before this sprint becomes the open one.
                 self._check_conflicts(
-                    [str(project) for project in sprint.get("reservations") or []],
+                    dict(sprint) | {"observer": document["intent"]["observer"]},
                     excluding=reference,
                 )
             # Observer first, status second, and each step is recorded durably: a reopen that
@@ -1436,6 +1571,43 @@ def _create_marker(request_id: str) -> str:
 def _close_archive_request_id(request_id: str, reference: str) -> str:
     digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
     return f"{request_id}:sprint-close-archive:{digest}"
+
+
+def _canonical_roots(paths: list[Any]) -> list[Path]:
+    """Repository roots as this host resolves them: symlinks followed, then normalized.
+
+    A path that cannot be resolved at all is kept as it was written rather than
+    dropped: an unresolvable root is still a root the sprint claims, and dropping it
+    would silently make two sprints look disjoint.
+    """
+    roots: list[Path] = []
+    for raw in paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            root = Path(text).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            root = Path(text)
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _roots_overlap(left: Path, right: Path) -> bool:
+    """Whether two canonical roots name one tree, which includes one nested in the other."""
+    return left == right or left in right.parents or right in left.parents
+
+
+def _declares_observer_head(sprint: dict[str, Any]) -> bool:
+    """Whether an open sprint counts against the one-observer ceiling.
+
+    Only `none` proves a sprint runs without a head.  A row whose observer is missing or
+    unreadable proves nothing, and the ceiling has to read it as a head: admitting a
+    second head because one row could not be read is the collision it exists to prevent.
+    """
+    observer = sprint.get("observer")
+    return not (isinstance(observer, dict) and observer.get("kind") == KIND_NONE)
 
 
 def _unique_strings(values: list[str]) -> list[str]:
