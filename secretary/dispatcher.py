@@ -32,6 +32,7 @@ from secretary.dispatcher_launcher import (
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
+    RED_REVIEW_CEILING,
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
@@ -42,6 +43,7 @@ from secretary.dispatcher_helpers import (
     _review_adoption_baseline,
     _tail,
     _worker_id,
+    red_review_count as _red_review_count,
     scrub_host_output,
 )
 from secretary.dispatcher_gate import (
@@ -3167,6 +3169,13 @@ class DispatcherRuntime:
                 # No observer to release it: the verdict acts on its own tick, as it did before
                 # Assessment existed. The worker of this round stayed suspended through the gate
                 # and the review, so the verdict goes to the conversation that wrote the code.
+                # Except at the ceiling: a card nobody watches has to stop asking for another
+                # round at some point, and this verdict is the one that decides which it is.
+                reds = _red_review_count(task)
+                if reds >= RED_REVIEW_CEILING:
+                    return self._block_red_review_ceiling(
+                        task, record, records, payload, attempt_id, reds=reds
+                    )
                 return self._begin_red_transition(
                     task, record, records, payload, attempt_id, phase="review",
                     move_reason="review:red", verdict_outcome="red",
@@ -3265,9 +3274,11 @@ class DispatcherRuntime:
                 "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
             }
         if not status.get("live"):
+            # The one trigger that is a death rather than a silence: the head this wait belongs to
+            # is gone, not quiet. That is what the no-observer replacement budget is spent on.
             return self._trigger_wait_watchdog(
                 task, record, records, payload, attempt_id, kind=kind,
-                trigger=f"terminal {status.get('reason') or 'missing'}",
+                trigger=f"terminal {status.get('reason') or 'missing'}", dead=True,
             )
         activity = status.get("last_activity")
         progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
@@ -3319,10 +3330,71 @@ class DispatcherRuntime:
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
 
-    def _trigger_wait_watchdog(self, task, record, records, payload, attempt_id, *, kind: str, trigger: str):
-        if int(getattr(record, f"{kind}_respawns") or 0) < 1:
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
-        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
+    def _trigger_wait_watchdog(
+        self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
+        dead: bool = False,
+    ):
+        if int(getattr(record, f"{kind}_respawns") or 0) >= 1:
+            return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
+        if dead and not self._parks_for_decision(task):
+            # A card with an observer keeps the per-wait budget: the observer is the ceiling, and
+            # it can see a card burning heads and say so. A card with nobody watching gets one
+            # replacement for the whole attempt, whichever of its heads dies.
+            return self._replace_dead_head(
+                task, record, records, payload, attempt_id, kind=kind, trigger=trigger
+            )
+        return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
+
+    def _replace_dead_head(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        kind: str,
+        trigger: str,
+    ) -> dict[str, Any]:
+        """Spend this attempt's one head replacement, or block because it is already spent.
+
+        A crashed head usually comes back on a restart, so blocking on the first death would make
+        the no-observer mode brittle; a second death in the same attempt is a question for a
+        person. The budget lives in the audit under an id keyed by the card and its attempt round,
+        not on the dispatcher record: it has to survive a restart that lost the records, and an
+        adopted card recovers its round from the same journal. It resets with the round, so a
+        rework that opens the next attempt gets its own replacement rather than inheriting a
+        spent one.
+        """
+        ref = task["ref"]
+        round_number = record.attempt_round or self._journal_round(ref)
+        request_id = _head_replacement_request_id(ref, round_number)
+        if self.audit.committed_event(request_id) is not None:
+            return self._escalate_wait(
+                task, record, records, payload, attempt_id, kind=kind,
+                stall=_stall_seconds(kind),
+                trigger=(
+                    f"{trigger}, and this card has no observer: attempt {round_number} "
+                    f"already spent its one head replacement"
+                ),
+            )
+        # Charged before the head is replaced, never after. A tick that dies between the two
+        # leaves the budget spent and the next death blocks the card, which is the side of the
+        # ceiling that cannot burn quota.
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher head replacement: {trigger}. This card has no observer, so attempt "
+                f"{round_number} gets one replacement head and no more; another dead head in this "
+                f"attempt moves the card to Blocked."
+            ),
+            request_id=request_id,
+        )
+        return self._respawn_wait(
+            task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger
+        )
 
     def _respawn_wait(
         self,
@@ -4251,6 +4323,41 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": outcome}
 
+    def _block_red_review_ceiling(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        reds: int,
+    ) -> dict[str, Any]:
+        """The last red review a card with no observer gets: Blocked instead of another round.
+
+        The verdict is still recorded against the heads that earned it. It happened, and the
+        round's outcome is the same red whether or not it opened a rework. What does not happen
+        is the red transition: no board move to In progress, no continuation delivered, no
+        replacement head. `_block_merge_path` takes the heads down and moves the card, and it
+        stops the terminals of the workspace rather than removing it, so the checkout and the
+        branch are exactly where the third round left them. Coming back is one transition someone
+        makes on purpose, which is the whole point of the ceiling.
+        """
+        self._record_verdict_routing(task["ref"], record, "red")
+        return self._block_merge_path(
+            task, record, records, payload, attempt_id,
+            action="red-review-ceiling",
+            reason=(
+                f"review:red. This card has now collected {reds} substantive red reviews and its "
+                f"sprint has no observer to decide for it, so the no-observer ceiling of "
+                f"{RED_REVIEW_CEILING} is reached: the card is Blocked instead of opening another "
+                f"worker round. The workspace and the branch are kept as the last round left "
+                f"them; unblock the card to continue."
+            ),
+            step="review",
+            outcome="red review ceiling reached",
+        )
+
     def _release_parked(
         self,
         task: dict[str, Any],
@@ -4550,6 +4657,16 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
+
+
+def _head_replacement_request_id(reference: str, round_number: int) -> str:
+    """Identity of the one head replacement an attempt of an unobserved card is allowed.
+
+    Deliberately keyed on the card and the round alone, with a constant in the attempt-id slot:
+    the dispatcher's attempt id changes on every restart, and a budget that reset with it would
+    hand a fresh replacement to every crash of the dispatcher itself.
+    """
+    return _attempt_request_id("head-replacement", "budget", reference, str(round_number))
 
 
 def _continuation_prompt(phase: str) -> str:
