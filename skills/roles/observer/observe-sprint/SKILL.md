@@ -298,12 +298,12 @@ actual contribution. Record the conclusion in a resume entry and return to step 
 Apply the same classification to the Blocked evidence before identifying the immediate cause. Do not treat
 hardening or compatibility outside the sprint as a local implementation defect.
 
-A card blocked by its worker carries the worker's own view of the blocker: `blocked_classification` on the
-card, `external_fact` or `wrong_task_definition`, and the same line under the `[report:blocked]` marker.
-Start from it, it is not the verdict: a worker that names a wrong task definition on every card it touches
-is a fact about the head, not about the cards. Your move out of Blocked requires a non-empty reason and is
-refused without one, so name what you decided and why in it. The card field is cleared when the card reaches
-Ready or Done; to count how often one head blocks, read the `reported` audit events, which keep every one.
+A card blocked by its worker carries the worker's own view of the blocker: a `classification:` line under the
+`[report:blocked]` marker in the report comment, `external_fact` or `wrong_task_definition`. Start from it,
+it is not the verdict: a worker that names a wrong task definition on every card it touches is a fact about
+the head, not about the cards. Your move out of Blocked requires a non-empty reason and is refused without
+one, so name what you decided and why in it. To count how often one head blocks, read the `reported` audit
+events, which carry the classification of every block.
 
 Identify the class of cause and act accordingly:
 

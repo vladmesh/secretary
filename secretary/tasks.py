@@ -90,7 +90,7 @@ _KNOWN_METADATA = {
     "head", "resolved_head", "review_head", "resolved_review_head", "retry_same",
     "retry_switch", "retry_heads", "complexity", "family_preference", "routing_reason",
     "quota_snapshot_at", "codex_launch_mode",
-    "sprint_ref", "blocked_classification",
+    "sprint_ref",
 }
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
@@ -144,10 +144,6 @@ _READY_RESET_METADATA = {
     "retry_same": "",
     "retry_switch": "",
     "retry_heads": "",
-    # The card field is current state, not history: a card back in Ready or In progress showing a
-    # `blocked_classification` reads as a live answer. The `reported` audit event keeps the
-    # classification of every block forever, so clearing it here loses nothing.
-    "blocked_classification": "",
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
 # What kind of blocker a worker ran into, in the worker's own view. Two values and no more:
@@ -403,9 +399,6 @@ class TaskReader:
             "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
             "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
             "sprint": _null_if_empty(meta.get("sprint_ref")),
-            # The worker's classification of its last blocked report, on the card so an observer
-            # reading the board has it without parsing the report prose.
-            "blocked_classification": _enum_or_none(meta.get("blocked_classification"), set(_BLOCK_CLASSIFICATIONS)),
             "record_type": _null_if_empty(meta.get("record_type")),
             "audit": {"created_at": _rfc3339(card.get("date_creation")), "updated_at": _rfc3339(card.get("date_modification")), "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name}},
         }
@@ -942,6 +935,12 @@ class TaskWriter:
         definition are repaired by different people in different places, and prose that leaves
         the observer to infer which one it is costs an analysis the worker had already done.
         Two values and no free text, so repeated blocks from one head are countable.
+
+        It is durable in two places, both written by the single write this method already makes:
+        the `reported` audit payload, which is the authoritative machine-readable copy, and a
+        `classification:` line under the marker in the comment, which is what an observer reads
+        on the card. It is deliberately not card metadata: a second backend write can fail on its
+        own and leave a field that silently disagrees with the audit.
         """
         self._role(role, {"worker"})
         if kind not in {"done", "blocked"} or (kind == "blocked" and not body.strip()):
@@ -964,20 +963,7 @@ class TaskWriter:
         if classification:
             payload["classification"] = classification
             content = f"[{marker}]\nclassification: {classification}\n\n{body}"
-
-        def mutation(task: dict[str, Any]) -> Any:
-            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=content)
-            if not classification:
-                return
-            try:
-                self.client.call(
-                    "saveTaskMetadata", task_id=_task_number(task),
-                    values={"blocked_classification": classification},
-                )
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
-
-        return self._write("reported", role, actor, reference, request_id, payload, mutation)
+        return self._write("reported", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=content))
 
     def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"reviewer"})
@@ -1662,7 +1648,6 @@ class TaskWriter:
             or normalized["routing"]["resolved_worker_head"] is not None
             or normalized["routing"]["resolved_review_head"] is not None
             or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
-            or normalized["blocked_classification"] is not None
         ):
             raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
 

@@ -1860,7 +1860,6 @@ class BlockedContractTests(unittest.TestCase):
                     request_id=f"blocked-{classification}",
                 )
                 self.assertEqual(result["action"], "reported")
-                self.assertEqual(result["task"]["blocked_classification"], classification)
                 payload = self._events("reported")[index]["payload"]
                 self.assertEqual(payload["marker"], "report:blocked")
                 self.assertEqual(payload["classification"], classification)
@@ -1868,21 +1867,28 @@ class BlockedContractTests(unittest.TestCase):
                     payload["body_sha256"],
                     hashlib.sha256(b"stuck on the adapter").hexdigest(),
                 )
-                self.assertEqual(
-                    self.client.metadata[12]["blocked_classification"], classification
-                )
                 comment = self.client.comments[12][-1]["comment"]
                 self.assertTrue(comment.startswith("[report:blocked]\n"))
                 self.assertIn(f"classification: {classification}", comment)
                 self.assertIn("stuck on the adapter", comment)
+
+    def test_a_blocked_report_is_a_single_backend_write(self) -> None:
+        """Two writes could disagree; the comment and the audit event cannot."""
+        self.writer.report(
+            role="worker", actor="w", reference="secretary-468", kind="blocked",
+            body="stuck", classification="external_fact", request_id="blocked-one-write",
+        )
+        written = [method for method, _ in self.client.calls if method.startswith(("create", "save", "move", "update"))]
+        self.assertEqual(written, ["createComment"])
 
     def test_a_done_report_carries_no_classification(self) -> None:
         result = self.writer.report(
             role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
             request_id="done-no-classification",
         )
+        self.assertEqual(result["action"], "reported")
         self.assertNotIn("classification", self._events("reported")[0]["payload"])
-        self.assertIsNone(result["task"]["blocked_classification"])
+        self.assertNotIn("classification:", self.client.comments[12][-1]["comment"])
         with self.assertRaisesRegex(TaskError, "no classification") as raised:
             self.writer.report(
                 role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
@@ -1921,8 +1927,9 @@ class BlockedContractTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(errors.getvalue(), "")
-        task = json.loads(output.getvalue())["task"]
-        self.assertEqual(task["blocked_classification"], "wrong_task_definition")
+        self.assertEqual(json.loads(output.getvalue())["action"], "reported")
+        comment = self.client.comments[12][-1]["comment"]
+        self.assertIn("classification: wrong_task_definition", comment)
 
     def test_an_observer_moving_a_card_out_of_blocked_must_say_why(self) -> None:
         self._reserve()
@@ -1948,6 +1955,14 @@ class BlockedContractTests(unittest.TestCase):
         self.assertEqual(payload["reason_sha256"], hashlib.sha256(reason.encode()).hexdigest())
         self.assertIn(reason, self.client.comments[12][-1]["comment"])
 
+        # Every exit is guarded, not just the requeue to Ready.
+        self.client.tasks[0]["column_id"] = 5
+        with self.assertRaisesRegex(TaskError, "out of Blocked requires a non-empty reason"):
+            self.writer.move(
+                role="observer", actor="observer", reference="secretary-468",
+                target="in_progress", reason="", request_id="observer-silent-resume",
+            )
+
     def test_the_observer_may_still_move_a_card_into_blocked_without_a_reason(self) -> None:
         """Only the exit is guarded here. The entry paths are unchanged."""
         self._reserve()
@@ -1958,24 +1973,22 @@ class BlockedContractTests(unittest.TestCase):
         )
         self.assertEqual(moved["task"]["state"], "blocked")
 
-    def test_leaving_blocked_clears_the_card_field_and_keeps_the_audit(self) -> None:
-        """The card field is current state; the `reported` event is the permanent record."""
+    def test_the_record_of_a_block_survives_the_card_leaving_blocked(self) -> None:
+        """The classification is history, not card state: nothing on the card to go stale."""
         self._reserve()
         self.writer.report(
             role="worker", actor="w", reference="secretary-468", kind="blocked",
             body="the upstream API is down", classification="external_fact",
             request_id="blocked-before-requeue",
         )
-        self.assertEqual(self.client.metadata[12]["blocked_classification"], "external_fact")
-
         self.client.tasks[0]["column_id"] = 5  # Blocked
         requeued = self.writer.move(
             role="observer", actor="observer", reference="secretary-468", target="ready",
             reason="the upstream fix landed", request_id="observer-requeue",
         )
         self.assertEqual(requeued["task"]["state"], "ready")
-        self.assertIsNone(requeued["task"]["blocked_classification"])
-        self.assertEqual(self.client.metadata[12]["blocked_classification"], "")
+        self.assertNotIn("blocked_classification", requeued["task"])
+        self.assertNotIn("blocked_classification", self.client.metadata[12])
         self.assertEqual(self._events("reported")[0]["payload"]["classification"], "external_fact")
 
     def test_the_steward_requirement_is_untouched(self) -> None:
