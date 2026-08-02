@@ -5017,6 +5017,50 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "the block must name the budget it ran out of",
         )
 
+    def test_two_worker_deaths_block_with_the_reason_that_names_the_budget(self) -> None:
+        """The same head dying twice must not block with the generic stall reason.
+
+        The first death spends the budget through the ordinary respawn, which also leaves the
+        per-wait counter at one. The per-wait ceiling would answer the second death first and say
+        only "after respawn", which tells the operator nothing about which ceiling this card hit.
+        """
+        self._unobserved_card_in_progress()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "worker-respawned")
+
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
+        blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["to"], "blocked")
+        reason = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("already spent its one head replacement", reason)
+        self.assertIn("no observer", reason)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_a_silence_respawn_does_not_spend_the_death_budget(self) -> None:
+        """A silent head is a different trigger. It takes the per-wait replacement it always did
+        and leaves the attempt's death budget alone, so the wait escalates on its own reason."""
+        self._unobserved_card_in_progress()
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "worker-respawned")
+        self.assertEqual(
+            [comment for comment in self.reader.show("secretary-510-pilot")["comments"]
+             if "Dispatcher head replacement" in comment["body"]],
+            [],
+            "a silence respawn charges no death budget",
+        )
+
+        # The wait's own ceiling still ends it, with its own reason.
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
+        blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["to"], "blocked")
+        reason = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("after respawn", reason)
+        self.assertNotIn("already spent its one head replacement", reason)
+
     def test_the_replacement_budget_survives_a_dispatcher_restart(self) -> None:
         """The budget is in the audit, not on the record: a restart that lost the records adopts
         the card, recovers its round from the same journal, and still sees the budget spent."""

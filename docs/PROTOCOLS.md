@@ -471,13 +471,19 @@ card eat five rounds unattended.
 
 The second bounds head replacement. A head that dies gets one replacement per attempt, whichever
 of the attempt's heads it is; a second death in the same attempt moves the card to Blocked with a
-reason naming the spent budget. A crashed head usually comes back on a restart, so blocking on the
-first death would make the mode brittle, and one extra head per attempt bounds the burn. The
-budget is charged in the audit under an id keyed by the card and its attempt round, before the
-replacement is launched, so a dispatcher restart that lost its records adopts the card, recovers
-the round from the journal and still sees the budget spent. It resets with the round: a rework
-opens the next attempt with its replacement unspent. A silent head is a different trigger and
-keeps the wait watchdog's own per-wait replacement.
+reason naming the spent budget, and that reason is read before the wait watchdog's own per-wait
+ceiling so the operator is told which of the two ended the card. A crashed head usually comes back
+on a restart, so blocking on the first death would make the mode brittle, and one extra head per
+attempt bounds the burn. The budget is charged in the audit under an id keyed by the card and its
+attempt round, before the replacement is launched, so a dispatcher restart that lost its records
+adopts the card, recovers the round from the journal and still sees the budget spent. It resets
+with the round: a rework opens the next attempt with its replacement unspent.
+
+Every path that puts a head up after a death charges it. That is the wait watchdog, and the
+recovery of a launch intent whose head is gone: an intent left behind by a tick that died is
+settled first, and when its head has exited the ordinary path relaunches, which is a replacement
+like any other. A silent head is a different trigger and keeps the wait watchdog's own per-wait
+replacement without touching this budget.
 
 Neither ceiling binds a card that parks for a decision. The observer is the ceiling there, and a
 counter that fired would be deciding a card the observer is still holding.

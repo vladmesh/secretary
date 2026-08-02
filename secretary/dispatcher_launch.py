@@ -356,7 +356,14 @@ def resolve_launch_intent(
                 role=role,
                 reason=failure,
             )
-        return None
+        # The head this intent was written for is confirmed gone and the ordinary path below is
+        # about to put another one up in its place. That is a replacement for a dead head, so it
+        # is charged against the same per-attempt budget the wait watchdog spends, and a card
+        # whose budget is already gone is blocked here rather than handed a second free head.
+        # After `keep_reserved_round`: a rework intent's replacement belongs to the round it
+        # reserved, and so does the budget it spends. The runtime owns this decision; only the
+        # settling of the intent above belongs to this module.
+        return runtime.block_dead_launch_intent(task, record, records, payload, role=role)
     return _adopt_launch_intent(runtime, task, records, payload, record, intent, role, step)
 
 
