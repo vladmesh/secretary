@@ -10,7 +10,14 @@ from typing import Callable
 
 from secretary.config import ConfigError, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import (
+    _BLOCK_CLASSIFICATIONS,
+    KanboardClient,
+    TaskAudit,
+    TaskError,
+    TaskReader,
+    TaskWriter,
+)
 
 
 def _add_data_dir_args(parser) -> None:
@@ -105,6 +112,9 @@ def add_task_subcommands(subparsers) -> None:
         command.add_argument("--body-file")
         if name == "report":
             command.add_argument("--kind", required=True, choices=("done", "blocked"))
+            # Required with `--kind blocked`, refused with `--kind done`; the writer holds both
+            # rules so the protocol is the same from a script as from the CLI.
+            command.add_argument("--classification", default="", choices=("", *_BLOCK_CLASSIFICATIONS))
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "decide":
@@ -271,7 +281,7 @@ def run_task_edit(args: argparse.Namespace) -> int:
 
 
 def run_task_report(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.report(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
+    return _run_task_write(args, lambda writer, body, actor: writer.report(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, classification=args.classification, request_id=args.request_id))
 
 
 def run_task_verdict(args: argparse.Namespace) -> int:

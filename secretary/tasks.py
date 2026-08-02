@@ -90,7 +90,7 @@ _KNOWN_METADATA = {
     "head", "resolved_head", "review_head", "resolved_review_head", "retry_same",
     "retry_switch", "retry_heads", "complexity", "family_preference", "routing_reason",
     "quota_snapshot_at", "codex_launch_mode",
-    "sprint_ref",
+    "sprint_ref", "blocked_classification",
 }
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
@@ -146,6 +146,11 @@ _READY_RESET_METADATA = {
     "retry_heads": "",
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
+# What kind of blocker a worker ran into, in the worker's own view. Two values and no more:
+# an external fact is repaired outside the card, a wrong task definition is repaired by
+# rewriting or reslicing the card, and the observer's next move differs between the two. The
+# worker's view is not the verdict, it is the cheapest evidence the observer has to start from.
+_BLOCK_CLASSIFICATIONS = ("external_fact", "wrong_task_definition")
 # What the observer may decide about a parked card, and where each decision sends it. The
 # decision is recorded on the card before anything acts on it: the effect belongs to the
 # dispatcher and can fail, and a failed effect blocks the card rather than half releasing it.
@@ -394,6 +399,9 @@ class TaskReader:
             "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
             "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
             "sprint": _null_if_empty(meta.get("sprint_ref")),
+            # The worker's classification of its last blocked report, on the card so an observer
+            # reading the board has it without parsing the report prose.
+            "blocked_classification": _enum_or_none(meta.get("blocked_classification"), set(_BLOCK_CLASSIFICATIONS)),
             "record_type": _null_if_empty(meta.get("record_type")),
             "audit": {"created_at": _rfc3339(card.get("date_creation")), "updated_at": _rfc3339(card.get("date_modification")), "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name}},
         }
@@ -920,14 +928,52 @@ class TaskWriter:
             files += f", +{len(dirt) - len(shown)} more"
         raise TaskError("uncommitted", f"workspace has uncommitted changes: {files}; commit them and retry", 3)
 
-    def report(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+    def report(
+        self, *, role: str, actor: str, reference: str, kind: str, body: str,
+        classification: str = "", request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """A worker's report, and for a blocked one the kind of blocker it hit.
+
+        The classification is required rather than offered: an external fact and a wrong task
+        definition are repaired by different people in different places, and prose that leaves
+        the observer to infer which one it is costs an analysis the worker had already done.
+        Two values and no free text, so repeated blocks from one head are countable.
+        """
         self._role(role, {"worker"})
         if kind not in {"done", "blocked"} or (kind == "blocked" and not body.strip()):
             raise TaskError("validation", "blocked reports require a non-empty body", 2)
+        classification = classification.strip()
+        if kind == "blocked" and classification not in _BLOCK_CLASSIFICATIONS:
+            raise TaskError(
+                "validation",
+                "blocked reports require --classification, one of "
+                + ", ".join(_BLOCK_CLASSIFICATIONS),
+                2,
+            )
         if kind == "done":
+            if classification:
+                raise TaskError("validation", "a done report carries no classification", 2)
             self._require_committed_workspace()
         marker = f"report:{kind}"
-        return self._write("reported", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
+        payload: dict[str, Any] = {"marker": marker, "body_sha256": _digest(body)}
+        content = f"[{marker}]\n{body}"
+        if classification:
+            payload["classification"] = classification
+            content = f"[{marker}]\nclassification: {classification}\n\n{body}"
+
+        def mutation(task: dict[str, Any]) -> Any:
+            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=content)
+            if not classification:
+                return
+            try:
+                self.client.call(
+                    "saveTaskMetadata", task_id=_task_number(task),
+                    values={"blocked_classification": classification},
+                )
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+
+        return self._write("reported", role, actor, reference, request_id, payload, mutation)
 
     def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"reviewer"})
@@ -1120,6 +1166,12 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
+            # The observer's disposition of a Blocked card is the other half of the worker's
+            # classification: the card says why it stopped, and the move out says what was done
+            # about it. Without this a card leaves Blocked with nothing recorded, and a head that
+            # blocks without cause repeatedly is invisible.
+            if role == "observer" and source == "blocked" and not reason.strip():
+                raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
             self._check_decision(task, source, target, decision, role)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:

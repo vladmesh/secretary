@@ -4212,7 +4212,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
-            kind="blocked", body="stuck", request_id="worker-blocked-attempt-1",
+            kind="blocked", body="stuck", classification="external_fact",
+            request_id="worker-blocked-attempt-1",
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
         self.writer.move(
@@ -5035,10 +5036,25 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
         commands = self._command_lines(doc)
 
-        self.assertEqual(len(commands), 2, "one done and one blocked command")
+        # One done, and one blocked line per classification: a blocked report needs a
+        # classification, and the worker copies the line rather than editing a placeholder.
+        self.assertEqual(len(commands), 3, "one done and one blocked command per classification")
         for command in commands:
             self.assertIn("--body-file /tmp/secretary-report-secretary-510-pilot-0.md", command)
             self.assertNotIn("<file>", command)
+        blocked = [command for command in commands if "--kind blocked" in command]
+        self.assertEqual(
+            [command.split("--classification ")[1].split()[0] for command in blocked],
+            ["external_fact", "wrong_task_definition"],
+        )
+        self.assertNotIn("--classification", commands[0])
+
+    def test_worker_prompt_says_which_blocked_classification_to_use(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("`--classification external_fact` when the blocker is a fact outside this", doc)
+        self.assertIn("`--classification wrong_task_definition` when the card itself is", doc)
+        self.assertIn("a blocked report without one is", doc)
 
     def test_worker_prompt_limits_blocked_reports_to_an_obvious_wrong_cut(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")

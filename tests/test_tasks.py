@@ -1745,7 +1745,11 @@ class ReportDurabilityGateTests(unittest.TestCase):
         )
 
     def _report(self, kind: str, body: str = "ready") -> dict:
-        return self.writer.report(role="worker", actor="w", reference="secretary-468", kind=kind, body=body)
+        classification = "external_fact" if kind == "blocked" else ""
+        return self.writer.report(
+            role="worker", actor="w", reference="secretary-468", kind=kind, body=body,
+            classification=classification,
+        )
 
     def test_clean_workspace_reports_done(self) -> None:
         self.assertEqual(self._report("done")["action"], "reported")
@@ -1796,3 +1800,180 @@ class ReportDurabilityGateTests(unittest.TestCase):
             with self.assertRaises(TaskError) as caught:
                 writer.report(role="worker", actor="w", reference="secretary-468", kind="done", body="ok")
         self.assertEqual(caught.exception.code, "uncommitted")
+
+
+class BlockedContractTests(unittest.TestCase):
+    """Why a card is blocked, and what the observer did about it (secretary-1034).
+
+    Both halves are recorded rather than left in prose: the worker names the kind of blocker
+    it hit, and the observer's move out of Blocked carries the reason it moved.
+    """
+
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        # A workspace outside git, so the done report's durability gate is not what these
+        # tests are measuring.
+        workspace = Path(self.tmpdir.name) / "workspace"
+        workspace.mkdir()
+        self.writer = TaskWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmpdir.name, workspace=str(workspace),
+        )
+
+    def _events(self, kind: str) -> list[dict]:
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            return [event for event in map(json.loads, events) if event["kind"] == kind]
+
+    def _reserve(self) -> None:
+        self.client.metadata[12]["sprint_ref"] = SPRINT
+        reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": ["secretary"]})
+        patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        refresh_active_sprint_projects(self.tmpdir.name, reader)
+
+    def test_a_blocked_report_without_a_classification_is_refused(self) -> None:
+        with self.assertRaisesRegex(TaskError, "require --classification") as raised:
+            self.writer.report(
+                role="worker", actor="w", reference="secretary-468", kind="blocked",
+                body="the upstream API is down", request_id="blocked-unclassified",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(raised.exception.exit_code, 2)
+        self.assertEqual(self.client.calls, [])
+
+    def test_an_unknown_classification_is_refused(self) -> None:
+        with self.assertRaisesRegex(TaskError, "require --classification"):
+            self.writer.report(
+                role="worker", actor="w", reference="secretary-468", kind="blocked",
+                body="stuck", classification="something_else", request_id="blocked-unknown",
+            )
+        self.assertEqual(self.client.calls, [])
+
+    def test_each_classification_reaches_the_audit_and_the_card(self) -> None:
+        for index, classification in enumerate(("external_fact", "wrong_task_definition")):
+            with self.subTest(classification=classification):
+                result = self.writer.report(
+                    role="worker", actor="w", reference="secretary-468", kind="blocked",
+                    body="stuck on the adapter", classification=classification,
+                    request_id=f"blocked-{classification}",
+                )
+                self.assertEqual(result["action"], "reported")
+                self.assertEqual(result["task"]["blocked_classification"], classification)
+                payload = self._events("reported")[index]["payload"]
+                self.assertEqual(payload["marker"], "report:blocked")
+                self.assertEqual(payload["classification"], classification)
+                self.assertEqual(
+                    payload["body_sha256"],
+                    hashlib.sha256(b"stuck on the adapter").hexdigest(),
+                )
+                self.assertEqual(
+                    self.client.metadata[12]["blocked_classification"], classification
+                )
+                comment = self.client.comments[12][-1]["comment"]
+                self.assertTrue(comment.startswith("[report:blocked]\n"))
+                self.assertIn(f"classification: {classification}", comment)
+                self.assertIn("stuck on the adapter", comment)
+
+    def test_a_done_report_carries_no_classification(self) -> None:
+        result = self.writer.report(
+            role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
+            request_id="done-no-classification",
+        )
+        self.assertNotIn("classification", self._events("reported")[0]["payload"])
+        self.assertIsNone(result["task"]["blocked_classification"])
+        with self.assertRaisesRegex(TaskError, "no classification") as raised:
+            self.writer.report(
+                role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
+                classification="external_fact", request_id="done-with-classification",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+
+    def test_the_cli_refuses_an_unclassified_blocked_report(self) -> None:
+        body = Path(self.tmpdir.name) / "report.md"
+        body.write_text("the upstream API is down\n", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main([
+                "task", "report", "--role", "worker", "--ref", "secretary-468",
+                "--kind", "blocked", "--data-dir", str(Path(self.tmpdir.name) / "cli"),
+                "--body-file", str(body), "--request-id", "cli-blocked-unclassified",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "validation")
+
+    def test_the_cli_records_a_classified_blocked_report(self) -> None:
+        body = Path(self.tmpdir.name) / "report.md"
+        body.write_text("the card contradicts itself\n", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main([
+                "task", "report", "--role", "worker", "--ref", "secretary-468",
+                "--kind", "blocked", "--classification", "wrong_task_definition",
+                "--data-dir", str(Path(self.tmpdir.name) / "cli"),
+                "--body-file", str(body), "--request-id", "cli-blocked-classified",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors.getvalue(), "")
+        task = json.loads(output.getvalue())["task"]
+        self.assertEqual(task["blocked_classification"], "wrong_task_definition")
+
+    def test_an_observer_moving_a_card_out_of_blocked_must_say_why(self) -> None:
+        self._reserve()
+        self.client.tasks[0]["column_id"] = 5  # Blocked
+
+        with self.assertRaisesRegex(TaskError, "out of Blocked requires a non-empty reason") as raised:
+            self.writer.move(
+                role="observer", actor="observer", reference="secretary-468", target="ready",
+                reason="   ", request_id="observer-silent-disposition",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(raised.exception.exit_code, 2)
+        self.assertEqual(self.client.tasks[0]["column_id"], 5)
+
+        reason = "the upstream fix landed, the card is workable again"
+        moved = self.writer.move(
+            role="observer", actor="observer", reference="secretary-468", target="ready",
+            reason=reason, request_id="observer-disposition",
+        )
+        self.assertEqual(moved["task"]["state"], "ready")
+        payload = self._events("moved")[-1]["payload"]
+        self.assertEqual((payload["from"], payload["to"]), ("blocked", "ready"))
+        self.assertEqual(payload["reason_sha256"], hashlib.sha256(reason.encode()).hexdigest())
+        self.assertIn(reason, self.client.comments[12][-1]["comment"])
+
+    def test_the_observer_may_still_move_a_card_into_blocked_without_a_reason(self) -> None:
+        """Only the exit is guarded here. The entry paths are unchanged."""
+        self._reserve()
+        self.client.tasks[0]["column_id"] = 3  # In progress
+        moved = self.writer.move(
+            role="observer", actor="observer", reference="secretary-468", target="blocked",
+            reason="", request_id="observer-into-blocked",
+        )
+        self.assertEqual(moved["task"]["state"], "blocked")
+
+    def test_the_steward_requirement_is_untouched(self) -> None:
+        self.client.tasks[0]["column_id"] = 3  # In progress
+        with self.assertRaisesRegex(TaskError, "this steward transition requires a non-empty reason"):
+            self.writer.move(
+                role="steward", actor="s", reference="secretary-468", target="blocked", reason="",
+            )
+        escalated = self.writer.move(
+            role="steward", actor="s", reference="secretary-468", target="blocked",
+            reason="the head went silent", request_id="steward-escalation",
+        )
+        self.assertEqual(escalated["task"]["state"], "blocked")
+        # And its own exit out of Blocked keeps the shape it had: Ready needs nothing, Done does.
+        self.assertEqual(
+            self.writer.move(
+                role="steward", actor="s", reference="secretary-468", target="ready", reason="",
+                request_id="steward-requeue",
+            )["task"]["state"],
+            "ready",
+        )

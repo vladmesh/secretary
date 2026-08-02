@@ -438,6 +438,16 @@ instead of learning about it later from a blocked card. An untracked runtime tai
 `--kind blocked` is not gated because work in progress is legitimate there, and the dispatcher's after-the-
 fact check stays as defence in depth.
 
+`report --kind blocked` also requires `--classification`, one of `external_fact` when the blocker is a fact
+outside the card that somebody has to change first, or `wrong_task_definition` when the card itself is wrong.
+The two are repaired by different people in different places, so the worker's own view of which one it hit is
+what the observer starts its analysis from. The value goes into the `reported` audit payload as
+`classification`, onto the card as `blocked_classification`, and into the report comment under the marker
+line, so it is readable without parsing the report prose. `--kind done` takes no classification and is
+refused if given one. An observer moving a card out of Blocked must give a non-empty reason, the same
+requirement the steward carries moving one into it; the reason is a comment on the card and its digest is in
+the `moved` event, so how a Blocked card was disposed of stays answerable.
+
 The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
 attempt. A `done` report on the same SHA does not move to Validate: the first such report sends the worker
 back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so the

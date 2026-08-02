@@ -298,6 +298,12 @@ actual contribution. Record the conclusion in a resume entry and return to step 
 Apply the same classification to the Blocked evidence before identifying the immediate cause. Do not treat
 hardening or compatibility outside the sprint as a local implementation defect.
 
+A card blocked by its worker carries the worker's own view of the blocker: `blocked_classification` on the
+card, `external_fact` or `wrong_task_definition`, and the same line under the `[report:blocked]` marker.
+Start from it, it is not the verdict: a worker that names a wrong task definition on every card it touches
+is a fact about the head, not about the cards. Your move out of Blocked requires a non-empty reason and is
+refused without one, so name what you decided and why in it.
+
 Identify the class of cause and act accordingly:
 
 - an implementation defect — return the card to a supported rework or retry;
