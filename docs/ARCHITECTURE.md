@@ -197,7 +197,9 @@ marker can acknowledge the specific batch, including one whose delivery was refu
 only exists in a prompt that reached the head, so its resume ends the batch rather than earning a
 second turn. Events
 that arrive before the intent coalesce; later events wait for the next batch. A dead head is replaced only for
-pending work. An unacknowledged batch receives the same recovery attempt after 30 minutes by default. Failed
+pending work. An unacknowledged batch is sent again as soon as its head is seen ready for input, and
+otherwise once its acknowledgement deadline (30 minutes by default) expires; a head that is never ready for
+input at all is bounded instead by the far longer turn ceiling, after which the delivery fails. Failed
 wakes carry their reason and bounded retry time in the observer record, and a batch that has spent
 those retries is delivered by replacing the head rather than by retrying it again.
 
