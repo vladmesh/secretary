@@ -1430,6 +1430,48 @@ class AssessmentStateTests(unittest.TestCase):
 
         self.assertEqual(requeued["task"]["state"], "ready")
 
+    def test_a_po_override_takes_a_parked_card_to_the_decided_targets_too(self) -> None:
+        """The escape hatch is the whole exit, not the two thirds of it that need nothing decided.
+
+        A seam stuck with no observer to release it is exactly when an operator has to finish or
+        return a parked card by hand, and Done and In progress are where it would send it. Only
+        the dispatcher is held to a recorded decision, because only the dispatcher performs one.
+        """
+        self.reserve_project()
+        for target, request_id in (("done", "po-release"), ("in_progress", "po-return")):
+            self._park(request_id=f"{request_id}-park")
+
+            moved = self.writer.move(
+                role="po", actor="operator", reference="secretary-468", target=target,
+                reason="finishing this one by hand", sprint_override=True,
+                sprint_override_reason="no observer is coming back for it",
+                request_id=request_id,
+            )
+
+            self.assertEqual(moved["task"]["state"], target)
+
+    def test_a_po_move_out_of_assessment_still_checks_a_decision_it_names(self) -> None:
+        """Not being held to a decision is not licence to invent one: a decision the PO passes is
+        read against the card and its destination like anybody else's."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="po", actor="operator", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="po-claimed-release",
+            )
+        self._decide("release")
+        with self.assertRaises(TaskError) as mismatched:
+            self.writer.move(
+                role="po", actor="operator", reference="secretary-468", target="in_progress",
+                reason="", decision="release", sprint_override=True,
+                sprint_override_reason="stepping in on a reserved project",
+                request_id="po-mismatched-release",
+            )
+
+        self.assertEqual(mismatched.exception.code, "decision_mismatch")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
     def test_worker_may_not_move_a_card_out_of_assessment(self) -> None:
         self.client.tasks[0]["column_id"] = 7
         with self.assertRaisesRegex(TaskError, "may not move") as raised:

@@ -160,6 +160,11 @@ _DECIDED_TARGETS = {"done", "in_progress"}
 # and on a reserved project that move is a recorded sprint override. The observer needs no entry
 # here: it leaves Assessment by no exit at all.
 _UNDECIDED_EXITS = {"ready", "validate", "issues"}
+# Who the decision rules bind: the dispatcher, and only it. It is what performs a decision, so a
+# move it makes out of Assessment either carries one or is not its move to make. The PO's move is
+# the escape hatch out of a seam that is stuck, and a hatch that needs the thing it is escaping is
+# not one. A decision that is passed is still checked against the card and its destination for
+# every role.
 _DECISION_BOUND_ROLES = {"dispatcher"}
 # States in which a card holds a workspace, a suspended worker or a running head. `assessment`
 # is one of them: the reviewer is gone, but the worker and its checkout are retained for a
@@ -1142,18 +1147,21 @@ class TaskWriter:
     ) -> None:
         """A card leaves Assessment on a decision somebody recorded, or it does not leave.
 
-        Each decision has exactly one destination, so the recorded decision and the move that
-        performs it cannot say different things: a `release` paired with a move back to In
-        progress is a rework nobody decided.
+        Two rules, and they bind different callers. A decision that is supplied has to be real and
+        has to agree with where the card is going, whoever passes it: each decision has exactly one
+        destination, so a `release` paired with a move back to In progress is a rework nobody
+        decided. Needing a decision at all is the dispatcher's rule, because the dispatcher is what
+        performs decisions; the PO is the human operator and its move is the escape hatch, already
+        recorded as a sprint override on a reserved project. Holding the PO to a decision would
+        close the only way past a seam that is stuck.
 
-        `blocked` without a decision is left open on purpose: the steward's stale escalation and
-        the dispatcher's own failure paths reach it without anyone having decided anything, and a
-        card that cannot be blocked is a card nothing can rescue. The three remaining exits are
-        not left open for the dispatcher, because each of them leaves the column with the decision
-        still unmade. The PO is not held to it: it is the human operator, and on a sprint-reserved
-        project its move is already a recorded override. The observer reaches none of this: the
-        authority matrix gives it no exit from Assessment at all, because performing a decision is
-        the dispatcher's part of the seam.
+        `blocked` without a decision is left open on purpose even for the dispatcher: the steward's
+        stale escalation and the dispatcher's own failure paths reach it without anyone having
+        decided anything, and a card that cannot be blocked is a card nothing can rescue. The three
+        remaining exits are closed to the dispatcher, because each of them leaves the column with
+        the decision still unmade. The observer reaches none of this: the authority matrix gives it
+        no exit from Assessment at all, because performing a decision is the dispatcher's part of
+        the seam.
         """
         if decision and decision not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
@@ -1165,7 +1173,10 @@ class TaskWriter:
                 f"a {decision} decision moves the card to {_DECISION_TARGETS[decision]}, not {target}",
                 3,
             )
-        if source == "assessment" and target in _DECIDED_TARGETS and not decision:
+        if (
+            source == "assessment" and target in _DECIDED_TARGETS
+            and not decision and role in _DECISION_BOUND_ROLES
+        ):
             raise TaskError(
                 "decision_required",
                 "a card leaves Assessment only on a recorded decision: record one with "
