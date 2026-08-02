@@ -29,9 +29,9 @@ skills = ["retro"]
 [roles.steward]
 skills = ["steward"]
 
-# The sprint observer head. Delivered to the shells its head profiles can come up in
-# (`role_defaults.observer` and the fallback chain in triggered_agents/agents/pipeline/heads.toml),
-# because the dispatcher refuses to launch a head into a shell without this skill.
+# The sprint observer head. Which profile runs is the sprint's own `sprint_observer` field, not a
+# role default, so this is delivered to the shells of every profile a sprint may declare rather than
+# to one chosen shell. The dispatcher refuses to launch a head into a shell without this skill.
 [roles.observer]
 skills = ["observe-sprint"]
 

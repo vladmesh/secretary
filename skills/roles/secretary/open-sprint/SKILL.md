@@ -98,7 +98,13 @@ Grilling is finished when these are fixed:
 - one sentence of product goal: an end state of the product, not a list of fixes;
 - a Definition of Done as checkable items;
 - the list of repositories;
-- the boundaries: what is definitely outside the sprint.
+- the boundaries: what is definitely outside the sprint;
+- the observer: `none`, or one head profile from `heads.yaml`.
+
+The observer is the owner's decision and has no default. Ask it plainly: does this sprint need a
+head watching it, and if so which one, matched to how hard the work is. A simple sprint does not
+need one and should not pay for one. Do not pick a profile yourself and do not carry over what the
+last sprint used.
 
 If the goal conflicts with the product vision, stop and put the contradiction to the person rather than
 smoothing it over with wording.
@@ -130,6 +136,7 @@ python3 -m secretary sprint create --role po --actor <you> \
   --goal "<one sentence about the end product state>" \
   --dod-file /tmp/dod.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
+  --observer <head-profile|none> \
   --repository <repo> --repository <repo>
 ```
 
@@ -140,6 +147,10 @@ python3 -m secretary sprint create --role po --actor <you> \
 - `--project` is repeated once per registered project the sprint reserves. While the sprint is open, no
   other sprint may reserve them, and the installation holds only this one open sprint.
 - `--repository` is repeated once per repository.
+- `--observer` is required and has no fallback: pass the profile the owner chose, or `none`. The
+  sprint stores exactly that value; the dispatcher launches from it and never from a role default.
+  A profile the head registry does not have is refused here rather than at the first tick. Changing
+  it later is not an edit: it is `sprint close` and a fresh `sprint reopen --observer ...`.
 - Do not set `--ref`: the entity gets its own `sprint:<ID>`. If you do set it, the value must start with
   `sprint:` and must clash with neither an existing sprint nor a card.
 - Instead of `--dod-file` there is a `--definition-of-done` string; use the file for multi-line text.

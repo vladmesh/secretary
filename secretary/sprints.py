@@ -11,6 +11,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from secretary.sprint_observer import (
+    KIND_HEAD,
+    OBSERVER_FIELD,
+    ObserverMetadataError,
+    check_observer_profile,
+    encode_observer,
+    installed_observer_profiles,
+    is_executable,
+    parse_observer,
+)
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -40,6 +50,7 @@ SPRINT_METADATA = {
     "sprint_current_task",
     "sprint_resume",
     "sprint_source_audit",
+    "sprint_observer",
 }
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
 BUDGET_EVENT_TYPES = (
@@ -319,6 +330,7 @@ class SprintReader:
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
             "repositories": repositories,
             **_ownership(meta),
+            **_observer(meta),
             "status": meta.get("sprint_status") if meta.get("sprint_status") in SPRINT_STATUSES else "open",
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
@@ -413,6 +425,7 @@ class SprintWriter:
         self, *, role: str, actor: str, goal: str, definition_of_done: str = "",
         repositories: list[str] | None = None, product: str = "", issues: list[str] | None = None,
         projects: list[str] | None = None, reference: str = "", request_id: str | None = None,
+        observer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
         request_id = request_id or str(uuid.uuid4())
@@ -420,7 +433,7 @@ class SprintWriter:
         intent = self._create_intent(
             role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
             repositories=repositories or [], product=product, issues=issues or [],
-            reservations=projects or [], reference=reference,
+            reservations=projects or [], reference=reference, observer=observer,
         )
         # Admission and the row it admits are one transition on this installation: a
         # concurrent create that only read before this one wrote would open a second
@@ -444,6 +457,7 @@ class SprintWriter:
     def restore_create(
         self, *, reference: str, goal: str, definition_of_done: str = "",
         repositories: list[str] | None = None, request_id: str | None = None,
+        observer: dict[str, Any] | None = None, status: str = "open",
     ) -> dict[str, Any]:
         """Recreate one exported sprint row, without the rules for opening a sprint.
 
@@ -451,13 +465,20 @@ class SprintWriter:
         closed before a sprint owned a product.  `restore` writes their real fields
         immediately after, so this must not check or invent ownership, and it is not an
         admission: several restored entities are written one after another.
+
+        Status and observer are the two fields recovery cannot leave to that second
+        write.  The row becomes visible the moment its reference lands, and between the
+        two writes a reader would see an open sprint with no observer — the one state
+        the strict reader calls corrupt.  Both are therefore written before the
+        reference, so the row is never published in a shape nobody chose.
         """
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = self._create_intent(
             role="steward", actor="restore", goal=goal, definition_of_done=definition_of_done,
             repositories=repositories or [], product="", issues=[], reservations=[],
-            reference=reference, require_goal=False,
+            reference=reference, require_goal=False, observer=observer,
+            status=status, require_executable_observer=False,
         )
         document, committed = self.transactions.existing(
             request_id, kind=SPRINT_CREATED, intent=intent
@@ -473,7 +494,8 @@ class SprintWriter:
     def _create_intent(
         self, *, role: str, actor: str, goal: str, definition_of_done: str,
         repositories: list[str], product: str, issues: list[str], reservations: list[str],
-        reference: str, require_goal: bool = True,
+        reference: str, require_goal: bool = True, observer: dict[str, Any] | None = None,
+        status: str = "open", require_executable_observer: bool = True,
     ) -> dict[str, Any]:
         """The normalized request, which is both the replay key and the repair recipe.
 
@@ -482,6 +504,10 @@ class SprintWriter:
 
         Only an operator opening a sprint has to state a goal; recovery reproduces the
         goal its export carries.
+
+        The observer is part of the staged intent for the same reason the reservations
+        are: it is a decision the caller made, and a repair of this create has to write
+        the value the caller chose rather than one it picks up on the retry.
         """
         goal = goal.strip()
         reference = reference.strip()
@@ -489,12 +515,65 @@ class SprintWriter:
             raise TaskError("validation", "create requires a non-empty goal", 2)
         if reference and not reference.startswith(SPRINT_REFERENCE_PREFIX):
             raise TaskError("validation", f"sprint reference must start with {SPRINT_REFERENCE_PREFIX}", 2)
+        if status not in SPRINT_STATUSES:
+            raise TaskError("validation", f"unknown sprint status {status!r}", 2)
         return {
             "role": role, "actor": actor, "goal": goal, "definition_of_done": definition_of_done,
             "repositories": _unique_strings(repositories), "product": product.strip(),
             "issues": _unique_strings(issues), "reservations": _unique_strings(reservations),
-            "reference": reference,
+            "reference": reference, "status": status,
+            "observer": self._observer_intent(
+                observer, executable=require_executable_observer,
+            ),
         }
+
+    def _observer_intent(
+        self, observer: dict[str, Any] | None, *, executable: bool,
+    ) -> dict[str, Any] | None:
+        """The observer value a create writes, refused here rather than at the backend.
+
+        An operator opening a sprint has to state one: absent, null, empty, `default` and
+        `inherited` are not interpretations this model has, so there is nothing to fall
+        back to and the create is a validation error.  Recovery is the other caller, and
+        it reproduces whatever its export carried, including the migration provenance of
+        a closed row, which is not executable and must not be turned into one here.
+
+        A declared profile is resolved against the installation's head registry, the same
+        one the dispatcher launches from.  A sprint may not be opened on a head that does
+        not exist: the fence would stop its projects on the very first tick, and an
+        operator would be reading a critical outcome instead of a validation error.
+        """
+        if observer is None:
+            if executable:
+                raise TaskError(
+                    "validation",
+                    "sprint requires an explicit observer; pass --observer <profile> or "
+                    "--observer none",
+                    2,
+                )
+            return None
+        value = parse_observer(observer)
+        if value is None:
+            raise TaskError("validation", "sprint observer is not a valid observer value", 2)
+        if not executable:
+            return value
+        if not is_executable(value):
+            raise TaskError(
+                "validation",
+                "sprint observer must be a concrete head profile or none; migration provenance "
+                "is a record of what ran and can never be declared",
+                2,
+            )
+        if value["kind"] == KIND_HEAD:
+            # Only a concrete head needs the registry. `none` declares no profile, so a sprint
+            # that runs without an observer is not held up by a registry it never asks about.
+            try:
+                check_observer_profile(
+                    value, installed_observer_profiles(self.instance), subject="sprint",
+                )
+            except ObserverMetadataError as exc:
+                raise TaskError("validation", exc.message, 2) from None
+        return value
 
     def _begin_create(self, request_id: str, intent: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Claim the request id after the mutable preconditions have passed."""
@@ -677,11 +756,16 @@ class SprintWriter:
             "sprint_goal": str(intent["goal"]),
             "sprint_definition_of_done": str(intent["definition_of_done"]),
             "sprint_repositories": json.dumps(list(intent["repositories"]), separators=(",", ":")),
-            "sprint_status": "open",
+            "sprint_status": str(intent.get("status") or "open"),
             "sprint_budget": json.dumps(_budget(thresholds=self.thresholds), separators=(",", ":")),
             "sprint_current_task": "",
             "sprint_resume": "",
         }
+        # Written with the fields, which is before the reference publishes the row: a sprint is
+        # never readable open without the observer it was opened with.  A restored row that
+        # carried no observer at all keeps carrying none, and the strict reader refuses it.
+        if intent.get("observer") is not None:
+            values[OBSERVER_FIELD] = encode_observer(intent["observer"])
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent["product"]:
@@ -1071,7 +1155,10 @@ class SprintWriter:
             "remaining_tasks": list(payload.get("remaining_tasks") or []),
         }
 
-    def reopen(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
+    def reopen(
+        self, *, role: str, actor: str, reference: str, request_id: str | None = None,
+        observer: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Reopen a sprint that still satisfies every rule for an open sprint.
 
         This is the other transition into `open`, so it runs the same admission order as
@@ -1082,11 +1169,20 @@ class SprintWriter:
 
         A sprint predating ownership is not completed here: recovery keeps it readable,
         and an operator who needs the work opens a new sprint that owns its issues.
+
+        The observer is decided again here, and it is never inherited: what the row
+        carries is either the executable value of the run that closed, or the migration
+        provenance of one nobody recorded, and neither is a decision about the run being
+        opened now.  It is written while the sprint is still closed, so the row is never
+        readable open under a value the reopening caller did not choose.
         """
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
-        intent = {"role": role, "actor": actor, "reference": reference}
+        intent = {
+            "role": role, "actor": actor, "reference": reference,
+            "observer": self._observer_intent(observer, executable=True),
+        }
         with sprint_admission_lock(self.data_dir):
             document, committed = self.transactions.existing(
                 request_id, kind=SPRINT_REOPENED, intent=intent
@@ -1145,6 +1241,15 @@ class SprintWriter:
                     [str(project) for project in sprint.get("reservations") or []],
                     excluding=reference,
                 )
+            # Observer first, status second, and each step is recorded durably: a reopen that
+            # dies between them leaves a still-closed row already carrying its fresh choice,
+            # and the repeat finds that step done rather than writing it twice.
+            self._ensure_metadata(
+                document,
+                _sprint_number(sprint),
+                {OBSERVER_FIELD: encode_observer(document["intent"]["observer"])},
+                step="observer",
+            )
             self._ensure_metadata(
                 document, _sprint_number(sprint), {"sprint_status": "open"}, step="opened",
             )
@@ -1185,6 +1290,41 @@ class SprintWriter:
 
         return self._write(
             "restored", "steward", "restore", reference, request_id, {"fields": sorted(values)}, mutation
+        )
+
+    def backfill_observer(
+        self, *, reference: str, value: dict[str, Any], request_id: str,
+    ) -> dict[str, Any]:
+        """Write one row's observer metadata for the migration, and never over another value.
+
+        The refusal is the point.  A row that already carries a different value was written by
+        somebody who knew something this migration does not — an operator repairing it, or a
+        second run whose journal disagrees — and overwriting it would destroy that.  An exact
+        match is the retry of this very write and reports success without touching the backend.
+        """
+        encoded = encode_observer(value)
+        current = self.reader.show(reference, include_cards=False)
+        if "observer" in current:
+            existing = current["observer"]
+            if existing is None or encode_observer(existing) != encoded:
+                raise TaskError(
+                    "validation",
+                    f"sprint {reference} already carries observer metadata that is not the value "
+                    "this migration selected; resolve it by hand before running the migration again",
+                    2,
+                )
+
+        def mutation(sprint: dict[str, Any]) -> None:
+            if self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={OBSERVER_FIELD: encoded},
+            ) is not True:
+                raise TaskError("backend_error", "Kanboard rejected the sprint observer metadata", 1)
+
+        return self._write(
+            "observer_backfilled", "steward", "observer-migration", reference, request_id,
+            {"observer": dict(parse_observer(value) or {})}, mutation,
         )
 
     def restore_comment(self, *, reference: str, body: str, occurrence: int, request_id: str | None = None) -> dict[str, Any]:
@@ -1321,6 +1461,20 @@ def _ownership(meta: dict[str, str]) -> dict[str, Any]:
     if "sprint_reservations" in meta:
         result["reservations"] = _json_list(meta["sprint_reservations"])
     return result
+
+
+def _observer(meta: dict[str, str]) -> dict[str, Any]:
+    """The sprint's declared observer, only where the row carries the field.
+
+    Three states have to stay apart, because their repairs differ: the key is missing (a row that
+    predates the field, or one a migration has not reached), the key holds one of the four tagged
+    forms, or the key holds something else.  The last is reported as `None` rather than dropped:
+    a reader that answered "absent" for an unreadable value would let a corrupt row pass for an
+    unmigrated one, and the strict reader is precisely the thing that must tell them apart.
+    """
+    if OBSERVER_FIELD not in meta:
+        return {}
+    return {"observer": parse_observer(meta[OBSERVER_FIELD])}
 
 
 def _json_list(value: str | None) -> list[str]:

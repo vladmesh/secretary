@@ -52,6 +52,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
@@ -62,6 +63,14 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_types import HostError
 from secretary.role_skills import skill_delivery
+from secretary.sprint_observer import (
+    KIND_HEAD,
+    KIND_NONE,
+    REASON_UNKNOWN_PROFILE,
+    ObserverMetadataError,
+    executable_observer,
+    strict_reader_active,
+)
 from secretary.tasks import TaskError, is_significant_card_event
 
 OBSERVER_ROLE = "observer"
@@ -485,6 +494,10 @@ def reconcile_observers(
 
     Nothing at all happens when there is neither an open sprint nor a tracked observer: no record
     is written, no head call is made, and `payload` is left exactly as it was.
+
+    A fenced sprint is still reconciled here.  The fence stops the sprint's *cards*, and it clears
+    only once an observer has been adopted — which is a launch, which is this pass.  Excluding it
+    from here too would fence the sprint permanently.
     """
     observers = load_observers(payload)
     try:
@@ -515,7 +528,10 @@ def reconcile_observers(
             )
         for ref in sorted(open_sprints):
             outcomes.append(
-                _reconcile_open_sprint(runtime, payload, observers, ref, pause_mode=pause_mode)
+                _reconcile_open_sprint(
+                    runtime, payload, observers, ref,
+                    pause_mode=pause_mode, sprint=open_sprints[ref],
+                )
             )
     finally:
         # Whatever went wrong above, the heads that were started or stopped before it are already
@@ -532,8 +548,39 @@ def _reconcile_open_sprint(
     ref: str,
     *,
     pause_mode: str,
+    sprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record = observers.get(ref)
+    sprint = sprint if sprint is not None else {}
+    try:
+        decision = observer_decision(runtime, sprint)
+    except ObserverMetadataError as exc:
+        # The fence has already stopped this sprint's cards and said so durably.  Nothing is
+        # launched, nothing is probed and no live head is taken down on the strength of a value
+        # nobody can read: a corrupt declaration is repaired by an operator, not guessed at here.
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-declaration-invalid",
+            "reason": exc.message,
+            "observer_reason": exc.reason,
+        }
+    if decision["kind"] == KIND_NONE:
+        # A sprint that declares no observer gets no head and no probe.  A record left from an
+        # earlier declaration is stopped, or the sprint would keep paying for a head it no longer
+        # declares.
+        if record is not None:
+            return _stop_observer(
+                runtime, payload, observers, ref, reason="sprint declares no observer"
+            )
+        return {
+            "status": "ok",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-none",
+            "reason": "sprint declares no observer",
+        }
     # A record still in `launching` is a bring-up whose tick did not live to record the outcome.
     # It is resolved before anything else, because until it is, neither "a head is running here"
     # nor "this sprint is headless" is known.
@@ -629,7 +676,7 @@ def _reconcile_open_sprint(
             observers,
             ref,
             record,
-            head=_observer_head_or_blank(runtime),
+            head=_observer_head_or_blank(runtime, sprint),
             reason="pipeline is draining",
             action="observer-launch-skipped",
             # An intent nobody could resolve stays an intent through the drain: the resume then
@@ -666,6 +713,7 @@ def _reconcile_open_sprint(
         ref,
         record,
         pending_event=pending_event,
+        head=str(decision["head"]),
     )
 
 
@@ -1253,16 +1301,76 @@ def _adopt_launch_intent(
     )
 
 
-def _observer_head_or_blank(runtime: Any) -> str:
-    """The observer profile, or an empty string when the registry cannot name one.
+def runtime_data_dir(runtime: Any) -> Path | None:
+    """Where this runtime's durable board state lives, or None when it has none."""
+    board_dir = getattr(getattr(runtime, "audit", None), "board_dir", None)
+    return Path(board_dir).parent if board_dir is not None else None
 
-    A registry that cannot answer must not cost the sprint its record: the row is still worth more
-    without a head profile than not at all, and the launch path reports the same failure properly.
+
+def observer_decision(runtime: Any, sprint: dict[str, Any]) -> dict[str, Any]:
+    """What this sprint's observer metadata says to run. Raises rather than guessing.
+
+    Three answers, and no fourth:
+
+      `head`   the sprint declares one concrete profile, and the registry has it
+      `none`   the sprint declares that it runs without an observer
+      `legacy` the row predates the field on an installation the migration has not reached, so
+               the head still comes from `role_defaults.observer`
+
+    `legacy` is reachable only while the strict reader is off, which is only before the cutover.
+    Once `secretary sprint migrate-observer` has activated it there is no unmigrated row left and
+    no path back to the role default: a declared observer is read from the sprint or not at all.
+
+    `ObserverMetadataError` for an open row whose value is missing, unreadable, provenance rather
+    than a declaration, or a profile the registry does not have.
+    """
+    if "observer" not in sprint and not strict_reader_active(runtime_data_dir(runtime)):
+        return {
+            "kind": "legacy",
+            "head": _role_default_observer_head(runtime),
+            "value": None,
+        }
+    value = executable_observer(sprint)
+    if value["kind"] == KIND_NONE:
+        return {"kind": KIND_NONE, "head": "", "value": value}
+    head = str(value["profile"])
+    try:
+        runtime.catalog.observer_profile(head)
+    except (HostError, TaskError) as exc:
+        raise ObserverMetadataError(
+            REASON_UNKNOWN_PROFILE,
+            f"sprint {sprint.get('ref') or '?'} declares observer head {head!r}, which this "
+            f"installation cannot resolve: {getattr(exc, 'message', str(exc))}",
+        ) from None
+    return {"kind": KIND_HEAD, "head": head, "value": value}
+
+
+def _role_default_observer_head(runtime: Any) -> str:
+    """The registry's observer default, for a row that predates the sprint's own field.
+
+    Empty when the registry cannot answer: a row is still worth more without a head profile than
+    not at all, and the launch path reports the same failure properly.
     """
     try:
         return runtime.catalog.observer_head()
     except HostError:
         return ""
+
+
+def _observer_head_or_blank(runtime: Any, sprint: dict[str, Any] | None = None) -> str:
+    """The head to fill a record with, without deciding anything the launch has to decide again.
+
+    A declared sprint answers from its own metadata; only an unmigrated row falls back to the
+    registry default.  Corruption is not reported here: this fills in a record, and the fence and
+    the launch path are where an unusable observer is answered for.
+    """
+    if sprint is not None:
+        try:
+            decision = observer_decision(runtime, sprint)
+        except ObserverMetadataError:
+            return ""
+        return str(decision.get("head") or "")
+    return _role_default_observer_head(runtime)
 
 
 def observer_skill_delivery(runtime: Any, head: str) -> dict[str, Any]:
@@ -1291,6 +1399,20 @@ def observer_skill_delivery(runtime: Any, head: str) -> dict[str, Any]:
     return skill_delivery(OBSERVER_ROLE, OBSERVER_SKILL, shell)
 
 
+def _declared_head(runtime: Any, ref: str) -> str:
+    """The profile one open sprint declares, read live. Raises rather than substituting one."""
+    sprint = runtime.sprints.show(ref, include_cards=False)
+    decision = observer_decision(runtime, sprint)
+    if decision["kind"] == KIND_NONE:
+        raise ObserverMetadataError(
+            "observer_none", f"sprint {ref} declares no observer, so there is no head to launch"
+        )
+    head = str(decision.get("head") or "")
+    if not head:
+        raise HostError(f"no observer head could be resolved for sprint {ref}")
+    return head
+
+
 def _launch_observer(
     runtime: Any,
     payload: dict[str, Any],
@@ -1299,13 +1421,26 @@ def _launch_observer(
     record: ObserverRecord | None,
     *,
     pending_event: dict[str, Any] | None = None,
+    head: str = "",
 ) -> dict[str, Any]:
+    """Bring up one head for one sprint, on the profile that sprint declares.
+
+    `head` is decided by the caller from the sprint's own metadata, so nothing between the
+    declaration and the launch can substitute another profile.  Only an unmigrated row reaches
+    here with an empty head, and it takes the registry's observer default the way it always did.
+    """
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
-    try:
-        head = runtime.catalog.observer_head()
-    except HostError as exc:
-        return _defer(runtime, payload, observers, ref, record, head="", reason=str(exc))
+    if not head:
+        # The replacement path after a batch of refused wakes gets here without one. It resolves
+        # the sprint's declaration again rather than reusing `record.head`: a re-pointed sprint
+        # must move its head at the replacement, not keep the profile the first launch picked.
+        try:
+            head = _declared_head(runtime, ref)
+        except ObserverMetadataError as exc:
+            return _defer(runtime, payload, observers, ref, record, head="", reason=exc.message)
+        except HostError as exc:
+            return _defer(runtime, payload, observers, ref, record, head="", reason=str(exc))
     readiness = runtime.head_readiness(head)
     if not readiness.launch_allowed:
         return _defer(
@@ -1855,7 +1990,8 @@ def observer_request_id(action: str, reference: str, generation: str, launches: 
 
 
 def stage_event(
-    runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any]
+    runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any],
+    *, outcome: str = "success",
 ) -> dict[str, Any] | None:
     """Put one lifecycle event on durable disk before the host call it describes.
 
@@ -1872,7 +2008,7 @@ def stage_event(
         "occurred_at": now_rfc3339(),
         "actor": {"role": "dispatcher", "id": str(getattr(runtime, "owner", "") or "dispatcher")},
         "kind": kind,
-        "outcome": "success",
+        "outcome": outcome,
         "task_id": "",
         "ref": reference,
         "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},

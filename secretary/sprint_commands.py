@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
+from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import KanboardClient, TaskError
@@ -48,6 +49,7 @@ def add_sprint_subcommands(subparsers) -> None:
         help="registered project the sprint reserves; repeat for more",
     )
     created.add_argument("--ref", default="")
+    _add_observer_argument(created)
     created.set_defaults(handler=run_create)
     for name, handler, roles in (
         ("comment", run_comment, ("po", "dispatcher", "worker", "reviewer", "steward", "retro")),
@@ -73,8 +75,37 @@ def add_sprint_subcommands(subparsers) -> None:
             command.add_argument("--body-file", required=True)
             command.add_argument("--delivery-id")
             command.add_argument("--through-event")
+        elif name == "reopen":
+            _add_observer_argument(command)
         command.set_defaults(handler=handler)
+    migrate = commands.add_parser(
+        "migrate-observer",
+        help="back-fill explicit observer metadata onto every sprint row and go strict",
+    )
+    _add_data_dir_args(migrate)
+    migrate.add_argument(
+        "--dry-run", action="store_true",
+        help="print the value that would be written for every row, and write nothing",
+    )
+    migrate.add_argument(
+        "--no-resume", action="store_true",
+        help="leave the freeze in force after a successful cutover",
+    )
+    migrate.add_argument("--owner", default="observer-migration")
+    migrate.set_defaults(handler=run_migrate_observer)
     sprint.set_defaults(handler=not_implemented)
+
+
+def _add_observer_argument(command: argparse.ArgumentParser) -> None:
+    """The sprint's one observer decision, stated by the operator or not at all.
+
+    Required, because there is nothing to fall back to: `none` and a concrete head profile are the
+    two answers, and neither is more of a default than the other.
+    """
+    command.add_argument(
+        "--observer", required=True,
+        help="head profile that observes this sprint, or 'none' to run without one",
+    )
 
 
 def not_implemented(args: argparse.Namespace) -> int:
@@ -154,6 +185,7 @@ def run_create(args: argparse.Namespace) -> int:
         definition_of_done=definition_of_done, repositories=args.repository,
         product=args.product, issues=args.issue, projects=args.project,
         reference=args.ref, request_id=args.request_id,
+        observer=observer_choice(args.observer),
     ))
 
 
@@ -190,7 +222,56 @@ def run_resume(args: argparse.Namespace) -> int:
 
 
 def run_reopen(args: argparse.Namespace) -> int:
-    return _write(args, lambda writer: writer.reopen(role=args.role, actor=args.actor or args.role, reference=args.ref, request_id=args.request_id))
+    return _write(args, lambda writer: writer.reopen(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        request_id=args.request_id, observer=observer_choice(args.observer),
+    ))
+
+
+def run_migrate_observer(args: argparse.Namespace) -> int:
+    """Run the observer cutover, or print what it would write.
+
+    Read-only until the freeze is proved: the dry run touches neither the board nor the pause
+    state, and the real run refuses before its first write if the pipeline is not frozen.
+    """
+    from secretary.dispatcher import runtime_from_args
+    from secretary.dispatcher_state import now_rfc3339
+    from secretary.observer_backfill import BackfillError, plan_cutover, run_cutover
+
+    data_dir = resolve_data_dir(args)
+    try:
+        runtime = runtime_from_args(
+            args.instance, data_dir, host_mode="real", owner=args.owner,
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad instance is an answer, not a crash
+        print(json.dumps({
+            "ok": False, "action": "sprint migrate-observer", "error": str(exc),
+        }, sort_keys=True))
+        return 2
+    try:
+        if args.dry_run:
+            result = plan_cutover(runtime, data_dir=data_dir, instance=args.instance)
+        else:
+            result = run_cutover(
+                runtime,
+                sprint_writer=SprintWriter(
+                    KanboardClient(), data_dir=data_dir, thresholds=_thresholds(args),
+                ),
+                data_dir=data_dir,
+                instance=args.instance,
+                now=now_rfc3339(),
+                resume=not args.no_resume,
+            )
+    except (BackfillError, TaskError) as exc:
+        print(json.dumps({
+            "ok": False, "action": "sprint migrate-observer",
+            "error": getattr(exc, "message", str(exc)),
+        }, sort_keys=True))
+        return 2
+    print(json.dumps(result, sort_keys=True, default=str))
+    # A dry run that names refusals is not a green light: the real run would stop on them, and an
+    # operator scripting the cutover has to see that before they freeze the pipeline.
+    return 0 if result.get("ok", True) else 1
 
 
 def run_close(args: argparse.Namespace) -> int:

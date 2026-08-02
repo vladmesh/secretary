@@ -115,8 +115,12 @@ the record earlier would leave a live head that nothing points at. For the same 
 after a dead pid is deferred if the old terminal could not be closed: two heads on one sprint is
 worse than none.
 
-The head profile comes from the `role_defaults.observer` key of the installation's `heads/heads.yaml`
-snapshot. The profile is interactive, because an observer is one continuous session for the whole
+The head profile is the sprint's own: `sprint_observer` holds one concrete profile or `none`, and the
+launch resolves that profile against the installation's `heads/heads.yaml` snapshot without any fallback.
+A sprint declaring a profile the snapshot does not have is corrupt and fences its own projects rather than
+launching on a default. `role_defaults.observer` still exists for the installations that have not run the
+observer migration yet, and for nothing else afterwards.
+The profile is interactive, because an observer is one continuous session for the whole
 sprint: a one-shot launch would exit after the first turn and the tick would read that as a dead
 head. The same resource-readiness gate that runs before claiming a card runs before launch; an
 unavailable resource means a deferred launch, and the next tick tries again.
@@ -144,10 +148,10 @@ role skill.
 
 What an observer does while running a sprint is defined by the `observer` role in the role-skill
 registry (`skills/manifest.toml`) and its `observe-sprint` skill. The canon lives in this repository
-and is delivered to shells by the same `secretary role-skills sync` as every other role skill. Since
-the observer profile comes from the head registry, the skill must be delivered to that profile's
-shell; repointing `role_defaults.observer` at a profile on another shell also requires a delivery
-target for that shell.
+and is delivered to shells by the same `secretary role-skills sync` as every other role skill. The skill
+must be delivered to the shell of whichever profile a sprint declares, so a sprint opened on a profile from
+another shell also needs a delivery target for that shell. `role_defaults` decides delivery for the other
+roles, not the observer's profile.
 
 The skill is self-sufficient for a fresh head with no transcript: recovering state from the sprint
 entity and the live board, checking the Definition of Done against current `main` before each new

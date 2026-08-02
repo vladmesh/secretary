@@ -16,6 +16,7 @@ from secretary.dispatcher_observer import (
     reconcile_observers,
     retry_pending_observer_stops,
 )
+from secretary.dispatcher_observer_fence import fenced_task, observer_fence
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -66,11 +67,16 @@ HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
 # reach. Nothing raises on those paths, so `errors` stays empty and the tick used to return `ok`
 # and record itself healthy right over the degradation (secretary-833 review, round 3).
 #
+# `critical` is here for the opposite reason to `blocked`. An observer fence stops a sprint's whole
+# project because the role that was supposed to be watching it is not there, which is the state the
+# pipeline health line exists to show. A tick that fenced a sprint and still reported `ok` would put
+# the sprint's cards on hold with nothing anywhere saying so.
+#
 # `blocked` is deliberately not here. A card parked in Blocked is the dispatcher doing its job:
 # the board carries the reason, the steward already reports it as a `new_blocked` signal, and the
 # tick's exit code drives the systemd unit's result — a correctly blocked card must not put the
 # production unit into `failed` and the pipeline health line into RED.
-DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed"})
+DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed", "critical"})
 
 
 def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:
@@ -379,17 +385,40 @@ def _production_tick_body(
     payload.setdefault("owner_acquired_at", now_rfc3339())
     payload["last_tick_started_at"] = now_rfc3339()
 
-    active_tasks = _production_tasks(runtime, {"in_progress", "validate"})
-    active_refs = {str(task.get("ref") or "") for task in active_tasks}
-    reconcile_outcomes = _reconcile_production(runtime, records, payload, active_refs)
     observer_errors: list[dict[str, str]] = []
+    # Before anything moves. A sprint whose declared observer is corrupt, dead or unresolvable
+    # holds its own reservations, and the cards in them are not advanced, reconciled or claimed
+    # this tick. Pure: it reads the board and the records, and launches nothing.
+    try:
+        fence = observer_fence(runtime, payload)
+    except Exception as exc:
+        # The fence is the thing that decides what may move, so a fence that could not finish
+        # decides nothing — and an empty fence is not "nothing", it is "everything may move". The
+        # tick ends here instead, before reconciliation, advancement, budget accounting, observer
+        # reconciliation and Ready claims. A sprint whose critical outcome could not be staged
+        # (an unwritable audit, a full volume) is exactly the sprint whose cards must not advance.
+        return _fence_failed_tick(runtime, payload, exc)
+    fence_outcomes = list(fence.get("outcomes") or [])
+
+    cycle = _production_tasks(runtime, {"in_progress", "validate"})
+    active_tasks = [task for task in cycle if not fenced_task(fence, task)]
+    active_refs = {str(task.get("ref") or "") for task in active_tasks}
+    # A fenced card drops out of `active_refs`, which is exactly the shape reconciliation reads as
+    # an orphaned record and settles. Its refs are handed over separately so the record survives
+    # the fence untouched instead of being cleaned up as work that left the cycle.
+    fenced_refs = set(fence.get("refs") or ()) | {
+        str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
+    }
+    reconcile_outcomes = _reconcile_production(
+        runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
+    )
     # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
     # reconciliation did: those are stamped by every tick regardless of code version, so a
     # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
     # on the strength of a field that predates the reconciliation pass itself.
     payload["last_reconciled_at"] = now_rfc3339()
     outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
-    outcomes = reconcile_outcomes + outcomes
+    outcomes = fence_outcomes + reconcile_outcomes + outcomes
     try:
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:
@@ -407,7 +436,7 @@ def _production_tick_body(
     claims_allowed = pause.get("mode") != "drain"
     if claims_allowed and not active_blocked:
         try:
-            ready_outcome = _production_claim_ready(runtime, records, payload)
+            ready_outcome = _production_claim_ready(runtime, records, payload, fence=fence)
         except Exception as exc:
             errors.append(_unexpected_error("", exc))
         else:
@@ -859,11 +888,44 @@ def _advance_active(
     return outcomes, errors, active_blocked
 
 
+def _fence_failed_tick(
+    runtime: Any, payload: dict[str, Any], exc: Exception
+) -> dict[str, Any]:
+    """End the tick without touching a card, and leave a durable record of why.
+
+    The state is still saved: the fence may have opened or cleared fences and refreshed its
+    snapshot before it raised, and those are what the next tick reads. Nothing else in the payload
+    has been touched yet, because this runs before every pass that writes one.
+    """
+    result = {
+        "status": "critical",
+        "step": "production-tick",
+        "owner": runtime.owner,
+        "action": "observer-fence-unavailable",
+        "reason": (
+            "the observer fence could not be evaluated, so no card was advanced, reconciled or "
+            f"claimed this tick: {type(exc).__name__}: {exc}"
+        ),
+        "actions": [],
+        "errors": [_unexpected_error("", exc)],
+    }
+    payload["last_tick_finished_at"] = now_rfc3339()
+    record_tick_telemetry(payload, result)
+    try:
+        runtime.production_state.save(payload)
+    except Exception:
+        # Reporting the refusal matters more than recording it: the cards are already untouched.
+        result["state_save"] = "failed"
+    return result
+
+
 def _reconcile_production(
     runtime: Any,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     active_refs: set[str],
+    fenced_refs: set[str] | None = None,
+    fence: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile records and controlled divergences against the current board.
 
@@ -878,13 +940,39 @@ def _reconcile_production(
     """
     outcomes: list[dict[str, Any]] = []
     state_cache: dict[str, str | None] = {}
+    # A fenced sprint's records are left exactly as they are. Reconciliation stops heads and
+    # removes records, and both are mutations of work the fence exists to hold still.
+    fenced_refs = fenced_refs or set()
+    fence = fence or {}
+    task_cache: dict[str, dict[str, Any] | None] = {}
+
+    def card(ref: str) -> dict[str, Any] | None:
+        if ref not in task_cache:
+            task_cache[ref] = _current_card(runtime, ref)
+        return task_cache[ref]
 
     def card_state(ref: str) -> str | None:
         if ref not in state_cache:
-            state_cache[ref] = _current_card_state(runtime, ref)
+            task = card(ref)
+            state_cache[ref] = None if task is None else str(task.get("state") or "unknown")
         return state_cache[ref]
 
+    def fenced(ref: str) -> bool:
+        """Whether this record's card belongs to a fenced sprint, decided a second way.
+
+        `fenced_refs` is the fence's own inventory of the fenced cards. This asks the card the tick
+        has just read, by its sprint link and its project, so a card missing from that inventory —
+        a card created since, or one the fence's read did not see — is still not settled while its
+        sprint is fenced.
+        """
+        if ref in fenced_refs:
+            return True
+        task = card(ref)
+        return task is not None and fenced_task(fence, task)
+
     for ref in sorted(ref for ref in records if ref not in active_refs):
+        if fenced(ref):
+            continue
         # `active_refs` is a snapshot taken before this pass; the board can move the card back
         # into the active cycle between that snapshot and this loop (a PO race). The snapshot is
         # only ever a reason to look, never proof of anything: only the live state fetched right
@@ -921,6 +1009,8 @@ def _reconcile_production(
         if isinstance(divergence, dict) and divergence_is_open(divergence)
     } if isinstance(divergences, list) else set()
     for ref in sorted(open_refs - active_refs):
+        if fenced(ref):
+            continue
         state = card_state(ref)
         if state is None or state in ("in_progress", "validate"):
             continue
@@ -1000,21 +1090,26 @@ def _close_divergences_for_ref(payload: dict[str, Any], ref: str, card_state: st
     return closed_ids
 
 
-def _current_card_state(runtime: Any, ref: str) -> str | None:
-    """The card's live state, or None when the board could not be asked right now.
+def _current_card(runtime: Any, ref: str) -> dict[str, Any] | None:
+    """The card as the board has it right now, or None when it could not be asked.
 
     A `None` here means "skip this ref this tick", never "treat as gone": a
     transient backend error must not look like the card left the cycle, or a
     Kanboard hiccup would reconcile away a record that is still legitimately
-    in flight.
+    in flight. A card the board says is gone comes back as a `not_found` state.
     """
     try:
-        task = runtime.reader.show(ref)
+        return runtime.reader.show(ref)
     except TaskError as exc:
-        return "not_found" if exc.code == "not_found" else None
+        return {"ref": ref, "state": "not_found"} if exc.code == "not_found" else None
     except Exception:
         return None
-    return str(task.get("state") or "unknown")
+
+
+def _current_card_state(runtime: Any, ref: str) -> str | None:
+    """The card's live state, or None when the board could not be asked right now."""
+    task = _current_card(runtime, ref)
+    return None if task is None else str(task.get("state") or "unknown")
 
 
 def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1127,7 +1222,9 @@ def _production_claim_ready(
     runtime: Any,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
+    fence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    fence = fence or {"sprints": set(), "projects": set(), "refs": set()}
     active_code_projects = {
         str(task.get("project") or "")
         for task in _production_tasks(runtime, {"in_progress", "validate"})
@@ -1139,6 +1236,12 @@ def _production_claim_ready(
     for task in _production_tasks(runtime, {"ready"}):
         if is_steward_report(task):
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
+            continue
+        if fenced_task(fence, task):
+            skipped.append({
+                "ref": task["ref"],
+                "reason": "the sprint holding this project has no working declared observer",
+            })
             continue
         sprint_ref = str(task.get("sprint") or "")
         if sprint_ref:
