@@ -784,12 +784,22 @@ def add_comment(role: str, reference: str, body: str, marker: str | None = None)
 
 
 def report(reference: str, kind: str, body: str = "") -> dict:
-    """Worker-only: post a `[report:done]`/`[report:blocked]` comment. Blocked needs a body."""
+    """Worker-only: post a `[report:done]` comment. A blocked report belongs to `secretary.tasks`.
+
+    A blocked report now carries a classification of the blocker, and `secretary.tasks` owns that
+    vocabulary. This path cannot write one, so a blocked report through here would be a record the
+    protocol owner refuses: the classification silently missing, and no audit event behind it.
+    Copying the two values into this module instead would give the protocol two definitions to
+    drift apart, so this refuses and names the writer that owns it. `done` is unchanged.
+    """
     if kind not in ("done", "blocked"):
         raise model.GuardError(f"report kind must be 'done' or 'blocked', not {kind!r}")
-    if kind == "blocked" and not body.strip():
-        raise model.GuardError("a blocked report requires a non-empty body (why it is blocked)")
-    marker = model.MARKER_REPORT_DONE if kind == "done" else model.MARKER_REPORT_BLOCKED
+    if kind == "blocked":
+        raise model.GuardError(
+            "a blocked report must go through `python3 -m secretary task report --kind blocked "
+            "--classification ...`, which owns the blocker classification this path cannot write"
+        )
+    marker = model.MARKER_REPORT_DONE
     out = add_comment("worker", reference, body, marker=marker)
     out["action"] = "reported"
     out["kind"] = kind

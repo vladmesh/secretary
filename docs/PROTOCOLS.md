@@ -438,6 +438,23 @@ instead of learning about it later from a blocked card. An untracked runtime tai
 `--kind blocked` is not gated because work in progress is legitimate there, and the dispatcher's after-the-
 fact check stays as defence in depth.
 
+`report --kind blocked` also requires `--classification`, one of `external_fact` when the blocker is a fact
+outside the card that somebody has to change first, or `wrong_task_definition` when the card itself is wrong.
+The two are repaired by different people in different places, so the worker's own view of which one it hit is
+what the observer starts its analysis from. The value goes into the `reported` audit payload as
+`classification`, and into the report comment as a `classification:` line under the marker, so it is readable
+without parsing the report prose. Both are written by the one backend write the report already makes; the
+classification is deliberately not card metadata, because a second write that can fail on its own would leave
+a card field that silently disagrees with the audit. `--kind done` takes no classification and is refused if
+given one. An observer moving a card out of Blocked must give a non-empty reason, the same requirement the
+steward carries moving one into it; the reason is a comment on the card and its digest is in the `moved`
+event, so how a Blocked card was disposed of stays answerable.
+
+The `reported` events are the authoritative copy and keep the classification of every block, so counting how
+often one head blocks is a question for the audit. The compatibility CLI (`triggered_agents pipeline report`)
+cannot write a classification, so it refuses `--kind blocked` outright and names this command instead. The
+vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
+
 The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
 attempt. A `done` report on the same SHA does not move to Validate: the first such report sends the worker
 back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so the
