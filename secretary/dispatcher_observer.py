@@ -1051,31 +1051,35 @@ def _redelivery_reason(
     """Why an active delivery is sent again, or an empty string to keep waiting for its deadline.
 
     The head being idle is the first reason and does not wait the deadline out: a head that took
-    its turn and came back to the prompt without writing a resume for this batch never has to be
-    asked again later than the tick that sees it.
+    its turn and came back to the prompt without writing a resume for this batch is asked again on
+    the tick that sees it, with no quiet interval over either the last output or the send.
 
-    A pane reported ready is not on its own evidence of that. A prompt sent a moment ago has not
-    made the pane busy yet, and a `last_activity` that is missing or unreadable is no evidence at
-    all, so this second read of the idle signal is deliberately stricter than the one that decides
-    a first delivery: it needs a readable timestamp, and the same short grace a freshly launched
-    pane already gets, counted from the later of the last output and this delivery's send. Without
-    that a head mid-sentence would be nudged.
+    The idle evidence is the readiness signal plus a readable `last_activity`. A pane whose
+    activity cannot be read at all says nothing about whether a turn ended, so it is not idle here
+    and waits for the deadline. A head that is mid-sentence is not ready for input, and the
+    not-idle branch of the caller owns that case.
+
+    A delivery whose send never completed is a third thing again: it sits in `DELIVERY_INTENT`
+    because the tick died between persisting the intent and confirming the prompt landed, so a
+    ready pane may simply be one that never received it. Reading that as a finished turn would
+    nudge the head a second time for a prompt it is still about to answer, so only a delivery known
+    to have been sent is redelivered on idleness. The deadline covers the other one.
     """
     if now >= delivery.deadline:
         return (
             "the acknowledgement deadline expired with this batch unacknowledged after "
             f"{int(now - delivery.sent_at)}s"
         )
+    if delivery.stage != DeliveryStage.AWAITING_ACK:
+        return ""
     try:
-        last_activity = float(status.get("last_activity"))
+        # Read for its readability alone: the value is not compared against anything.
+        float(status.get("last_activity"))
     except (TypeError, ValueError):
         return ""
-    quiet_since = max(last_activity, delivery.sent_at)
-    if now - quiet_since < initial_output_stall_seconds():
-        return ""
     return (
-        "the observer became idle without acknowledging this batch, quiet for "
-        f"{int(now - quiet_since)}s"
+        "the observer became idle without acknowledging this batch "
+        f"{int(now - delivery.sent_at)}s after it was sent"
     )
 
 

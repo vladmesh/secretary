@@ -443,13 +443,15 @@ a replacement, so it has to sit above the longest legitimate observer turn on a 
 the deadline would tear down working observers mid-turn, which is a failure nothing reports loudly: the
 sprint simply stops being supervised.
 
-Idleness on this path is the pane-readiness signal from the session manager, and a redelivery reads it
-more strictly than a first delivery does. It needs a readable last-output timestamp, and both that
-timestamp and the delivery's own send have to be older than `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` (3
-minutes), the same grace a freshly launched pane gets. A pane that has not yet gone busy from the prompt
-just delivered, or one whose activity cannot be read at all, is not evidence of a finished turn and waits
-for the deadline instead. A card in Ready, In progress or Validate is an ordinary wait throughout and never
-by itself an idle head.
+Idleness on this path is the pane-readiness signal from the session manager, plus a last-output
+timestamp that can be read at all. That is the whole test: the tick that sees a ready pane holding an
+unacknowledged batch sends it again on that tick, with no quiet interval required over the last output
+or over the delivery's own send. A pane whose activity cannot be read says nothing about whether a turn
+ended, so it is not idle here and waits for the deadline instead, and so does a head that is still busy.
+A delivery whose send never completed, left in `delivery-intent` by a dispatcher that died mid-send, also
+waits for the deadline: a ready pane there may be one the prompt never reached, and reading it as a
+finished turn would prompt the head twice. A card in Ready, In progress or Validate is an ordinary wait
+throughout and never by itself an idle head.
 
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
