@@ -144,6 +144,31 @@ class SchemaInvalidTests(unittest.TestCase):
                 report = validate_instance(instance)
                 self.assertTrue(any(error.path == "sprint_budget" for error in report.errors), report.errors)
 
+    def test_open_sprint_limit_accepts_only_one_or_two(self):
+        for limit in (1, 2):
+            data = copy.deepcopy(VALID_INSTANCE)
+            data["open_sprint_limit"] = limit
+            self.assertEqual(validate(data, "instance", "instance.yaml"), [], limit)
+
+    def test_an_invalid_open_sprint_limit_is_reported_with_its_fallback(self):
+        """A value nobody can honour has to be visible: it silently keeps the limit at one."""
+        for limit in (0, 3, -1, 1.5, "", "2", True, None):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as tmpdir:
+                instance = Path(tmpdir) / "instance.yaml"
+                document = copy.deepcopy(VALID_INSTANCE)
+                document["open_sprint_limit"] = limit
+                instance.write_text(json.dumps(document), encoding="utf-8")
+
+                report = validate_instance(instance)
+
+                self.assertTrue(
+                    any(
+                        error.path == "open_sprint_limit" and "one open sprint" in error.message
+                        for error in report.errors
+                    ),
+                    report.errors,
+                )
+
     def test_host_units_require_unit_prefix(self):
         data = copy.deepcopy(VALID_INSTANCE)
         # units with no unit_prefix cannot yield unmanaged-on-host, so reject it.
