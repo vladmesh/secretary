@@ -23,11 +23,6 @@ class WorkerContinuationStage(StrEnum):
     # be able to tell "the move may not have landed" from "the card is parked and waiting".
     ASSESSMENT_PENDING = "assessment_pending"
     ASSESSMENT_PARKED = "assessment_parked"
-    # A release decision whose merge is in flight. The stage exists so that a tick which dies
-    # anywhere inside the merge is recovered by asking the remote what actually landed, rather
-    # than by assuming either way: a re-publish and a rework are both wrong answers when the
-    # branch is already on the base.
-    RELEASE_PENDING = "release_pending"
     RED_TRANSITION_PENDING = "red_transition_pending"
     DELIVERY_PENDING = "delivery_pending"
     DELIVERY_CONFIRMED = "delivery_confirmed"
@@ -81,25 +76,12 @@ class WorkerContinuation:
         return self.stage == WorkerContinuationStage.ASSESSMENT_PENDING
 
     @property
-    def assessment_parked(self) -> bool:
-        return self.stage == WorkerContinuationStage.ASSESSMENT_PARKED
-
-    @property
     def parked(self) -> bool:
         """The card is held by a verdict nobody has acted on, move landed or not."""
         return self.stage in {
             WorkerContinuationStage.ASSESSMENT_PENDING,
             WorkerContinuationStage.ASSESSMENT_PARKED,
         }
-
-    @property
-    def release_pending(self) -> bool:
-        return self.stage == WorkerContinuationStage.RELEASE_PENDING
-
-    @property
-    def held_by_decision(self) -> bool:
-        """The card is in Assessment as far as this record is concerned, decided or not."""
-        return self.parked or self.release_pending
 
     @property
     def red_transition_pending(self) -> bool:
@@ -159,32 +141,6 @@ class WorkerContinuation:
         if self.stage != WorkerContinuationStage.ASSESSMENT_PENDING:
             raise ValueError(f"cannot confirm a park from {self.stage}")
         self.stage = WorkerContinuationStage.ASSESSMENT_PARKED
-
-    def begin_release(self) -> None:
-        """A release decision is about to touch the remote.
-
-        Written before the merge, so a tick that dies inside it leaves behind the one fact
-        recovery cannot reconstruct afterwards: that a publish may be in flight. What actually
-        landed is then read from the remote, never guessed from where the crash happened.
-
-        Re-entry is allowed so a retried release is the same call as the first one.
-        """
-        if self.stage not in {
-            WorkerContinuationStage.ASSESSMENT_PARKED,
-            WorkerContinuationStage.RELEASE_PENDING,
-        }:
-            raise ValueError(f"cannot open a release from {self.stage}")
-        self.stage = WorkerContinuationStage.RELEASE_PENDING
-        self.decision = "release"
-
-    def abandon_release(self) -> None:
-        """The publish did not happen. The card is parked again and the observer decides again."""
-        if self.stage == WorkerContinuationStage.ASSESSMENT_PARKED:
-            return
-        if self.stage != WorkerContinuationStage.RELEASE_PENDING:
-            raise ValueError(f"cannot abandon a release from {self.stage}")
-        self.stage = WorkerContinuationStage.ASSESSMENT_PARKED
-        self.decision = ""
 
     def begin_red_transition(
         self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str,

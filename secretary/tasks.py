@@ -118,10 +118,6 @@ _TRANSITIONS = {
         ("validate", "blocked"), ("validate", "done"),
         ("validate", "assessment"), ("assessment", "in_progress"),
         ("assessment", "done"), ("assessment", "blocked"),
-        # A release whose Done move committed and whose finalisation then failed. The branch is
-        # merged, so the card cannot go back for rework, and it cannot stay in Done either: the
-        # release was not finished and the reason has to be readable on the card.
-        ("done", "blocked"),
     },
     # The observer moves any card except one that is parked. `release`, `rework` and `reslice`
     # are effects the dispatcher performs, a merge, a rework round, a reslice, and a board move
@@ -152,8 +148,8 @@ _READY_RESET_METADATA = {
 _ROUTING_PHASES = {"worker", "review", "verdict"}
 # What the observer may decide about a parked card, and where each decision sends it. The
 # decision is recorded on the card before anything acts on it: the effect belongs to the
-# dispatcher and can fail, and a failed effect must leave the card parked rather than half
-# released. `blocked` takes no decision requirement: it is the escape hatch the steward's stale
+# dispatcher and can fail, and a failed effect blocks the card rather than half releasing it.
+# `blocked` takes no decision requirement: it is the escape hatch the steward's stale
 # escalation and every dispatcher failure path already use, and refusing it would strand cards.
 _DECISION_TARGETS = {"release": "done", "rework": "in_progress", "reslice": "blocked"}
 _DECISIONS = set(_DECISION_TARGETS)
@@ -207,10 +203,6 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
     decision about earlier work, and letting one release a later verdict is exactly the replay
     the seam exists to prevent. Both readers use this, the board writer refusing a decision-less
     move and the dispatcher deciding what to perform, so neither can drift from the other.
-
-    A `decision_failed` line takes the decision back down. That is what makes a release the
-    dispatcher could not perform leave the card parked and waiting for the observer instead of
-    parked and retried on every tick with the same result.
     """
     parked_at = -1
     ordered = list(events)
@@ -225,8 +217,6 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if event.get("kind") == "decided" and str(payload.get("decision") or ""):
             decision = str(payload["decision"])
-        elif event.get("kind") == "decision_failed":
-            decision = ""
     return decision
 
 
@@ -945,10 +935,9 @@ class TaskWriter:
         """Record what to do with a parked card, apart from the move that does it.
 
         The decision and its effect are two facts. The effect, a merge or a rework round or a
-        reslice, belongs to the dispatcher and can fail; recording the decision first is what
-        makes a failed effect leave the card parked with the decision still standing, instead of
-        losing the decision or half-performing it. It also makes the decision checkable: the move
-        out of Assessment refuses to carry one that is not on the card.
+        reslice, belongs to the dispatcher; recording it first is what makes the decision
+        checkable, because the move out of Assessment refuses to carry one that is not on the
+        card. An effect that fails takes the card to Blocked with its reason.
 
         The observer decides, and nobody else. One sprint has one observer and the decision is
         its judgement about a card it has been watching; a PO that has to intervene moves the
@@ -991,31 +980,6 @@ class TaskWriter:
 
         return self._write(
             "decided", role, actor, reference, request_id,
-            {"marker": marker, "decision": kind, "body_sha256": _digest(body)}, mutation,
-        )
-
-    def decision_failed(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
-        """The dispatcher could not perform a decision, and the card stays parked.
-
-        This takes the decision back down: without it the same doomed effect would be retried on
-        every tick, and the observer would never be asked again. The card does not move, so the
-        state the failure leaves behind is the one the card was already in, with the reason for
-        the failure readable on it.
-        """
-        self._role(role, {"dispatcher"})
-        if kind not in _DECISIONS:
-            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
-        if not body.strip():
-            raise TaskError("validation", "a failed decision requires a non-empty reason", 2)
-        marker = "decision:failed"
-
-        def mutation(task: dict[str, Any]) -> Any:
-            if task["state"] != "assessment":
-                raise TaskError("transition_forbidden", "a decision only fails on a card in Assessment", 3)
-            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
-
-        return self._write(
-            "decision_failed", role, actor, reference, request_id,
             {"marker": marker, "decision": kind, "body_sha256": _digest(body)}, mutation,
         )
 

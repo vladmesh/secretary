@@ -1163,16 +1163,7 @@ class AssessmentStateTests(unittest.TestCase):
                 ("validate", "blocked"), ("validate", "done"),
                 ("validate", "assessment"), ("assessment", "in_progress"),
                 ("assessment", "done"), ("assessment", "blocked"),
-                ("done", "blocked"),
             },
-        )
-
-    def test_the_dispatcher_can_block_a_release_it_could_not_finalise(self) -> None:
-        """The one edge out of Done: the column changed and the release did not finish, so the
-        card has to say the branch is merged rather than sit in Done as if it were finalised."""
-        self.assertIn(("done", "blocked"), _TRANSITIONS["dispatcher"])
-        self.assertEqual(
-            {edge for edge in _TRANSITIONS["dispatcher"] if edge[0] == "done"}, {("done", "blocked")}
         )
 
     def test_worker_and_reviewer_stay_out_of_assessment(self) -> None:
@@ -1438,32 +1429,6 @@ class AssessmentStateTests(unittest.TestCase):
         )
 
         self.assertEqual(requeued["task"]["state"], "ready")
-
-    def test_a_failed_decision_takes_the_decision_back_down(self) -> None:
-        """What keeps a card the dispatcher could not release from being retried forever."""
-        self._park()
-        self._decide("release")
-
-        failed = self.writer.decision_failed(
-            role="dispatcher", actor="d", reference="secretary-468", kind="release",
-            body="the merge did not land", request_id="release-failed",
-        )
-
-        self.assertEqual(failed["action"], "decision_failed")
-        self.assertEqual(failed["task"]["comments"][-1]["marker"], "decision:failed")
-        self.assertEqual(failed["task"]["state"], "assessment")
-        self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
-        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
-            self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="done",
-                reason="", decision="release", request_id="release-after-failure",
-            )
-
-        # And the observer deciding again puts it back up.
-        self._decide("release", request_id="decision-release-again")
-        self.assertEqual(
-            standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "release"
-        )
 
     def test_worker_may_not_move_a_card_out_of_assessment(self) -> None:
         self.client.tasks[0]["column_id"] = 7

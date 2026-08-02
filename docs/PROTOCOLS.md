@@ -99,13 +99,10 @@ not go through the dispatcher.
 An observer decides only about a card whose project an open sprint reserves, the same guard
 `task move` carries. A decision on a card no open sprint holds is refused.
 
-A release the dispatcher cannot carry out never leaves the card looking reworkable. If the branch
-did not reach the base, the card stays parked, the failure is recorded on it and the decision comes
-back down, so the observer decides again. If the branch did reach the base, the work is merged: the
-release is finished on top of that fact, and where it cannot be, the card goes to Blocked with a
-reason saying the branch is merged and the release was not finalised. That holds for a Done move
-that committed on the board without its audit event too: `done -> blocked` is the dispatcher's one
-edge out of Done, and it exists so a release nothing accounts for does not sit in Done as finalised.
+A release the dispatcher cannot carry out never leaves the card looking reworkable: it takes the
+card to Blocked with the failure on it, whether the merge was rejected or the pre-merge re-check
+went red while the card was parked. Deciding again on a release that failed part-way through is a
+separate card; until it exists, Blocked is the one answer, because it cannot publish twice.
 
 `secretary task move` is the writer for the transition itself. The board has one role and transition
 model, this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries
@@ -533,10 +530,9 @@ stop never permits a second writer in the workspace.
 
 Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
 the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker
-session. A preempt or
-requeue back to Ready, a `report:blocked`, a move to Blocked and a reconciliation onto another card
-all stop the worker head and clear the retained state, so the next round starts from a replacement
-head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends
+session. A preempt or requeue back to Ready, a `report:blocked`, a move to Blocked and a
+reconciliation onto another card all stop the worker head and clear the retained state, so the next
+round starts from a replacement head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends
 the round too: the merge tears the worktree down, waking the suspended head before it is killed.
 
 ```json

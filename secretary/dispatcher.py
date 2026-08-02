@@ -1114,49 +1114,6 @@ class CommandHostRuntime:
         self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
 
-    def merge_published(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        """Has the reviewed branch actually landed on the base?
-
-        Asked of the remote, not of where a failure happened: `complete_green` publishes and then
-        refreshes the local checkout as separate operations, so a failure carries no information
-        about whether the merge is a fact about the world. A card whose branch is already on the
-        base must never be reworked or published a second time, and a card whose branch is not
-        there must never be treated as merged, so the question is put to the thing that knows.
-
-        Raises `HostError` when the answer cannot be read. An unreadable answer is not a "no".
-        """
-        if self.mode == "noop" or not record.workspace:
-            return False
-        if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
-            return False
-        branch = _legacy_worker_branch(task["ref"])
-        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
-        if _validation_ci(self, task) == "github":
-            state = self._run(
-                ["gh", "pr", "view", branch, "--json", "state", "--jq", ".state"],
-                "merge publish probe", cwd=Path(record.workspace),
-            ).stdout.strip().upper()
-            if state not in {"MERGED", "OPEN", "CLOSED"}:
-                raise HostError(f"gh reported an unreadable pull request state: {state or 'empty'}")
-            return state == "MERGED"
-        self._run(["git", "-C", record.workspace, "fetch", "origin", base], "merge publish probe fetch")
-        head = self._run(
-            ["git", "-C", record.workspace, "rev-parse", branch], "merge publish probe head"
-        ).stdout.strip()
-        if not head:
-            raise HostError("the reviewed branch has no head to check against the base")
-        # Not `_commit_is_ancestor`: that reads every failure as "not an ancestor", and here a
-        # git that could not answer must raise rather than report an unpublished branch.
-        probe = self.run_capture(
-            ["git", "-C", record.workspace, "merge-base", "--is-ancestor", head, f"origin/{base}"],
-            "merge publish probe ancestry",
-        )
-        if probe.returncode not in (0, 1):
-            raise HostError(
-                f"merge publish probe ancestry failed: {_tail((probe.stderr or probe.stdout or '').strip())}"
-            )
-        return probe.returncode == 0
-
     def _complete_green_instance_repo(
         self,
         record: DispatcherRecord,
@@ -2426,10 +2383,11 @@ class DispatcherRuntime:
                 "merge-gate-blocked",
                 "merge-gate-red-blocked",
                 "merge-blocked",
-                # The release path that cannot land: a card blocked from Assessment comes back
-                # to Ready the same way, and a re-run that kept the old attempt id would replay
-                # its claim idempotently and leave the card sitting in Ready.
-                "release-unfinalised-blocked",
+                # The release the pre-merge re-check refused: a card blocked from Assessment
+                # comes back to Ready the same way, and a re-run that kept the old attempt id
+                # would replay its claim idempotently and leave the card sitting in Ready.
+                "release-drift-blocked",
+                "release-failed-blocked",
                 "review-blocked",
                 "review-freeze-red-blocked",
                 "review-inventory-blocked",
@@ -4142,16 +4100,11 @@ class DispatcherRuntime:
             # A rework decision whose board move did not commit. Same rule as Validate: the
             # transition the card is already owed is finished before any decision is read again.
             return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
-        if continuation.release_pending:
-            # A release was in flight when the last tick ended. Nothing is decided here from the
-            # card: what matters is what the remote has, and that comes before the decision is
-            # read again, before the gate and before anything is published a second time.
-            return self._resume_release(task, record, records, payload, attempt_id)
         if continuation.assessment_pending:
             # The park's move landed and the tick died before the checkpoint. Re-issuing it is a
             # no-op through the request id, and it is what turns the record into a parked one.
             return self._complete_park(record, records, payload, attempt_id, ref=ref)
-        if not continuation.held_by_decision:
+        if not continuation.parked:
             # A card whose dispatcher record was lost while parked, or one an operator parked by
             # hand. The board is the fact; the record is brought to it without a move. A session
             # this record cannot prove is held is not held, so an adopted park owns no worker and
@@ -4173,49 +4126,6 @@ class DispatcherRuntime:
             return self._rework_parked(task, record, records, payload, attempt_id, reason=reason)
         if decision == "reslice":
             return self._reslice_parked(task, record, records, payload, attempt_id, reason=reason)
-        return self._release_parked(task, record, records, payload, attempt_id, reason=reason)
-
-    def _resume_release(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-    ) -> dict[str, Any]:
-        """A release that was in flight when a tick ended. The remote says which state this is.
-
-        Published: the work is merged and the rest of the release is finished on top of that fact.
-        Not published: nothing happened externally, so the release is simply run again from the
-        top, gate included. Unreadable: nothing is done at all, and the intent stays on disk for
-        the next tick, because guessing here is the one thing that can either lose a merge or
-        publish one twice.
-        """
-        ref = task["ref"]
-        decision, reason = self._recorded_decision(task)
-        try:
-            published = self.host.merge_published(task, record)
-        except HostError as exc:
-            return {
-                "status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": "release-publish-unreadable", "reason": scrub_host_output(str(exc)),
-            }
-        if published:
-            return self._settle_release(
-                task, record, records, payload, attempt_id, step="assessment",
-                move_reason=f"Observer decision: release. {reason}".strip(), decision="release",
-                merged_detail="an interrupted release",
-            )
-        if decision != "release":
-            # The decision came down while the release was in flight and nothing was published.
-            # The card goes back to waiting rather than acting on a decision nobody is holding.
-            record.worker_continuation.abandon_release()
-            records[ref] = record
-            self.save_records(payload, records)
-            return {
-                "status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": "waiting-observer-decision",
-            }
         return self._release_parked(task, record, records, payload, attempt_id, reason=reason)
 
     def _recorded_decision(self, task: dict[str, Any]) -> tuple[str, str]:
@@ -4355,9 +4265,9 @@ class DispatcherRuntime:
 
         The gate is asked again here rather than trusted from the park: a card can sit in
         Assessment for as long as the decision takes, and the reviewed checkout is the only thing
-        that may land. A re-check the machine does not like does not send the card anywhere: it
-        is the observer's decision that cannot be carried out, so the decision comes back down
-        and the card stays parked with the reason on it.
+        that may land. A release that cannot be carried out goes to Blocked with the reason, the
+        same as any other merge path that cannot finish: leaving it parked would mean taking the
+        decision back down, and that machinery is a card of its own.
         """
         ref = task["ref"]
         kind, _result, detail = self._merge_readiness(task, record)
@@ -4368,9 +4278,10 @@ class DispatcherRuntime:
                 "drift": f"the release cannot land: {detail}",
                 "failed": f"the merge gate could not be read: {detail}",
             }.get(kind, "the mechanical gate is no longer green for the checkout this release was decided on")
-            return self._hold_failed_decision(
-                task, record, records, payload, attempt_id, decision="release",
-                action=f"release-{kind}-held", detail=summary,
+            return self._block_merge_path(
+                task, record, records, payload, attempt_id,
+                action=f"release-{kind}-blocked", reason=f"Observer decision: release. {summary}",
+                step="assessment", outcome=f"release {kind}",
             )
         return self._release_effect(
             task, record, records, payload, attempt_id, step="assessment",
@@ -4392,180 +4303,37 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Merge the reviewed branch, tear the round down and move the card to Done.
 
-        The release intent goes to disk before the merge is attempted, so that a tick which dies
-        inside it is recovered by asking the remote what landed rather than by assuming. Without
-        a decision behind it there is nothing to park back into, so the merge failing there ends
-        the card in Blocked exactly as it did before Assessment existed.
+        One linear release, whether a decision opened it or a card nobody watches merged on its
+        own verdict. A merge that cannot be carried out ends in Blocked with its reason.
+        Recovering a release that failed part-way through is deliberately not attempted here, so
+        no retry can publish a second time.
         """
         ref = task["ref"]
-        if decision:
-            record.worker_continuation.begin_release()
-            records[ref] = record
-            self.save_records(payload, records)
         try:
             self.host.complete_green(task, record)
         except HostError as exc:
-            detail = scrub_host_output(str(exc))
-            if not decision:
-                # A rejected merge (non-fast-forward push, gh refusing on branch protection) must
-                # land the card in Blocked rather than escape the tick: an escaping error leaves
-                # the card in Validate with a green verdict, so the next tick retries the same
-                # doomed merge forever while the worker's terminals stay up.
-                return self._block_merge_path(
-                    task, record, records, payload, attempt_id,
-                    action="merge-blocked", reason=f"merge failed: {detail}",
-                    step=step, outcome="merge failed",
-                )
-            return self._release_after_failure(
-                task, record, records, payload, attempt_id, move_reason=move_reason, detail=detail,
-            )
-        return self._settle_release(
-            task, record, records, payload, attempt_id, step=step, move_reason=move_reason,
-            decision=decision,
-        )
-
-    def _release_after_failure(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        move_reason: str,
-        detail: str,
-    ) -> dict[str, Any]:
-        """A release that raised. What happens next depends on one fact: did the publish land?
-
-        The publish and the local refresh are separate operations, so the error itself says
-        nothing about which of them failed. The remote is asked. A branch that is not on the base
-        leaves the card parked with the failure recorded and the decision back down; a branch that
-        is on the base is merged, and the only thing left is to finish the release or, failing
-        that, say so in Blocked. An answer that cannot be read is neither: the card holds its
-        release intent and the next tick asks again.
-        """
-        ref = task["ref"]
-        try:
-            published = self.host.merge_published(task, record)
-        except HostError as exc:
-            records[ref] = record
-            self.save_records(payload, records)
-            return {
-                "status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": "release-publish-unreadable",
-                "reason": f"{detail}; {scrub_host_output(str(exc))}",
-            }
-        if published:
-            return self._settle_release(
-                task, record, records, payload, attempt_id, step="assessment",
-                move_reason=move_reason, decision="release", merged_detail=detail,
-            )
-        return self._hold_failed_decision(
-            task, record, records, payload, attempt_id, decision="release",
-            action="release-failed-held", detail=f"the merge did not land: {detail}",
-        )
-
-    def _settle_release(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        step: str,
-        move_reason: str,
-        decision: str = "",
-        merged_detail: str = "",
-    ) -> dict[str, Any]:
-        """The branch is on the base. Everything after that is finishing what is already true.
-
-        A step that fails here cannot send the card back: the work is merged, so a rework or a
-        second publish would both act on a world that has moved on. What is left is to finish
-        idempotently, and to say in Blocked that the branch is merged when it cannot be.
-        """
-        ref = task["ref"]
-        reason = move_reason if not merged_detail else (
-            f"{move_reason}\nThe merge reported {merged_detail}, and the branch is on the base."
-        )
-        try:
-            self.host.teardown(record)
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                target="done",
-                reason=reason,
-                decision=decision,
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
-            )
-        except (HostError, TaskError) as exc:
-            # Without a decision behind it this is the pre-Assessment path, where an escaping
-            # error is the established behaviour. With one, the card cannot be left looking
-            # releasable: it is merged, and the only honest place for it is Blocked saying so.
-            # `audit_pending` is no exception. The Done move committed on the board but its
-            # decision event did not, so a card left there reads as a finalised release that
-            # nothing in the audit accounts for; Blocked with the merge named is the state the
-            # rule promises, and the pending event is still the reconciler's to repair.
-            if not decision:
-                raise
+            # A rejected merge (non-fast-forward push, gh refusing on branch protection) must
+            # land the card in Blocked rather than escape the tick: an escaping error leaves the
+            # card where it is with a verdict or a decision already standing, so the next tick
+            # retries the same doomed merge forever while the terminals stay up.
             return self._block_merge_path(
                 task, record, records, payload, attempt_id,
-                action="release-unfinalised-blocked",
-                reason=(
-                    f"{move_reason}\nThe branch is merged and the release was not finalised: "
-                    f"{scrub_host_output(str(exc))}. Do not rework or re-publish this card."
-                ),
-                step=step, outcome="release not finalised",
+                action="merge-blocked", reason=f"merge failed: {scrub_host_output(str(exc))}",
+                step=step, outcome="merge failed",
             )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
-
-    def _hold_failed_decision(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        decision: str,
-        action: str,
-        detail: str,
-    ) -> dict[str, Any]:
-        """A decision the dispatcher could not carry out. The card does not move.
-
-        Nothing external happened, so there is nothing to undo and nowhere better for the card to
-        be: it is still the reviewed checkout, still held, and there is still a decision to make
-        about it. The failure is recorded and the decision comes back down, which is what brings
-        the observer back to a card it thought it had finished with.
-        """
-        ref = task["ref"]
-        self.writer.decision_failed(
+        self.host.teardown(record)
+        self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
-            kind=decision,
-            body=(
-                f"The {decision} decision could not be carried out: {detail}\n"
-                "The card stays parked in Assessment with the reviewed checkout held. "
-                "Decide it again."
-            ),
-            # Keyed by the comment count as well as the attempt: a decision recorded after this
-            # failure, and failing in the same way, is a second failure and must be recorded as
-            # one, or the decision would stay standing and the release retry forever.
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, action, ref, str(len(task.get("comments") or []))
-            ),
+            target="done",
+            reason=move_reason,
+            decision=decision,
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
         )
-        record.worker_continuation.abandon_release()
-        records[ref] = record
+        records.pop(ref, None)
         self.save_records(payload, records)
-        return {
-            "status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id,
-            "action": action, "reason": detail,
-        }
+        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
 
     def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes

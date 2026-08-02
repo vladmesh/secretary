@@ -820,11 +820,10 @@ the merge below runs on the tick that performs a recorded `release` decision. A 
 still resolves in Validate, so a card only reaches Assessment with nothing mechanical left to decide.
 A card with no observer to release it merges on the verdict's own tick, as below.
 
-A release that fails is split on one fact, read from the remote rather than from where the failure
-happened: whether the branch reached the base. It did not, and the card stays parked with the
-failure recorded and the decision taken back down; it did, and the release is finished on top of a
-merge that is now a fact, or the card goes to Blocked saying exactly that. A failed release never
-sends a card back for rework and never publishes twice.
+A release the dispatcher cannot carry out takes the card to Blocked with the failure on it, the
+same as any merge that could not land before Assessment existed. It never sends the card back for
+rework. Recovering a release that failed part-way through, so that the card can be decided again,
+is a separate card.
 
 On the release, the production dispatcher takes the card to done without a manual merge:
 

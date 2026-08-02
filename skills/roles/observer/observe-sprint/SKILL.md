@@ -237,10 +237,9 @@ of your part. The `triggered_agents pipeline` CLI does not serve this either, it
 carries the steward's escalation to Blocked. Left alone the card wakes the steward as a stale one,
 which is an escalation, not a decision.
 
-A release the dispatcher could not carry out comes back to you: the card is still parked, a
-`[decision:failed]` comment on it says what went wrong, and your decision is no longer standing.
-Read that comment before deciding again; if it says the branch is merged, the card is done work and
-the answer is not another release.
+A release the dispatcher could not carry out lands the card in Blocked with the failure on it, not
+back in Assessment. Read the reason there before you recut it: a merge the remote rejected and a
+checkout that moved under the park are different problems, and neither is fixed by deciding again.
 
 Default to release. The seam exists so drift is caught at every round, not so every round is
 argued: hold a card only when there is a reason to think about recutting or fixing the task, and say
