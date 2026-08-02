@@ -216,13 +216,34 @@ running, or before the pull request reaches a terminal result. Watch the card's 
 reports, verdicts, pull request and CI.
 
 Assessment is not a terminal state either, and it is the one column that waits for you rather than for
-a machine. A card parked there has passed everything mechanical it is going to pass — CI, the stand run
-and the reviewer verdict all resolve in Validate — and holds a verdict nobody has acted on yet. The
-decision out of it is yours: release (`assessment -> done`), rework (`assessment -> in_progress`) or
-reslice (`assessment -> blocked`, then a fresh cut). Write it with `python3 -m secretary task move
---role observer --ref <card-ref> --to <state>`; the `triggered_agents pipeline` CLI does not serve
-that decision, it only carries the steward's escalation to Blocked. Left alone the card wakes the
-steward as a stale one, which is an escalation, not a decision.
+a machine. Every substantive reviewer verdict parks the card there, green or red: the reviewer is
+stopped, the worker of the round is held with its workspace, and nothing merges or reworks until you
+decide. A parked card has passed everything mechanical it is going to pass, CI and the stand run
+included, so what is left is the direction, not the code.
+
+The decision is yours: release, rework or reslice. Record it, with a reason, and the dispatcher
+performs it: merge and Done for a release, a fresh worker round for a rework, Blocked for a reslice
+you then recut:
+
+```bash
+python3 -m secretary task decide --role observer --actor observer --ref <card-ref> \
+  --kind release|rework|reslice --reason-file <reason.md>
+```
+
+You cannot move the card out of Assessment yourself, and a matching decision does not buy you the
+move: every exit from that column is refused to you, because the merge or the rework round has to
+run before the card moves and the dispatcher is what runs it. Recording the decision is the whole
+of your part. The `triggered_agents pipeline` CLI does not serve this either, it only
+carries the steward's escalation to Blocked. Left alone the card wakes the steward as a stale one,
+which is an escalation, not a decision.
+
+A release the dispatcher could not carry out lands the card in Blocked with the failure on it, not
+back in Assessment. Read the reason there before you recut it: a merge the remote rejected and a
+checkout that moved under the park are different problems, and neither is fixed by deciding again.
+
+Default to release. The seam exists so drift is caught at every round, not so every round is
+argued: hold a card only when there is a reason to think about recutting or fixing the task, and say
+what that reason is in the decision.
 
 When you see RED or Blocked evidence, classify the finding from the report evidence:
 
@@ -237,8 +258,11 @@ When you see RED or Blocked evidence, classify the finding from the report evide
   report that every path reaches it. You will not always see the whole rule at once, and refining it after
   a round is normal; what is not normal is approving a third round on the same moving defect.
 
-The dispatcher may already have started the first automatic rework before you wake. Do not promise or
-assume otherwise. You make the final classification because you have the sprint context. A reviewer provides
+A red reviewer verdict on your sprint's card starts no rework on its own: the card is parked in
+Assessment waiting for you, and the round resumes only when you record `rework`. Do not wait for a
+worker to pick it up, because none will. A red mechanical gate is the exception and does rework
+immediately, so a card that went back to In progress without you is a failed gate, not a review.
+You make the final classification because you have the sprint context. A reviewer provides
 evidence; it does not decide sprint scope. Record the classification and evidence in the card or resume entry.
 
 An ordinary red review and rework are neither a failure of the card nor a reason to intervene when the

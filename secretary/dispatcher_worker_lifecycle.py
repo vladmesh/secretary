@@ -17,6 +17,12 @@ class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"
     RETAINED = "retained"
+    # A substantive reviewer verdict, before and after the board move that parks the card in
+    # Assessment. The two are separate stages for the same reason the red transition splits its
+    # move: the intent has to be on disk before anything observable happens, and recovery has to
+    # be able to tell "the move may not have landed" from "the card is parked and waiting".
+    ASSESSMENT_PENDING = "assessment_pending"
+    ASSESSMENT_PARKED = "assessment_parked"
     RED_TRANSITION_PENDING = "red_transition_pending"
     DELIVERY_PENDING = "delivery_pending"
     DELIVERY_CONFIRMED = "delivery_confirmed"
@@ -38,6 +44,13 @@ class WorkerContinuation:
     prevent.
     """
     verdict_outcome: str = ""
+    decision: str = ""
+    """The observer decision this transition is performing, empty when nobody decided anything.
+
+    A red mechanical gate opens its transition with no decision behind it; a rework decision on a
+    parked card opens the same transition and must carry the decision into the board move, which
+    refuses to take a card out of Assessment without one.
+    """
     session_held: bool = False
     """Whether a suspended session of this round is still there to be resumed.
 
@@ -57,6 +70,18 @@ class WorkerContinuation:
     @property
     def validation_move_pending(self) -> bool:
         return self.stage == WorkerContinuationStage.VALIDATION_MOVE_PENDING
+
+    @property
+    def assessment_pending(self) -> bool:
+        return self.stage == WorkerContinuationStage.ASSESSMENT_PENDING
+
+    @property
+    def parked(self) -> bool:
+        """The card is held by a verdict nobody has acted on, move landed or not."""
+        return self.stage in {
+            WorkerContinuationStage.ASSESSMENT_PENDING,
+            WorkerContinuationStage.ASSESSMENT_PARKED,
+        }
 
     @property
     def red_transition_pending(self) -> bool:
@@ -84,8 +109,42 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm validation move from {self.stage}")
         self.stage = WorkerContinuationStage.RETAINED
 
-    def begin_red_transition(
+    def begin_park(
         self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str
+    ) -> None:
+        """Record the reviewer's verdict before the card is parked in Assessment.
+
+        This is the whole point of the seam: the verdict is durable here, and nothing has yet
+        merged, resumed a worker or moved the board. A tick that dies between this write and the
+        move is recovered by finishing the move, never by re-deciding what the verdict meant.
+
+        Re-entry from `ASSESSMENT_PENDING` is allowed so the recovery of an unlanded move is the
+        same call as the first attempt.
+        """
+        if self.stage not in {
+            WorkerContinuationStage.NONE,
+            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
+            WorkerContinuationStage.RETAINED,
+            WorkerContinuationStage.ASSESSMENT_PENDING,
+        }:
+            raise ValueError(f"cannot park from {self.stage}")
+        self.stage = WorkerContinuationStage.ASSESSMENT_PENDING
+        self.phase = phase
+        self.report_baseline = int(report_baseline)
+        self.move_reason = move_reason
+        self.verdict_outcome = verdict_outcome
+
+    def confirm_park(self) -> None:
+        """The card is in Assessment. From here only a recorded decision moves it."""
+        if self.stage == WorkerContinuationStage.ASSESSMENT_PARKED:
+            return
+        if self.stage != WorkerContinuationStage.ASSESSMENT_PENDING:
+            raise ValueError(f"cannot confirm a park from {self.stage}")
+        self.stage = WorkerContinuationStage.ASSESSMENT_PARKED
+
+    def begin_red_transition(
+        self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str,
+        decision: str = "",
     ) -> None:
         """Record the red verdict before the board is moved.
 
@@ -105,6 +164,8 @@ class WorkerContinuation:
             WorkerContinuationStage.NONE,
             WorkerContinuationStage.VALIDATION_MOVE_PENDING,
             WorkerContinuationStage.RETAINED,
+            # A rework decision on a parked card opens the transition the park was holding back.
+            WorkerContinuationStage.ASSESSMENT_PARKED,
         }:
             raise ValueError(f"cannot open a red transition from {self.stage}")
         self.stage = WorkerContinuationStage.RED_TRANSITION_PENDING
@@ -112,6 +173,7 @@ class WorkerContinuation:
         self.report_baseline = int(report_baseline)
         self.move_reason = move_reason
         self.verdict_outcome = verdict_outcome
+        self.decision = decision
 
     def begin_delivery(self, phase: str, now: float) -> None:
         # `DELIVERY_PENDING` is allowed back in: a tick that died between the send and its
@@ -140,9 +202,10 @@ class WorkerContinuation:
     def drop_session(self) -> None:
         """The session is gone, by a confirmed stop or by its own death.
 
-        A retention that has nothing else pending disappears with it. A red transition does not:
-        it still owes the card a replacement, and losing the intent here is what would let a later
-        tick read the closed round's report as a new completion.
+        A retention that has nothing else pending disappears with it. A park and a red transition
+        do not. A parked card still owes the observer a decision; a red transition still owes the
+        card a replacement, and losing that intent here is what would let a later tick read the
+        closed round's report as a new completion.
         """
         self.session_held = False
         if self.stage in {
@@ -159,6 +222,7 @@ class WorkerContinuation:
         self.report_baseline = 0
         self.move_reason = ""
         self.verdict_outcome = ""
+        self.decision = ""
         self.session_held = False
 
     def to_json(self) -> dict[str, Any]:
@@ -172,6 +236,7 @@ class WorkerContinuation:
             "report_baseline": self.report_baseline,
             "move_reason": self.move_reason,
             "verdict_outcome": self.verdict_outcome,
+            "decision": self.decision,
             "session_held": self.session_held,
         }
 
@@ -188,6 +253,7 @@ class WorkerContinuation:
             report_baseline=int(value.get("report_baseline") or 0),
             move_reason=str(value.get("move_reason") or ""),
             verdict_outcome=str(value.get("verdict_outcome") or ""),
+            decision=str(value.get("decision") or ""),
             # Records written before the session flag existed only ever reached a stage by
             # retaining one.
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),

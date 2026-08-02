@@ -13,6 +13,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.data import export_board
+from secretary.sprints import refresh_active_sprint_projects
 from secretary.routing_journal import (
     HeadRun,
     attempts,
@@ -25,6 +26,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    standing_decision,
     _STATE_BY_COLUMN,
     _STATES,
     _TRANSITIONS,
@@ -41,6 +43,25 @@ def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
     sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
     with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
         yield ref
+
+
+# The sprint the assessment fixture's card belongs to.
+SPRINT = "sprint:1031"
+
+
+class FakeSprintReader:
+    """The sprint board as the task writer's reservation guard reads it: one open sprint."""
+
+    def __init__(self, sprint: dict[str, object]) -> None:
+        self.sprint = sprint
+
+    def list(self, **kwargs: object) -> list[dict[str, object]]:
+        return [self.sprint]
+
+    def show(self, reference: str, **kwargs: object) -> dict[str, object]:
+        if reference != self.sprint["ref"]:
+            raise TaskError("not_found", f"no sprint {reference}", 3)
+        return self.sprint
 
 
 class FakeKanboard:
@@ -993,6 +1014,50 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "capacity_reached")
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.client.calls))
 
+    def test_claim_counts_a_parked_card_as_an_active_code_task(self) -> None:
+        """A parked card holds a retained worker and its checkout: a second writer in the same
+        project is as wrong there as it is in Validate."""
+        self.client.metadata[12]["claim"] = ""
+        self.client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-999",
+                "title": "Parked code",
+                "column_id": 7,  # Assessment
+                "position": 1,
+                "swimlane_id": 4,
+            }
+        )
+        self.client.metadata[14] = {
+            "project": "secretary",
+            "task_type": "code",
+            "claim": "other-worker",
+        }
+
+        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+            self.writer.claim(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+            )
+
+        self.assertEqual(raised.exception.code, "capacity_reached")
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.client.calls))
+
+    def test_archive_refuses_a_parked_card(self) -> None:
+        """Assessment is a wait, not a resting place: the worker and workspace are still owned."""
+        self.client.metadata[12]["claim"] = ""
+        self.client.tasks[0]["column_id"] = 7
+
+        with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
+            self.writer.archive(
+                role="po", actor="operator", reference="secretary-468", reason="cleanup"
+            )
+
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
     def test_reviewer_verdict_uses_review_marker(self) -> None:
         result = self.writer.verdict(
             role="reviewer",
@@ -1048,10 +1113,11 @@ class TaskWriterTests(unittest.TestCase):
 
 
 class AssessmentStateTests(unittest.TestCase):
-    """secretary-1025: the durable wait between a reviewer verdict and the observer's decision.
+    """secretary-1025/1031: the durable wait between a reviewer verdict and the observer's decision.
 
-    Nothing routes a card into `assessment` yet, so these tests pin the model itself: who may
-    move a card in and out of it, and that the column round-trips through the state map.
+    These pin the model: who may move a card in and out of the column, that the column
+    round-trips through the state map, and that a card only leaves it on a decision somebody
+    recorded.
     """
 
     def setUp(self) -> None:
@@ -1059,6 +1125,22 @@ class AssessmentStateTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
+
+    def reserve_project(
+        self, *, card_sprint: str = SPRINT, project: str = "secretary", data_dir: str = "",
+    ) -> None:
+        """Put the card in an open sprint that reserves its project.
+
+        That reservation is what entitles an observer to decide about the card, so the tests of
+        the decision path set it up as the board would have it: the guard index and the live
+        sprint row both naming the sprint the card is linked to.
+        """
+        self.client.metadata[12]["sprint_ref"] = card_sprint
+        reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": [project]})
+        patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        refresh_active_sprint_projects(data_dir or self.tmpdir.name, reader)
 
     def test_column_order_and_state_map(self) -> None:
         self.assertEqual(
@@ -1089,27 +1171,306 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(_TRANSITIONS["reviewer"], set())
         for role in ("po", "observer"):
             self.assertIn(("validate", "assessment"), _TRANSITIONS[role])
-            self.assertIn(("assessment", "ready"), _TRANSITIONS[role])
+        self.assertIn(("assessment", "ready"), _TRANSITIONS["po"])
         self.assertEqual(
             {edge for edge in _TRANSITIONS["steward"] if "assessment" in edge},
             {("assessment", "blocked")},
         )
 
-    def test_dispatcher_moves_a_card_into_and_out_of_assessment(self) -> None:
+    def test_the_observer_takes_no_exit_out_of_assessment(self) -> None:
+        """The observer decides; the dispatcher performs. A board move by the observer would be a
+        release with nothing merged, so the authority matrix has no exit for it at all."""
+        self.assertEqual(
+            {edge for edge in _TRANSITIONS["observer"] if edge[0] == "assessment"}, set()
+        )
+        self.assertIn(("validate", "assessment"), _TRANSITIONS["observer"])
+
+    def _park(self, request_id: str = "into-assessment") -> None:
         self.client.tasks[0]["column_id"] = 4  # Validate
         entered = self.writer.move(
             role="dispatcher", actor="d", reference="secretary-468",
-            target="assessment", reason="", request_id="into-assessment",
+            target="assessment", reason="", request_id=request_id,
         )
         self.assertEqual(entered["task"]["state"], "assessment")
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
+    def _decide(self, kind: str, request_id: str = "") -> dict:
+        if not self.client.metadata[12].get("sprint_ref"):
+            self.reserve_project()
+        return self.writer.decide(
+            role="observer", actor="observer", reference="secretary-468", kind=kind,
+            body="the round converged", request_id=request_id or f"decision-{kind}",
+        )
+
+    def test_dispatcher_moves_a_card_into_and_out_of_assessment(self) -> None:
+        self._park()
+        self._decide("rework")
+
         left = self.writer.move(
             role="dispatcher", actor="d", reference="secretary-468",
-            target="in_progress", reason="", request_id="out-of-assessment",
+            target="in_progress", reason="", decision="rework", request_id="out-of-assessment",
         )
         self.assertEqual(left["task"]["state"], "in_progress")
         self.assertEqual(self.client.tasks[0]["column_id"], 3)
+
+    def test_a_release_with_no_recorded_decision_is_refused(self) -> None:
+        """The seam's whole point: nothing acts on a parked card that nobody decided about."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "recorded decision") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", request_id="undecided-release",
+            )
+
+        self.assertEqual(raised.exception.code, "decision_required")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_a_move_naming_a_decision_nobody_recorded_is_refused(self) -> None:
+        """Carrying the word is not deciding: the audit is what the refusal reads."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="claimed-release",
+            )
+
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_a_decision_from_an_earlier_parking_does_not_release_a_later_one(self) -> None:
+        """A decision is about the round it was written for, not about every later round."""
+        self._park()
+        self._decide("release")
+        self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="done",
+            reason="", decision="release", request_id="first-release",
+        )
+        self._park(request_id="parked-again")
+
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="replayed-release",
+            )
+
+    def test_a_decision_is_recorded_on_the_card_and_in_the_audit(self) -> None:
+        self._park()
+
+        decided = self._decide("reslice")
+
+        self.assertEqual(decided["action"], "decided")
+        comment = decided["task"]["comments"][-1]
+        self.assertEqual(comment["marker"], "decision:reslice")
+        self.assertIn("the round converged", comment["body"])
+        event = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")[-1]
+        self.assertEqual(event["payload"]["decision"], "reslice")
+        self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
+
+    def test_a_decision_needs_a_parked_card_a_reason_and_a_permitted_role(self) -> None:
+        self._park()
+        with self.assertRaisesRegex(TaskError, "non-empty reason"):
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="  ", request_id="empty-reason",
+            )
+        with self.assertRaisesRegex(TaskError, "decision must be one of"):
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="merge", body="ship it", request_id="unknown-kind",
+            )
+        with self.assertRaisesRegex(TaskError, "role is not permitted"):
+            self.writer.decide(
+                role="worker", actor="w", reference="secretary-468",
+                kind="release", body="ship it", request_id="worker-decision",
+            )
+        # The card leaves the column. Its project stays reserved by the observer's own sprint, so
+        # what refuses this is the state and not the reservation.
+        self.reserve_project()
+        self.client.tasks[0]["column_id"] = 4
+        with self.assertRaisesRegex(TaskError, "only recorded on a card in Assessment"):
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="ship it", request_id="unparked-decision",
+            )
+
+    def test_a_blocked_escalation_out_of_assessment_needs_no_decision(self) -> None:
+        """Blocked stays reachable without one: it is what rescues a card nobody decided about."""
+        self._park()
+
+        escalated = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="blocked",
+            reason="the release could not land", request_id="parked-card-blocked",
+        )
+
+        self.assertEqual(escalated["task"]["state"], "blocked")
+
+    def test_only_the_observer_decides(self) -> None:
+        """One authority for the decision. A PO that has to intervene overrides visibly."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "role is not permitted"):
+            self.writer.decide(
+                role="po", actor="operator", reference="secretary-468",
+                kind="release", body="ship it", request_id="po-decision",
+            )
+
+    def test_a_decision_moves_the_card_where_that_decision_goes(self) -> None:
+        """A recorded release paired with a move back to In progress is a rework nobody decided."""
+        self._park()
+        self._decide("release")
+
+        with self.assertRaisesRegex(TaskError, "release decision moves the card to done") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="in_progress",
+                reason="", decision="release", request_id="release-to-in-progress",
+            )
+
+        self.assertEqual(raised.exception.code, "decision_mismatch")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_the_undecided_exits_from_assessment_are_closed(self) -> None:
+        """Ready, Validate and Issues all leave the column with nothing decided, and Ready also
+        clears the claim, which is what would let a second worker start on a reviewed checkout."""
+        self._park()
+
+        for target in ("ready", "validate", "issues"):
+            with self.assertRaises(TaskError) as raised:
+                self.writer.move(
+                    role="dispatcher", actor="d", reference="secretary-468", target=target,
+                    reason="", request_id=f"dispatcher-bypass-{target}",
+                )
+            self.assertIn(raised.exception.code, {"decision_required", "transition_forbidden"})
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_the_observer_may_not_perform_its_own_decision(self) -> None:
+        """The observer records the decision; the dispatcher performs it.
+
+        A matching decision is checkable, but a board move is not a release: the card would read
+        Done with nothing merged, In progress with no worker relaunched. So every
+        decision-carrying exit is refused to the observer, on its own sprint's card and with the
+        decision standing on the card.
+        """
+        self._park()
+
+        for kind, target in (("release", "done"), ("rework", "in_progress"), ("reslice", "blocked")):
+            self._decide(kind, request_id=f"decision-performed-by-{kind}")
+            with self.assertRaises(TaskError) as raised:
+                self.writer.move(
+                    role="observer", actor="observer", reference="secretary-468", target=target,
+                    reason="", decision=kind, request_id=f"observer-performs-{kind}",
+                )
+            self.assertEqual(raised.exception.code, "transition_forbidden")
+            self.assertIn("task decide", str(raised.exception))
+            self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+        # And the dispatcher performs the decision that is standing, from the same state.
+        performed = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="blocked",
+            reason="", decision="reslice", request_id="dispatcher-performs-reslice",
+        )
+        self.assertEqual(performed["task"]["state"], "blocked")
+
+    def test_a_decision_needs_an_open_sprint_to_hold_the_project(self) -> None:
+        """A decision is refused where no open sprint holds the card's project, the reservation
+        `move` already checks. What it does not do is say who the caller is: see the test below.
+        """
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "role is not permitted") as unheld:
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="ship it", request_id="decision-without-a-sprint",
+            )
+        self.assertEqual(unheld.exception.code, "role_forbidden")
+
+        # A card linked to another sprint than the one holding its project is refused too, and
+        # refused as the reservation it crosses.
+        self.reserve_project(card_sprint="sprint:1030")
+        with self.assertRaises(TaskError) as other:
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="ship it", request_id="decision-from-another-sprint",
+            )
+        self.assertEqual(other.exception.code, "sprint_write_forbidden")
+        self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
+
+    def test_the_decision_guard_is_positional_and_not_a_caller_identity(self) -> None:
+        """What the guard above does not do, pinned so nothing is built on top of it.
+
+        Every observer process runs as `--role observer --actor observer`, so the writer has no
+        fact that tells one sprint's observer from another's: the guard admits any observer once
+        some open sprint holds the card's project, and the recorded actor is the same either way.
+        This is the accepted behaviour of this card, and it is why no rule may treat an
+        observer-authored event as self-authored until a sprint-bound identity exists.
+        """
+        self._park()
+        self.reserve_project()
+
+        decided = self.writer.decide(
+            role="observer", actor="observer", reference="secretary-468", kind="release",
+            body="deciding from a head this guard cannot place", request_id="decision-positional",
+        )
+
+        self.assertEqual(decided["action"], "decided")
+        event = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")[-1]
+        self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
+        # And nothing in the record names the sprint the caller was observing, which is the fact
+        # a suppression or an authorisation by author would need.
+        self.assertNotIn("sprint", event["payload"])
+
+    def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:
+        """The escape hatch stays open, and it is recorded as the override it is."""
+        self._park()
+
+        requeued = self.writer.move(
+            role="po", actor="operator", reference="secretary-468", target="ready",
+            reason="taking this one back by hand", request_id="po-requeue",
+        )
+
+        self.assertEqual(requeued["task"]["state"], "ready")
+
+    def test_a_po_override_takes_a_parked_card_to_the_decided_targets_too(self) -> None:
+        """The escape hatch is the whole exit, not the two thirds of it that need nothing decided.
+
+        A seam stuck with no observer to release it is exactly when an operator has to finish or
+        return a parked card by hand, and Done and In progress are where it would send it. Only
+        the dispatcher is held to a recorded decision, because only the dispatcher performs one.
+        """
+        self.reserve_project()
+        for target, request_id in (("done", "po-release"), ("in_progress", "po-return")):
+            self._park(request_id=f"{request_id}-park")
+
+            moved = self.writer.move(
+                role="po", actor="operator", reference="secretary-468", target=target,
+                reason="finishing this one by hand", sprint_override=True,
+                sprint_override_reason="no observer is coming back for it",
+                request_id=request_id,
+            )
+
+            self.assertEqual(moved["task"]["state"], target)
+
+    def test_a_po_move_out_of_assessment_still_checks_a_decision_it_names(self) -> None:
+        """Not being held to a decision is not licence to invent one: a decision the PO passes is
+        read against the card and its destination like anybody else's."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="po", actor="operator", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="po-claimed-release",
+            )
+        self._decide("release")
+        with self.assertRaises(TaskError) as mismatched:
+            self.writer.move(
+                role="po", actor="operator", reference="secretary-468", target="in_progress",
+                reason="", decision="release", sprint_override=True,
+                sprint_override_reason="stepping in on a reserved project",
+                request_id="po-mismatched-release",
+            )
+
+        self.assertEqual(mismatched.exception.code, "decision_mismatch")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
     def test_worker_may_not_move_a_card_out_of_assessment(self) -> None:
         self.client.tasks[0]["column_id"] = 7
@@ -1154,8 +1515,32 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(json.loads(output)["action"], "moved")
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
+        # The way back out is the decision path, through the CLI as well: the writer checks
+        # `--decision` against the audit, so the recorded decision has to come first.
         code, output, errors = self._move_cli(
-            "--role", "dispatcher", "--to", "done", "--request-id", "cli-to",
+            "--role", "dispatcher", "--to", "done", "--request-id", "cli-to-undecided",
+        )
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(errors)["error"]["code"], "decision_required")
+
+        # The CLI writes its audit and its sprint guard index under its own data dir, so both the
+        # decision and the reservation that authorizes it have to be set up there.
+        self.reserve_project(data_dir=str(Path(self.tmpdir.name) / "data"))
+        reason = Path(self.tmpdir.name) / "reason.md"
+        reason.write_text("ship it", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            decided = main([
+                "task", "decide", "--ref", "secretary-468", "--role", "observer",
+                "--kind", "release", "--reason-file", str(reason),
+                "--data-dir", str(Path(self.tmpdir.name) / "data"), "--request-id", "cli-decision",
+            ])
+        self.assertEqual((decided, errors.getvalue()), (0, ""))
+        self.assertEqual(json.loads(output.getvalue())["action"], "decided")
+        code, output, errors = self._move_cli(
+            "--role", "dispatcher", "--to", "done", "--decision", "release",
+            "--request-id", "cli-to",
         )
         self.assertEqual((code, errors), (0, ""))
         self.assertEqual(self.client.tasks[0]["column_id"], 6)

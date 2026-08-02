@@ -40,7 +40,13 @@ from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerCont
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
-from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
+from tests.test_dispatcher import (
+    FakeCatalog,
+    FakeHost,
+    FakeKanboard,
+    FakeLegacyPause,
+    FakeSprints,
+)
 
 REF = "secretary-510-pilot"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.
@@ -66,6 +72,16 @@ class LaunchIntentTests(unittest.TestCase):
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        # The card belongs to a sprint with a concrete observer, so a substantive verdict parks
+        # for a decision: these tests drive the rework that decision opens.
+        self.sprints = FakeSprints()
+        self.sprints.rows["sprint:1031"] = {
+            "ref": "sprint:1031", "status": "open",
+            "observer": {"kind": "head", "profile": "claude-observer"},
+        }
+        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        # And that sprint reserves the card's project, which is what lets its observer decide.
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -75,6 +91,7 @@ class LaunchIntentTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+            sprints=self.sprints,
         )
         self.selector = PilotSelector.exact(REF)
         self.runtime.pause_old(self.selector, actor="operator", evidence="legacy hard pause")
@@ -323,6 +340,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()  # reviewer up
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):
                 self.tick()
@@ -377,6 +396,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
         self.tick()  # rework head up on the rejected sha
         seen: list[dict] = []
         real = self.host.restart_worker
@@ -396,6 +417,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
         self.tick()  # rework head up on the rejected sha
         self.report_done(request_id="worker-done-again")
         self.host.calls.clear()
@@ -418,11 +441,30 @@ class LaunchIntentTests(unittest.TestCase):
 
     # worker: the round a rework launch belongs to ---------------------------
 
+    def decide(self, kind: str, request_id: str = "") -> None:
+        """The observer decision that releases a parked card. Nothing acts without one."""
+        self.writer.decide(
+            role="observer", actor="observer", reference=REF, kind=kind,
+            body="observer decision", request_id=request_id or f"decision-{kind}",
+        )
+
+    def release_after_green_verdict(self) -> dict:
+        """Park the green verdict, decide release, and hand back the tick that merged."""
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.decide("release")
+        return self.tick()
+
     def rework_after_red_review(self) -> None:
-        """Bring the card to the point where the next tick relaunches a worker for round 2."""
+        """Bring the card to the point where the next tick relaunches a worker for round 2.
+
+        A red verdict parks the card first, so the rework these tests are about only begins once
+        the observer has decided it: the park and the decision are part of getting there now.
+        """
         self.run_to_validate()
         self.tick()  # reviewer up
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card in Assessment
+        self.decide("rework")
 
     def test_an_uninterrupted_review_red_rework_opens_the_next_round(self) -> None:
         """The baseline the interrupted rework below has to end up matching."""
@@ -644,7 +686,13 @@ class LaunchIntentTests(unittest.TestCase):
         return mock.patch.object(self.writer, "move", move)
 
     def assert_red_intent_open_in_validate(self, phase: str) -> None:
-        self.assertEqual(self.reader.show(REF)["state"], "validate")
+        """A red transition whose move did not land, over a card the board has not moved.
+
+        The column that card sits in depends on which red opened the transition: a mechanical
+        gate opens one in Validate, a rework decision opens one over a card already parked in
+        Assessment. Either way the transition is what the record owes and the board has not moved.
+        """
+        self.assertIn(self.reader.show(REF)["state"], ("validate", "assessment"))
         stranded = self.record()
         assert stranded is not None
         self.assertEqual(
@@ -786,6 +834,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()  # reviewer up
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
 
         with self.die_after_red_move():
             with self.assertRaises(OSError):
@@ -873,6 +923,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()  # reviewer up over a confirmed suspended worker
         self.host.retained_worker_alive = False
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
 
         outcome = self.tick()
 
@@ -1267,7 +1319,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # The verdict of the adopted reviewer lands on the card it was launched for.
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
         self.assertEqual(self.host.reviews, [REF])
 
     def test_a_review_intent_whose_head_died_starts_exactly_one_replacement(self) -> None:
@@ -1336,7 +1388,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # And the adopted reviewer's verdict still lands on the card it was launched for.
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
 
     # an adopted head belongs to the round's routing history ------------------
 
@@ -1368,7 +1420,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
 
         attempt = self.routing_history()[-1]
         assert attempt.worker is not None and attempt.reviewer is not None
@@ -1388,7 +1440,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual((attempt.reviewer.role, attempt.reviewer.head), ("reviewer", "codex-reviewer"))
 
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
 
         attempt = self.routing_history()[-1]
         assert attempt.worker is not None and attempt.reviewer is not None
@@ -1469,6 +1521,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_an_adopted_reviewer_is_stopped_by_the_red_verdict_it_returns(self) -> None:
         self.adopt_reviewer()
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
 
         rework = self.tick()
 
@@ -1721,6 +1775,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.writer.move(
             role="po", actor="operator", reference=REF, target="ready",
             reason="requeued", request_id="requeue-after-workspace-mismatch",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
         recovered = self.tick()
 
@@ -1781,6 +1837,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
         self.host.fail_stop_review_reason = ""
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.decide("rework")
         rework = self.tick()
 
         self.assertEqual(rework["action"], "rework-started")
@@ -2334,6 +2392,16 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        # The card belongs to a sprint with a concrete observer, so a substantive verdict parks
+        # for a decision: these tests drive the rework that decision opens.
+        self.sprints = FakeSprints()
+        self.sprints.rows["sprint:1031"] = {
+            "ref": "sprint:1031", "status": "open",
+            "observer": {"kind": "head", "profile": "claude-observer"},
+        }
+        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        # And that sprint reserves the card's project, which is what lets its observer decide.
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -2343,6 +2411,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+            sprints=self.sprints,
         )
         self.runtime.state.save({
             "version": 1,
@@ -2414,6 +2483,11 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             role="reviewer", actor="reviewer", reference=REF, kind="red",
             body="needs work", request_id="verdict-red",
         )
+        self.tick()  # the verdict parks the card
+        self.writer.decide(
+            role="observer", actor="observer", reference=REF, kind="rework",
+            body="observer decision", request_id="decision-rework",
+        )
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):
                 self.tick()
@@ -2432,6 +2506,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         )
 
     def move_card(self, target: str, reason: str, request_id: str) -> None:
+        # The card's sprint reserves its project, so an operator move is a recorded override.
         self.writer.move(
             role="po",
             actor="operator",
@@ -2439,6 +2514,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             target=target,
             reason=reason,
             request_id=request_id,
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
 
     def head_alive(self, kind: str) -> bool:
@@ -2476,6 +2553,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             target="issues",
             reason="park the neighbour",
             request_id="park-neighbor",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
         self.move_card("ready", "back to the queue", "move-back-to-ready")
         for _ in range(3):
@@ -2493,6 +2572,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             reference="secretary-510-neighbor",
             target="issues",
             reason="make the requeue claimable",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             request_id="park-neighbor-for-ready-intent",
         )
         self.move_card("ready", "requeue during bring-up", "ready-with-live-intent")

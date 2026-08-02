@@ -683,10 +683,11 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
     real profile in heads.toml (a stale reference — the profile was renamed/removed after the
     card was created — must GuardError here, not blow up bring-up mid-tick); its blocked_by
     predecessor, if any, is Done; if it is a code card, no other active code card for the
-    same project sits in In progress or Validate (a Validate card still owns its worker
-    session for rework, so it counts); and fewer than `cap` cards sit in In progress or
-    Validate (both hold a live worker session — a steward report card doesn't and is excluded
-    from this count, same as it is excluded from the per-project code guard).
+    same project sits in In progress, Validate or Assessment (a Validate card still owns its
+    worker session for rework, and a parked card owns it and the project checkout until the
+    observer decides, so both count); and fewer than `cap` cards sit in those three columns
+    (each holds a live worker session — a steward report card doesn't and is excluded from
+    this count, same as it is excluded from the per-project code guard).
 
     The whole thing runs under AgentState("pipeline").lock(): Kanboard offers no
     compare-and-swap, so with a single dispatcher the host-local lock is what closes the
@@ -730,13 +731,15 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
             )
         actives = call("getAllTasks", project_id=pid, status_id=1) or []
 
-        # Validate counts toward both guards too: a card there still owns its worker session.
+        # Validate and Assessment count toward both guards too: a card in either still owns its
+        # worker session and its project checkout. A parked card holds them for as long as the
+        # observer's decision takes, which is exactly when a second claim would arrive.
         wip = 0
         for t in actives:
             if int(t["id"]) == tid:
                 continue
             col = _column_title(pid, int(t["column_id"]))
-            if col not in (model.IN_PROGRESS, "Validate"):
+            if col not in (model.IN_PROGRESS, "Validate", model.ASSESSMENT):
                 continue
             tmeta = call("getTaskMetadata", task_id=int(t["id"])) or {}
             if tmeta.get(model.META_STEWARD_REPORT) == "1":
@@ -752,7 +755,9 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
             wip += 1
 
         if wip >= cap:
-            raise model.GuardError(f"cap reached: {wip} card(s) in In progress/Validate (cap {cap})")
+            raise model.GuardError(
+                f"cap reached: {wip} card(s) in In progress/Validate/Assessment (cap {cap})"
+            )
 
         call("saveTaskMetadata", task_id=tid, values={
             model.META_CLAIM: worker,

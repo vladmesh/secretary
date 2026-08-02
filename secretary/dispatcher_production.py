@@ -36,7 +36,7 @@ from secretary.dispatcher_state import (
     request_token,
 )
 from secretary.dispatcher_types import HostError
-from secretary.tasks import TaskError
+from secretary.tasks import ACTIVE_STATES, TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
 
 
@@ -400,7 +400,7 @@ def _production_tick_body(
         return _fence_failed_tick(runtime, payload, exc)
     fence_outcomes = list(fence.get("outcomes") or [])
 
-    cycle = _production_tasks(runtime, {"in_progress", "validate"})
+    cycle = _production_tasks(runtime, set(ACTIVE_STATES))
     active_tasks = [task for task in cycle if not fenced_task(fence, task)]
     active_refs = {str(task.get("ref") or "") for task in active_tasks}
     # A fenced card drops out of `active_refs`, which is exactly the shape reconciliation reads as
@@ -747,7 +747,7 @@ def production_probe(runtime: Any) -> dict[str, Any]:
         would: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
 
-        active = _production_tasks(runtime, {"in_progress", "validate"})
+        active = _production_tasks(runtime, set(ACTIVE_STATES))
         for task in active:
             if is_steward_report(task):
                 continue
@@ -978,7 +978,7 @@ def _reconcile_production(
         # only ever a reason to look, never proof of anything: only the live state fetched right
         # here, immediately before removal, decides whether the record is actually orphaned.
         state = card_state(ref)
-        if state is None or state in ("in_progress", "validate"):
+        if state is None or state in ACTIVE_STATES:
             continue
         record = records[ref]
         intent_action = str(launch_intent(record).get("action") or "")
@@ -1012,7 +1012,7 @@ def _reconcile_production(
         if fenced(ref):
             continue
         state = card_state(ref)
-        if state is None or state in ("in_progress", "validate"):
+        if state is None or state in ACTIVE_STATES:
             continue
         closed_ids = _close_divergences_for_ref(payload, ref, state)
         if closed_ids:
@@ -1227,7 +1227,7 @@ def _production_claim_ready(
     fence = fence or {"sprints": set(), "projects": set(), "refs": set()}
     active_code_projects = {
         str(task.get("project") or "")
-        for task in _production_tasks(runtime, {"in_progress", "validate"})
+        for task in _production_tasks(runtime, set(ACTIVE_STATES))
         if task.get("type") == "code" and task.get("project") and not is_steward_report(task)
     }
     skipped: list[dict[str, str]] = []
@@ -1417,7 +1417,7 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
         request_id = str(event.get("request_id") or "")
         if target == "blocked":
             return "blocked"
-        if target == "ready" and source in {"in_progress", "validate"}:
+        if target == "ready" and source in ACTIVE_STATES:
             return "preempt"
         if target == "in_progress" and "gate-red" in request_id:
             return "red_ci"

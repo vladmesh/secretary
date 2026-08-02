@@ -54,21 +54,63 @@ Issues → ready → in_progress → validate → assessment → done
 The board columns are `Issues, Ready, In progress, Validate, Assessment, Blocked, Done`, in that
 order.
 
-`assessment` is a durable wait for a decision, not for a machine. A card sits there with no running
-head and no gate left to run; it leaves when the observer (or the PO) decides release, rework or
-reslice, and the dispatcher performs that decision as `assessment -> done`, `assessment ->
-in_progress` or `assessment -> blocked`. Mechanical gate outcomes never pass through it: CI, the
-stand run and the layer-3 reviewer verdict all still resolve in Validate. The steward may move a
-card from Assessment to Blocked with a reason, its usual escalation when nobody comes back for a
-decision; workers and reviewers move nothing, there as everywhere else. A card left in Assessment
-past the steward's stale threshold is reported like any other stuck card.
+`assessment` is a durable wait for a decision, not for a machine. A substantive reviewer verdict,
+green or red, parks the card there: the reviewer is stopped, the worker of the round stays suspended
+with its workspace, and nothing merges or reworks until somebody decides. Mechanical gate outcomes
+never pass through it: CI, the stand run and the pre-merge re-check all resolve in Validate, so a
+card that is parked has passed everything a machine decides. The steward may move a card from
+Assessment to Blocked with a reason, its usual escalation when nobody comes back for a decision;
+workers and reviewers move nothing, there as everywhere else. A card left in Assessment past the
+steward's stale threshold is reported like any other stuck card.
 
-`secretary task move` is the writer for that decision. The board has one role and transition model,
-this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries only
-the steward's `Assessment -> Blocked` escalation, so a PO or observer release, rework or reslice
-goes through `python3 -m secretary task move --role po --ref REF --to done` (or `in_progress`, or
-`blocked`) rather than through that surface. `--target` is accepted as a second spelling of `--to`
-on that command; both name the same destination state.
+A card parks only where a decision can come from: its sprint is open and declares a concrete
+observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
+closed, keeps the immediate behaviour, where the verdict acts on its own tick.
+
+The decision and its effect are two writes. The observer records the decision on the card, and the
+dispatcher performs it: merge and `assessment -> done` for a release, a new worker round and
+`assessment -> in_progress` for a rework, `assessment -> blocked` for a reslice.
+
+```bash
+python3 -m secretary task decide --role observer --ref PROJECT-N \
+  --kind release --reason-file REASON.md --request-id REQUEST_ID
+```
+
+`--kind` is `release`, `rework` or `reslice`, and the reason is required. The observer is the only
+role that decides; a PO that has to intervene moves the card itself, and on a sprint-reserved
+project that move carries `--sprint-override` and a reason, which reads in the audit as the
+override it is.
+
+The move out of Assessment carries the decision it performs, and each decision has one destination:
+`release` goes to Done, `rework` to In progress, `reslice` to Blocked. A `--decision` that names one
+the card's audit does not hold since it entered the column is refused, whoever passes it, as is one
+paired with the wrong destination; that is what makes the seam checkable from the audit alone.
+Needing a decision at all binds the dispatcher, the role that performs them: a dispatcher move to
+Done or In progress without `--decision` is refused, and so are `assessment -> ready`, `-> validate`
+and `-> issues`, each of which leaves the column with nothing decided while Ready additionally
+clears the claim. The PO is held to none of that, because its move is the escape hatch out of a seam
+that is stuck. `assessment -> blocked` takes no decision from anyone: it is the escalation path the
+steward and the dispatcher's own failures use, and a card that cannot be blocked is a card nothing
+can rescue.
+
+The observer takes no exit out of Assessment at all, not even one carrying a matching decision. A
+matching move is checkable but it is not a release: the board would read Done with nothing merged.
+The observer's authority over a parked card is `task decide`; the effect is the dispatcher's. The
+PO's override and the steward's escalation to Blocked are the two moves out of the column that do
+not go through the dispatcher.
+
+An observer decides only about a card whose project an open sprint reserves, the same guard
+`task move` carries. A decision on a card no open sprint holds is refused.
+
+A release the dispatcher cannot carry out never leaves the card looking reworkable: it takes the
+card to Blocked with the failure on it, whether the merge was rejected or the pre-merge re-check
+went red while the card was parked. Deciding again on a release that failed part-way through is a
+separate card; until it exists, Blocked is the one answer, because it cannot publish twice.
+
+`secretary task move` is the writer for the transition itself. The board has one role and transition
+model, this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries
+only the steward's `Assessment -> Blocked` escalation. `--target` is accepted as a second spelling
+of `--to` on that command; both name the same destination state.
 
 ```bash
 python3 -m secretary task list --project PROJECT
@@ -441,9 +483,13 @@ Nothing here stops every terminal in the worktree, so the worker's own pane stay
 split anchor.
 
 Both red verdicts return the card to In progress through one transition, and both hand the round
-back to the session that wrote the code. A red mechanical gate opens it directly; a red review opens
-it after the reviewer's stop is confirmed. Nothing else moves a card to In progress for rework, and
-the transition always runs the same order, differing only in the phase it records:
+back to the session that wrote the code. What differs is what opens it. A red mechanical gate opens
+it directly, always: nothing about a failed gate is a judgement anyone has to make. A red review on
+a card whose sprint declares a concrete observer opens nothing by itself; the card parks in
+Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs
+a recorded `rework` decision. A red review on a card with no observer to decide opens it directly
+after that same confirmed stop. Nothing else moves a card to In progress for rework, and the
+transition always runs the same order, differing only in the phase it records:
 
 1. The red intent, with its phase, the baseline of the report it closes and the reason the card is
    moving, goes to disk.
@@ -486,10 +532,10 @@ and stop signal the head's private process group, so its helpers are frozen too.
 stop never permits a second writer in the workspace.
 
 Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
-and the red verdict that hands that round back. Nothing else keeps a worker session. A preempt or
-requeue back to Ready, a `report:blocked`, a move to Blocked and a reconciliation onto another card
-all stop the worker head and clear the retained state, so the next round starts from a replacement
-head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends
+the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker
+session. A preempt or requeue back to Ready, a `report:blocked`, a move to Blocked and a
+reconciliation onto another card all stop the worker head and clear the retained state, so the next
+round starts from a replacement head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends
 the round too: the merge tears the worktree down, waking the suspended head before it is killed.
 
 ```json

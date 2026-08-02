@@ -80,22 +80,27 @@ def _gate_red_repeat_count(task: dict[str, Any], fingerprint: str) -> int:
     )
 
 
+def _last_marker_body(task: dict[str, Any], marker: str) -> str | None:
+    """Text of the most recent comment carrying this marker, with the marker line stripped."""
+    body = None
+    for comment in (task.get("comments") or []):
+        if comment.get("marker") == marker:
+            body = comment.get("body")
+    if not body:
+        return None
+    lines = body.splitlines()
+    if lines and lines[0].strip() == f"[{marker}]":
+        lines = lines[1:]
+    return "\n".join(lines).strip() or None
+
+
 def _last_review_red_body(task: dict[str, Any]) -> str | None:
     """Findings from the most recent review:red verdict, for delivery to the rework worker.
 
     The rework prompt otherwise carries only the card description, so without this the worker
     reworks blind and re-reports the same commit, looping red forever.
     """
-    body = None
-    for comment in (task.get("comments") or []):
-        if comment.get("marker") == "review:red":
-            body = comment.get("body")
-    if not body:
-        return None
-    lines = body.splitlines()
-    if lines and lines[0].strip() == "[review:red]":
-        lines = lines[1:]
-    return "\n".join(lines).strip() or None
+    return _last_marker_body(task, "review:red")
 
 
 def _review_adoption_baseline(task: dict[str, Any]) -> int:
