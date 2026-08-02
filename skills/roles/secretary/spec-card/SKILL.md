@@ -94,10 +94,12 @@ The columns are `Issues, Ready, In progress, Validate, Assessment, Blocked, Done
 Ready or Issues; the dispatcher owns everything after that. Assessment is the one column that is
 waiting for a person: the card has cleared or failed everything mechanical (CI, the stand run, the
 LLM review all resolve in Validate) and is holding a verdict until the observer decides release,
-rework or reslice. The observer is the only role that decides; as PO you intervene with `python3 -m
-secretary task move --role po --ref <ref> --to <state> --sprint-override --sprint-override-reason-file
-<reason.md>`, which reads in the audit as the override it is rather than as an unmarked decision. Do
-not treat a card sitting there as a stuck pipeline to poke, and do not read it as approval either.
+rework or reslice. The observer is the only role that decides; as PO you intervene by moving the
+card yourself, with `python3 -m secretary task move --role po --ref <ref> --to <state>`, adding
+`--sprint-override --sprint-override-reason-file <reason.md>` where the project is reserved by an
+open sprint. That reads in the audit as the intervention it is rather than as an unmarked decision.
+Do not treat a card sitting there as a stuck pipeline to poke, and do not read it as approval
+either.
 
 ## Concurrency
 

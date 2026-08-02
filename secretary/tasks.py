@@ -147,7 +147,8 @@ _DECISIONS = set(_DECISION_TARGETS)
 _DECIDED_TARGETS = {"done", "in_progress"}
 # The other three ways out of Assessment. Each of them leaves the column with nothing decided,
 # and Ready additionally clears the claim and lets a second worker start on the reviewed
-# checkout, so the two automated roles reach them only through a visible sprint override.
+# checkout, so the two automated roles do not take them at all. The PO still can: it is the
+# human operator, and on a reserved project that move is a recorded sprint override.
 _UNDECIDED_EXITS = {"ready", "validate", "issues"}
 _DECISION_BOUND_ROLES = {"observer", "dispatcher"}
 # States in which a card holds a workspace, a suspended worker or a running head. `assessment`
@@ -1112,7 +1113,7 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            self._check_decision(task, source, target, decision, role, bool(override_payload))
+            self._check_decision(task, source, target, decision, role)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
                 if target in {"ready", "done"}:
@@ -1136,7 +1137,6 @@ class TaskWriter:
 
     def _check_decision(
         self, task: dict[str, Any], source: str, target: str, decision: str, role: str,
-        overridden: bool,
     ) -> None:
         """A card leaves Assessment on a decision somebody recorded, or it does not leave.
 
@@ -1147,8 +1147,9 @@ class TaskWriter:
         `blocked` without a decision is left open on purpose: the steward's stale escalation and
         the dispatcher's own failure paths reach it without anyone having decided anything, and a
         card that cannot be blocked is a card nothing can rescue. The three remaining exits are
-        not left open, because each of them leaves the column with the decision still unmade;
-        an automated role reaches them only through a sprint override, which is recorded.
+        not left open for the observer or the dispatcher, because each of them leaves the column
+        with the decision still unmade. The PO is not held to it: it is the human operator, and on
+        a sprint-reserved project its move is already a recorded override.
         """
         if decision and decision not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
@@ -1167,14 +1168,11 @@ class TaskWriter:
                 "`task decide` and pass it as --decision",
                 3,
             )
-        if (
-            source == "assessment" and target in _UNDECIDED_EXITS
-            and role in _DECISION_BOUND_ROLES and not overridden
-        ):
+        if source == "assessment" and target in _UNDECIDED_EXITS and role in _DECISION_BOUND_ROLES:
             raise TaskError(
                 "decision_required",
                 f"{role} may not move a parked card to {target}: that leaves Assessment with "
-                "nothing decided. Decide the card, or move it with --sprint-override and a reason",
+                "nothing decided. Decide the card, or have the PO move it",
                 3,
             )
         if decision and not self._decision_recorded(task["ref"], decision):

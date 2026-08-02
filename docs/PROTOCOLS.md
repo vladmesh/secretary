@@ -77,8 +77,9 @@ python3 -m secretary task decide --role observer --ref PROJECT-N \
 ```
 
 `--kind` is `release`, `rework` or `reslice`, and the reason is required. The observer is the only
-role that decides; a PO that has to intervene moves the card with `--sprint-override` and a reason,
-which reads in the audit as the override it is.
+role that decides; a PO that has to intervene moves the card itself, and on a sprint-reserved
+project that move carries `--sprint-override` and a reason, which reads in the audit as the
+override it is.
 
 The move out of Assessment carries the decision it performs, and each decision has one destination:
 `release` goes to Done, `rework` to In progress, `reslice` to Blocked. A move to Done or In progress
