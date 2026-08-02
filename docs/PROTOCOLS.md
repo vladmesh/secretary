@@ -456,47 +456,25 @@ writing next to the process.
 A card whose sprint declares a concrete observer is bounded by that observer's judgement: the
 verdict parks and a person decides how many rounds it is worth. A card with no observer (no
 sprint, a sprint that declares `none`, a closed sprint, a sprint board that cannot be read) has
-nobody to say stop, so two ceilings say it instead.
+nobody to say stop, so a ceiling on substantive red reviews says it instead.
 
-The first counts substantive red reviews. The count is the card's own `review:red` comments, so it
-needs no sprint to live in, survives anything the dispatcher forgets, and is idempotent without
-bookkeeping: a retried verdict write dedupes on its request id and leaves no second comment. A red
-mechanical gate and a red CI rollup leave dispatcher comments with no verdict marker and are not
-counted, the same separation the sprint budget makes between `red_review` and `red_ci`. The third
-red review moves the card to Blocked with a reason naming the ceiling instead of opening another
-worker round. Only the terminals are stopped: the workspace and the branch stay as the round left
-them, and coming back is one explicit transition. Three is early on purpose. Blocking a card
-nobody is watching is a question to a person, not lost work, and it is cheaper than letting the
-card eat five rounds unattended.
+The count is the card's own `review:red` comments, so it needs no sprint to live in, survives
+anything the dispatcher forgets, and is idempotent without bookkeeping: a retried verdict write
+dedupes on its request id and leaves no second comment. A red mechanical gate and a red CI rollup
+leave dispatcher comments with no verdict marker and are not counted, the same separation the
+sprint budget makes between `red_review` and `red_ci`. The third red review moves the card to
+Blocked with a reason naming the ceiling instead of opening another worker round. Only the
+terminals are stopped: the workspace and the branch stay as the round left them, and coming back
+is one explicit transition. Three is early on purpose. Blocking a card nobody is watching is a
+question to a person, not lost work, and it is cheaper than letting the card eat five rounds
+unattended.
 
-The second bounds head replacement. A head that dies gets one replacement per attempt, whichever
-of the attempt's heads it is; a second death in the same attempt moves the card to Blocked with a
-reason naming the spent budget, and that reason is read before the wait watchdog's own per-wait
-ceiling so the operator is told which of the two ended the card. A crashed head usually comes back
-on a restart, so blocking on the first death would make the mode brittle, and one extra head per
-attempt bounds the burn. The budget is charged in the audit under an id keyed by the card and its
-attempt round, after the dead head's stop is confirmed and before the replacement is launched, so
-a dispatcher restart that lost its records
-adopts the card, recovers the round from the journal and still sees the budget spent. It resets
-with the round: a rework opens the next attempt with its replacement unspent.
+The ceiling does not bind a card that parks for a decision. The observer is the ceiling there, and
+a counter that fired would be deciding a card the observer is still holding.
 
-Every path that puts a head up after a death charges it, and each walks the same order: establish
-the death, confirm the old head is stopped, charge, launch. That is the wait watchdog for a worker
-and for a reviewer, and the recovery of a launch intent whose head is gone: an intent left behind
-by a tick that died is settled first, and when its head has exited the ordinary path relaunches,
-which is a replacement like any other. A tick whose stop is refused ends before the charge and
-retries, so a host that will not confirm cannot spend a replacement it never put up. A tick that
-dies between the charge and the launch leaves the budget spent, which is the side of the ceiling
-that cannot burn quota.
-
-A silent head is a different trigger, and the two ceilings do not borrow from each other. A
-silence respawn comes out of the wait watchdog's own per-wait budget and charges nothing here; it
-also does not consume the replacement a later crash is owed, because a head that went quiet once
-and then died is still a head that died. On a card with no observer, a confirmed death answers to
-the attempt budget and to nothing else.
-
-Neither ceiling binds a card that parks for a decision. The observer is the ceiling there, and a
-counter that fired would be deciding a card the observer is still holding.
+The other half of the rule, that a dead head on an unobserved card gets one replacement per
+attempt and the second death blocks, is not implemented. A dead head is answered by the wait
+watchdog's own per-kind respawn ceiling, on an unobserved card as on any other.
 
 ### Routing telemetry per attempt
 

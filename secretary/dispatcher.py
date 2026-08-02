@@ -3274,11 +3274,9 @@ class DispatcherRuntime:
                 "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
             }
         if not status.get("live"):
-            # The one trigger that is a death rather than a silence: the head this wait belongs to
-            # is gone, not quiet. That is what the no-observer replacement budget is spent on.
             return self._trigger_wait_watchdog(
                 task, record, records, payload, attempt_id, kind=kind,
-                trigger=f"terminal {status.get('reason') or 'missing'}", dead=True,
+                trigger=f"terminal {status.get('reason') or 'missing'}",
             )
         activity = status.get("last_activity")
         progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
@@ -3330,134 +3328,10 @@ class DispatcherRuntime:
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
 
-    def _trigger_wait_watchdog(
-        self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
-        dead: bool = False,
-    ):
-        # A confirmed death on a card with no observer answers to its own ceiling and to nothing
-        # else. The attempt's one replacement is what bounds it, and the per-wait respawn counter
-        # below neither grants it nor takes it away: that counter is the silence watchdog's, and a
-        # head that went quiet once and then crashed is still a head that crashed, owed the
-        # replacement a crash usually only needs. The budget is read before it is charged, so the
-        # second death of the attempt blocks with the reason naming the budget it ran out of
-        # instead of the generic stall reason.
-        if dead and not self._parks_for_decision(task):
-            if self._head_replacement_spent(task, record):
-                round_number = self._replacement_round(task["ref"], record)
-                return self._escalate_wait(
-                    task, record, records, payload, attempt_id, kind=kind,
-                    stall=_stall_seconds(kind),
-                    trigger=(
-                        f"{trigger}, and this card has no observer: attempt {round_number} "
-                        f"already spent its one head replacement"
-                    ),
-                )
-            # The charge itself happens inside the respawn, once that path has proved the dead
-            # head is down and has nothing left to refuse it. Charging here would spend the
-            # replacement on a tick that turns out to start no head at all.
-            return self._respawn_wait(
-                task, record, records, payload, attempt_id, kind=kind, now=time.time(),
-                trigger=trigger, charge_replacement=True,
-            )
-        if int(getattr(record, f"{kind}_respawns") or 0) >= 1:
-            return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
-        return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
-
-    def _replacement_round(self, ref: str, record: DispatcherRecord) -> int:
-        """The attempt the head replacement budget is keyed on, journal-recovered when the record
-        has lost its own round to a restart."""
-        return record.attempt_round or self._journal_round(ref)
-
-    def _head_replacement_spent(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        """Whether this attempt has already used the one head replacement it gets.
-
-        Only a card with nobody to decide for it has such a budget: with an observer the ceiling
-        is the observer's judgement, and it can see a card burning heads and say so.
-
-        The budget lives in the audit under an id keyed by the card and its attempt round, not on
-        the dispatcher record: it has to survive a restart that lost the records, and an adopted
-        card recovers its round from the same journal. It resets with the round, so a rework that
-        opens the next attempt gets its own replacement rather than inheriting a spent one.
-        """
-        if self._parks_for_decision(task):
-            return False
-        request_id = _head_replacement_request_id(
-            task["ref"], self._replacement_round(task["ref"], record)
-        )
-        return self.audit.committed_event(request_id) is not None
-
-    def _charge_head_replacement(
-        self, task: dict[str, Any], record: DispatcherRecord, trigger: str
-    ) -> None:
-        """Spend this attempt's one head replacement on a confirmed dead head.
-
-        Every path that puts a replacement head up after a death comes through here: the wait
-        watchdog, and the recovery of a launch intent whose head is gone. A crashed head usually
-        comes back on a restart, so blocking on the first death would make the no-observer mode
-        brittle; a second death in the same attempt is a question for a person.
-
-        One ordered sequence owns the budget, and every path that replaces a dead head walks it:
-        establish the death on a card with no observer, confirm the old head is stopped, charge
-        here, then launch. A tick that cannot confirm the stop ends before this call and retries,
-        so a host that merely refuses cannot spend the replacement it never put up.
-
-        Charged before the head is replaced, never after. A tick that dies between the two leaves
-        the budget spent and the next death blocks the card, which is the side of the ceiling that
-        cannot burn quota. Charging twice in one attempt is impossible rather than merely unlikely:
-        the callers ask `_head_replacement_spent` first and block instead, and the charge is keyed
-        on a request id that makes a repeated tick a no-op.
-        """
-        if self._parks_for_decision(task):
-            return
-        ref = task["ref"]
-        round_number = self._replacement_round(ref, record)
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=(
-                f"Dispatcher head replacement: {trigger}. This card has no observer, so attempt "
-                f"{round_number} gets one replacement head and no more; another dead head in this "
-                f"attempt moves the card to Blocked."
-            ),
-            request_id=_head_replacement_request_id(ref, round_number),
-        )
-
-    def block_dead_launch_intent(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        role: str,
-    ) -> dict[str, Any] | None:
-        """Charge a launch intent whose head is gone against the same replacement budget.
-
-        An intent left behind by a tick that died is settled before anything else runs, and when
-        its head is gone the ordinary path relaunches from a record that no longer claims one.
-        That relaunch is a replacement for a dead head like any other, so it spends the same
-        per-attempt budget: without this the recovery path would hand an unobserved card a free
-        head and the next real death would still find the nominal budget unspent.
-
-        Returns the tick outcome when the card was blocked instead, and None when the relaunch may
-        go ahead. Public because `dispatcher_launch` owns the intent contour and calls back into
-        the runtime for anything that decides the card's fate.
-        """
-        kind = _watchdog_kind(role)
-        trigger = f"the {kind} head of an unresolved launch intent is gone"
-        if self._head_replacement_spent(task, record):
-            return self._escalate_wait(
-                task, record, records, payload, record.attempt_id, kind=kind,
-                stall=_stall_seconds(kind),
-                trigger=(
-                    f"{trigger}, and this card has no observer: attempt "
-                    f"{self._replacement_round(task['ref'], record)} already spent its one head "
-                    f"replacement"
-                ),
-            )
-        self._charge_head_replacement(task, record, trigger)
-        return None
+    def _trigger_wait_watchdog(self, task, record, records, payload, attempt_id, *, kind: str, trigger: str):
+        if int(getattr(record, f"{kind}_respawns") or 0) < 1:
+            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
+        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
 
     def _respawn_wait(
         self,
@@ -3470,18 +3344,7 @@ class DispatcherRuntime:
         kind: str,
         now: float,
         trigger: str,
-        charge_replacement: bool = False,
     ) -> dict[str, Any]:
-        """Put a replacement head up for a stalled or dead wait.
-
-        `charge_replacement` says this respawn answers a confirmed death on a card with no
-        observer, so it spends that attempt's one head replacement. Both roles charge at the same
-        point of the sequence `_charge_head_replacement` describes: after the stop of the dead head
-        is confirmed, and immediately before the host is asked for the new one. For the worker that
-        also puts it after the durable launch intent, which is the last thing before the host call
-        that can still refuse. A stop or an intent write that fails returns above the charge, so
-        the budget survives for the next tick.
-        """
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
         if kind == "review":
@@ -3493,8 +3356,6 @@ class DispatcherRuntime:
             )
             if unconfirmed is not None:
                 return unconfirmed
-            if charge_replacement:
-                self._charge_head_replacement(task, record, trigger)
             # One bring-up path for the reviewer: the same helper the normal launch and the
             # recovery path use, so its error handling can't drift from theirs.
             outcome = _start_review(
@@ -3522,8 +3383,6 @@ class DispatcherRuntime:
                     role=WORKER_ROLE,
                     reason=failure,
                 )
-            if charge_replacement:
-                self._charge_head_replacement(task, record, trigger)
             launched, failed = self._bring_up_worker_head(
                 task,
                 record,
@@ -4735,16 +4594,6 @@ def _dispatcher_label(payload: dict[str, Any]) -> str:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
-
-
-def _head_replacement_request_id(reference: str, round_number: int) -> str:
-    """Identity of the one head replacement an attempt of an unobserved card is allowed.
-
-    Deliberately keyed on the card and the round alone, with a constant in the attempt-id slot:
-    the dispatcher's attempt id changes on every restart, and a budget that reset with it would
-    hand a fresh replacement to every crash of the dispatcher itself.
-    """
-    return _attempt_request_id("head-replacement", "budget", reference, str(round_number))
 
 
 def _continuation_prompt(phase: str) -> str:

@@ -223,12 +223,6 @@ class LaunchIntentTests(unittest.TestCase):
         self.report_done()
         self.assertEqual(self.tick()["to"], "validate")
 
-    def unobserved_card(self) -> None:
-        """Take the observer away: nothing decides for this card, so the ceilings bind it."""
-        self.board.metadata[12].pop("sprint_ref", None)
-        self.sprints.rows.clear()
-        self.board.sprints.clear()
-
     def age_intent(self, seconds: float) -> None:
         """Push a stored intent back in time, so its grace window has run out."""
         payload = self.runtime.state.load()
@@ -317,100 +311,6 @@ class LaunchIntentTests(unittest.TestCase):
             ["prepare_worker", "stop", "prepare_worker"],
         )
         self.assertEqual(self.stored_intent(), {})
-
-    def test_a_dead_intent_on_an_unobserved_card_spends_its_replacement_budget(self) -> None:
-        """secretary-1033: the recovery relaunch is a replacement for a dead head like any other.
-
-        The head of an unresolved intent is gone, so the ordinary path below puts another one up.
-        That has to charge the attempt's one replacement, or the next real death would still find
-        the budget nominally unspent and the attempt would get two heads out of one budget.
-        """
-        self.unobserved_card()
-        self.host.head_pid = DEAD_PID
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
-
-        self.host.head_pid = os.getpid()
-        relaunched = self.tick()
-
-        self.assertEqual(relaunched["step"], "claim")
-        self.assertEqual(self.host.prepared, [REF, REF])
-        charged = [
-            comment for comment in self.reader.show(REF)["comments"]
-            if "Dispatcher head replacement" in comment["body"]
-        ]
-        self.assertEqual(len(charged), 1, "the recovery relaunch charged the budget")
-        self.assertIn("unresolved launch intent is gone", charged[0]["body"])
-
-        # And the budget is now gone: the next death of this attempt blocks instead of paying for
-        # a third head out of a budget of one.
-        self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
-        blocked = self.tick()
-
-        self.assertEqual(blocked["to"], "blocked")
-        self.assertEqual(self.reader.show(REF)["state"], "blocked")
-        self.assertEqual(self.host.prepared, [REF, REF], "no third head was launched")
-        self.assertIn(
-            "already spent its one head replacement",
-            self.reader.show(REF)["comments"][-1]["body"],
-        )
-
-    def test_a_refused_intent_stop_charges_nothing_and_still_owes_a_replacement(self) -> None:
-        """The launch-intent mirror of the wait watchdog's rule: charge only behind a stop.
-
-        This path settles the dead head through `stop_launch_intent`, which can be refused exactly
-        like the role-scoped stops the watchdog uses. A refusal ends the tick before the budget is
-        read, so nothing is charged and nothing is launched, and the tick after the stop succeeds
-        still puts the one replacement up.
-        """
-        self.unobserved_card()
-        self.host.head_pid = DEAD_PID
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
-
-        unconfirmed = self.tick()
-
-        self.assertEqual(unconfirmed["action"], "worker-stop-unconfirmed")
-        self.assertEqual(self.host.prepared, [REF], "no replacement while the stop is refused")
-        self.assertEqual(
-            [comment for comment in self.reader.show(REF)["comments"]
-             if "Dispatcher head replacement" in comment["body"]],
-            [],
-            "an unconfirmed stop charges nothing",
-        )
-
-        self.host.fail_stop_workspace_reason = ""
-        self.host.head_pid = os.getpid()
-        relaunched = self.tick()
-
-        self.assertEqual(relaunched["step"], "claim")
-        self.assertEqual(self.host.prepared, [REF, REF])
-        self.assertEqual(
-            len([comment for comment in self.reader.show(REF)["comments"]
-                 if "Dispatcher head replacement" in comment["body"]]),
-            1,
-        )
-
-    def test_a_dead_intent_on_an_observed_card_charges_nothing(self) -> None:
-        """The other side: with an observer the ceiling is the observer's judgement, so the
-        recovery relaunch is unchanged and leaves no budget record behind."""
-        self.host.head_pid = DEAD_PID
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
-
-        self.host.head_pid = os.getpid()
-        relaunched = self.tick()
-
-        self.assertEqual(relaunched["step"], "claim")
-        self.assertEqual(
-            [comment for comment in self.reader.show(REF)["comments"]
-             if "Dispatcher head replacement" in comment["body"]],
-            [],
-        )
 
     def test_an_intent_without_a_heartbeat_waits_out_its_grace_window(self) -> None:
         """A head that has been launched but has not written its pid is not a dead head."""
