@@ -249,6 +249,10 @@ class SprintFixture(unittest.TestCase):
         board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
         return [task for task in self.client.tasks if task["project_id"] == board]
 
+    def _transactions(self) -> list[str]:
+        directory = Path(self.tmp.name) / "board" / "product-issue-transactions"
+        return sorted(path.name for path in directory.glob("v1-*.json")) if directory.is_dir() else []
+
 
 class SprintOwnershipTests(SprintFixture):
     """A sprint belongs to a Product, serves its open Issues and reserves projects."""
@@ -459,6 +463,8 @@ class SprintOwnershipTests(SprintFixture):
         winner = self._create(
             goal="winner", reference="sprint:winner", projects=["secretary-instance"],
         )["sprint"]["ref"]
+        events = [event["event_id"] for event in self._events()]
+        pending = [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()]
 
         with self.assertRaisesRegex(TaskError, winner) as raised:
             self._create(
@@ -469,6 +475,13 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [winner])  # type: ignore[arg-type]
         self.assertEqual(len(self._sprint_rows()), 1)
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
+        # The refusal is this request's answer, so its staged intent goes with it: nothing
+        # is left for a repair that would only be refused again.
+        self.assertEqual(self._transactions(), [])
+        self.assertEqual([event["event_id"] for event in self._events()], events)
+        self.assertEqual(
+            [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()], pending,
+        )
 
     def test_a_staged_create_never_takes_over_a_sprint_sharing_its_reference(self) -> None:
         """Compensation frees the reference too, so another request may take it.
@@ -702,6 +715,11 @@ class SprintOwnershipTests(SprintFixture):
         winner = self._create(
             goal="winner", reference="sprint:winner", projects=["secretary-instance"],
         )["sprint"]["ref"]
+        # The stalled attempt already wrote its fresh observer; the row it refuses to reopen
+        # has to come back carrying the value it carried before that attempt.
+        closed = SprintReader(self.client, data_dir=self.tmp.name).show(ref, include_cards=False)  # type: ignore[arg-type]
+        events = [event["event_id"] for event in self._events()]
+        pending = [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()]
 
         with self.assertRaisesRegex(TaskError, winner) as raised:
             self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-lost")
@@ -710,6 +728,48 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(
             [sprint["ref"] for sprint in SprintReader(self.client).list(statuses={"open"})], [winner],  # type: ignore[arg-type]
         )
+        reopened = SprintReader(self.client, data_dir=self.tmp.name).show(ref, include_cards=False)  # type: ignore[arg-type]
+        self.assertEqual(reopened["observer"], closed["observer"])
+        self.assertEqual(reopened["status"], "closed")
+        self.assertEqual(self._transactions(), [])
+        self.assertEqual([event["event_id"] for event in self._events()], events)
+        self.assertEqual(
+            [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()], pending,
+        )
+
+    def test_a_refused_reopen_puts_back_the_observer_its_attempt_wrote(self) -> None:
+        """A reopen that loses the slot leaves the row exactly as it found it.
+
+        Its first attempt got as far as writing the fresh observer, so the refusal of the
+        repeat has to undo that: the closed row keeps the value of the run that closed,
+        and nothing of the refused request is left staged.
+        """
+        ref = self._create(goal="reopen rollback", reference="sprint:rollback")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+        with self._refuse_metadata("sprint_status"):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                self.writer.reopen(
+                    observer=none_choice(), role="po", actor="operator", reference=ref,
+                    request_id="reopen-rollback",
+                )
+        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.assertEqual(reader.show(ref, include_cards=False)["observer"], none_choice())
+        self._create(goal="winner", reference="sprint:winner", projects=["secretary-instance"])
+        events = [event["event_id"] for event in self._events()]
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.reopen(
+                observer=none_choice(), role="po", actor="operator", reference=ref,
+                request_id="reopen-rollback",
+            )
+
+        self.assertEqual(raised.exception.code, "sprint_conflict")
+        restored = reader.show(ref, include_cards=False)
+        self.assertEqual(restored["status"], "closed")
+        self.assertEqual(restored["observer"], head_choice("codex-observer"))
+        self.assertEqual(self._transactions(), [])
+        self.assertEqual([event["event_id"] for event in self._events()], events)
+        self.assertEqual([event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()], [])
 
     def test_reopen_is_refused_when_its_only_issue_has_been_closed(self) -> None:
         ref = self._create(goal="issue closed later", reference="sprint:stale")["sprint"]["ref"]
@@ -784,10 +844,6 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
             sprint["ref"]
             for sprint in SprintReader(self.client).list(statuses={"open"}, create=False)  # type: ignore[arg-type]
         ]
-
-    def _transactions(self) -> list[str]:
-        directory = Path(self.tmp.name) / "board" / "product-issue-transactions"
-        return sorted(path.name for path in directory.glob("v1-*.json")) if directory.is_dir() else []
 
     def _assert_refusal_left_nothing(self, call, code: str, message: str) -> None:
         """Prove a refusal is only an answer: no row, no staged intent, no audit event."""
@@ -933,6 +989,26 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
         )
         self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
 
+    def test_a_third_sprint_is_refused_on_the_count_even_when_it_collides(self) -> None:
+        """At capacity nothing about the candidate's resources can admit it."""
+        self._limit(2)
+        first = self._first()
+        second = self._second()["sprint"]["ref"]
+
+        for name, candidate in (
+            ("reservation", lambda: self._third(projects=["other"])),
+            ("product", lambda: self._third(product="other", issues=["issue:foreign"])),
+            ("repository", lambda: self._third(repositories=[str(self.roots / "other")])),
+            ("observer", lambda: self._third(observer=head_choice("claude-observer"))),
+        ):
+            with self.subTest(collision=name):
+                self._assert_refusal_left_nothing(
+                    candidate, "sprint_conflict",
+                    "installation already holds its limit of 2 open sprints: "
+                    + ", ".join(sorted([first, second])),
+                )
+        self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
+
     def test_reopen_obeys_the_same_rules_excluding_only_its_own_row(self) -> None:
         self._limit(2)
         first = self._first()
@@ -955,13 +1031,24 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
         )
 
         third = self._third(projects=["other"])["sprint"]["ref"]
+        # At its limit the installation refuses on the count, whatever this row collides on.
+        self._assert_refusal_left_nothing(
+            lambda: self.writer.reopen(
+                role="po", actor="operator", reference=second, observer=none_choice(),
+            ),
+            "sprint_conflict", "installation already holds its limit of 2 open sprints",
+        )
+        self.assertEqual(sorted(self._open_refs()), sorted([first, third]))
+
+        # With room again, the reservation the third sprint took is what refuses it.
+        self.writer.close(role="po", actor="operator", reference=first)
         self._assert_refusal_left_nothing(
             lambda: self.writer.reopen(
                 role="po", actor="operator", reference=second, observer=none_choice(),
             ),
             "resource_conflict", f"other held by {third}",
         )
-        self.assertEqual(sorted(self._open_refs()), sorted([first, third]))
+        self.assertEqual(self._open_refs(), [third])
 
     def test_concurrent_creates_admit_at_most_the_limit(self) -> None:
         """Three disjoint creates at once still leave exactly two open sprints."""

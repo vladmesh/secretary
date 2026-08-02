@@ -18,7 +18,12 @@ from unittest import mock
 
 from secretary.data import export_board, init_layout, normalize_sprint_entity
 from secretary.restore import RestoreError, import_normalized_board, restore_findings, restore_state
-from secretary.sprint_observer import forget_migration_state, head_choice, strict_reader_active
+from secretary.sprint_observer import (
+    forget_migration_state,
+    head_choice,
+    none_choice,
+    strict_reader_active,
+)
 from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
 from secretary.tasks import TaskWriter
 
@@ -343,6 +348,103 @@ class SprintRestoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RestoreError, "may not carry migration provenance"):
             self._restore()
+
+    def _two_open_rows(self, **overrides: object) -> dict:
+        """An export carrying the seeded row open, plus a second open row beside it."""
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        second = dict(payload["sprints"][0]) | {"reference": "sprint:collision"} | overrides
+        payload["sprints"].append(second)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def _set_open_sprint_limit(self, value: int) -> None:
+        (self.instance / "instance.yaml").write_text(
+            f"open_sprint_limit: {value}\n", encoding="utf-8",
+        )
+
+    def test_restore_refuses_an_export_of_open_sprints_admission_would_have_refused(self) -> None:
+        """Restore reproduces rows one by one, so the set is judged once, before the first write.
+
+        Otherwise an archive is the way around admission: two open sprints sharing a
+        product, a reservation, a repository tree and an observer head would come back
+        exactly as the rules refuse to create them.
+        """
+        self._two_open_rows()
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(RestoreError, "not admissible"):
+            import_normalized_board(
+                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(
+            [method for method, _ in client.calls if method in {"createTask", "saveTaskMetadata"}],  # type: ignore[attr-defined]
+            [],
+        )
+
+    def test_restore_at_the_pilot_limit_judges_the_open_set_by_the_same_rules(self) -> None:
+        """Two open rows come back only when they satisfy every rule `create` enforces."""
+        self._set_open_sprint_limit(2)
+        for name, overrides, message in (
+            (
+                "product",
+                {
+                    "product": "secretary", "reservations": ["other"],
+                    "repositories": ["other"], "observer": none_choice(),
+                },
+                "needs a different product",
+            ),
+            (
+                "reservation",
+                {"product": "other", "repositories": ["other"], "reservations": ["secretary"]},
+                "already reserved by an open sprint",
+            ),
+            (
+                "repository",
+                {
+                    "product": "other", "reservations": ["other"],
+                    "repositories": ["secretary/nested"], "observer": none_choice(),
+                },
+                "overlaps",
+            ),
+            (
+                "observer",
+                {
+                    "product": "other", "reservations": ["other"], "repositories": ["other"],
+                    "observer": head_choice("codex-observer"),
+                },
+                "one-observer ceiling",
+            ),
+        ):
+            with self.subTest(collision=name):
+                self.setUp()
+                self._set_open_sprint_limit(2)
+                self._two_open_rows(**overrides)
+                client = _EmptyBoardsKanboard()
+
+                with self.assertRaisesRegex(RestoreError, message):
+                    import_normalized_board(
+                        self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+
+        self.setUp()
+        self._set_open_sprint_limit(2)
+        self._two_open_rows(
+            product="other", reservations=["other"], repositories=["other"],
+            observer=none_choice(),
+        )
+        client, _ = self._restore()
+
+        reader = SprintReader(client, data_dir=self.target_data)  # type: ignore[arg-type]
+        self.assertEqual(
+            sorted(sprint["ref"] for sprint in reader.list(statuses={"open"})),
+            ["sprint:collision", "sprint:entity"],
+        )
 
     def test_an_open_row_is_never_published_without_its_observer(self) -> None:
         """Status and observer are on the row before the reference makes it readable."""

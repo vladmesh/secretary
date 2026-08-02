@@ -106,6 +106,7 @@ def import_normalized_board(
             # every Pipeline card: validating them at their own step would leave the whole card
             # board already restored behind a refusal.
             recovered_observers = _check_restored_observers(data_dir, sprints, instance)
+            _check_restored_admission(sprints, recovered_observers, instance)
             client = client or KanboardClient()
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
@@ -393,6 +394,43 @@ def _check_restored_observers(
     if problems:
         raise RestoreError("sprint observer metadata is invalid: " + "; ".join(problems))
     return recovered
+
+
+def _check_restored_admission(
+    sprints: list[dict[str, Any]], recovered_observers: dict[str, dict[str, Any]],
+    instance: Path | None,
+) -> None:
+    """Refuse an export whose open sprints this installation would never have admitted.
+
+    `restore_create` is deliberately not an admission decision: it reproduces rows one
+    after another, and an export of finished work is not a request to open anything.  The
+    set as a whole is a different question, and it is asked once, here, before the first
+    backend write of any set: an archive that carries two open sprints sharing a product,
+    a reservation, a repository tree or an observer head would otherwise be a way to
+    arrive at exactly the pair admission exists to refuse.
+
+    The limit is the target installation's, not the source's: recovery lands on this
+    host, and this host's setting says how many open sprints it can carry.
+    """
+    from secretary.sprints import instance_open_sprint_limit, open_sprint_admission_error
+
+    rows = [
+        {
+            "ref": str(sprint.get("reference") or ""),
+            "product": str(sprint.get("product") or ""),
+            "reservations": list(sprint.get("reservations") or []),
+            "repositories": list(sprint.get("repositories") or []),
+            "observer": (
+                parse_observer(sprint["observer"]) if "observer" in sprint
+                else recovered_observers.get(str(sprint.get("reference") or ""))
+            ),
+        }
+        for sprint in sprints
+        if str(sprint.get("status") or "") == "open"
+    ]
+    problem = open_sprint_admission_error(rows, limit=instance_open_sprint_limit(instance))
+    if problem is not None:
+        raise RestoreError(f"restored open sprints are not admissible on this installation: {problem}")
 
 
 # A checkpoint written before a sprint owned a product carries none of the ownership
