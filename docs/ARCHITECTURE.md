@@ -70,6 +70,12 @@ write goes through `secretary task` or `secretary sprint`, which apply role guar
 append-only audit. The dispatcher resolves routing, drives the worker and reviewer lifecycle, and
 checks board, workspace, report and review state before each transition.
 
+A substantive reviewer verdict is not itself an effect. It parks the card in Assessment with the
+reviewer stopped and the worker of the round held, and the merge or the next round runs only on the
+tick that performs a decision the observer recorded (see [Tasks](PROTOCOLS.md#tasks)). Mechanical
+outcomes keep resolving in Validate, so the decision point sits where direction is decided and
+nowhere else.
+
 Sprint budget is not the observer's self-report. The dispatcher reads the durable audit of the cards
 linked to a sprint and writes one budget event per source-event identity. Thresholds come from
 instance configuration, with defaults substituted before validation; the hard limit moves the entity

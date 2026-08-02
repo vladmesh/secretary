@@ -993,6 +993,50 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "capacity_reached")
         self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.client.calls))
 
+    def test_claim_counts_a_parked_card_as_an_active_code_task(self) -> None:
+        """A parked card holds a retained worker and its checkout: a second writer in the same
+        project is as wrong there as it is in Validate."""
+        self.client.metadata[12]["claim"] = ""
+        self.client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-999",
+                "title": "Parked code",
+                "column_id": 7,  # Assessment
+                "position": 1,
+                "swimlane_id": 4,
+            }
+        )
+        self.client.metadata[14] = {
+            "project": "secretary",
+            "task_type": "code",
+            "claim": "other-worker",
+        }
+
+        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+            self.writer.claim(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+            )
+
+        self.assertEqual(raised.exception.code, "capacity_reached")
+        self.assertFalse(any(call[0] == "saveTaskMetadata" for call in self.client.calls))
+
+    def test_archive_refuses_a_parked_card(self) -> None:
+        """Assessment is a wait, not a resting place: the worker and workspace are still owned."""
+        self.client.metadata[12]["claim"] = ""
+        self.client.tasks[0]["column_id"] = 7
+
+        with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
+            self.writer.archive(
+                role="po", actor="operator", reference="secretary-468", reason="cleanup"
+            )
+
+        self.assertEqual(raised.exception.code, "live_work")
+        self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
+
     def test_reviewer_verdict_uses_review_marker(self) -> None:
         result = self.writer.verdict(
             role="reviewer",
@@ -1048,10 +1092,11 @@ class TaskWriterTests(unittest.TestCase):
 
 
 class AssessmentStateTests(unittest.TestCase):
-    """secretary-1025: the durable wait between a reviewer verdict and the observer's decision.
+    """secretary-1025/1031: the durable wait between a reviewer verdict and the observer's decision.
 
-    Nothing routes a card into `assessment` yet, so these tests pin the model itself: who may
-    move a card in and out of it, and that the column round-trips through the state map.
+    These pin the model: who may move a card in and out of the column, that the column
+    round-trips through the state map, and that a card only leaves it on a decision somebody
+    recorded.
     """
 
     def setUp(self) -> None:
@@ -1095,21 +1140,120 @@ class AssessmentStateTests(unittest.TestCase):
             {("assessment", "blocked")},
         )
 
-    def test_dispatcher_moves_a_card_into_and_out_of_assessment(self) -> None:
+    def _park(self, request_id: str = "into-assessment") -> None:
         self.client.tasks[0]["column_id"] = 4  # Validate
         entered = self.writer.move(
             role="dispatcher", actor="d", reference="secretary-468",
-            target="assessment", reason="", request_id="into-assessment",
+            target="assessment", reason="", request_id=request_id,
         )
         self.assertEqual(entered["task"]["state"], "assessment")
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
+    def _decide(self, kind: str, request_id: str = "") -> dict:
+        return self.writer.decide(
+            role="observer", actor="observer", reference="secretary-468", kind=kind,
+            body="the round converged", request_id=request_id or f"decision-{kind}",
+        )
+
+    def test_dispatcher_moves_a_card_into_and_out_of_assessment(self) -> None:
+        self._park()
+        self._decide("rework")
+
         left = self.writer.move(
             role="dispatcher", actor="d", reference="secretary-468",
-            target="in_progress", reason="", request_id="out-of-assessment",
+            target="in_progress", reason="", decision="rework", request_id="out-of-assessment",
         )
         self.assertEqual(left["task"]["state"], "in_progress")
         self.assertEqual(self.client.tasks[0]["column_id"], 3)
+
+    def test_a_release_with_no_recorded_decision_is_refused(self) -> None:
+        """The seam's whole point: nothing acts on a parked card that nobody decided about."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "recorded decision") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", request_id="undecided-release",
+            )
+
+        self.assertEqual(raised.exception.code, "decision_required")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_a_move_naming_a_decision_nobody_recorded_is_refused(self) -> None:
+        """Carrying the word is not deciding: the audit is what the refusal reads."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="claimed-release",
+            )
+
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_a_decision_from_an_earlier_parking_does_not_release_a_later_one(self) -> None:
+        """A decision is about the round it was written for, not about every later round."""
+        self._park()
+        self._decide("release")
+        self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="done",
+            reason="", decision="release", request_id="first-release",
+        )
+        self._park(request_id="parked-again")
+
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="replayed-release",
+            )
+
+    def test_a_decision_is_recorded_on_the_card_and_in_the_audit(self) -> None:
+        self._park()
+
+        decided = self._decide("reslice")
+
+        self.assertEqual(decided["action"], "decided")
+        comment = decided["task"]["comments"][-1]
+        self.assertEqual(comment["marker"], "decision:reslice")
+        self.assertIn("the round converged", comment["body"])
+        event = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")[-1]
+        self.assertEqual(event["payload"]["decision"], "reslice")
+        self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
+
+    def test_a_decision_needs_a_parked_card_a_reason_and_a_permitted_role(self) -> None:
+        self._park()
+        with self.assertRaisesRegex(TaskError, "non-empty reason"):
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="  ", request_id="empty-reason",
+            )
+        with self.assertRaisesRegex(TaskError, "decision must be one of"):
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="merge", body="ship it", request_id="unknown-kind",
+            )
+        with self.assertRaisesRegex(TaskError, "role is not permitted"):
+            self.writer.decide(
+                role="worker", actor="w", reference="secretary-468",
+                kind="release", body="ship it", request_id="worker-decision",
+            )
+        self.client.tasks[0]["column_id"] = 4
+        with self.assertRaisesRegex(TaskError, "only recorded on a card in Assessment"):
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="ship it", request_id="unparked-decision",
+            )
+
+    def test_a_blocked_escalation_out_of_assessment_needs_no_decision(self) -> None:
+        """Blocked stays reachable without one: it is what rescues a card nobody decided about."""
+        self._park()
+
+        escalated = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="blocked",
+            reason="the release could not land", request_id="parked-card-blocked",
+        )
+
+        self.assertEqual(escalated["task"]["state"], "blocked")
 
     def test_worker_may_not_move_a_card_out_of_assessment(self) -> None:
         self.client.tasks[0]["column_id"] = 7
@@ -1154,8 +1298,23 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(json.loads(output)["action"], "moved")
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
+        # The way back out is the decision path, through the CLI as well: the writer checks
+        # `--decision` against the audit, so the recorded decision has to come first.
         code, output, errors = self._move_cli(
-            "--role", "dispatcher", "--to", "done", "--request-id", "cli-to",
+            "--role", "dispatcher", "--to", "done", "--request-id", "cli-to-undecided",
+        )
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(errors)["error"]["code"], "decision_required")
+
+        # The CLI writes its audit under its own data dir, so the decision it will be checked
+        # against has to be recorded there too.
+        TaskWriter(self.client, data_dir=str(Path(self.tmpdir.name) / "data")).decide(
+            role="observer", actor="observer", reference="secretary-468", kind="release",
+            body="ship it", request_id="cli-decision",
+        )
+        code, output, errors = self._move_cli(
+            "--role", "dispatcher", "--to", "done", "--decision", "release",
+            "--request-id", "cli-to",
         )
         self.assertEqual((code, errors), (0, ""))
         self.assertEqual(self.client.tasks[0]["column_id"], 6)

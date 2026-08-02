@@ -814,7 +814,12 @@ and does not affect `doctor` or readiness.
 
 ## Auto-merging green cards
 
-When a reviewer records a green verdict, the production dispatcher takes the card to done without a manual merge:
+A green verdict does not merge on its own. It parks the card in Assessment (see
+[Tasks](PROTOCOLS.md#tasks)) once the mechanical gate is green, and the merge below runs on the tick
+that performs a recorded `release` decision. A red or pending gate still resolves in Validate, so a
+card only reaches Assessment with nothing mechanical left to decide.
+
+On the release, the production dispatcher takes the card to done without a manual merge:
 
 1. Push the worker branch to the default branch, fast-forward only. If the default branch diverged, the push is
    rejected; the dispatcher neither forces nor resolves the conflict itself.
@@ -835,8 +840,9 @@ branch into the local instance checkout, so a checkpoint commit that appeared be
 preserved by an ordinary merge commit alongside the feature commit. If the tick died after the remote publish but
 before the local merge, the next tick repeats the done path idempotently.
 
-Teardown happens only on this done path. On a red review the workspace and its branch are left untouched so the
-worker can continue in the same worktree.
+Teardown happens only on this done path. While a card is parked, and on the rework decision after a
+red review, the workspace and its branch are left untouched so the worker can continue in the same
+worktree.
 
 Kill switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` disables the push and fast-forward steps entirely. The card
 still reaches done, but the branch stays unmerged and needs a manual merge. The default is on.

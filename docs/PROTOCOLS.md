@@ -54,21 +54,36 @@ Issues → ready → in_progress → validate → assessment → done
 The board columns are `Issues, Ready, In progress, Validate, Assessment, Blocked, Done`, in that
 order.
 
-`assessment` is a durable wait for a decision, not for a machine. A card sits there with no running
-head and no gate left to run; it leaves when the observer (or the PO) decides release, rework or
-reslice, and the dispatcher performs that decision as `assessment -> done`, `assessment ->
-in_progress` or `assessment -> blocked`. Mechanical gate outcomes never pass through it: CI, the
-stand run and the layer-3 reviewer verdict all still resolve in Validate. The steward may move a
-card from Assessment to Blocked with a reason, its usual escalation when nobody comes back for a
-decision; workers and reviewers move nothing, there as everywhere else. A card left in Assessment
-past the steward's stale threshold is reported like any other stuck card.
+`assessment` is a durable wait for a decision, not for a machine. A substantive reviewer verdict,
+green or red, parks the card there: the reviewer is stopped, the worker of the round stays suspended
+with its workspace, and nothing merges or reworks until somebody decides. Mechanical gate outcomes
+never pass through it: CI, the stand run and the pre-merge re-check all resolve in Validate, so a
+card that is parked has passed everything a machine decides. The steward may move a card from
+Assessment to Blocked with a reason, its usual escalation when nobody comes back for a decision;
+workers and reviewers move nothing, there as everywhere else. A card left in Assessment past the
+steward's stale threshold is reported like any other stuck card.
 
-`secretary task move` is the writer for that decision. The board has one role and transition model,
-this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries only
-the steward's `Assessment -> Blocked` escalation, so a PO or observer release, rework or reslice
-goes through `python3 -m secretary task move --role po --ref REF --to done` (or `in_progress`, or
-`blocked`) rather than through that surface. `--target` is accepted as a second spelling of `--to`
-on that command; both name the same destination state.
+The decision and its effect are two writes. The observer (or the PO) records the decision on the
+card, and the dispatcher performs it: merge and `assessment -> done` for a release, a new worker
+round and `assessment -> in_progress` for a rework, `assessment -> blocked` for a reslice. A release
+that cannot land leaves the decision standing and the card parked or blocked, never half merged.
+
+```bash
+python3 -m secretary task decide --role observer --ref PROJECT-N \
+  --kind release --reason-file REASON.md --request-id REQUEST_ID
+```
+
+`--kind` is `release`, `rework` or `reslice`, and the reason is required. The move out of Assessment
+carries the decision it performs: `assessment -> done` and `assessment -> in_progress` are refused
+unless `--decision` names a decision recorded on that card since it entered the column, which is
+what makes the seam checkable from the audit alone. `assessment -> blocked` takes no decision: it
+is the escalation path the steward and the dispatcher's own failures use, and a card that cannot be
+blocked is a card nothing can rescue.
+
+`secretary task move` is the writer for the transition itself. The board has one role and transition
+model, this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries
+only the steward's `Assessment -> Blocked` escalation. `--target` is accepted as a second spelling
+of `--to` on that command; both name the same destination state.
 
 ```bash
 python3 -m secretary task list --project PROJECT

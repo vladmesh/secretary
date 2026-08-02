@@ -88,6 +88,7 @@ def add_task_subcommands(subparsers) -> None:
         ("comment", run_task_comment),
         ("report", run_task_report),
         ("verdict", run_task_verdict),
+        ("decide", run_task_decide),
         ("move", run_task_move),
         ("archive", run_task_archive),
     ):
@@ -106,11 +107,17 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--kind", required=True, choices=("done", "blocked"))
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
+        if name == "decide":
+            command.add_argument("--kind", required=True, choices=("release", "rework", "reslice"))
+            command.add_argument("--reason-file")
         if name == "move":
             # `--target` is the spelling the restore commands use for the same idea, and the one
             # operators reach for. Both names write the same dest, so neither is a second contract.
             command.add_argument("--to", "--target", dest="to", required=True, choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"))
             command.add_argument("--reason-file")
+            # A card leaves Assessment on a decision somebody recorded with `task decide`, and
+            # the move has to name it: the writer checks it against the card's audit.
+            command.add_argument("--decision", default="", choices=("", "release", "rework", "reslice"))
             _add_sprint_override_args(command)
         if name == "archive":
             command.add_argument("--reason-file")
@@ -271,11 +278,16 @@ def run_task_verdict(args: argparse.Namespace) -> int:
     return _run_task_write(args, lambda writer, body, actor: writer.verdict(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
 
 
+def run_task_decide(args: argparse.Namespace) -> int:
+    return _run_task_write(args, lambda writer, body, actor: writer.decide(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
+
+
 def run_task_move(args: argparse.Namespace) -> int:
     return _run_task_write(
         args,
         lambda writer, body, actor: writer.move(
             role=args.role, actor=actor, reference=args.ref, target=args.to, reason=body,
+            decision=args.decision,
             sprint_override=args.sprint_override,
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
             request_id=args.request_id,

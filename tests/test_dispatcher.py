@@ -64,7 +64,7 @@ from secretary.dispatcher_watchdog import (
     stall_seconds,
     wait_outcome,
 )
-from secretary.dispatcher_worker_lifecycle import WorkerContinuationStage
+from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 
@@ -97,6 +97,41 @@ class WorkerContinuationStateTests(unittest.TestCase):
             WorkerContinuationStage.VALIDATION_MOVE_PENDING,
         )
 
+    def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
+        """A dropped session ends a plain retention. It does not end a park: the card is still
+        waiting for a decision, and a rework decision on it is owed a replacement worker."""
+        continuation = WorkerContinuation()
+        continuation.begin_retention(10.0)
+        continuation.confirm_validation_move()
+        continuation.begin_park("review", 4, "parked", "red")
+        continuation.confirm_park()
+
+        continuation.drop_session()
+
+        self.assertEqual(continuation.stage, WorkerContinuationStage.ASSESSMENT_PARKED)
+        self.assertFalse(continuation.session_held)
+        self.assertFalse(continuation.retained)
+        self.assertTrue(continuation.parked)
+
+    def test_a_park_is_confirmed_only_from_its_own_pending_stage(self) -> None:
+        continuation = WorkerContinuation()
+
+        with self.assertRaises(ValueError):
+            continuation.confirm_park()
+
+        continuation.begin_park("review", 2, "parked", "green")
+        continuation.confirm_park()
+        continuation.confirm_park()  # idempotent: the recovery of a lost checkpoint re-enters it
+
+        self.assertEqual(continuation.stage, WorkerContinuationStage.ASSESSMENT_PARKED)
+
+        continuation.begin_red_transition("review", 2, "rework", "red", "rework")
+
+        self.assertEqual(continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING)
+        self.assertEqual(continuation.decision, "rework")
+        with self.assertRaises(ValueError):
+            continuation.begin_park("review", 2, "parked again", "red")
+
     def test_unknown_nested_stage_is_not_silently_discarded(self) -> None:
         with self.assertRaises(ValueError):
             DispatcherRecord.from_json({
@@ -123,6 +158,7 @@ class FakeKanboard:
             {"id": 2, "title": "Ready"},
             {"id": 3, "title": "In progress"},
             {"id": 4, "title": "Validate"},
+            {"id": 7, "title": "Assessment"},
             {"id": 5, "title": "Blocked"},
             {"id": 6, "title": "Done"},
         ]
@@ -1429,6 +1465,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body="fix the outage regression",
             request_id="production-review-red",
         )
+        self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "assessment")
+        self._decide("rework", request_id="production-decision-rework")
         self.host.fail_restart_reason = "terminal service unavailable"
         blocked = self.runtime.production_tick()
         self.assertEqual(blocked["actions"][0]["reason"], "rework bring-up failed")
@@ -2212,7 +2250,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body="green",
             request_id="review-green",
         )
-        done = self.runtime.tick(self.selector)
+        # The green verdict parks the card; the merge happens on the observer's release.
+        done = self._park_and_decide("release")
 
         self.assertEqual(done["to"], "done")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "done")
@@ -2239,6 +2278,21 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         advanced = self.runtime.tick(self.selector)
         self.assertEqual(advanced["to"], "validate")
+
+    def _decide(self, kind: str, reason: str = "the observer looked and decided", *, request_id: str = "") -> None:
+        """The observer's decision on a parked card, the only thing that releases it."""
+        self.writer.decide(
+            role="observer", actor="observer", reference="secretary-510-pilot",
+            kind=kind, body=reason, request_id=request_id or f"decision-{kind}",
+        )
+
+    def _park_and_decide(self, kind: str, *, request_id: str = "") -> dict:
+        """Tick the parked verdict through the seam and hand back the tick that acted on it."""
+        parked = self.runtime.tick(self.selector)
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self._decide(kind, request_id=request_id)
+        return self.runtime.tick(self.selector)
 
     def _drop_records_and_restart_attempt(self) -> None:
         """A dispatcher that came back without its records: the card is mid-flight on the board and
@@ -2674,7 +2728,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body="findings from the respawned reviewer",
             request_id="review-red-round-1",
         )
-        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+        self.assertEqual(self._park_and_decide("rework")["action"], "rework-started")
 
         record = self.runtime.state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(record["review_waiting_since"], 0.0)
@@ -2719,6 +2773,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         original_workspace = self.runtime.state.load()["records"]["secretary-510-pilot"]["workspace"]
         original_attempt = self.runtime.state.load()["records"]["secretary-510-pilot"]["attempt_id"]
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+        self._decide("rework")
         self.host.fail_restart_reason = "terminal service unavailable"
         blocked = self.runtime.tick(self.selector)
         self.assertEqual(blocked["reason"], "rework bring-up failed")
@@ -2841,7 +2897,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
         self._review_red()
 
-        reworked = self.runtime.tick(self.selector)
+        # The verdict parks first; the rework is the observer's decision, not the verdict's.
+        reworked = self._park_and_decide("rework")
 
         record = self.runtime.state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(reworked["action"], "review-red-reused-worker")
@@ -2870,7 +2927,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         self.runtime.tick(self.selector)
         self._review_red()
-        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-red-reused-worker")
+        self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
         self.host.commit = "review-rework-accepted-c0ffee"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
@@ -2894,12 +2951,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         refused = self.runtime.tick(self.selector)
 
         self.assertEqual(refused["action"], "review-stop-unconfirmed")
+        # The refusal now lands one step earlier, at the park: a card is never parked with a
+        # reviewer that may still be alive in its checkout, so it does not leave Validate either.
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
         self.assertEqual(self.host.resumed_workers, [])
         self.assertNotIn("restart_worker", self.host.calls)
 
         self.host.fail_stop_review_reason = ""
-        retried = self.runtime.tick(self.selector)
+        retried = self._park_and_decide("rework")
 
         self.assertEqual(retried["action"], "review-red-reused-worker")
         self.assertEqual(self.host.calls.count("resume_worker"), 1)
@@ -2911,7 +2970,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self._review_red()
 
-        reworked = self.runtime.tick(self.selector)
+        reworked = self._park_and_decide("rework")
 
         self.assertEqual(reworked["action"], "rework-started")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
@@ -2929,6 +2988,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         self.runtime.tick(self.selector)
         self._review_red()
+        parked = self.runtime.tick(self.selector)
+        self.assertEqual(parked["to"], "assessment")
+        self._decide("rework")
         self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
 
         stopped = self.runtime.tick(self.selector)
@@ -2949,6 +3011,322 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
 
+    # the verdict seam (secretary-1031) ---------------------------------------
+
+    def _parked_record(self) -> dict:
+        return self.runtime.state.load()["records"]["secretary-510-pilot"]
+
+    def test_a_green_verdict_parks_before_it_merges(self) -> None:
+        """The ordering proof: the release effect is broken, and nothing is merged anyway.
+
+        A merge that cannot land is the sharpest way to ask whether the merge was even reached.
+        It is not: the verdict's own tick parks the card and stops there, so the failure the
+        host is primed with never happens and the card is waiting for a decision, not blocked.
+        """
+        self.start_pilot()
+        self.host.fail_complete_reason = "merge push failed: ! [rejected] non-fast-forward"
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)  # gate green -> review started
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-parks",
+        )
+
+        parked = self.runtime.tick(self.selector)
+
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(self.host.completed, [], "nothing was merged")
+        self.assertEqual(self.host.torn_down, [], "the checkout is kept for the decision")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PARKED.value,
+        )
+        # The reviewer is stopped cleanly and the worker of the round is still owned.
+        self.assertEqual(self.host.stopped_reviews, ["review:secretary-510-pilot"])
+        self.assertEqual(self.host.stopped, [])
+        self.assertTrue(self._parked_record()["worker_continuation"]["session_held"])
+        # The reviewed commit outlives the reviewer's pane: the release may land that and nothing
+        # else, however long the decision takes.
+        self.assertEqual(self._parked_record()["review_commit"], self.host.commit)
+
+        # And it stays parked: an undecided card is not something a later tick acts on.
+        waiting = self.runtime.tick(self.selector)
+
+        self.assertEqual(waiting["action"], "waiting-observer-decision")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(self.host.completed, [])
+
+    def test_a_red_verdict_parks_before_the_worker_continues(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+
+        parked = self.runtime.tick(self.selector)
+
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(self.host.resumed_workers, [], "no rework round was opened")
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(self._parked_record()["attempt_round"], 1)
+
+        waiting = self.runtime.tick(self.selector)
+
+        self.assertEqual(waiting["action"], "waiting-observer-decision")
+        self.assertEqual(self.host.resumed_workers, [])
+
+    def test_a_mechanical_gate_verdict_never_passes_through_assessment(self) -> None:
+        """CI and the local gate resolve in Validate, before the observer is ever involved."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_gate_that_turns_red_under_a_green_verdict_bounces_from_validate(self) -> None:
+        """The pre-merge re-check stays on the Validate side: a card only parks once the
+        mechanical state is green, so a red gate is never a question for the observer."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("green", "green"), GateResult("red", "CI went red")]
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-late-red-gate",
+        )
+
+        bounced = self.runtime.tick(self.selector)
+
+        self.assertEqual(bounced["action"], "merge-gate-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_pending_gate_under_a_green_verdict_waits_in_validate(self) -> None:
+        self.start_pilot()
+        self.host.gate_results = [GateResult("green", "green"), GateResult("pending", "CI running")]
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-pending-gate",
+        )
+
+        waiting = self.runtime.tick(self.selector)
+
+        self.assertEqual(waiting["action"], "merge-gate-pending")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def test_a_reslice_decision_stops_the_heads_and_keeps_the_workspace(self) -> None:
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+
+        resliced = self._park_and_decide("reslice")
+
+        self.assertEqual((resliced["to"], resliced["decision"]), ("blocked", "reslice"))
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        self.assertIn("Observer decision: reslice", card["comments"][-1]["body"])
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertEqual(self.host.torn_down, [], "the recut starts from the work that is there")
+        self.assertIn(
+            "secretary-510-pilot", self.runtime.state.load()["resume_workspaces"]
+        )
+
+    def test_a_parked_card_survives_a_dispatcher_restart_with_its_worker(self) -> None:
+        """Criterion 3: the park is on disk, so a dispatcher that comes back finds the card still
+        waiting, the workspace still owned and the round's own conversation still resumable."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        before = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        self._review_red()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+
+        restarted = DispatcherRuntime(
+            self.reader,
+            self.writer,
+            TaskAudit(self.data_dir),
+            CutoverState(self.data_dir),
+            self.catalog,  # type: ignore[arg-type]
+            self.host,  # type: ignore[arg-type]
+            owner="secretary-pilot",
+            legacy_pause=self.legacy_pause,  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(restarted.tick(self.selector)["action"], "waiting-observer-decision")
+        parked = restarted.state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(parked["workspace"], before["workspace"])
+        self.assertEqual(parked["handle"], before["handle"])
+        self.assertTrue(parked["worker_continuation"]["session_held"])
+
+        self._decide("rework")
+        reworked = restarted.tick(self.selector)
+
+        self.assertEqual(reworked["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.resumed_workers, [before["handle"]])
+
+    def test_a_release_move_carries_its_decision_into_the_audit(self) -> None:
+        """Criterion 4: the transition out of Assessment names the decision it performed, so the
+        seam is checkable from the audit without reading a comment."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-audited",
+        )
+
+        self.assertEqual(self._park_and_decide("release")["to"], "done")
+
+        audit = TaskAudit(self.data_dir)
+        decided = audit.events("secretary-510-pilot", kind="decided")[-1]
+        moved = [
+            event for event in audit.events("secretary-510-pilot", kind="moved")
+            if event["payload"]["from"] == "assessment"
+        ]
+        self.assertEqual(decided["payload"]["decision"], "release")
+        self.assertEqual(len(moved), 1)
+        self.assertEqual((moved[0]["payload"]["to"], moved[0]["payload"]["decision"]), ("done", "release"))
+
+    def test_a_checkout_that_moved_while_parked_blocks_instead_of_releasing(self) -> None:
+        """The reviewed commit is the only thing a release may land, and a park can last a while.
+        A card whose checkout moved under it is a question for a person, not another round."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        reviewed = self.host.commit
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-drift-while-parked",
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+        self.host.commit = "moved-under-the-park-c0ffee"
+        self._decide("release")
+
+        blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["status"], "blocked")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        self.assertIn(reviewed[:12], card["comments"][-1]["body"])
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual(self.host.torn_down, [])
+
+    def test_a_crash_between_the_verdict_and_the_park_resumes_parked(self) -> None:
+        """Boundary one. The verdict is durable before the board moves, so the recovery of a
+        tick that died in between is the park itself, never a re-decision of the verdict."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        real_move = self.writer.move
+
+        def fail_the_park(**kwargs):
+            if kwargs.get("target") == "assessment":
+                raise OSError("dispatcher died before the park's board move")
+            return real_move(**kwargs)
+
+        with mock.patch.object(self.writer, "move", fail_the_park):
+            with self.assertRaises(OSError):
+                self.runtime.tick(self.selector)
+
+        stranded = self._parked_record()
+        self.assertEqual(
+            stranded["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PENDING.value,
+        )
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.resumed_workers, [])
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["to"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PARKED.value,
+        )
+
+    def test_a_crash_between_the_park_and_the_release_resumes_parked(self) -> None:
+        """Boundary two. The card is on the board in Assessment and the record died before its
+        checkpoint: the single well-defined state is parked, with the decision re-read from the
+        card rather than replayed from anything the dead tick believed."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-crash",
+        )
+        real_save = self.runtime.state.save
+
+        def die_after_the_park(payload: dict) -> None:
+            record = payload.get("records", {}).get("secretary-510-pilot", {})
+            if record.get("state") == "assessment":
+                raise OSError("dispatcher died after the park's board move")
+            real_save(payload)
+
+        with mock.patch.object(self.runtime.state, "save", die_after_the_park):
+            with self.assertRaises(OSError):
+                self.runtime.tick(self.selector)
+
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PENDING.value,
+        )
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["to"], "assessment")
+        self.assertEqual(self.host.completed, [], "recovery merges nothing on its own")
+        self._decide("release")
+
+        released = self.runtime.tick(self.selector)
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_a_parked_card_whose_record_was_lost_is_adopted_as_parked(self) -> None:
+        """A dispatcher restart over a parked card: the board is the fact, and the decision is
+        still the only thing that moves it."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+        self._drop_records_and_restart_attempt()
+
+        adopted = self.runtime.tick(self.selector)
+
+        self.assertEqual(adopted["action"], "waiting-observer-decision")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        record = self._parked_record()
+        self.assertEqual(record["state"], "assessment")
+        self.assertEqual(
+            record["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PARKED.value,
+        )
+
+        self._decide("rework")
+        reworked = self.runtime.tick(self.selector)
+
+        # Nothing proves the old session is still suspended, so the rework opens a replacement
+        # behind a confirmed stop of the checkout rather than resuming a conversation on trust.
+        self.assertEqual(reworked["action"], "rework-started")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.resumed_workers, [])
+        self.assertLess(
+            self.host.calls.index("stop_workspace"), self.host.calls.index("restart_worker")
+        )
+
     def test_a_retained_worker_of_unclear_liveness_is_stopped_before_the_reviewer(self) -> None:
         """Retention is a record; the heartbeat decides. An unclear answer costs the session."""
         self.host.fail_resume_worker_reason = ""
@@ -2967,7 +3345,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record["worker_continuation"], {})
         self._review_red()
 
-        reworked = self.runtime.tick(self.selector)
+        reworked = self._park_and_decide("rework")
 
         self.assertEqual(reworked["action"], "rework-started")
         self.assertEqual(self.host.resumed_workers, [])
@@ -3309,7 +3687,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-green",
         )
 
-        result = self.runtime.tick(self.selector)
+        result = self._park_and_decide("release")
 
         self.assertEqual(result["to"], "done")
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
@@ -3329,7 +3707,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-green",
         )
 
-        self.runtime.tick(self.selector)
+        self._park_and_decide("release")
 
         self.assertIn("complete_green", self.host.calls)
         self.assertIn("teardown", self.host.calls)
@@ -3353,13 +3731,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     def test_rejected_merge_blocks_the_card_instead_of_escaping_the_tick(self) -> None:
         """The merge push is rejected when the branch is not a fast-forward of main. That must
-        park the card in Blocked: an escaping HostError would leave a green card in validate and
-        every later tick would retry the same doomed merge with the worker terminals still up."""
+        park the card in Blocked: an escaping HostError would leave a released card in Assessment
+        and every later tick would retry the same doomed merge with the worker terminals still up."""
         self.start_pilot()
         self.host.fail_complete_reason = "merge push failed: ! [rejected] non-fast-forward"
         self._drive_to_green_verdict()
 
-        result = self.runtime.tick(self.selector)
+        result = self._park_and_decide("release")
 
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "merge failed")
@@ -3385,7 +3763,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-red",
         )
 
-        result = self.runtime.tick(self.selector)
+        result = self._park_and_decide("rework")
 
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "rework bring-up failed")
@@ -3485,7 +3863,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # The registry is re-pinned between the two rounds. Attempt 1 keeps the model it actually
         # ran on; only attempt 2 sees the new pin.
         self.catalog.profiles["codex"] = dict(self.catalog.profiles["codex"], model="gpt-6-terra")
-        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+        self.assertEqual(self._park_and_decide("rework")["action"], "rework-started")
         # The rework produced new work; a done report on the rejected SHA would bounce instead.
         self.host.commit = "attempt-two-c0ffee"
         self.writer.report(
@@ -3498,7 +3876,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
             role="reviewer", actor="reviewer", reference="secretary-510-pilot",
             kind="green", body="ok", request_id="review-green-attempt-2",
         )
-        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
+        self.assertEqual(
+            self._park_and_decide("release", request_id="decision-release-attempt-2")["to"], "done"
+        )
 
         card = self.reader.show("secretary-510-pilot")
         self.assertEqual(card["state"], "done")
@@ -3853,7 +4233,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-red",
         )
 
-        relaunched = self.runtime.tick(self.selector)
+        relaunched = self._park_and_decide("rework")
 
         self.assertEqual(relaunched["action"], "rework-started")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
@@ -3960,7 +4340,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-red-pane",
         )
 
-        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+        self.assertEqual(self._park_and_decide("rework")["action"], "rework-started")
 
         record = self._record_json()
         self.assertEqual(record["review_handle"], "")
@@ -4036,7 +4416,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-green-instance-recovery",
         )
 
-        done = self.runtime.tick(self.selector)
+        done = self._park_and_decide("release")
 
         self.assertEqual(done["to"], "done")
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
@@ -4055,7 +4435,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="review-green-pinned",
         )
 
-        done = self.runtime.tick(self.selector)
+        done = self._park_and_decide("release")
 
         self.assertEqual(done["to"], "done")
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
@@ -4110,7 +4490,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body="round 1: fix the hermetic test",
             request_id=round_one,
         )
-        self.assertEqual(self.runtime.tick(self.selector)["action"], "rework-started")
+        self.assertEqual(
+            self._park_and_decide("rework", request_id="decision-rework-round-1")["action"],
+            "rework-started",
+        )
 
         self.host.commit = "round-two-c0ffee"
         self.writer.report(
@@ -4141,7 +4524,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(len(after), before + 1, "round 2 verdict was deduped away")
         self.assertIn("round 2", after[-1]["body"])
 
-        reworked = self.runtime.tick(self.selector)
+        reworked = self._park_and_decide("rework", request_id="decision-rework-round-2")
         self.assertEqual(reworked["action"], "rework-started")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
@@ -4249,7 +4632,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             request_id="existing-verdict",
         )
 
-        result = self.runtime.tick(self.selector)
+        result = self._park_and_decide("release")
 
         self.assertEqual(result["to"], "done")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "done")

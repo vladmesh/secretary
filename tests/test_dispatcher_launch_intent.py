@@ -323,6 +323,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()  # reviewer up
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):
                 self.tick()
@@ -377,6 +379,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
         self.tick()  # rework head up on the rejected sha
         seen: list[dict] = []
         real = self.host.restart_worker
@@ -396,6 +400,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
         self.tick()  # rework head up on the rejected sha
         self.report_done(request_id="worker-done-again")
         self.host.calls.clear()
@@ -418,11 +424,30 @@ class LaunchIntentTests(unittest.TestCase):
 
     # worker: the round a rework launch belongs to ---------------------------
 
+    def decide(self, kind: str, request_id: str = "") -> None:
+        """The observer decision that releases a parked card. Nothing acts without one."""
+        self.writer.decide(
+            role="observer", actor="observer", reference=REF, kind=kind,
+            body="observer decision", request_id=request_id or f"decision-{kind}",
+        )
+
+    def release_after_green_verdict(self) -> dict:
+        """Park the green verdict, decide release, and hand back the tick that merged."""
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.decide("release")
+        return self.tick()
+
     def rework_after_red_review(self) -> None:
-        """Bring the card to the point where the next tick relaunches a worker for round 2."""
+        """Bring the card to the point where the next tick relaunches a worker for round 2.
+
+        A red verdict parks the card first, so the rework these tests are about only begins once
+        the observer has decided it: the park and the decision are part of getting there now.
+        """
         self.run_to_validate()
         self.tick()  # reviewer up
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card in Assessment
+        self.decide("rework")
 
     def test_an_uninterrupted_review_red_rework_opens_the_next_round(self) -> None:
         """The baseline the interrupted rework below has to end up matching."""
@@ -644,7 +669,13 @@ class LaunchIntentTests(unittest.TestCase):
         return mock.patch.object(self.writer, "move", move)
 
     def assert_red_intent_open_in_validate(self, phase: str) -> None:
-        self.assertEqual(self.reader.show(REF)["state"], "validate")
+        """A red transition whose move did not land, over a card the board has not moved.
+
+        The column that card sits in depends on which red opened the transition: a mechanical
+        gate opens one in Validate, a rework decision opens one over a card already parked in
+        Assessment. Either way the transition is what the record owes and the board has not moved.
+        """
+        self.assertIn(self.reader.show(REF)["state"], ("validate", "assessment"))
         stranded = self.record()
         assert stranded is not None
         self.assertEqual(
@@ -786,6 +817,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.tick()  # reviewer up
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
 
         with self.die_after_red_move():
             with self.assertRaises(OSError):
@@ -873,6 +906,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()  # reviewer up over a confirmed suspended worker
         self.host.retained_worker_alive = False
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
 
         outcome = self.tick()
 
@@ -1267,7 +1302,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # The verdict of the adopted reviewer lands on the card it was launched for.
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
         self.assertEqual(self.host.reviews, [REF])
 
     def test_a_review_intent_whose_head_died_starts_exactly_one_replacement(self) -> None:
@@ -1336,7 +1371,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # And the adopted reviewer's verdict still lands on the card it was launched for.
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
 
     # an adopted head belongs to the round's routing history ------------------
 
@@ -1368,7 +1403,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
 
         attempt = self.routing_history()[-1]
         assert attempt.worker is not None and attempt.reviewer is not None
@@ -1388,7 +1423,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual((attempt.reviewer.role, attempt.reviewer.head), ("reviewer", "codex-reviewer"))
 
         self.verdict("green", "looks good", "verdict-green")
-        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.release_after_green_verdict()["to"], "done")
 
         attempt = self.routing_history()[-1]
         assert attempt.worker is not None and attempt.reviewer is not None
@@ -1469,6 +1504,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_an_adopted_reviewer_is_stopped_by_the_red_verdict_it_returns(self) -> None:
         self.adopt_reviewer()
         self.verdict("red", "needs work", "verdict-red")
+        self.tick()  # the verdict parks the card
+        self.decide("rework")
 
         rework = self.tick()
 
@@ -1781,6 +1818,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
         self.host.fail_stop_review_reason = ""
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.decide("rework")
         rework = self.tick()
 
         self.assertEqual(rework["action"], "rework-started")
@@ -2413,6 +2452,11 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer.verdict(
             role="reviewer", actor="reviewer", reference=REF, kind="red",
             body="needs work", request_id="verdict-red",
+        )
+        self.tick()  # the verdict parks the card
+        self.writer.decide(
+            role="observer", actor="observer", reference=REF, kind="rework",
+            body="observer decision", request_id="decision-rework",
         )
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):

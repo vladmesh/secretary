@@ -13,6 +13,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -105,8 +106,8 @@ _EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ready", "blocked"}
 # `assessment` is a durable wait: a card parked there has no running head and no mechanical
 # gate left to run, and it leaves only when the observer (or the PO) decides release, rework or
-# reslice. Nothing routes a card into it yet; the dispatcher edges below are the seam a later
-# card uses.
+# reslice. A substantive reviewer verdict parks the card here; the dispatcher then performs the
+# recorded decision, so the effect of a verdict is never the verdict's own tick.
 _STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 _TRANSITIONS = {
     # PO is the human operator and may move a card between any two states.
@@ -136,6 +137,17 @@ _READY_RESET_METADATA = {
     "retry_heads": "",
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
+# What the observer may decide about a parked card, and where each decision sends it. The
+# decision is recorded on the card before anything acts on it: the effect belongs to the
+# dispatcher and can fail, and a failed effect must leave the card parked rather than half
+# released. `blocked` takes no decision requirement: it is the escape hatch the steward's stale
+# escalation and every dispatcher failure path already use, and refusing it would strand cards.
+_DECISIONS = {"release", "rework", "reslice"}
+_DECIDED_TARGETS = {"done", "in_progress"}
+# States in which a card holds a workspace, a suspended worker or a running head. `assessment`
+# is one of them: the reviewer is gone, but the worker and its checkout are retained for a
+# rework decision, so a second writer in the same project is as wrong there as in Validate.
+ACTIVE_STATES = frozenset({"in_progress", "validate", "assessment"})
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
@@ -152,12 +164,44 @@ def _check_execution_record(task: dict[str, Any]) -> None:
         )
 
 
+def standing_decision(events: Iterable[dict[str, Any]]) -> str:
+    """The decision a card is holding since it last entered Assessment, or "" for none.
+
+    Scoped to the current stay in the column on purpose: a decision from an earlier round is a
+    decision about earlier work, and letting one release a later verdict is exactly the replay
+    the seam exists to prevent. Both readers use this, the board writer refusing a decision-less
+    move and the dispatcher deciding what to perform, so neither can drift from the other.
+    """
+    parked_at = -1
+    ordered = list(events)
+    for index, event in enumerate(ordered):
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
+            parked_at = index
+    if parked_at < 0:
+        return ""
+    decision = ""
+    for event in ordered[parked_at + 1:]:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("kind") == "decided" and str(payload.get("decision") or ""):
+            decision = str(payload["decision"])
+    return decision
+
+
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
-    """Whether a committed card-audit line requires the sprint observer's attention."""
+    """Whether a committed card-audit line requires the sprint observer's attention.
+
+    An event the observer wrote itself is not one. A sprint has exactly one observer, and its
+    own decision on a parked card is the event that would otherwise wake it to read its own
+    work: the release decision produces a card event, the card event produces a delivery, and
+    the delivery has nothing in it the observer does not already know.
+    """
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
     return (
         str(event.get("ref") or "") in linked_refs
         and str(event.get("kind") or "") not in {"routing", "sprint_guard_denied"}
         and str(event.get("outcome") or "") == "success"
+        and str(actor.get("role") or "") != "observer"
     )
 
 
@@ -863,6 +907,37 @@ class TaskWriter:
         marker = f"review:{kind}"
         return self._write("verdict", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
 
+    def decide(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+        """Record what to do with a parked card, apart from the move that does it.
+
+        The decision and its effect are two facts. The effect, a merge or a rework round or a
+        reslice, belongs to the dispatcher and can fail; recording the decision first is what
+        makes a failed effect leave the card parked with the decision still standing, instead of
+        losing the decision or half-performing it. It also makes the decision checkable: the move
+        out of Assessment refuses to carry one that is not on the card.
+
+        No sprint reservation guard here, unlike `move`: this write changes nothing on its own,
+        and the move that acts on it carries that guard already.
+        """
+        self._role(role, {"observer", "po"})
+        if kind not in _DECISIONS:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
+        if not body.strip():
+            raise TaskError("validation", "a decision requires a non-empty reason", 2)
+        if self.reader.show(reference)["state"] != "assessment":
+            raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+        marker = f"decision:{kind}"
+
+        def mutation(task: dict[str, Any]) -> Any:
+            if task["state"] != "assessment":
+                raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
+
+        return self._write(
+            "decided", role, actor, reference, request_id,
+            {"marker": marker, "decision": kind, "body_sha256": _digest(body)}, mutation,
+        )
+
     def routing(
         self,
         *,
@@ -926,14 +1001,14 @@ class TaskWriter:
                 predecessor = self.reader.show(str(blocked_by))
                 if predecessor["state"] != "done":
                     raise TaskError("predecessor_open", "blocked_by task is not Done", 3)
-            for active in self.reader.list(states={"in_progress", "validate"}):
+            for active in self.reader.list(states=set(ACTIVE_STATES)):
                 if active["id"] == task["id"] or _is_steward_report(active):
                     continue
                 if active["type"] == "code" and task["type"] == "code" and active["project"] == task["project"]:
                     raise TaskError("capacity_reached", "one active code task per project is already claimed", 3)
             active_count = sum(
                 1
-                for active in self.reader.list(states={"in_progress", "validate"})
+                for active in self.reader.list(states=set(ACTIVE_STATES))
                 if active["id"] != task["id"] and not _is_steward_report(active)
             )
             if active_count >= cap:
@@ -974,7 +1049,8 @@ class TaskWriter:
 
     def move(
         self, *, role: str, actor: str, reference: str, target: str, reason: str,
-        sprint_override: bool = False, sprint_override_reason: str = "", request_id: str | None = None,
+        decision: str = "", sprint_override: bool = False, sprint_override_reason: str = "",
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _ROLES)
         request_id = request_id or str(uuid.uuid4())
@@ -994,6 +1070,7 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
+            self._check_decision(task, source, target, decision)
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
                 if target in {"ready", "done"}:
@@ -1009,10 +1086,40 @@ class TaskWriter:
             lambda task: {
                 "from": task["state"], "to": target,
                 "reason_sha256": _digest(reason) if reason else None,
+                **({"decision": decision} if decision else {}),
                 **override_payload,
             },
             mutation,
         )
+
+    def _check_decision(self, task: dict[str, Any], source: str, target: str, decision: str) -> None:
+        """A card leaves Assessment on a decision somebody recorded, or it does not leave.
+
+        Only `done` and `in_progress` are held to it: those are the two ways a parked card
+        rejoins the pipeline. `blocked` is left open on purpose: the steward's stale escalation
+        and the dispatcher's own failure paths reach it without anyone having decided anything,
+        and a card that cannot be blocked is a card nothing can rescue.
+        """
+        if decision and decision not in _DECISIONS:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
+        if decision and source != "assessment":
+            raise TaskError("validation", "a decision is only carried by a move out of Assessment", 2)
+        if source == "assessment" and target in _DECIDED_TARGETS and not decision:
+            raise TaskError(
+                "decision_required",
+                "a card leaves Assessment only on a recorded decision: record one with "
+                "`task decide` and pass it as --decision",
+                3,
+            )
+        if decision and not self._decision_recorded(task["ref"], decision):
+            raise TaskError(
+                "decision_required",
+                f"no {decision} decision is recorded on this card since it entered Assessment",
+                3,
+            )
+
+    def _decision_recorded(self, reference: str, decision: str) -> bool:
+        return standing_decision(self.audit.events(reference)) == decision
 
     def edit(
         self,
@@ -1539,8 +1646,13 @@ class TaskWriter:
     @staticmethod
     def _check_archivable(task: dict[str, Any]) -> None:
         state = task["state"]
-        if state in {"in_progress", "validate"}:
-            raise TaskError("live_work", "archive refuses a card with live worker or reviewer work", 3)
+        if state in ACTIVE_STATES:
+            raise TaskError(
+                "live_work",
+                "archive refuses a card with live worker or reviewer work, or one parked in "
+                "Assessment holding a retained worker",
+                3,
+            )
         if task["claim"]["worker"] is not None:
             raise TaskError("live_work", "archive refuses a card with an active claim", 3)
 

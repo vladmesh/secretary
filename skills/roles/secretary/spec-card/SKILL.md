@@ -94,9 +94,9 @@ The columns are `Issues, Ready, In progress, Validate, Assessment, Blocked, Done
 Ready or Issues; the dispatcher owns everything after that. Assessment is the one column that is
 waiting for a person: the card has cleared or failed everything mechanical (CI, the stand run, the
 LLM review all resolve in Validate) and is holding a verdict until the observer decides release,
-rework or reslice. As PO you may move a card out of it in any direction, with `python3 -m secretary
-task move --role po --ref <ref> --to <state>` rather than the `pipeline` CLI used above: the task
-protocol owns that column's role matrix. Do not treat a card sitting there as a stuck pipeline to
+rework or reslice. As PO you can decide it yourself, with `python3 -m secretary task decide --role po
+--ref <ref> --kind release|rework|reslice --reason-file <reason.md>`; the dispatcher then performs
+the decision, and a move out of that column without a recorded decision is refused. Do not treat a card sitting there as a stuck pipeline to
 poke, and do not read it as approval either.
 
 ## Concurrency

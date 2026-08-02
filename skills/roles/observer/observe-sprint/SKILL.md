@@ -216,13 +216,28 @@ running, or before the pull request reaches a terminal result. Watch the card's 
 reports, verdicts, pull request and CI.
 
 Assessment is not a terminal state either, and it is the one column that waits for you rather than for
-a machine. A card parked there has passed everything mechanical it is going to pass — CI, the stand run
-and the reviewer verdict all resolve in Validate — and holds a verdict nobody has acted on yet. The
-decision out of it is yours: release (`assessment -> done`), rework (`assessment -> in_progress`) or
-reslice (`assessment -> blocked`, then a fresh cut). Write it with `python3 -m secretary task move
---role observer --ref <card-ref> --to <state>`; the `triggered_agents pipeline` CLI does not serve
-that decision, it only carries the steward's escalation to Blocked. Left alone the card wakes the
-steward as a stale one, which is an escalation, not a decision.
+a machine. Every substantive reviewer verdict parks the card there, green or red: the reviewer is
+stopped, the worker of the round is held with its workspace, and nothing merges or reworks until you
+decide. A parked card has passed everything mechanical it is going to pass, CI and the stand run
+included, so what is left is the direction, not the code.
+
+The decision is yours: release, rework or reslice. Record it, with a reason, and the dispatcher
+performs it: merge and Done for a release, a fresh worker round for a rework, Blocked for a reslice
+you then recut:
+
+```bash
+python3 -m secretary task decide --role observer --actor observer --ref <card-ref> \
+  --kind release|rework|reslice --reason-file <reason.md>
+```
+
+Do not move the card out of Assessment yourself: the move is refused unless it carries a decision
+somebody recorded, and the effect has to run before the card moves. The `triggered_agents pipeline`
+CLI does not serve this either, it only carries the steward's escalation to Blocked. Left alone the
+card wakes the steward as a stale one, which is an escalation, not a decision.
+
+Default to release. The seam exists so drift is caught at every round, not so every round is
+argued: hold a card only when there is a reason to think about recutting or fixing the task, and say
+what that reason is in the decision.
 
 When you see RED or Blocked evidence, classify the finding from the report evidence:
 
