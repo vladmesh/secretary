@@ -302,7 +302,8 @@ A card blocked by its worker carries the worker's own view of the blocker: `bloc
 card, `external_fact` or `wrong_task_definition`, and the same line under the `[report:blocked]` marker.
 Start from it, it is not the verdict: a worker that names a wrong task definition on every card it touches
 is a fact about the head, not about the cards. Your move out of Blocked requires a non-empty reason and is
-refused without one, so name what you decided and why in it.
+refused without one, so name what you decided and why in it. The card field is cleared when the card reaches
+Ready or Done; to count how often one head blocks, read the `reported` audit events, which keep every one.
 
 Identify the class of cause and act accordingly:
 

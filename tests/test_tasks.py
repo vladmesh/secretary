@@ -1958,6 +1958,26 @@ class BlockedContractTests(unittest.TestCase):
         )
         self.assertEqual(moved["task"]["state"], "blocked")
 
+    def test_leaving_blocked_clears_the_card_field_and_keeps_the_audit(self) -> None:
+        """The card field is current state; the `reported` event is the permanent record."""
+        self._reserve()
+        self.writer.report(
+            role="worker", actor="w", reference="secretary-468", kind="blocked",
+            body="the upstream API is down", classification="external_fact",
+            request_id="blocked-before-requeue",
+        )
+        self.assertEqual(self.client.metadata[12]["blocked_classification"], "external_fact")
+
+        self.client.tasks[0]["column_id"] = 5  # Blocked
+        requeued = self.writer.move(
+            role="observer", actor="observer", reference="secretary-468", target="ready",
+            reason="the upstream fix landed", request_id="observer-requeue",
+        )
+        self.assertEqual(requeued["task"]["state"], "ready")
+        self.assertIsNone(requeued["task"]["blocked_classification"])
+        self.assertEqual(self.client.metadata[12]["blocked_classification"], "")
+        self.assertEqual(self._events("reported")[0]["payload"]["classification"], "external_fact")
+
     def test_the_steward_requirement_is_untouched(self) -> None:
         self.client.tasks[0]["column_id"] = 3  # In progress
         with self.assertRaisesRegex(TaskError, "this steward transition requires a non-empty reason"):

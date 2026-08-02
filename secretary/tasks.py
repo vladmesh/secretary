@@ -144,6 +144,10 @@ _READY_RESET_METADATA = {
     "retry_same": "",
     "retry_switch": "",
     "retry_heads": "",
+    # The card field is current state, not history: a card back in Ready or In progress showing a
+    # `blocked_classification` reads as a live answer. The `reported` audit event keeps the
+    # classification of every block forever, so clearing it here loses nothing.
+    "blocked_classification": "",
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
 # What kind of blocker a worker ran into, in the worker's own view. Two values and no more:
@@ -1658,6 +1662,7 @@ class TaskWriter:
             or normalized["routing"]["resolved_worker_head"] is not None
             or normalized["routing"]["resolved_review_head"] is not None
             or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
+            or normalized["blocked_classification"] is not None
         ):
             raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
 

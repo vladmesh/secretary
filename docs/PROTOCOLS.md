@@ -448,6 +448,13 @@ refused if given one. An observer moving a card out of Blocked must give a non-e
 requirement the steward carries moving one into it; the reason is a comment on the card and its digest is in
 the `moved` event, so how a Blocked card was disposed of stays answerable.
 
+`blocked_classification` is cleared with the rest of the per-attempt metadata when the card reaches Ready or
+Done. The card field is current state, and a card in Ready still showing one reads as a live answer rather
+than as history; the `reported` event keeps the classification of every block. The compatibility CLI
+(`triggered_agents pipeline report`) cannot write a classification, so it refuses `--kind blocked` outright
+and names this command instead. The vocabulary has one definition, in `secretary.tasks`. Its `--kind done`
+is unchanged.
+
 The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
 attempt. A `done` report on the same SHA does not move to Validate: the first such report sends the worker
 back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so the
