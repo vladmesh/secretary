@@ -238,7 +238,9 @@ matching event and do not move the counter.
 A new sprint belongs to a Product, serves at least one of its open Issues and reserves at least one
 registered project. `--product` names an existing Product, every `--issue` is an open Issue of that
 Product, and every `--project` is an id from the instance project registry; `--repository` keeps its own
-meaning as the write-guard scope. An Issue of another Product and a closed Issue are refused with their
+meaning as the write-guard scope. A repository root is canonicalized where it is declared, so the row
+persists the absolute path and a root this host cannot resolve is refused with the value it could not
+resolve. An Issue of another Product and a closed Issue are refused with their
 own messages. One installation holds at most one open sprint: a second `create` is refused as
 `sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
 that, as `resource_conflict` naming the project and its holder. Every one of these checks is a read, so a

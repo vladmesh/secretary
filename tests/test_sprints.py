@@ -613,6 +613,29 @@ class SprintOwnershipTests(SprintFixture):
             for field in ("product", "issues", "reservations"):
                 self.assertNotIn(field, view)
 
+    def test_recovery_reproduces_the_roots_a_closed_row_already_carries(self) -> None:
+        """Canonicalization is a rule for declaring a sprint, not for reproducing one.
+
+        The rows closed before it carry the spellings their creates wrote, and recovery
+        has to bring them back unchanged; rewriting them here would make the restored
+        entity differ from its own export.
+        """
+        legacy = self.writer.restore_create(
+            reference="sprint:legacy", goal="legacy", repositories=["secretary", "."],
+            request_id="legacy-create",
+        )["sprint"]
+        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+        self.assertEqual(legacy["repositories"], ["secretary", "."])
+        for view in (reader.show(legacy["ref"]), reader.list()[0], reader.export()[0]):
+            self.assertEqual(view["repositories"], ["secretary", "."])
+        self.assertEqual(
+            self.writer.close(
+                role="po", actor="operator", reference=legacy["ref"],
+            )["sprint"]["repositories"],
+            ["secretary", "."],
+        )
+
     def test_show_status_and_export_carry_the_new_links(self) -> None:
         ref = self._create(goal="linked", projects=["secretary", "secretary-instance"])["sprint"]["ref"]
         reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
@@ -962,6 +985,82 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
 
         self.assertEqual(sorted(self._open_refs()), sorted([first, sibling["ref"]]))
 
+    def _stored_repositories(self, reference: str, values: list[str]) -> None:
+        """Put values on an open row that no create would write, as a legacy row carries."""
+        row = next(
+            task for task in self._sprint_rows() if task["reference"] == reference
+        )
+        self.client.call(
+            "saveTaskMetadata", task_id=row["id"],
+            values={"sprint_repositories": json.dumps(values)},
+        )
+
+    def test_a_declared_root_is_canonicalized_where_it_is_declared(self) -> None:
+        """The reviewer's sequence, which used to admit an overlapping pair.
+
+        A sprint that declared `.` persisted the literal `.`, and the next admission
+        resolved it against its own working directory.  Run from a second tree, the
+        first sprint's stored root pointed at that second tree, the two read as
+        disjoint, and both were admitted although they shared one working tree.
+        """
+        self._limit(2)
+        work_a, work_b = self.roots / "work-a", self.roots / "work-b"
+        for path in (work_a, work_b):
+            path.mkdir(parents=True)
+
+        with contextlib.chdir(work_a):
+            first = self._first(repositories=["."])
+
+        self.assertEqual(
+            SprintReader(self.client).show(first)["repositories"], [str(work_a)],  # type: ignore[arg-type]
+        )
+
+        with contextlib.chdir(work_b):
+            self._assert_refusal_left_nothing(
+                lambda: self._second(repositories=[str(work_a)]),
+                "resource_conflict", f"overlaps {work_a}, held by open sprint {first}",
+            )
+        self.assertEqual(self._open_refs(), [first])
+
+    def test_a_root_this_host_cannot_resolve_is_refused_before_anything_is_written(self) -> None:
+        """A declaration nobody can canonicalize is an answer, not a sprint."""
+        with mock.patch.object(Path, "resolve", side_effect=OSError("too many levels")):
+            self._assert_refusal_left_nothing(
+                lambda: self._first(repositories=["/loop"]),
+                "validation",
+                "repository root '/loop' cannot be resolved on this host",
+            )
+        self.assertEqual(self._open_refs(), [])
+
+    def test_a_stored_root_that_is_not_absolute_is_refused_rather_than_resolved(self) -> None:
+        """Admission never resolves a stored root: it would answer against its own cwd.
+
+        Both sides are judged, because a relative root proves nothing about the tree it
+        names whichever of the two sprints happens to carry it.
+        """
+        self._limit(2)
+        first = self._first()
+        self._stored_repositories(first, ["."])
+
+        self._assert_refusal_left_nothing(
+            self._second, "resource_conflict",
+            f"open sprint {first} declares repository root '.', which is not an absolute path",
+        )
+
+        self._stored_repositories(first, [str(self.roots / "secretary")])
+        second = self._second()["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=second)
+        self._stored_repositories(second, ["../elsewhere"])
+
+        self._assert_refusal_left_nothing(
+            lambda: self.writer.reopen(
+                role="po", actor="operator", reference=second, observer=none_choice(),
+            ),
+            "resource_conflict",
+            "this sprint declares repository root '../elsewhere', which is not an absolute path",
+        )
+        self.assertEqual(self._open_refs(), [first])
+
     def test_the_one_observer_ceiling_admits_a_second_sprint_only_without_a_head(self) -> None:
         """Nothing binds an observer call to a sprint yet, so only one head may run."""
         self._limit(2)
@@ -1128,7 +1227,9 @@ class SprintTests(SprintFixture):
             reference="sprint:entity", request_id="create",
         )
         sprint = created["sprint"]
-        self.assertEqual(sprint["repositories"], ["secretary"])
+        # A declaration is canonicalized where it is written, so the row persists the
+        # absolute root rather than the spelling the caller happened to use.
+        self.assertEqual(sprint["repositories"], [str(Path("secretary").resolve())])
         self.assertEqual(sprint["product"], "secretary")
         self.assertEqual(sprint["issues"], ["issue:open"])
         self.assertEqual(sprint["reservations"], ["secretary"])
@@ -1408,7 +1509,7 @@ class SprintTests(SprintFixture):
         self.assertEqual(errors.getvalue(), "")
         result = json.loads(output.getvalue())
         self.assertEqual(result["action"], "created")
-        self.assertEqual(result["sprint"]["repositories"], ["secretary"])
+        self.assertEqual(result["sprint"]["repositories"], [str(Path("secretary").resolve())])
         self.assertEqual(result["sprint"]["product"], "secretary")
         self.assertEqual(result["sprint"]["issues"], ["issue:open"])
         self.assertEqual(result["sprint"]["reservations"], ["secretary"])

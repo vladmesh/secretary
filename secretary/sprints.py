@@ -369,14 +369,15 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
 
     Repository overlap includes nesting, and is judged on canonical paths: two spellings
     of one working tree are one working tree, and a root that contains another's is the
-    same tree twice.
+    same tree twice.  A stored root that is not already absolute is refused on either
+    side rather than resolved here, because the tree it names would depend on the working
+    directory of whichever process happens to run this check.
 
     The observer ceiling is last of the specific refusals: while nothing binds an
     observer call to the sprint it is about, two heads observing at once would each read
     the other's cards as their own, so at most one open sprint may declare one.
     """
     product = str(candidate.get("product") or "").strip()
-    roots = _canonical_roots(candidate.get("repositories") or [])
     for sprint in sorted(others, key=lambda row: str(row["ref"])):
         reference = str(sprint["ref"])
         other_product = str(sprint.get("product") or "").strip()
@@ -405,7 +406,25 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
                 "a second open sprint needs a different product",
                 2,
             )
-        for held in _canonical_roots(sprint.get("repositories") or []):
+        roots = _scanned_roots(
+            candidate.get("repositories") or [],
+            refusal=lambda text, why: TaskError(
+                "resource_conflict",
+                f"this sprint declares repository root {text!r}, which {why}, so it cannot "
+                f"be proven disjoint from open sprint {reference}",
+                2,
+            ),
+        )
+        held_roots = _scanned_roots(
+            sprint.get("repositories") or [],
+            refusal=lambda text, why: TaskError(
+                "resource_conflict",
+                f"open sprint {reference} declares repository root {text!r}, which {why}, "
+                "so a second open sprint cannot be proven disjoint from it",
+                2,
+            ),
+        )
+        for held in held_roots:
             clash = next((root for root in roots if _roots_overlap(root, held)), None)
             if clash is not None:
                 raise TaskError(
@@ -697,6 +716,7 @@ class SprintWriter:
             repositories=repositories or [], product="", issues=[], reservations=[],
             reference=reference, require_goal=False, observer=observer,
             status=status, require_executable_observer=False,
+            canonical_repositories=False,
         )
         document, committed = self.transactions.existing(
             request_id, kind=SPRINT_CREATED, intent=intent
@@ -714,6 +734,7 @@ class SprintWriter:
         repositories: list[str], product: str, issues: list[str], reservations: list[str],
         reference: str, require_goal: bool = True, observer: dict[str, Any] | None = None,
         status: str = "open", require_executable_observer: bool = True,
+        canonical_repositories: bool = True,
     ) -> dict[str, Any]:
         """The normalized request, which is both the replay key and the repair recipe.
 
@@ -726,6 +747,13 @@ class SprintWriter:
         The observer is part of the staged intent for the same reason the reservations
         are: it is a decision the caller made, and a repair of this create has to write
         the value the caller chose rather than one it picks up on the retry.
+
+        Repository roots are canonicalized here, where the operator declaring them is:
+        the intent is the recipe every later step writes from, so the absolute root is
+        what the row persists, and a root this host cannot resolve is refused before any
+        board row, staged intent, metadata or audit event exists.  Recovery declares
+        nothing and canonicalizes nothing: it reproduces the values its export carries,
+        including those of closed rows written before this rule.
         """
         goal = goal.strip()
         reference = reference.strip()
@@ -737,7 +765,11 @@ class SprintWriter:
             raise TaskError("validation", f"unknown sprint status {status!r}", 2)
         return {
             "role": role, "actor": actor, "goal": goal, "definition_of_done": definition_of_done,
-            "repositories": _unique_strings(repositories), "product": product.strip(),
+            "repositories": (
+                canonical_repository_roots(repositories) if canonical_repositories
+                else _unique_strings(repositories)
+            ),
+            "product": product.strip(),
             "issues": _unique_strings(issues), "reservations": _unique_strings(reservations),
             "reference": reference, "status": status,
             "observer": self._observer_intent(
@@ -1707,22 +1739,56 @@ def _close_archive_request_id(request_id: str, reference: str) -> str:
     return f"{request_id}:sprint-close-archive:{digest}"
 
 
-def _canonical_roots(paths: list[Any]) -> list[Path]:
-    """Repository roots as this host resolves them: symlinks followed, then normalized.
+def canonical_repository_roots(paths: list[Any]) -> list[str]:
+    """The absolute roots a declaration means, resolved where the caller declared them.
 
-    A path that cannot be resolved at all is kept as it was written rather than
-    dropped: an unresolvable root is still a root the sprint claims, and dropping it
-    would silently make two sprints look disjoint.
+    A relative root only names a tree next to the process that wrote it, so it is
+    resolved once, here, at declaration time, and the absolute answer is what the sprint
+    persists.  Resolving it later instead would answer against whichever process happens
+    to run the check, and two sprints sharing a tree would read as disjoint.
+
+    A root this host cannot resolve at all is refused rather than guessed at: a sprint
+    whose tree cannot be named is not a sprint any other sprint can be judged against.
+    """
+    roots: list[str] = []
+    for raw in paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            root = str(Path(text).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise TaskError(
+                "validation",
+                f"repository root {text!r} cannot be resolved on this host ({exc}); "
+                "declare a repository root this host can name",
+                2,
+            ) from None
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _scanned_roots(paths: list[Any], *, refusal: Callable[[str, str], TaskError]) -> list[Path]:
+    """The stored roots of one sprint being scanned, or a refusal naming the bad value.
+
+    Scanning fails closed on anything that is not already absolute.  Such a value is
+    canonical to no host: resolving it here would resolve it against the working
+    directory of whichever process runs admission, and that is exactly how two sprints
+    sharing a working tree come to read as disjoint.
     """
     roots: list[Path] = []
     for raw in paths:
         text = str(raw).strip()
         if not text:
             continue
+        root = Path(text)
+        if not root.is_absolute():
+            raise refusal(text, "is not an absolute path")
         try:
-            root = Path(text).expanduser().resolve()
+            root = root.resolve()
         except (OSError, RuntimeError, ValueError):
-            root = Path(text)
+            raise refusal(text, "cannot be resolved on this host") from None
         if root not in roots:
             roots.append(root)
     return roots
