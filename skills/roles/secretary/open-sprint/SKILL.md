@@ -59,10 +59,10 @@ What you need as input:
 Do not promote Issues to Ready and do not touch cards. Fresh cards are cut by the observer from current
 understanding.
 
-## 2. Check that the repositories are free
+## 2. Check that the projects are free
 
-An open sprint holds its repositories as their only writer. A second sprint on the same repository is not
-opened.
+An open sprint holds the projects it reserves as their only writer. A second sprint on the same project is
+not opened.
 
 ```bash
 python3 -m secretary sprint list --status open

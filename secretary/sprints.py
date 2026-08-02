@@ -76,6 +76,10 @@ RESUME_FIELDS = (
     "next_safe_step",
 )
 _GUARD_INDEX = "sprints/active-repositories.json"
+# Version 2 keys the index by reserved project instead of repository path.  The card
+# guards ask about a card's project, and `repositories` are filesystem paths, so a
+# version 1 index answers a question nobody asks; it is rebuilt rather than read.
+_GUARD_INDEX_VERSION = 2
 _ADMISSION_LOCK = "sprints/admission.lock"
 SPRINT_CREATED = "created"
 SPRINT_REOPENED = "reopened"
@@ -87,78 +91,86 @@ SPRINT_STATUSES = {"open", "closed", "stopped"}
 _ADMISSION_REFUSALS = {"sprint_conflict", "resource_conflict"}
 
 
-def active_sprint_repositories(data_dir: str | Path) -> dict[str, list[str]]:
-    """Return the local index of repositories held by open sprints.
+def active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
+    """Return the local index of projects reserved by open sprints.
 
     This is an index, not a second sprint model.  Task writes use it to avoid a
-    sprint-board read for repositories that no open sprint holds; a listed ref is
-    always checked live before it authorizes a write.
+    sprint-board read for projects that no open sprint reserves; a listed ref is
+    always checked live before it authorizes a write.  It is keyed by project id
+    because that is what a card carries; a sprint's `repositories` are filesystem
+    paths and answer a different question.
     """
-    path = Path(data_dir) / _GUARD_INDEX
-    return _read_active_sprint_repositories(path)
+    return _read_guard_index(Path(data_dir) / _GUARD_INDEX) or {}
 
 
-def _read_active_sprint_repositories(path: Path) -> dict[str, list[str]]:
+def _read_guard_index(path: Path) -> dict[str, list[str]] | None:
+    """Return the index, or None when it is absent, unreadable or of an older version."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    repositories = raw.get("repositories") if isinstance(raw, dict) else None
-    if not isinstance(repositories, dict):
-        return {}
+        return None
+    if not isinstance(raw, dict) or raw.get("version") != _GUARD_INDEX_VERSION:
+        return None
+    projects = raw.get("projects")
+    if not isinstance(projects, dict):
+        return None
     return {
-        str(repo): sorted({str(ref) for ref in refs if str(ref)})
-        for repo, refs in repositories.items()
-        if isinstance(refs, list) and str(repo)
+        str(project): sorted({str(ref) for ref in refs if str(ref)})
+        for project, refs in projects.items()
+        if isinstance(refs, list) and str(project)
     }
 
 
 def sprint_guard_index_initialized(data_dir: str | Path) -> bool:
-    try:
-        raw = json.loads((Path(data_dir) / _GUARD_INDEX).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(raw, dict) and raw.get("version") == 1 and isinstance(raw.get("repositories"), dict)
+    return _read_guard_index(Path(data_dir) / _GUARD_INDEX) is not None
 
 
-def refresh_active_sprint_repositories(data_dir: str | Path, reader: Any) -> None:
+def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
     """Seed the index from the live board without racing a sprint mutation."""
     with _sprint_guard_index_lock(data_dir):
-        _replace_active_sprint_repositories(data_dir, reader.list(statuses={"open"}, create=False))
+        _replace_active_sprint_projects(data_dir, reader.list(statuses={"open"}, create=False))
 
 
-def _replace_active_sprint_repositories(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
-    repositories: dict[str, list[str]] = {}
+def _replace_active_sprint_projects(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
+    projects: dict[str, list[str]] = {}
     for sprint in sprints:
         if sprint.get("status") != "open":
             continue
         reference = str(sprint.get("ref") or "")
         if not reference:
             continue
-        for repo in sprint.get("repositories") or []:
-            name = str(repo).strip()
+        for project in sprint.get("reservations") or []:
+            name = str(project).strip()
             if name:
-                repositories[name] = sorted(set(repositories.get(name, []) + [reference]))
-    _write_active_sprint_repositories(data_dir, repositories)
+                projects[name] = sorted(set(projects.get(name, []) + [reference]))
+    _write_guard_index(data_dir, projects)
 
 
-def update_active_sprint_repositories(data_dir: str | Path, sprint: dict[str, Any]) -> None:
-    """Update one sprint's entries in the local open-repository index."""
+def update_active_sprint_projects(data_dir: str | Path, sprint: dict[str, Any]) -> None:
+    """Update one sprint's entries in the local reserved-project index."""
     with _sprint_guard_index_lock(data_dir):
-        repositories = _read_active_sprint_repositories(Path(data_dir) / _GUARD_INDEX)
+        path = Path(data_dir) / _GUARD_INDEX
+        projects = _read_guard_index(path)
+        if projects is None and path.exists():
+            # An index of an older key space cannot be updated one sprint at a time:
+            # the entries of the other open sprints are not in this call.  Dropping it
+            # leaves the next guarded write to rebuild it from the board.
+            path.unlink()
+            return
+        projects = projects or {}
         reference = str(sprint.get("ref") or "")
-        for repo in list(repositories):
-            refs = [ref for ref in repositories[repo] if ref != reference]
+        for project in list(projects):
+            refs = [ref for ref in projects[project] if ref != reference]
             if refs:
-                repositories[repo] = refs
+                projects[project] = refs
             else:
-                repositories.pop(repo)
+                projects.pop(project)
         if reference and sprint.get("status") == "open":
-            for repo in sprint.get("repositories") or []:
-                name = str(repo).strip()
+            for project in sprint.get("reservations") or []:
+                name = str(project).strip()
                 if name:
-                    repositories[name] = sorted(set(repositories.get(name, []) + [reference]))
-        _write_active_sprint_repositories(data_dir, repositories)
+                    projects[name] = sorted(set(projects.get(name, []) + [reference]))
+        _write_guard_index(data_dir, projects)
 
 
 @contextmanager
@@ -192,12 +204,15 @@ def _exclusive_lock(path: Path):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _write_active_sprint_repositories(data_dir: str | Path, repositories: dict[str, list[str]]) -> None:
+def _write_guard_index(data_dir: str | Path, projects: dict[str, list[str]]) -> None:
     path = Path(data_dir) / _GUARD_INDEX
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
-        json.dumps({"version": 1, "repositories": repositories}, sort_keys=True, separators=(",", ":")),
+        json.dumps(
+            {"version": _GUARD_INDEX_VERSION, "projects": projects},
+            sort_keys=True, separators=(",", ":"),
+        ),
         encoding="utf-8",
     )
     temporary.replace(path)
@@ -612,7 +627,7 @@ class SprintWriter:
             event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
             self.transactions.save(document)
             self.transactions.complete(document)
-            update_active_sprint_repositories(self.data_dir, sprint)
+            update_active_sprint_projects(self.data_dir, sprint)
             return {"action": SPRINT_CREATED, "sprint": sprint, "event_id": str(event["event_id"])}
         except TaskError as exc:
             answer = exc.code in _ADMISSION_REFUSALS or (
@@ -1142,7 +1157,7 @@ class SprintWriter:
             raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
         except (OSError, KeyError, TypeError):
             raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
-        update_active_sprint_repositories(self.data_dir, self.reader.show(str(event["ref"]), include_cards=False))
+        update_active_sprint_projects(self.data_dir, self.reader.show(str(event["ref"]), include_cards=False))
         return self._close_result(event)
 
     def _close_result(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -1259,7 +1274,7 @@ class SprintWriter:
             event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
             self.transactions.save(document)
             self.transactions.complete(document)
-            update_active_sprint_repositories(self.data_dir, sprint)
+            update_active_sprint_projects(self.data_dir, sprint)
             return {"action": SPRINT_REOPENED, "sprint": sprint, "event_id": str(event["event_id"])}
         except TaskError as exc:
             if exc.code in _ADMISSION_REFUSALS or (
@@ -1364,7 +1379,7 @@ class SprintWriter:
         request_id = str(event["request_id"])
         self.audit.stage(request_id, event)
         event_id = self.audit.append(request_id, event)
-        update_active_sprint_repositories(Path(self.audit.board_dir).parent, sprint)
+        update_active_sprint_projects(Path(self.audit.board_dir).parent, sprint)
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     def _committed(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -1378,7 +1393,7 @@ class SprintWriter:
         event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
         self.audit.stage(str(event["request_id"]), event)
         event_id = self.audit.append(str(event["request_id"]), event)
-        update_active_sprint_repositories(Path(self.audit.board_dir).parent, sprint)
+        update_active_sprint_projects(Path(self.audit.board_dir).parent, sprint)
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     @staticmethod

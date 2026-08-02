@@ -1092,9 +1092,14 @@ class TaskWriter:
         return self._write("edited", role, actor, reference, request_id, payload, mutation)
 
     def _sprint_holds_project(self, project: str) -> bool:
-        from secretary.sprints import active_sprint_repositories
+        """Whether an open sprint reserves this card's project.
 
-        return bool(active_sprint_repositories(self.data_dir).get(project))
+        Both callers run after `_guard_sprint_write`, which initializes the index and
+        refreshes the entries of the project it was asked about.
+        """
+        from secretary.sprints import active_sprint_projects
+
+        return bool(active_sprint_projects(self.data_dir).get(project))
 
     def _guard_sprint_write(
         self,
@@ -1109,28 +1114,28 @@ class TaskWriter:
         request_id: str,
         reference: str,
     ) -> dict[str, str]:
-        """Authorize one create/move/edit against the open-sprint repository index."""
+        """Authorize one create/move/edit against the open-sprint reservation index."""
         from secretary.sprints import (
             SprintReader,
-            active_sprint_repositories,
-            refresh_active_sprint_repositories,
+            active_sprint_projects,
+            refresh_active_sprint_projects,
             sprint_guard_index_initialized,
-            update_active_sprint_repositories,
+            update_active_sprint_projects,
         )
 
         if not sprint_guard_index_initialized(self.data_dir):
             try:
-                refresh_active_sprint_repositories(self.data_dir, SprintReader(self.client))
+                refresh_active_sprint_projects(self.data_dir, SprintReader(self.client))
             except TaskError as exc:
                 self._deny_sprint_write(
                     code="sprint_guard_unavailable",
-                    message=f"cannot verify open sprints for repository {project}; write it through the sprint entity",
+                    message=f"cannot verify open sprints for project {project}; write it through the sprint entity",
                     role=role, actor=actor, project=project, sprint="", request_id=request_id, reference=reference,
                 )
                 raise AssertionError("unreachable") from exc
 
-        refs = set(active_sprint_repositories(self.data_dir).get(project, []))
-        if linked_sprint is not None and project in linked_sprint.get("repositories", []):
+        refs = set(active_sprint_projects(self.data_dir).get(project, []))
+        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
             refs.add(str(linked_sprint["ref"]))
         held: list[str] = []
         for sprint_ref in sorted(refs):
@@ -1139,12 +1144,12 @@ class TaskWriter:
             except TaskError as exc:
                 self._deny_sprint_write(
                     code="sprint_guard_unavailable",
-                    message=f"cannot verify sprint {sprint_ref} holding repository {project}; write it through the sprint entity",
+                    message=f"cannot verify sprint {sprint_ref} reserving project {project}; write it through the sprint entity",
                     role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
                 )
                 raise AssertionError("unreachable") from exc
-            update_active_sprint_repositories(self.data_dir, sprint)
-            if sprint.get("status") == "open" and project in sprint.get("repositories", []):
+            update_active_sprint_projects(self.data_dir, sprint)
+            if sprint.get("status") == "open" and project in sprint.get("reservations", []):
                 held.append(sprint_ref)
         if not held:
             return {}
@@ -1163,7 +1168,7 @@ class TaskWriter:
             return {}
         self._deny_sprint_write(
             code="sprint_write_forbidden",
-            message=f"repository {project} is held by open sprint {sprint_ref}; write it through the sprint entity {sprint_ref}",
+            message=f"project {project} is reserved by open sprint {sprint_ref}; write it through the sprint entity {sprint_ref}",
             role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
         )
         raise AssertionError("unreachable")
