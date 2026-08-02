@@ -4503,9 +4503,11 @@ class DispatcherRuntime:
             # Without a decision behind it this is the pre-Assessment path, where an escaping
             # error is the established behaviour. With one, the card cannot be left looking
             # releasable: it is merged, and the only honest place for it is Blocked saying so.
-            # `audit_pending` is the exception: that write did commit, so a second move would be
-            # a second board write on top of a repair the operator has to do by hand anyway.
-            if not decision or (isinstance(exc, TaskError) and exc.code == "audit_pending"):
+            # `audit_pending` is no exception. The Done move committed on the board but its
+            # decision event did not, so a card left there reads as a finalised release that
+            # nothing in the audit accounts for; Blocked with the merge named is the state the
+            # rule promises, and the pending event is still the reconciler's to repair.
+            if not decision:
                 raise
             return self._block_merge_path(
                 task, record, records, payload, attempt_id,

@@ -3362,6 +3362,40 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("The branch is merged", card["comments"][-1]["body"])
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
 
+    def test_a_done_move_whose_audit_did_not_commit_still_reaches_blocked(self) -> None:
+        """The same rule for a partial write: the Done column changed and the decision event did
+        not. Left in Done the card reads as a finished release nothing in the audit accounts for,
+        so it goes to Blocked saying the branch is merged and the pending event is repaired."""
+        self.start_pilot()
+        self._drive_to_green_verdict()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+        self._decide("release")
+        real_append = self.writer.audit.append
+
+        def fail_the_done_append(request_id, event):
+            if event.get("kind") == "moved" and event.get("payload", {}).get("to") == "done":
+                raise OSError("the audit store is unwritable")
+            return real_append(request_id, event)
+
+        with mock.patch.object(self.writer.audit, "append", fail_the_done_append):
+            blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["status"], "blocked")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        self.assertIn("The branch is merged", card["comments"][-1]["body"])
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+        self.assertNotIn("secretary-510-pilot", self.runtime.state.load()["records"])
+        audit = TaskAudit(self.data_dir)
+        self.assertEqual(
+            [event["payload"]["to"] for event in audit.events("secretary-510-pilot", kind="moved")][-1],
+            "blocked",
+        )
+        self.assertTrue(
+            any(event["payload"].get("to") == "done" for event in audit.pending_events()),
+            "the uncommitted Done event stays pending for the reconciler",
+        )
+
     def test_a_release_whose_publish_cannot_be_read_does_nothing(self) -> None:
         """Neither answer is safe to guess, so neither is taken: the release intent stays on
         disk, the card does not move, and the next tick asks the remote again."""

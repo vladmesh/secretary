@@ -1148,50 +1148,6 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observer_nudges, [])
 
-    def test_an_observers_own_decision_does_not_wake_that_observer(self) -> None:
-        """The release decision on a parked card is the one event that would loop.
-
-        The observer writes it, the write is a card transition, and a card transition is what
-        wakes the observer: without authorship in the significance rule the head is woken to read
-        its own decision, every time it makes one.
-        """
-        self.open_sprint()
-        self.board.tasks[0]["column_id"] = 6
-        self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
-        for request_id, role in (("observer-own-decision", "observer"), ("observer-own-move", "observer")):
-            self.audit.append(request_id, {
-                "event_id": "evt_" + request_id,
-                "request_id": request_id,
-                "ref": "secretary-510-pilot",
-                "actor": {"role": role, "id": "observer"},
-                "kind": "decided" if "decision" in request_id else "moved",
-                "outcome": "success",
-                "occurred_at": "2099-01-01T00:00:00Z",
-            })
-
-        quiet = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(quiet)], ["observer-idle"])
-        self.assertEqual(self.host.observer_nudges, [])
-
-        # The same card event from anyone else still wakes it: authorship is the only thing
-        # this rule looks at.
-        self.audit.append("dispatcher-card-event", {
-            "event_id": "evt_dispatcher_card_event",
-            "request_id": "dispatcher-card-event",
-            "ref": "secretary-510-pilot",
-            "actor": {"role": "dispatcher", "id": "production"},
-            "kind": "moved",
-            "outcome": "success",
-            "occurred_at": "2099-01-01T00:00:01Z",
-        })
-
-        woken = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(woken)], ["observer-nudged"])
-
     def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
         """Orca may rotate the handle while retaining leafId, so status must read the alias."""
         self.open_sprint()

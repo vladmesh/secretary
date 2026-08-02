@@ -118,6 +118,10 @@ _TRANSITIONS = {
         ("validate", "blocked"), ("validate", "done"),
         ("validate", "assessment"), ("assessment", "in_progress"),
         ("assessment", "done"), ("assessment", "blocked"),
+        # A release whose Done move committed and whose finalisation then failed. The branch is
+        # merged, so the card cannot go back for rework, and it cannot stay in Done either: the
+        # release was not finished and the reason has to be readable on the card.
+        ("done", "blocked"),
     },
     # The observer moves any card except one that is parked. `release`, `rework` and `reslice`
     # are effects the dispatcher performs, a merge, a rework round, a reslice, and a board move
@@ -227,27 +231,11 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
 
 
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
-    """Whether a committed card-audit line requires the sprint observer's attention.
-
-    An event the observer wrote itself is not one. A sprint has exactly one observer, and its
-    own decision on a parked card is the event that would otherwise wake it to read its own
-    work: the release decision produces a card event, the card event produces a delivery, and
-    the delivery has nothing in it the observer does not already know.
-
-    The role alone is enough to say "itself" here, and the reason is the writer's guards rather
-    than luck. `linked_refs` already narrows this to the sprint's own cards, and every
-    observer-authored write on such a card goes through the sprint reservation guard, which
-    admits an observer only on a project its own open sprint holds. Two open sprints cannot hold
-    one project, so an observer-authored event on a linked card can only have been authored by
-    this sprint's observer. Another sprint's observer cannot write it, and its own events are on
-    its own cards, which are not in `linked_refs`.
-    """
-    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    """Whether a committed card-audit line requires the sprint observer's attention."""
     return (
         str(event.get("ref") or "") in linked_refs
         and str(event.get("kind") or "") not in {"routing", "sprint_guard_denied"}
         and str(event.get("outcome") or "") == "success"
-        and str(actor.get("role") or "") != "observer"
     )
 
 

@@ -96,16 +96,16 @@ The observer's authority over a parked card is `task decide`; the effect is the 
 PO's override and the steward's escalation to Blocked are the two moves out of the column that do
 not go through the dispatcher.
 
-An observer decides only about a card whose project its own open sprint reserves, the same guard
-`task move` carries. Two open sprints cannot hold one project, so a card's project names one sprint
-and one observer, and a decision recorded on a linked card can only have come from that card's own
-observer.
+An observer decides only about a card whose project an open sprint reserves, the same guard
+`task move` carries. A decision on a card no open sprint holds is refused.
 
 A release the dispatcher cannot carry out never leaves the card looking reworkable. If the branch
 did not reach the base, the card stays parked, the failure is recorded on it and the decision comes
 back down, so the observer decides again. If the branch did reach the base, the work is merged: the
 release is finished on top of that fact, and where it cannot be, the card goes to Blocked with a
-reason saying the branch is merged and the release was not finalised.
+reason saying the branch is merged and the release was not finalised. That holds for a Done move
+that committed on the board without its audit event too: `done -> blocked` is the dispatcher's one
+edge out of Done, and it exists so a release nothing accounts for does not sit in Done as finalised.
 
 `secretary task move` is the writer for the transition itself. The board has one role and transition
 model, this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries

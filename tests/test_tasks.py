@@ -1163,7 +1163,16 @@ class AssessmentStateTests(unittest.TestCase):
                 ("validate", "blocked"), ("validate", "done"),
                 ("validate", "assessment"), ("assessment", "in_progress"),
                 ("assessment", "done"), ("assessment", "blocked"),
+                ("done", "blocked"),
             },
+        )
+
+    def test_the_dispatcher_can_block_a_release_it_could_not_finalise(self) -> None:
+        """The one edge out of Done: the column changed and the release did not finish, so the
+        card has to say the branch is merged rather than sit in Done as if it were finalised."""
+        self.assertIn(("done", "blocked"), _TRANSITIONS["dispatcher"])
+        self.assertEqual(
+            {edge for edge in _TRANSITIONS["dispatcher"] if edge[0] == "done"}, {("done", "blocked")}
         )
 
     def test_worker_and_reviewer_stay_out_of_assessment(self) -> None:
