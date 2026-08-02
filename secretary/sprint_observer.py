@@ -59,6 +59,13 @@ MIGRATION_COMPLETED_KIND = "observer_migration_completed"
 # mode is off. Nothing removes it: an installation does not go back to interpreting an absent field.
 STRICT_MARKER = "sprints/observer-strict.json"
 
+# The cutover's own working set: the immutable inventory and journal it persists before its first
+# backend write. Local by construction — neither is checkpoint canon — which is what lets the
+# reader tell "this host is mid-cutover" from "this host was rebuilt from a finished one".
+CUTOVER_DIR = "sprints/observer-migration"
+CUTOVER_INVENTORY = "inventory.json"
+CUTOVER_JOURNAL = "journal.ndjson"
+
 # Why an open sprint's declared observer cannot be executed. Each is corruption that fails closed,
 # and they are named apart because the repair differs.
 REASON_MISSING = "observer_missing"
@@ -256,23 +263,37 @@ def strict_marker_path(data_dir: str | Path) -> Path:
 
 
 def strict_reader_active(data_dir: str | Path | None) -> bool:
-    """Whether this installation has been through the observer migration.
+    """Whether this installation reads observer metadata strictly.
 
-    False for an installation that has not run it, and for a caller with no data directory to ask.
-    Both read the tolerant way, which is the only correct answer while a row that predates the
-    field may still exist: the strict reader must never judge an unmigrated row.
+    Three states, and the two signals that tell them apart:
 
-    The answer comes from the committed audit log, because that is what survives the product's
-    declared recovery boundary. `state/board/events.ndjson` is checkpoint canon and recovery
-    materializes it back; a host recovered from a post-migration checkpoint therefore comes back
-    strict rather than silently returning to the role default. The marker file is consulted first
-    only to keep the common answer cheap.
+      not migrated          no completion event                    -> tolerant
+      migrating, this host  completion event + the cutover's own   -> tolerant
+                            local working set, no latch
+      migrated              the latch, or a completion event with  -> strict
+                            no cutover in flight
+
+    The completion event is the *durable* signal: `state/board/events.ndjson` is checkpoint canon
+    and recovery materializes it back, so a replacement host rebuilt from a post-migration
+    checkpoint comes back strict instead of silently returning to the role default. A local marker
+    file could not carry that.
+
+    But the event alone is written before the post-migration checkpoint is taken and pushed, so on
+    the host running the cutover there is a live interval in which the event exists and the ordered
+    sequence has not finished. Strict there would be strict before the recovery point the order
+    requires. The cutover's own working set — the inventory it persists under `sprints/` — is what
+    marks that interval, and it is local by construction: it is not checkpoint canon, so a recovered
+    host never has it and is never mistaken for a host mid-cutover.
+
+    The latch settles the finished case without either read: the cutover writes it last.
     """
     if data_dir is None:
         return False
     if strict_marker_present(data_dir):
         return True
-    return migration_recorded(data_dir)
+    if not migration_recorded(data_dir):
+        return False
+    return not cutover_in_flight(data_dir)
 
 
 def strict_marker_present(data_dir: str | Path) -> bool:
@@ -282,6 +303,18 @@ def strict_marker_present(data_dir: str | Path) -> bool:
     except (OSError, ValueError, UnicodeError):
         return False
     return isinstance(raw, dict) and raw.get("version") == 1 and raw.get("strict") is True
+
+
+def cutover_in_flight(data_dir: str | Path) -> bool:
+    """Whether this host is between the start of a cutover and its latch.
+
+    The inventory is written before the first backend write and the latch after the last step, so
+    an inventory without a latch is exactly the open interval. Both live under the data directory
+    and neither is checkpoint canon, so this answers only for the host that ran the cutover.
+    """
+    if strict_marker_present(data_dir):
+        return False
+    return (Path(data_dir) / CUTOVER_DIR / CUTOVER_INVENTORY).is_file()
 
 
 # Migration is a one-way transition, so a positive answer is remembered for the life of the

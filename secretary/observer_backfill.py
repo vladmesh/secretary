@@ -43,6 +43,9 @@ from pathlib import Path
 from typing import Any
 
 from secretary.sprint_observer import (
+    CUTOVER_DIR,
+    CUTOVER_INVENTORY,
+    CUTOVER_JOURNAL,
     MIGRATION_COMPLETED_KIND,
     ObserverMetadataError,
     activate_strict_reader,
@@ -60,9 +63,11 @@ from secretary.sprint_observer import (
 from secretary.tasks import TaskError
 
 INVENTORY_VERSION = 1
-JOURNAL_DIR = "sprints/observer-migration"
-INVENTORY_FILE = "inventory.json"
-JOURNAL_FILE = "journal.ndjson"
+# Named in `sprint_observer`, because the reader keys "a cutover is in flight on this host" on the
+# presence of the inventory these paths point at.
+JOURNAL_DIR = CUTOVER_DIR
+INVENTORY_FILE = CUTOVER_INVENTORY
+JOURNAL_FILE = CUTOVER_JOURNAL
 
 # The lifecycle kinds that prove a head actually came up for a sprint.  A deferral is not one: it
 # records the launch that did not happen.

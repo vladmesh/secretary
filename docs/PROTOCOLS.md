@@ -344,10 +344,20 @@ board are separate Kanboard projects and fail separately, so the tick can read a
 while its declaration is unreadable, and advancing them would be moving cards whose observer nobody
 could check. Each successful pass records every open sprint's reservations in the production state;
 a pass that cannot read the board fences from that snapshot, plus every card whose own metadata
-names a sprint. Cards belonging to no sprint keep running. The fence writes one durable `observer_fence_raised` event with
-`outcome: critical` per reason, and clears with `observer_fence_cleared` once a head on the declared
-profile is confirmed adopted, which is normally a later tick: the launch that adopts it happens
-after the fence in the same tick.
+names a sprint. Cards belonging to no sprint keep running. The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
+clears with `observer_fence_cleared` once adoption is confirmed: a record for that sprint naming
+exactly the declared profile, with a pid on disk that is alive. A pid that has not been written yet
+does not clear it. The lifecycle grace window that reads an unwritten pid as alive exists to decide
+whether to relaunch a head, and a head can die before it ever reaches the observer prompt; releasing
+another role's cards needs the stronger proof. Clearing is therefore normally a later tick's: the
+launch happens after the fence in the same tick and the pid lands after that.
+
+A fence that cannot be evaluated ends the tick. If the check raises — most plausibly because its
+critical outcome cannot be staged on a full or unwritable volume — the tick returns
+`observer-fence-unavailable` and runs no reconciliation, no advancement, no budget accounting, no
+observer reconciliation and no Ready claim. An empty fence is not "nothing was decided", it is
+"everything may move", and the sprint whose outcome could not be written is exactly the one whose
+cards must not.
 
 `task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
 `task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives its

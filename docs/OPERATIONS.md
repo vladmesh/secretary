@@ -728,9 +728,24 @@ Whether this installation is migrated is read from the `observer_migration_compl
 `state/board/events.ndjson`, not from the marker file. The audit log is checkpoint canon and a
 replacement host gets it back (see [Recovery](RECOVERY.md#what-the-checkpoint-contains)); the marker
 file is local runtime state and does not survive. Deriving the answer from the log is what stops a
-recovered host from quietly returning to `role_defaults.observer` after a completed migration. The
-marker is a latch over the same fact: it keeps the ordinary read a stat instead of a scan, and it is
-never the reason strict mode is off.
+recovered host from quietly returning to `role_defaults.observer` after a completed migration.
+
+The event alone is not the whole predicate, because it is written at step 5 and the order is not
+finished until step 7. On the host running the cutover there is a live interval in which the event
+exists and the post-migration checkpoint has not been taken and pushed; strict there would be strict
+before the recovery point the order requires. The cutover's own working set under
+`DATA_DIR/sprints/observer-migration/` marks that interval, and it is local by construction — it is
+not checkpoint canon, so a recovered host never has it and is never mistaken for a host mid-cutover.
+The three states are:
+
+| signals | reader |
+| --- | --- |
+| no completion event | tolerant |
+| completion event, plus this host's cutover inventory, no latch | tolerant — mid-cutover |
+| the latch, or a completion event with no cutover in flight | strict |
+
+The marker is the latch: written last, so a rerun after a crash keys its resume on it, and so the
+ordinary read is a stat rather than a scan.
 
 The same rule decides what recovery accepts. A checkpoint taken *after* the migration must carry an
 observer value on every row; one missing it is a corrupt export and the restore refuses before its

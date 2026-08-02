@@ -20,11 +20,13 @@ from secretary.dispatcher import CutoverState, DispatcherRuntime
 from secretary.dispatcher_observer import (
     ObserverRecord,
     load_observers,
+    observer_alive,
     observer_decision,
     put_observers,
 )
 from secretary.dispatcher_observer_fence import (
     REASON_DEAD,
+    REASON_NOT_ADOPTED,
     REASON_NO_RECORD,
     fenced_task,
     observer_fence,
@@ -48,6 +50,7 @@ from secretary.sprint_observer import (
     REASON_MISSING,
     REASON_UNKNOWN_PROFILE,
     activate_strict_reader,
+    cutover_in_flight,
     encode_observer,
     executable_observer,
     head_choice,
@@ -836,15 +839,22 @@ class ObserverCutoverTests(unittest.TestCase):
             row["ref"] for row in inventory["rows"]
         ))
 
-    def test_a_crash_after_the_completion_event_still_takes_the_checkpoint(self) -> None:
-        """The rerun must not report a finished cutover on a run that never checkpointed."""
+    def test_a_crash_after_the_completion_event_is_not_yet_strict(self) -> None:
+        """Strict follows the order, not the event alone.
+
+        The completion event is the durable signal a recovered host reads, but on the host running
+        the cutover it exists before the post-migration checkpoint has been taken and pushed.
+        Strict there would be strict before the recovery point the order requires, so the interval
+        is tolerant and the rerun finishes the sequence.
+        """
         self.checkpoint.results = [{"status": "ok"}, RuntimeError("host died")]
         with self.assertRaisesRegex(BackfillError, "post-migration checkpoint"):
             self.cutover()
-        # Strict already, because the completion event is on disk; but not latched, because the
-        # marker is written after the checkpoint the crash interrupted.
-        self.assertTrue(strict_reader_active(self.data_dir))
+
+        self.assertTrue(migration_recorded(self.data_dir))
+        self.assertTrue(cutover_in_flight(self.data_dir))
         self.assertFalse(strict_marker_present(self.data_dir))
+        self.assertFalse(strict_reader_active(self.data_dir))
         checkpoints_before = self.checkpoint.calls
 
         self.checkpoint.results = [{"status": "ok"}]
@@ -854,7 +864,30 @@ class ObserverCutoverTests(unittest.TestCase):
         self.assertGreater(self.checkpoint.calls, 0)
         self.assertNotEqual(result["status"], "already-migrated")
         self.assertTrue(strict_marker_present(self.data_dir))
+        self.assertTrue(strict_reader_active(self.data_dir))
+        self.assertFalse(cutover_in_flight(self.data_dir))
         self.assertGreater(checkpoints_before, 0)
+
+    def test_the_interval_before_the_post_migration_push_is_tolerant_too(self) -> None:
+        self.runtime.checkpoint_push.result = {"status": "failed", "reason": "remote refused"}
+        # The pre-migration push has to land, so it is allowed through and only the second fails.
+        real = self.runtime.checkpoint_push.push
+        calls: list[dict] = []
+
+        def second_push_fails(state: dict) -> dict:
+            calls.append(state)
+            if len(calls) == 1:
+                return {"status": "pushed", "commit": "abc123"}
+            return {"status": "failed", "reason": "remote refused"}
+
+        self.runtime.checkpoint_push.push = second_push_fails  # type: ignore[method-assign]
+        self.assertIsNotNone(real)
+
+        with self.assertRaisesRegex(BackfillError, "was not pushed"):
+            self.cutover()
+
+        self.assertTrue(migration_recorded(self.data_dir))
+        self.assertFalse(strict_reader_active(self.data_dir))
 
     def test_a_crash_after_the_post_migration_checkpoint_resumes_to_the_marker(self) -> None:
         with mock.patch(
@@ -1256,6 +1289,91 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["projects"], {"secretary"})
         self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
         self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
+
+    def test_a_fence_that_cannot_stage_its_outcome_stops_the_whole_tick(self) -> None:
+        """An empty fence is not "nothing may be decided", it is "everything may move".
+
+        The staging write is a separate path from the production-state guard, so a full volume or
+        a permissions change can take the audit while the state stays writable. The tick has to end
+        there rather than fall back to a fence that permits every card.
+        """
+        self.go_strict()
+        self.declare("{not json")
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.tasks[0]["column_id"] = 3
+
+        with mock.patch(
+            "secretary.dispatcher_observer_fence.stage_event", side_effect=OSError("disk full"),
+        ):
+            result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "critical")
+        self.assertEqual(result["action"], "observer-fence-unavailable")
+        self.assertEqual(result["actions"], [])
+        self.assertIn("disk full", result["reason"])
+        self.assertEqual(result["errors"][0]["code"], "unexpected_error")
+        # Nothing ran after the fence: no advance, no claim, no observer launch, no board move.
+        self.assertEqual([method for method, _ in self.board.calls if method == "moveTaskPosition"], [])
+        self.assertEqual(self.host.observers, [])
+        telemetry = self.runtime.production_state.load()["tick_telemetry"]
+        self.assertFalse(telemetry["last"]["healthy"])
+
+    def test_a_launched_head_that_has_not_written_its_pid_keeps_the_fence_up(self) -> None:
+        """A pid that is merely not written yet is not confirmed adoption.
+
+        The lifecycle grace window reads it as alive so a head that has just started is not
+        relaunched. Releasing another role's cards on that is different: the terminal may have
+        died before it ever reached the observer prompt.
+        """
+        self.go_strict()
+        self.declare(encode_observer(head_choice("claude-observer")))
+        self.runtime.production_tick()
+        record = load_observers(self.runtime.production_state.load())["sprint:1"]
+        Path(record.pid_file).unlink()
+        self.assertEqual(
+            observer_alive(record), {"alive": True, "reason": "pid-not-written-yet", "pid_known": False}
+        )
+
+        fence = self.fence()
+
+        self.assertEqual(fence["sprints"], {"sprint:1"})
+        self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_NOT_ADOPTED)
+
+    def test_a_record_that_names_no_head_is_a_mismatch(self) -> None:
+        self.go_strict()
+        self.declare(encode_observer(head_choice("claude-observer")))
+        payload = self.runtime.production_state.load()
+        put_observers(payload, {
+            "sprint:1": ObserverRecord(
+                sprint="sprint:1", head="", handle="term_x", state="running",
+                launches=1, launched_at=time.time(),
+            )
+        })
+        self.runtime.production_state.save(payload)
+
+        fence = observer_fence(self.runtime, self.runtime.production_state.load())
+
+        self.assertEqual(fence["outcomes"][0]["observer_reason"], "observer_head_mismatch")
+
+    def test_the_card_of_an_unadopted_observer_does_not_advance(self) -> None:
+        self.go_strict()
+        actions = self._tick_twice_with_an_active_card(
+            encode_observer(head_choice("claude-observer"))
+        )
+        self.assertEqual(
+            [action["action"] for action in actions if action["step"] == "advance"],
+            ["waiting-worker-report"],
+        )
+        record = load_observers(self.runtime.production_state.load())["sprint:1"]
+        Path(record.pid_file).unlink()
+
+        blind = self.runtime.production_tick()["actions"]
+
+        self.assertEqual([action for action in blind if action["step"] == "advance"], [])
+        self.assertEqual(
+            [action["observer_reason"] for action in blind if action["step"] == "observer-fence"],
+            [REASON_NOT_ADOPTED],
+        )
 
     def test_a_fenced_sprint_makes_the_tick_report_unhealthy(self) -> None:
         """A stopped project with a healthy-looking tick is how the last outage stayed invisible."""

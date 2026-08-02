@@ -19,8 +19,11 @@ projects and fail separately, so the fence keeps a durable snapshot of each open
 reservations and falls back to it, rather than letting a blind tick advance the cards of a sprint
 whose declaration nobody could check.
 
-The fence clears on confirmed adoption: a record for that sprint, on the declared profile, with a
-live pid.  The launch happens later in the same tick, so the clearing is normally a later tick's.
+The fence clears on confirmed adoption, and confirmed means confirmed: a record for that sprint,
+naming exactly the declared profile, with a pid on disk that is alive.  A pid that has not been
+written yet is not adoption — the lifecycle grace window that reads it as alive exists to decide
+whether to relaunch a head, not to release another role's cards.  The launch happens later in the
+same tick and the pid lands after that, so the clearing is normally a later tick's.
 """
 
 from __future__ import annotations
@@ -53,6 +56,9 @@ FENCE_SNAPSHOT = "observer_fence_snapshot"
 # Why the sprint cannot be observed right now. `observer_*` reasons come from the metadata itself
 # and are corruption; the rest describe a declared head that is not there.
 REASON_NO_RECORD = "observer_not_launched"
+# The head was launched but has not written its pid, so nothing has confirmed it came up. Distinct
+# from a dead pid: the repair is to wait a tick, not to look at a head that failed.
+REASON_NOT_ADOPTED = "observer_not_adopted"
 REASON_DEAD = "observer_head_dead"
 REASON_MISMATCH = "observer_head_mismatch"
 REASON_DEFERRED = "observer_launch_deferred"
@@ -216,10 +222,16 @@ def _sprint_verdict(
             "message": f"declared observer {head} has not been launched",
             "head": head,
         }
-    if record.head and record.head != head:
+    if record.head != head:
+        # A blank head is a record that never got one, and it is a mismatch like any other: what
+        # the fence needs is a record naming *this* profile, not merely one that does not
+        # contradict it.
         return {
             "reason": REASON_MISMATCH,
-            "message": f"declared observer {head} is not the running head {record.head}",
+            "message": (
+                f"declared observer {head} is not the running head "
+                f"{record.head or '(none recorded)'}"
+            ),
             "head": head,
         }
     if record.abandoned_handle:
@@ -237,6 +249,20 @@ def _sprint_verdict(
             "head": head,
         }
     liveness = observer_alive(record)
+    if not liveness["pid_known"]:
+        # The lifecycle grace window reads a head that has not written its pid yet as alive, and
+        # that is right for deciding whether to relaunch it. It is not proof of adoption, and this
+        # is the check that releases card mutations: the head may have died before it ever reached
+        # the observer prompt. The fence holds until the pid is on disk, which is the "confirmed
+        # adoption, normally on a later tick" this check exists to mean.
+        return {
+            "reason": REASON_NOT_ADOPTED,
+            "message": (
+                f"declared observer {head} has not written its pid yet, so its adoption is "
+                f"unconfirmed ({liveness['reason']})"
+            ),
+            "head": head,
+        }
     if not liveness["alive"]:
         return {
             "reason": REASON_DEAD,

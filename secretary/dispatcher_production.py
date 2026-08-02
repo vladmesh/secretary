@@ -392,8 +392,12 @@ def _production_tick_body(
     try:
         fence = observer_fence(runtime, payload)
     except Exception as exc:
-        observer_errors.append(_unexpected_error("", exc))
-        fence = {"sprints": set(), "projects": set(), "refs": set(), "outcomes": []}
+        # The fence is the thing that decides what may move, so a fence that could not finish
+        # decides nothing — and an empty fence is not "nothing", it is "everything may move". The
+        # tick ends here instead, before reconciliation, advancement, budget accounting, observer
+        # reconciliation and Ready claims. A sprint whose critical outcome could not be staged
+        # (an unwritable audit, a full volume) is exactly the sprint whose cards must not advance.
+        return _fence_failed_tick(runtime, payload, exc)
     fence_outcomes = list(fence.get("outcomes") or [])
 
     cycle = _production_tasks(runtime, {"in_progress", "validate"})
@@ -882,6 +886,37 @@ def _advance_active(
             active_blocked = True
         outcomes.append(outcome)
     return outcomes, errors, active_blocked
+
+
+def _fence_failed_tick(
+    runtime: Any, payload: dict[str, Any], exc: Exception
+) -> dict[str, Any]:
+    """End the tick without touching a card, and leave a durable record of why.
+
+    The state is still saved: the fence may have opened or cleared fences and refreshed its
+    snapshot before it raised, and those are what the next tick reads. Nothing else in the payload
+    has been touched yet, because this runs before every pass that writes one.
+    """
+    result = {
+        "status": "critical",
+        "step": "production-tick",
+        "owner": runtime.owner,
+        "action": "observer-fence-unavailable",
+        "reason": (
+            "the observer fence could not be evaluated, so no card was advanced, reconciled or "
+            f"claimed this tick: {type(exc).__name__}: {exc}"
+        ),
+        "actions": [],
+        "errors": [_unexpected_error("", exc)],
+    }
+    payload["last_tick_finished_at"] = now_rfc3339()
+    record_tick_telemetry(payload, result)
+    try:
+        runtime.production_state.save(payload)
+    except Exception:
+        # Reporting the refusal matters more than recording it: the cards are already untouched.
+        result["state_save"] = "failed"
+    return result
 
 
 def _reconcile_production(
