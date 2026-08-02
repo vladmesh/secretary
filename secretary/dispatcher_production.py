@@ -67,11 +67,16 @@ HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
 # reach. Nothing raises on those paths, so `errors` stays empty and the tick used to return `ok`
 # and record itself healthy right over the degradation (secretary-833 review, round 3).
 #
+# `critical` is here for the opposite reason to `blocked`. An observer fence stops a sprint's whole
+# project because the role that was supposed to be watching it is not there, which is the state the
+# pipeline health line exists to show. A tick that fenced a sprint and still reported `ok` would put
+# the sprint's cards on hold with nothing anywhere saying so.
+#
 # `blocked` is deliberately not here. A card parked in Blocked is the dispatcher doing its job:
 # the board carries the reason, the steward already reports it as a `new_blocked` signal, and the
 # tick's exit code drives the systemd unit's result — a correctly blocked card must not put the
 # production unit into `failed` and the pipeline health line into RED.
-DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed"})
+DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed", "critical"})
 
 
 def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:

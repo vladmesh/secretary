@@ -55,7 +55,10 @@ from secretary.sprint_observer import (
     historical_unknown,
     none_choice,
     observer_choice,
+    forget_migration_state,
+    migration_recorded,
     parse_observer,
+    strict_marker_present,
     strict_reader_active,
 )
 from secretary.sprints import SprintReader, SprintWriter
@@ -450,11 +453,40 @@ class _Json:
 
 
 class StubPusher:
-    def __init__(self, result: dict) -> None:
-        self.result = result
+    """The checkpoint pusher, recording what the cutover asked it to do.
+
+    The real pusher answers a call inside its 30-minute window by handing the previous state back
+    untouched. The cutover has to bypass that window, so the calls are kept: a cutover that relied
+    on the scheduler would show up here as a call carrying the tick's push state.
+    """
+
+    def __init__(self, result: dict | None = None) -> None:
+        self.result = result or {"status": "pushed", "commit": "abc123"}
+        self.calls: list[dict] = []
 
     def push(self, state: dict) -> dict:
+        self.calls.append(dict(state))
+        if isinstance(self.result, Exception):
+            raise self.result
         return dict(self.result)
+
+
+class WindowedStubPusher:
+    """`CheckpointPusher`'s scheduling, which is the part the cutover has to get past.
+
+    The real one returns the state it was handed, untouched, whenever its 30-minute window is not
+    due (`checkpoint.py`, `_due`). That returned state carries the *previous* run's status, so a
+    caller that reads it as its own result believes in a push that never happened.
+    """
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def push(self, state: dict) -> dict:
+        if state.get("attempted_epoch"):
+            return dict(state)
+        self.attempts += 1
+        return {"status": "pushed", "commit": "abc123", "attempted_epoch": 2.0}
 
 
 class StubRuntime:
@@ -490,7 +522,7 @@ class ObserverCutoverTests(unittest.TestCase):
             pause=self.pause,
             production_state=self.state,
             checkpoint=self.checkpoint,
-            pusher=StubPusher({"status": "ok"}),
+            pusher=StubPusher(),
         )
 
     def cutover(self, **kwargs):
@@ -499,6 +531,19 @@ class ObserverCutoverTests(unittest.TestCase):
             now="2026-08-02T00:00:00Z", resume=False, **kwargs,
         )
 
+    def metadata_writes(self) -> int:
+        return sum(
+            1 for method, params in self.board.calls
+            if method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"])
+        )
+
+    def observers_on_board(self) -> dict[str, dict]:
+        return {
+            str(sprint["ref"]): sprint["observer"]
+            for sprint in self.sprint_reader.export()
+            if "observer" in sprint
+        }
+
     def test_the_whole_sequence_runs_in_order_and_ends_strict(self) -> None:
         result = self.cutover()
 
@@ -506,7 +551,8 @@ class ObserverCutoverTests(unittest.TestCase):
             [step["step"] for step in result["steps"]],
             [
                 "freeze", "heads-stopped", "pre-migration-checkpoint", "inventory", "backfill",
-                "strict-scan", "post-migration-checkpoint", "strict-reader", "resume",
+                "strict-scan", "migration-completed", "post-migration-checkpoint",
+                "strict-reader", "resume",
             ],
         )
         self.assertTrue(strict_reader_active(self.data_dir))
@@ -590,6 +636,190 @@ class ObserverCutoverTests(unittest.TestCase):
         self.assertEqual(lifted.call_count, 1)
         self.assertEqual(result["steps"][-1]["step"], "resume")
 
+    # crash boundaries -------------------------------------------------------
+    #
+    # One test per point the process can die, each asserting the same two things: the strict
+    # reader is not on, and the rerun finishes the cutover with the values the first attempt
+    # selected rather than a second set derived from a world that has moved.
+
+    def test_both_checkpoints_are_pushed_past_the_windowed_scheduler(self) -> None:
+        """A recovery point that never left the machine is not one.
+
+        The ordinary pusher answers a call inside its 30-minute window by handing back the state
+        it was given, without attempting anything, and that stale state still says `pushed`. A
+        cutover that handed it the tick's push state would read that as its own push having
+        landed. It passes an empty state instead, which is what makes the window not apply.
+        """
+        pusher = WindowedStubPusher()
+        self.runtime.checkpoint_push = pusher
+        # The tick pushed five minutes ago, so the window is not due for anyone who asks with it.
+        self.state.payload["checkpoint_push"] = {"status": "pushed", "attempted_epoch": 1.0}
+
+        result = self.cutover()
+
+        self.assertEqual(pusher.attempts, 2)
+        self.assertEqual(
+            [
+                step["push"]["status"] for step in result["steps"]
+                if step["step"].endswith("-migration-checkpoint")
+            ],
+            ["pushed", "pushed"],
+        )
+
+    def test_a_checkpoint_that_did_not_reach_the_remote_stops_the_cutover(self) -> None:
+        for outcome in ({"status": "skipped", "reason": "no remote"}, {"status": "failed"},
+                        {"status": "diverged"}, {}):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                self.runtime.checkpoint_push.result = outcome
+
+                with self.assertRaisesRegex(BackfillError, "was not pushed"):
+                    self.cutover()
+
+                self.assertFalse(strict_reader_active(self.data_dir))
+                self.assertIsNone(read_inventory(self.data_dir))
+                self.assertEqual(self.metadata_writes(), 0)
+
+    def test_a_runtime_without_a_pusher_cannot_run_the_cutover(self) -> None:
+        self.runtime.checkpoint_push = None
+
+        with self.assertRaisesRegex(BackfillError, "no checkpoint pusher"):
+            self.cutover()
+
+        self.assertFalse(strict_reader_active(self.data_dir))
+
+    def test_a_crash_after_the_inventory_before_any_write_resumes_on_it(self) -> None:
+        inventory = persist_inventory(
+            self.data_dir,
+            build_inventory(
+                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
+            ),
+        )
+        self.assertEqual(self.observers_on_board(), {})
+
+        result = self.cutover()
+
+        self.assertEqual(result["digest"], inventory["digest"])
+        self.assertEqual(len(self.observers_on_board()), 17)
+        self.assertTrue(strict_reader_active(self.data_dir))
+
+    def test_a_crash_between_two_per_ref_writes_resumes_without_writing_twice(self) -> None:
+        inventory = persist_inventory(
+            self.data_dir,
+            build_inventory(
+                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
+            ),
+        )
+        real = self.sprint_writer.backfill_observer
+        seen: list[str] = []
+
+        def die_after_five(*, reference: str, value: dict, request_id: str):
+            if len(seen) >= 5:
+                raise RuntimeError("the process died mid-backfill")
+            seen.append(reference)
+            return real(reference=reference, value=value, request_id=request_id)
+
+        with mock.patch.object(self.sprint_writer, "backfill_observer", die_after_five):
+            with self.assertRaises(RuntimeError):
+                apply_backfill(self.sprint_writer, self.data_dir, inventory)
+        self.assertEqual(len(self.observers_on_board()), 5)
+        self.assertFalse(strict_reader_active(self.data_dir))
+        partial_writes = self.metadata_writes()
+
+        result = self.cutover()
+
+        self.assertEqual(len(result["rows"]), 17)
+        # The five rows already carrying their value are recognised, not rewritten.
+        self.assertEqual(self.metadata_writes(), partial_writes + 12)
+        self.assertEqual(len(self.observers_on_board()), 17)
+        self.assertEqual({entry["ref"] for entry in read_journal(self.data_dir)}, set(
+            row["ref"] for row in inventory["rows"]
+        ))
+
+    def test_a_crash_after_the_completion_event_still_takes_the_checkpoint(self) -> None:
+        """The rerun must not report a finished cutover on a run that never checkpointed."""
+        self.checkpoint.results = [{"status": "ok"}, RuntimeError("host died")]
+        with self.assertRaisesRegex(BackfillError, "post-migration checkpoint"):
+            self.cutover()
+        # Strict already, because the completion event is on disk; but not latched, because the
+        # marker is written after the checkpoint the crash interrupted.
+        self.assertTrue(strict_reader_active(self.data_dir))
+        self.assertFalse(strict_marker_present(self.data_dir))
+        checkpoints_before = self.checkpoint.calls
+
+        self.checkpoint.results = [{"status": "ok"}]
+        self.checkpoint.calls = 0
+        result = self.cutover()
+
+        self.assertGreater(self.checkpoint.calls, 0)
+        self.assertNotEqual(result["status"], "already-migrated")
+        self.assertTrue(strict_marker_present(self.data_dir))
+        self.assertGreater(checkpoints_before, 0)
+
+    def test_a_crash_after_the_post_migration_checkpoint_resumes_to_the_marker(self) -> None:
+        with mock.patch(
+            "secretary.observer_backfill.activate_strict_reader",
+            side_effect=RuntimeError("host died"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.cutover()
+        self.assertFalse(strict_marker_present(self.data_dir))
+
+        result = self.cutover()
+
+        self.assertTrue(strict_marker_present(self.data_dir))
+        self.assertEqual(len(result["rows"]), 17)
+
+    def test_a_crash_after_activation_before_resume_leaves_the_freeze_in_force(self) -> None:
+        self.cutover()  # resume=False is exactly "died before the resume ran"
+
+        self.assertTrue(strict_marker_present(self.data_dir))
+        self.assertEqual(self.pause.payload["mode"], "freeze")
+        with mock.patch("secretary.dispatcher_pause_ops.resume") as lifted:
+            again = run_cutover(
+                self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
+                now="2026-08-02T00:00:00Z",
+            )
+        # A finished cutover is not re-run, so the operator lifts the freeze themselves.
+        self.assertEqual(again["status"], "already-migrated")
+        self.assertEqual(lifted.call_count, 0)
+
+    def test_a_retry_writes_what_the_first_attempt_selected_not_what_the_log_now_says(self) -> None:
+        """The journal, not the log, is what a retry reads."""
+        inventory = persist_inventory(
+            self.data_dir,
+            build_inventory(
+                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
+            ),
+        )
+        selected = {row["ref"]: row["observer"] for row in inventory["rows"]}
+        self.assertEqual(selected["sprint:818"]["profile"], "claude-observer")
+
+        # The world moves between the two attempts: a later relaunch would now win the recovery.
+        events = (self.data_dir / "board" / "events.ndjson")
+        events.write_text(
+            events.read_text(encoding="utf-8")
+            + json.dumps({
+                "event_id": "evt_818_later", "schema_version": 1,
+                "occurred_at": "2026-07-30T00:00:00Z",
+                "actor": {"role": "dispatcher", "id": "dispatcher"},
+                "kind": "observer_relaunched", "outcome": "success", "task_id": "",
+                "ref": "sprint:818",
+                "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
+                "request_id": "req-818-later", "payload": {"head": "codex-observer"},
+            }, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            recover_observer("sprint:818", self.runtime.audit.events())["profile"],
+            "codex-observer",
+        )
+
+        result = self.cutover()
+
+        self.assertEqual(result["digest"], inventory["digest"])
+        self.assertEqual(self.observers_on_board()["sprint:818"]["profile"], "claude-observer")
+
     def test_a_dry_run_writes_nothing_and_needs_no_freeze(self) -> None:
         self.pause.payload = {"mode": ""}
 
@@ -602,6 +832,95 @@ class ObserverCutoverTests(unittest.TestCase):
             "sprint_observer",
             self.board.metadata[int(self.board.sprints[0]["id"])],
         )
+
+
+class MigrationDurabilityTests(unittest.TestCase):
+    """The strict state has to survive the boundary `docs/RECOVERY.md` actually promises."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(forget_migration_state)
+        forget_migration_state()
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.data_dir.mkdir(parents=True)
+        self.board = ObserverBoard()
+        self.board.seed_inventory(self.data_dir)
+        self.sprint_reader = SprintReader(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
+        self.runtime = StubRuntime(
+            sprints=self.sprint_reader,
+            audit=TaskAudit(self.data_dir),
+            pause=StubPause({"mode": "freeze", "excluded_worker": []}),
+            production_state=StubProductionState({
+                "observers": {
+                    OPEN_SPRINT: ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD).to_json()
+                },
+                "records": {},
+            }),
+            checkpoint=StubCheckpoint([{"status": "ok"}]),
+            pusher=StubPusher(),
+        )
+        run_cutover(
+            self.runtime,
+            sprint_writer=SprintWriter(self.board, data_dir=self.data_dir),  # type: ignore[arg-type]
+            data_dir=self.data_dir, now="2026-08-02T00:00:00Z", resume=False,
+        )
+
+    def recovered_data_dir(self) -> Path:
+        """A replacement host: only the checkpoint canon, nothing else from the old machine.
+
+        `docs/RECOVERY.md` calls the host runtime local and non-canonical and lists exactly these
+        board entries as what comes back. Anything the old data directory held outside them — the
+        strict marker, the migration inventory and journal — is gone by contract.
+        """
+        recovered = Path(self.tmp.name) / "recovered"
+        (recovered / "board").mkdir(parents=True)
+        for name in ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json"):
+            source = self.data_dir / "board" / name
+            if source.is_file():
+                (recovered / "board" / name).write_text(
+                    source.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+        return recovered
+
+    def test_the_migrated_installation_is_strict(self) -> None:
+        self.assertTrue(strict_reader_active(self.data_dir))
+        self.assertTrue(migration_recorded(self.data_dir))
+
+    def test_a_replacement_host_comes_back_strict_without_the_marker(self) -> None:
+        recovered = self.recovered_data_dir()
+
+        self.assertFalse(strict_marker_present(recovered))
+        self.assertFalse((recovered / "sprints" / "observer-migration").exists())
+        self.assertTrue(strict_reader_active(recovered))
+
+    def test_a_host_recovered_from_a_pre_migration_checkpoint_stays_tolerant(self) -> None:
+        pre = Path(self.tmp.name) / "pre"
+        (pre / "board").mkdir(parents=True)
+        (pre / "board" / "events.ndjson").write_text(
+            "".join(
+                line + "\n"
+                for line in (self.data_dir / "board" / "events.ndjson")
+                .read_text(encoding="utf-8").splitlines()
+                if "observer_migration_completed" not in line
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertFalse(strict_reader_active(pre))
+
+    def test_half_a_backfill_in_the_log_does_not_read_as_migrated(self) -> None:
+        """The completion event, never a single row's write, is what turns the reader strict."""
+        partial = Path(self.tmp.name) / "partial"
+        (partial / "board").mkdir(parents=True)
+        lines = (self.data_dir / "board" / "events.ndjson").read_text(encoding="utf-8").splitlines()
+        kept = [line for line in lines if "observer_migration_completed" not in line]
+        self.assertTrue(any("observer_backfilled" in line for line in kept))
+        (partial / "board" / "events.ndjson").write_text(
+            "".join(line + "\n" for line in kept), encoding="utf-8"
+        )
+
+        self.assertFalse(strict_reader_active(partial))
 
 
 class ObserverFenceFixture(unittest.TestCase):
@@ -835,6 +1154,20 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
         self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
 
+    def test_a_fenced_sprint_makes_the_tick_report_unhealthy(self) -> None:
+        """A stopped project with a healthy-looking tick is how the last outage stayed invisible."""
+        self.go_strict()
+        self.declare(encode_observer(head_choice("retired-observer")))
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "degraded")
+        telemetry = self.runtime.production_state.load()["tick_telemetry"]
+        self.assertFalse(telemetry["last"]["healthy"])
+        self.assertIn(
+            "sprint:1", [row["ref"] for row in telemetry["last"]["degradations"]],
+        )
+
     def test_a_fence_writes_its_reason_durably_once_per_reason(self) -> None:
         self.go_strict()
         self.declare(encode_observer(head_choice("retired-observer")))
@@ -850,16 +1183,63 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(raised[0]["outcome"], "critical")
         self.assertEqual(raised[0]["payload"]["observer_reason"], REASON_UNKNOWN_PROFILE)
 
-    def test_an_unreadable_sprint_board_fences_nothing(self) -> None:
+    def test_an_unreadable_sprint_board_fences_what_it_last_saw(self) -> None:
+        """The Pipeline board can answer while the sprint board cannot: fail closed, not open."""
         self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
+        payload = self.runtime.production_state.load()
+        observer_fence(self.runtime, payload)  # one sighted pass, to take the snapshot
+        self.runtime.production_state.save(payload)
+        self.board.metadata[13]["project"] = "other"
+
         with mock.patch.object(
             self.runtime.sprints, "list", side_effect=TaskError("backend_error", "down", 1)
         ):
             fence = self.fence()
 
-        self.assertEqual(fence["sprints"], set())
+        self.assertEqual(fence["sprints"], {"sprint:1"})
+        self.assertEqual(fence["projects"], {"secretary"})
         self.assertEqual(fence["outcomes"][0]["action"], "sprint_board_unavailable")
+        self.assertEqual(fence["outcomes"][0]["status"], "critical")
+        # Project-local even when blind: the reserved project stops, another project does not.
+        self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
+        self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
+
+    def test_a_blind_tick_still_fences_a_sprint_it_never_saw(self) -> None:
+        """A sprint opened since the last snapshot is caught through its cards' own link."""
+        self.go_strict()
+        self.declare(encode_observer(head_choice("claude-observer")))
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+
+        with mock.patch.object(
+            self.runtime.sprints, "list", side_effect=TaskError("backend_error", "down", 1)
+        ):
+            fence = self.fence()
+
+        self.assertIn("secretary-510-pilot", fence["refs"])
+        self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
+        self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
+
+    def test_an_unreadable_sprint_board_does_not_advance_the_sprints_cards(self) -> None:
+        self.go_strict()
+        actions = self._tick_twice_with_an_active_card(
+            encode_observer(head_choice("claude-observer"))
+        )
+        self.assertEqual(
+            [action["action"] for action in actions if action["step"] == "advance"],
+            ["waiting-worker-report"],
+        )
+
+        with mock.patch.object(
+            self.runtime.sprints, "list", side_effect=TaskError("backend_error", "down", 1)
+        ):
+            blind = self.runtime.production_tick()["actions"]
+
+        self.assertEqual([action for action in blind if action["step"] == "advance"], [])
+        self.assertEqual(
+            [action["action"] for action in blind if action["step"] == "observer-fence"],
+            ["sprint_board_unavailable"],
+        )
 
     def test_the_decision_never_reads_the_role_default_once_strict(self) -> None:
         self.go_strict()

@@ -679,20 +679,30 @@ migration rewrites. The command refuses before its first write if the pipeline i
 freeze carries exclusions, or if any worker, reviewer or observer record still holds a terminal
 handle. It then runs, in this order and no other:
 
-1. pre-migration checkpoint, written and pushed while the tolerant reader is still in force, so
-   there is a state to roll back to that describes the installation as it ran;
+1. pre-migration checkpoint, written and pushed to the remote while the tolerant reader is still in
+   force, so there is a state to roll back to that describes the installation as it ran;
 2. the immutable versioned inventory and journal, persisted under
    `DATA_DIR/sprints/observer-migration/`;
 3. one idempotent write per row, under a request id derived from the inventory digest and the ref;
-4. a strict full rescan of every row, plus a post-migration checkpoint;
-5. activation of the strict reader, `DATA_DIR/sprints/observer-strict.json`;
-6. resume.
+4. a strict full rescan of every row;
+5. the durable `observer_migration_completed` audit event, which is what makes the installation
+   migrated;
+6. post-migration checkpoint, pushed again, now carrying that event;
+7. the local strict-reader latch, `DATA_DIR/sprints/observer-strict.json`;
+8. resume.
+
+Both pushes are real pushes. The dispatcher's ordinary pusher runs on a 30-minute window and inside
+it simply hands back the previous state; the cutover bypasses that window and refuses on any
+outcome short of the commit being on the remote, because a checkpoint that never left the machine
+is not a recovery point.
 
 Any step that refuses leaves the freeze in force and the strict reader off. Rerun the same command:
 provenance is read back from the journal rather than recomputed, a row that already carries exactly
 the selected value is skipped without a backend write, and a row carrying a *different* value stops
-the migration for an operator to resolve by hand. Pass `--no-resume` to keep the freeze after a
-successful cutover and lift it yourself with `secretary resume --instance INSTANCE`.
+the migration for an operator to resolve by hand. A rerun after a crash resumes from wherever the
+sequence stopped and reports `already-migrated` only once the latch at step 7 is in place. Pass
+`--no-resume` to keep the freeze after a successful cutover and lift it yourself with
+`secretary resume --instance INSTANCE`.
 
 The one case the command cannot decide is an open sprint whose running head it cannot prove: no
 tracked observer record and no successful launch event, or the two disagreeing. It names the sprint
@@ -701,6 +711,23 @@ and refuses. Settle which head is running, then rerun.
 After the cutover, `secretary sprint create` and `secretary sprint reopen` both require
 `--observer`, and an open sprint with missing or unreadable metadata fences its own projects with a
 critical outcome instead of falling back to a role default.
+
+### Why the completion event and not the marker file
+
+Whether this installation is migrated is read from the `observer_migration_completed` event in
+`state/board/events.ndjson`, not from the marker file. The audit log is checkpoint canon and a
+replacement host gets it back (see [Recovery](RECOVERY.md#what-the-checkpoint-contains)); the marker
+file is local runtime state and does not survive. Deriving the answer from the log is what stops a
+recovered host from quietly returning to `role_defaults.observer` after a completed migration. The
+marker is a latch over the same fact: it keeps the ordinary read a stat instead of a scan, and it is
+never the reason strict mode is off.
+
+The same rule decides what recovery accepts. A checkpoint taken *after* the migration must carry an
+observer value on every row; one missing it is a corrupt export and the restore refuses before its
+first backend write. A checkpoint taken *before* the migration carries none, and comes back exactly
+as it was — unmigrated rows on an installation whose reader is tolerant, with this migration still
+the way forward. The rows and the reader recover together, so recovery never has to invent an
+executable choice nobody made.
 
 ## Recovery
 

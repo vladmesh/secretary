@@ -14,6 +14,11 @@ sprint's projects, and a card with no sprint at all is nobody's to fence.
 `{kind: none}` passes.  A sprint that declares no observer is not a sprint whose observer is
 missing, and nothing is launched or probed for it.
 
+A sprint board that cannot be read is not a healthy sprint.  The two boards are separate Kanboard
+projects and fail separately, so the fence keeps a durable snapshot of each open sprint's
+reservations and falls back to it, rather than letting a blind tick advance the cards of a sprint
+whose declaration nobody could check.
+
 The fence clears on confirmed adoption: a record for that sprint, on the declared profile, with a
 live pid.  The launch happens later in the same tick, so the clearing is normally a later tick's.
 """
@@ -40,6 +45,10 @@ EVENT_FENCED = "observer_fence_raised"
 EVENT_CLEARED = "observer_fence_cleared"
 
 FENCE_STATE = "observer_fence"
+# Each open sprint's reserved projects as of the last pass that could read the sprint board. It is
+# what a blind pass fences from, so an unreadable declaration stops the same work a dead observer
+# would rather than waving it through.
+FENCE_SNAPSHOT = "observer_fence_snapshot"
 
 # Why the sprint cannot be observed right now. `observer_*` reasons come from the metadata itself
 # and are corruption; the rest describe a declared head that is not there.
@@ -55,10 +64,17 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Decide which sprints are fenced this tick, before any card is touched.
 
     Returns the fenced sprint refs, the projects those sprints hold, the card refs to leave alone,
-    and the outcomes to report.  A sprint board that cannot be read fences nothing: an unreachable
-    board is not evidence that an observer is dead, and stopping every project on it would turn a
-    Kanboard blip into a pipeline-wide halt.
+    and the outcomes to report.
+
+    A sprint board that cannot be read fences the sprints it last saw.  The Pipeline board and the
+    sprint board are two Kanboard projects with their own availability, so the tick can perfectly
+    well read the cards of a sprint whose declaration it cannot read — and advancing those cards
+    is exactly "mutating a card whose declared observer is unavailable".  The snapshot below is
+    what makes that fail-closed without guessing: every successful pass records each open sprint's
+    reservations in the durable production state, so the blind tick fences the same projects the
+    last sighted one would have.
     """
+    snapshot = _snapshot(payload)
     try:
         open_sprints = {
             str(sprint.get("ref") or ""): sprint
@@ -66,15 +82,7 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
             if str(sprint.get("ref") or "")
         }
     except (TaskError, HostError) as exc:
-        return {
-            "sprints": set(), "projects": set(), "refs": set(),
-            "outcomes": [{
-                "status": "degraded",
-                "step": "observer-fence",
-                "action": REASON_BOARD_UNAVAILABLE,
-                "reason": getattr(exc, "message", str(exc)),
-            }],
-        }
+        return _blind_fence(runtime, payload, snapshot, getattr(exc, "message", str(exc)))
     observers = load_observers(payload)
     state = payload.get(FENCE_STATE)
     state = dict(state) if isinstance(state, dict) else {}
@@ -98,6 +106,10 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
     else:
         payload.pop(FENCE_STATE, None)
 
+    # Refreshed on every pass that could read the board, so the next one that cannot has something
+    # true to fall back on rather than a guess.
+    _put_snapshot(payload, open_sprints)
+
     projects: set[str] = set()
     for ref in fenced:
         projects |= _sprint_projects(open_sprints[ref])
@@ -107,6 +119,79 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
         "refs": _fenced_card_refs(runtime, set(fenced), projects),
         "outcomes": outcomes,
     }
+
+
+def _blind_fence(
+    runtime: Any, payload: dict[str, Any], snapshot: dict[str, list[str]], reason: str,
+) -> dict[str, Any]:
+    """Fence every open sprint the last successful pass saw, plus every sprint-linked card.
+
+    Two sources, because neither alone is complete.  The snapshot names the reservations, which is
+    how a card that is merely *in* a held project gets fenced.  The live card metadata names the
+    sprint each card is linked to, which catches a sprint opened since the last snapshot — the
+    Pipeline board is the one that is still readable here, so its `sprint` field is available even
+    though the entity behind it is not.
+
+    A tick that has never seen the board and has no snapshot still fences every sprint-linked card.
+    Cards belonging to no sprint keep running: an unreadable sprint board says nothing about them.
+    """
+    sprints = set(snapshot)
+    projects = {project for projects in snapshot.values() for project in projects}
+    refs = _fenced_card_refs(runtime, sprints, projects)
+    linked = _sprint_linked_cards(runtime)
+    return {
+        "sprints": sprints | set(linked),
+        "projects": projects,
+        "refs": refs | set(linked),
+        # Not a fence the durable log carries a reason for: it is one tick's read failure, it
+        # clears by itself as soon as the board answers, and writing an event per tick of a
+        # Kanboard outage would bury the fences that are about an actual observer.
+        "outcomes": [{
+            "status": "critical",
+            "step": "observer-fence",
+            "action": REASON_BOARD_UNAVAILABLE,
+            "reason": (
+                "the sprint board could not be read, so no declared observer could be checked; "
+                f"every sprint-held project is fenced this tick: {reason}"
+            ),
+            "sprints": sorted(sprints | set(linked)),
+            "projects": sorted(projects),
+        }],
+    }
+
+
+def _sprint_linked_cards(runtime: Any) -> dict[str, str]:
+    """Every card that names a sprint, from the Pipeline board. Card ref -> sprint ref."""
+    try:
+        cards = runtime.reader.list()
+    except (TaskError, HostError):
+        return {}
+    return {
+        str(card.get("ref") or ""): str(card.get("sprint") or "")
+        for card in cards
+        if str(card.get("ref") or "") and str(card.get("sprint") or "")
+    }
+
+
+def _snapshot(payload: dict[str, Any]) -> dict[str, list[str]]:
+    raw = payload.get(FENCE_SNAPSHOT)
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(ref): [str(project) for project in projects if str(project)]
+        for ref, projects in raw.items()
+        if str(ref) and isinstance(projects, list)
+    }
+
+
+def _put_snapshot(payload: dict[str, Any], open_sprints: dict[str, dict[str, Any]]) -> None:
+    snapshot = {
+        ref: sorted(_sprint_projects(sprint)) for ref, sprint in sorted(open_sprints.items())
+    }
+    if snapshot:
+        payload[FENCE_SNAPSHOT] = snapshot
+    else:
+        payload.pop(FENCE_SNAPSHOT, None)
 
 
 def _sprint_verdict(

@@ -27,7 +27,12 @@ from secretary.backup_verify import _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
 from secretary import state_repo
 from secretary.data import init_layout
-from secretary.sprint_observer import encode_observer, is_executable, parse_observer
+from secretary.sprint_observer import (
+    encode_observer,
+    is_executable,
+    migration_recorded,
+    parse_observer,
+)
 from secretary._fsutil import file_lock, write_text_atomic
 from secretary.tasks import (
     _STATE_BY_COLUMN,
@@ -93,6 +98,11 @@ def import_normalized_board(
         try:
             cards = _normalized_cards(data_dir, registered_project_ids=(registered_projects(instance) if instance else None))
             sprints = _normalized_sprints(data_dir)
+            # Before the first backend write of either set. A recovery that cannot produce a valid
+            # installation must not produce half of one, and the sprint entities are written after
+            # every Pipeline card: validating them at their own step would leave the whole card
+            # board already restored behind a refusal.
+            _check_restored_observers(data_dir, sprints)
             client = client or KanboardClient()
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
@@ -212,7 +222,6 @@ def _import_sprints(
     unexpected = set(existing) - {sprint["reference"] for sprint in sprints}
     if unexpected:
         raise RestoreError("sprint board is not empty or does not match normalized restore data")
-    _check_restored_observers(sprints)
     for sprint in sprints:
         reference = sprint["reference"]
         if reference not in existing:
@@ -256,26 +265,40 @@ SPRINT_PARITY_FIELDS = (
 )
 
 
-def _check_restored_observers(sprints: list[dict[str, Any]]) -> None:
-    """Validate every exported observer value before the first backend write.
+def _check_restored_observers(data_dir: Path, sprints: list[dict[str, Any]]) -> None:
+    """Validate the whole exported observer set before the first backend write of any set.
 
-    Per row rather than per write, and before any of them: a set validated as it is written
-    would leave the rows before the bad one already on the board, and one of those may be the
-    open sprint.  A restore that cannot produce a valid installation must not produce half of one.
+    What counts as valid depends on which installation the export was taken from, and the export
+    says which: the audit log it travels with carries the migration's completion event or it does
+    not.
+
+    A set taken *after* the migration must carry a readable value on every row.  A row without one
+    is a corrupt export, not an old one, and restoring it would publish a row the strict reader
+    this installation comes back with immediately calls corrupt.
+
+    A set taken *before* the migration carries no values at all, and comes back exactly as it was:
+    unmigrated rows on an installation whose reader is tolerant, which is the state it was in.
+    That is the whole point of deriving strictness from the same log — the reader and the rows
+    recover together, so recovery never has to invent an executable choice nobody ever made, and
+    the migration stays the one supported way forward.
     """
+    migrated = migration_recorded(data_dir)
     problems: list[str] = []
     for sprint in sprints:
         reference = str(sprint.get("reference") or "?")
+        status = str(sprint.get("status") or "")
         if "observer" not in sprint:
-            # A checkpoint older than the observer field restores as it was taken: the rows come
-            # back unmigrated, the strict reader is not active for them, and the migration is the
-            # supported way forward.  Silently inventing a value here would be recovery guessing.
+            if migrated:
+                problems.append(
+                    f"{reference}: this installation has completed the observer migration, so a "
+                    "row without observer metadata is a corrupt export"
+                )
             continue
         value = parse_observer(sprint.get("observer"))
         if value is None:
             problems.append(f"{reference}: observer value is not one of the tagged forms")
             continue
-        if str(sprint.get("status") or "") == "open" and not is_executable(value):
+        if status == "open" and not is_executable(value):
             problems.append(
                 f"{reference}: an open sprint may not carry migration provenance "
                 f"({value.get('source')})"

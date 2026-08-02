@@ -38,9 +38,25 @@ SOURCE_MIGRATION_UNKNOWN = "migration_unknown"
 # be a head profile is reserved here rather than guessed at the CLI boundary.
 NONE_SPELLING = "none"
 
-# Written by the last step of the cutover, after a full rescan proved every row migrated. Its
-# presence is what switches the reader from tolerant to strict, and nothing removes it: an
-# installation does not go back to interpreting an absent field.
+# The audit kind the migration writes once per backfilled row: the record of the writes.
+BACKFILL_EVENT_KIND = "observer_backfilled"
+
+# The audit kind written once, after the strict rescan proved every row migrated. Its presence in
+# the committed log is what makes this installation a migrated one.
+#
+# It is the completion, never a single row's write: a log carrying half the backfill must not read
+# as migrated, or the strict reader would judge the rows the cutover has not reached yet.
+#
+# It lives in the audit log because that is what survives the product's declared recovery boundary.
+# `state/board/events.ndjson` is checkpoint canon (docs/RECOVERY.md, "What the checkpoint contains")
+# and recovery materializes it back into the data directory. A local marker file would not survive
+# it, and a recovered host would go back to interpreting an absent field as a role default.
+MIGRATION_COMPLETED_KIND = "observer_migration_completed"
+
+# Written by the last step of the cutover, after a full rescan proved every row migrated. It is a
+# latch over the same fact the log already carries, not a second source of truth: it makes the
+# common answer a stat instead of a scan of the whole audit log, and it is never the reason strict
+# mode is off. Nothing removes it: an installation does not go back to interpreting an absent field.
 STRICT_MARKER = "sprints/observer-strict.json"
 
 # Why an open sprint's declared observer cannot be executed. Each is corruption that fails closed,
@@ -195,14 +211,27 @@ def strict_marker_path(data_dir: str | Path) -> Path:
 
 
 def strict_reader_active(data_dir: str | Path | None) -> bool:
-    """Whether every sprint row of this installation has been backfilled.
+    """Whether this installation has been through the observer migration.
 
-    False for an installation that has not run the migration, and for a caller that has no data
-    directory to ask. Both read the tolerant way, which is the only correct answer while a row
-    that predates the field may still exist: the strict reader must never judge an unmigrated row.
+    False for an installation that has not run it, and for a caller with no data directory to ask.
+    Both read the tolerant way, which is the only correct answer while a row that predates the
+    field may still exist: the strict reader must never judge an unmigrated row.
+
+    The answer comes from the committed audit log, because that is what survives the product's
+    declared recovery boundary. `state/board/events.ndjson` is checkpoint canon and recovery
+    materializes it back; a host recovered from a post-migration checkpoint therefore comes back
+    strict rather than silently returning to the role default. The marker file is consulted first
+    only to keep the common answer cheap.
     """
     if data_dir is None:
         return False
+    if strict_marker_present(data_dir):
+        return True
+    return migration_recorded(data_dir)
+
+
+def strict_marker_present(data_dir: str | Path) -> bool:
+    """The local latch alone. The cutover writes it last, so a retry keys its resume on it."""
     try:
         raw = json.loads(strict_marker_path(data_dir).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError):
@@ -210,14 +239,79 @@ def strict_reader_active(data_dir: str | Path | None) -> bool:
     return isinstance(raw, dict) and raw.get("version") == 1 and raw.get("strict") is True
 
 
+# Migration is a one-way transition, so a positive answer is remembered for the life of the
+# process. A negative one is re-derived whenever the log has grown, which is what makes the very
+# tick that finishes the cutover see the new state without a restart.
+_MIGRATION_SCAN: dict[str, tuple[int, int]] = {}
+_MIGRATED: set[str] = set()
+
+
+def migration_recorded(data_dir: str | Path) -> bool:
+    """Whether the committed audit log carries this installation's completed observer migration."""
+    key = str(Path(data_dir).expanduser())
+    if key in _MIGRATED:
+        return True
+    events_path = Path(key) / "board" / "events.ndjson"
+    try:
+        stat = events_path.stat()
+    except OSError:
+        return False
+    fingerprint = (stat.st_size, stat.st_mtime_ns)
+    if _MIGRATION_SCAN.get(key) == fingerprint:
+        return False
+    _MIGRATION_SCAN[key] = fingerprint
+    if _scan_for_completion(events_path):
+        _MIGRATED.add(key)
+        return True
+    return False
+
+
+def _scan_for_completion(events_path: Path) -> bool:
+    try:
+        with events_path.open(encoding="utf-8") as events:
+            for line in events:
+                # The kind is matched on the raw line before the record is parsed: the log holds
+                # every event this installation ever wrote, and parsing all of them to find one
+                # kind would put a full JSON decode of the whole history on the tick.
+                if MIGRATION_COMPLETED_KIND not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    isinstance(event, dict)
+                    and event.get("kind") == MIGRATION_COMPLETED_KIND
+                    and event.get("outcome") == "success"
+                ):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def forget_migration_state(data_dir: str | Path | None = None) -> None:
+    """Drop the process-level memo. For tests, and for a caller that rebuilt the data directory."""
+    if data_dir is None:
+        _MIGRATED.clear()
+        _MIGRATION_SCAN.clear()
+        return
+    key = str(Path(data_dir).expanduser())
+    _MIGRATED.discard(key)
+    _MIGRATION_SCAN.pop(key, None)
+
+
 def activate_strict_reader(
     data_dir: str | Path, *, inventory_digest: str, rows: int, activated_at: str,
 ) -> dict[str, Any]:
-    """Switch this installation to the strict reader, once and durably.
+    """Latch the strict reader on, after the scan that justified it.
 
-    The digest and the row count are what the activation was justified by, so an operator reading
-    the marker later can tell which scan it followed. A second activation of the same cutover
-    rewrites the same content; it is not an error, because the step it ends is retried as a whole.
+    This is not what makes the installation migrated — the backfill's own audit events already did
+    that, durably and inside the checkpoint. The file records which scan the activation followed,
+    so an operator can tell, and it keeps the ordinary read a stat rather than a scan.
+
+    A second activation of the same cutover rewrites the same content; it is not an error, because
+    the step it ends is retried as a whole.
     """
     payload = {
         "version": 1,

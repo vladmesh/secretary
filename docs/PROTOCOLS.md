@@ -301,8 +301,17 @@ it with the rest of the fields, before the reference publishes the row.
 After the migration below has run, the reader is strict: an open sprint whose observer metadata is
 missing, unreadable, historical, or names a profile the registry does not have is corrupt. It is not
 launched from `role_defaults.observer`, its cards do not move, and it does not silently become
-observer-free. Restore validates the whole exported set before its first backend write and refuses
-rather than publishing part of it.
+observer-free.
+
+"After the migration" is read from the durable `observer_migration_completed` audit event, which is
+checkpoint canon and comes back with a recovered host, rather than from a local file that would not.
+A log carrying only part of the backfill does not count: the completion event is written after the
+strict rescan, so the strict reader is never active against rows the cutover has not reached.
+
+Restore validates the whole exported set before the first backend write of any set, cards included,
+and refuses rather than publishing part of it. What it accepts follows the same signal: an export
+from a migrated installation must carry a value on every row, and one from an unmigrated
+installation carries none and restores as it was.
 
 ### The observer fence
 
@@ -314,7 +323,14 @@ A sprint is fenced when its declared head has not been launched, is dead, does n
 record, is parked behind a failed bring-up, or when its declaration is corrupt. Fencing is
 project-local: it excludes that sprint's reserved projects and linked cards from reconciliation,
 active advancement and Ready claims, and leaves every other project running. `{"kind": "none"}`
-passes with no launch and no probe. The fence writes one durable `observer_fence_raised` event with
+passes with no launch and no probe.
+
+A sprint board that cannot be read is fenced, not waved through. The sprint board and the Pipeline
+board are separate Kanboard projects and fail separately, so the tick can read a sprint's cards
+while its declaration is unreadable, and advancing them would be moving cards whose observer nobody
+could check. Each successful pass records every open sprint's reservations in the production state;
+a pass that cannot read the board fences from that snapshot, plus every card whose own metadata
+names a sprint. Cards belonging to no sprint keep running. The fence writes one durable `observer_fence_raised` event with
 `outcome: critical` per reason, and clears with `observer_fence_cleared` once a head on the declared
 profile is confirmed adopted, which is normally a later tick: the launch that adopts it happens
 after the fence in the same tick.

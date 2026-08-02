@@ -9,11 +9,13 @@ So the whole thing is one ordered sequence, and the order is the contract:
 
   freeze without exclusions
     -> confirm every worker, reviewer and observer head is stopped
-    -> checkpoint and push, while the tolerant reader is still what runs
+    -> checkpoint, pushed to the remote, while the tolerant reader is still what runs
     -> persist the immutable inventory and journal
     -> per-ref writes, idempotent and refusing to overwrite a different value
-    -> strict rescan, export, checkpoint
-    -> activate the strict reader
+    -> strict rescan
+    -> the durable completion event
+    -> checkpoint, pushed again, now carrying that event
+    -> latch the strict-reader marker
     -> resume
 
 Every step that can fail leaves the freeze in force, because the alternative is a dispatcher
@@ -24,16 +26,24 @@ step an operator has to identify.
 Provenance is selected once and written down before the first backend write.  The journal is what
 a retry reads: recomputing it would re-derive history from an audit log that the migration's own
 events have grown, and two runs would then disagree about what a closed sprint's observer was.
+
+What makes the installation strict is the completion event in the audit log, not the marker file
+beside it.  The log is checkpoint canon and comes back with a recovered host; a local file does
+not, and a replacement host rebuilt from a post-migration checkpoint would otherwise be strict
+before the disaster and tolerant after it.  Both checkpoints are pushed rather than committed
+locally, because a recovery point that never left the machine is not one.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
 from secretary.sprint_observer import (
+    MIGRATION_COMPLETED_KIND,
     activate_strict_reader,
     encode_observer,
     head_choice,
@@ -41,6 +51,7 @@ from secretary.sprint_observer import (
     historical_unknown,
     is_executable,
     parse_observer,
+    strict_marker_present,
     strict_reader_active,
 )
 from secretary.tasks import TaskError
@@ -318,6 +329,78 @@ def running_heads(runtime: Any, payload: dict[str, Any]) -> list[str]:
     return running
 
 
+# A push outcome that means the commit is on the remote. `unchanged` counts: the remote already
+# holds this HEAD. Everything else — `skipped` (no remote, no branch), `failed`, `diverged`, or a
+# window that was simply not due — leaves the checkpoint local, which is not a recovery point.
+PUSH_SUCCESS_STATUSES = ("pushed", "unchanged")
+
+
+def push_now(runtime: Any, label: str) -> dict[str, Any]:
+    """Push the checkpoint just written, and prove it landed. Raises otherwise.
+
+    The ordinary pusher runs on a 30-minute window and answers a call inside that window by
+    returning the previous state untouched. That is right for a tick and wrong here: the cutover's
+    contract is that this particular commit is on the remote before the board is rewritten, so the
+    window is bypassed rather than waited on, and any outcome short of the commit being on the
+    remote leaves the freeze in force.
+    """
+    pusher = getattr(runtime, "checkpoint_push", None)
+    if pusher is None:
+        raise BackfillError(
+            f"the {label} checkpoint cannot be pushed: this runtime has no checkpoint pusher, so "
+            "the cutover has no recovery point"
+        )
+    try:
+        # An empty state is a pusher that has never run, which is exactly how the window is
+        # bypassed: `_due` admits it. Nothing else about the tick's push state is touched.
+        result = pusher.push({})
+    except Exception as exc:  # noqa: BLE001 - the reason travels into the operator's refusal
+        raise BackfillError(
+            f"the {label} checkpoint could not be pushed: {type(exc).__name__}: {exc}"
+        ) from None
+    status = str((result or {}).get("status") or "")
+    if status not in PUSH_SUCCESS_STATUSES:
+        raise BackfillError(
+            f"the {label} checkpoint was not pushed (status {status or 'unknown'}: "
+            f"{(result or {}).get('reason') or 'no reason given'}); the cutover needs a remote "
+            "recovery point before it rewrites the board"
+        )
+    return dict(result or {})
+
+
+def record_migration_completed(
+    runtime: Any, inventory: dict[str, Any], *, rows: int, at: str,
+) -> str:
+    """Write the one durable event that makes this installation migrated.
+
+    Staged then committed, like every other durable effect, and keyed on the inventory digest so a
+    retry of the same cutover finds its own event rather than writing a second one.
+    """
+    audit = runtime.audit
+    request_id = f"observer-migration-completed:{inventory.get('digest') or ''}"
+    committed = audit.committed_event(request_id)
+    if committed is not None:
+        return str(committed.get("event_id") or "")
+    event = {
+        "event_id": "evt_" + uuid.uuid4().hex,
+        "schema_version": 1,
+        "occurred_at": str(at),
+        "actor": {"role": "steward", "id": "observer-migration"},
+        "kind": MIGRATION_COMPLETED_KIND,
+        "outcome": "success",
+        "task_id": "",
+        "ref": "",
+        "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
+        "request_id": request_id,
+        "payload": {
+            "inventory_digest": str(inventory.get("digest") or ""),
+            "rows": int(rows),
+        },
+    }
+    audit.stage(request_id, event)
+    return str(audit.append(request_id, event))
+
+
 def run_cutover(
     runtime: Any,
     *,
@@ -335,15 +418,16 @@ def run_cutover(
     """
     from secretary.dispatcher_pause import normalize_pause_mode
     from secretary.dispatcher_pause_ops import resume as lift_pause
-    from secretary.dispatcher_production import _push_checkpoint, _write_checkpoint
+    from secretary.dispatcher_production import _write_checkpoint
 
     data_dir = Path(data_dir)
     steps: list[dict[str, Any]] = []
 
-    if strict_reader_active(data_dir):
-        # Nothing to do, and saying so is not the same as doing it again: the marker is the
-        # installation's proof that a full scan passed, and a second cutover would rewrite it on
-        # the strength of an inventory taken against an already-migrated board.
+    if strict_marker_present(data_dir):
+        # The marker is written last, so its presence is the proof that every step before it ran.
+        # The gate is deliberately the marker rather than `strict_reader_active`: a run that died
+        # between the durable completion event and the marker has a checkpoint still to take, and
+        # this has to resume it rather than report a finished cutover.
         return {
             "ok": True, "action": "sprint migrate-observer", "status": "already-migrated",
             "steps": steps,
@@ -376,10 +460,11 @@ def run_cutover(
     checkpoint = _write_checkpoint(runtime)
     if checkpoint is None or checkpoint.get("status") == "blocked":
         raise BackfillError(f"the pre-migration checkpoint could not be written: {checkpoint}")
-    push = _push_checkpoint(runtime, payload)
-    if push is not None and push.get("status") == "blocked":
-        raise BackfillError(f"the pre-migration checkpoint could not be pushed: {push}")
-    steps.append({"step": "pre-migration-checkpoint", "status": "ok", "checkpoint": checkpoint})
+    push = push_now(runtime, "pre-migration")
+    steps.append({
+        "step": "pre-migration-checkpoint", "status": "ok",
+        "checkpoint": checkpoint, "push": push,
+    })
 
     stored = read_inventory(data_dir)
     if stored is None:
@@ -399,10 +484,20 @@ def run_cutover(
         raise BackfillError("the post-migration scan refused the board: " + "; ".join(problems))
     steps.append({"step": "strict-scan", "status": "ok"})
 
+    # The completion fact, and the only thing that makes this installation strict. It is written
+    # after the scan, so a half-written board never reads as migrated, and before the checkpoint,
+    # so the snapshot a replacement host is rebuilt from carries it.
+    completion = record_migration_completed(runtime, stored, rows=len(written), at=now)
+    steps.append({"step": "migration-completed", "status": "ok", "event_id": completion})
+
     after = _write_checkpoint(runtime)
     if after is None or after.get("status") == "blocked":
         raise BackfillError(f"the post-migration checkpoint could not be written: {after}")
-    steps.append({"step": "post-migration-checkpoint", "status": "ok", "checkpoint": after})
+    after_push = push_now(runtime, "post-migration")
+    steps.append({
+        "step": "post-migration-checkpoint", "status": "ok",
+        "checkpoint": after, "push": after_push,
+    })
 
     marker = activate_strict_reader(
         data_dir,

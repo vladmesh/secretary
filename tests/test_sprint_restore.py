@@ -18,7 +18,7 @@ from unittest import mock
 
 from secretary.data import export_board, init_layout, normalize_sprint_entity
 from secretary.restore import RestoreError, import_normalized_board, restore_findings, restore_state
-from secretary.sprint_observer import head_choice
+from secretary.sprint_observer import forget_migration_state, head_choice, strict_reader_active
 from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
 from secretary.tasks import TaskWriter
 
@@ -155,7 +155,11 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(self._exported_sprint()["observer"], head_choice("codex-observer"))
 
     def test_an_invalid_observer_value_stops_the_restore_before_the_first_write(self) -> None:
-        """Validated as a set, so a bad row cannot leave the rows before it on the board."""
+        """Validated as a set, before the Pipeline cards, not at the sprint step that follows them.
+
+        Sprint entities are written after every card, so validating them where they are written
+        would leave a fully restored card board behind the refusal.
+        """
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0]["observer"] = {"kind": "default"}
         (self.target_data / "board" / "sprints.json").write_text(
@@ -168,6 +172,80 @@ class SprintRestoreTests(unittest.TestCase):
 
         board = ensure_sprint_board(client)  # type: ignore[arg-type]
         self.assertEqual([task for task in client.tasks if task["project_id"] == board], [])
+        # The Pipeline card of the same export is untouched too: nothing of either set was written.
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(
+            [method for method, _ in client.calls if method in {"createTask", "saveTaskMetadata"}],  # type: ignore[attr-defined]
+            [],
+        )
+
+    def _mark_migrated(self, data_dir: Path) -> None:
+        """Put the migration's completion event in the log this recovery travels with."""
+        events = data_dir / "board" / "events.ndjson"
+        events.parent.mkdir(parents=True, exist_ok=True)
+        with events.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "event_id": "evt_migration_done", "schema_version": 1,
+                "occurred_at": "2026-08-02T00:00:00Z",
+                "actor": {"role": "steward", "id": "observer-migration"},
+                "kind": "observer_migration_completed", "outcome": "success",
+                "task_id": "", "ref": "",
+                "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
+                "request_id": "observer-migration-completed:test",
+                "payload": {"inventory_digest": "test", "rows": 1},
+            }, sort_keys=True) + "\n")
+        forget_migration_state(data_dir)
+
+    def test_a_migrated_export_missing_an_observer_is_refused(self) -> None:
+        """After the migration a row without the field is a corrupt export, not an old one."""
+        self._mark_migrated(self.target_data)
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        payload["sprints"][0].pop("observer")
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(RestoreError, "completed the observer migration"):
+            import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+
+    def test_a_pre_migration_export_restores_as_it_was_and_stays_tolerant(self) -> None:
+        """Recovery of an unmigrated checkpoint brings back the rows and the tolerant reader.
+
+        The two recover together, because both come from the same log: the strict reader is never
+        activated against rows it would call corrupt, and recovery never invents an executable
+        choice that nobody ever made.
+        """
+        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        payload["sprints"][0].pop("observer")
+        payload["sprints"][0]["status"] = "open"
+        (self.target_data / "board" / "sprints.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        forget_migration_state(self.target_data)
+
+        client, _ = self._restore()
+
+        live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
+        self.assertNotIn("observer", live)
+        self.assertEqual(live["status"], "open")
+        self.assertFalse(strict_reader_active(self.target_data))
+
+    def test_a_second_disaster_keeps_the_migrated_strict_state(self) -> None:
+        """The checkpoint of a migrated installation recovers a migrated installation."""
+        self._mark_migrated(self.target_data)
+        first, _ = self._restore()
+        export_board(self.target_data, command=self._pipeline_command(), sprint_client=first)
+        second_data = self.root / "second-migrated"
+        shutil.copytree(self.target_data, second_data)
+        forget_migration_state(second_data)
+
+        second = _EmptyBoardsKanboard()
+        import_normalized_board(second_data, client=second)  # type: ignore[arg-type]
+
+        live = SprintReader(second, data_dir=second_data).show(self.ref)  # type: ignore[arg-type]
+        self.assertEqual(live["observer"], head_choice("codex-observer"))
+        self.assertTrue(strict_reader_active(second_data))
+        self.assertFalse((second_data / "sprints" / "observer-strict.json").exists())
 
     def test_an_open_row_is_refused_when_its_export_carries_provenance(self) -> None:
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
