@@ -105,7 +105,7 @@ _PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}
 _EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ready", "blocked"}
 # `assessment` is a durable wait: a card parked there has no running head and no mechanical
-# gate left to run, and it leaves only when the observer (or the PO) decides release, rework or
+# gate left to run, and it leaves only when the sprint's observer decides release, rework or
 # reslice. A substantive reviewer verdict parks the card here; the dispatcher then performs the
 # recorded decision, so the effect of a verdict is never the verdict's own tick.
 _STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
@@ -142,8 +142,14 @@ _ROUTING_PHASES = {"worker", "review", "verdict"}
 # dispatcher and can fail, and a failed effect must leave the card parked rather than half
 # released. `blocked` takes no decision requirement: it is the escape hatch the steward's stale
 # escalation and every dispatcher failure path already use, and refusing it would strand cards.
-_DECISIONS = {"release", "rework", "reslice"}
+_DECISION_TARGETS = {"release": "done", "rework": "in_progress", "reslice": "blocked"}
+_DECISIONS = set(_DECISION_TARGETS)
 _DECIDED_TARGETS = {"done", "in_progress"}
+# The other three ways out of Assessment. Each of them leaves the column with nothing decided,
+# and Ready additionally clears the claim and lets a second worker start on the reviewed
+# checkout, so the two automated roles reach them only through a visible sprint override.
+_UNDECIDED_EXITS = {"ready", "validate", "issues"}
+_DECISION_BOUND_ROLES = {"observer", "dispatcher"}
 # States in which a card holds a workspace, a suspended worker or a running head. `assessment`
 # is one of them: the reviewer is gone, but the worker and its checkout are retained for a
 # rework decision, so a second writer in the same project is as wrong there as in Validate.
@@ -171,6 +177,10 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
     decision about earlier work, and letting one release a later verdict is exactly the replay
     the seam exists to prevent. Both readers use this, the board writer refusing a decision-less
     move and the dispatcher deciding what to perform, so neither can drift from the other.
+
+    A `decision_failed` line takes the decision back down. That is what makes a release the
+    dispatcher could not perform leave the card parked and waiting for the observer instead of
+    parked and retried on every tick with the same result.
     """
     parked_at = -1
     ordered = list(events)
@@ -185,6 +195,8 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if event.get("kind") == "decided" and str(payload.get("decision") or ""):
             decision = str(payload["decision"])
+        elif event.get("kind") == "decision_failed":
+            decision = ""
     return decision
 
 
@@ -916,10 +928,15 @@ class TaskWriter:
         losing the decision or half-performing it. It also makes the decision checkable: the move
         out of Assessment refuses to carry one that is not on the card.
 
+        The observer decides, and nobody else. One sprint has one observer and the decision is
+        its judgement about a card it has been watching; a PO that has to intervene moves the
+        card with `--sprint-override` and a reason, which reads in the audit as the override it
+        is rather than as an unmarked decision.
+
         No sprint reservation guard here, unlike `move`: this write changes nothing on its own,
         and the move that acts on it carries that guard already.
         """
-        self._role(role, {"observer", "po"})
+        self._role(role, {"observer"})
         if kind not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
         if not body.strip():
@@ -935,6 +952,31 @@ class TaskWriter:
 
         return self._write(
             "decided", role, actor, reference, request_id,
+            {"marker": marker, "decision": kind, "body_sha256": _digest(body)}, mutation,
+        )
+
+    def decision_failed(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+        """The dispatcher could not perform a decision, and the card stays parked.
+
+        This takes the decision back down: without it the same doomed effect would be retried on
+        every tick, and the observer would never be asked again. The card does not move, so the
+        state the failure leaves behind is the one the card was already in, with the reason for
+        the failure readable on it.
+        """
+        self._role(role, {"dispatcher"})
+        if kind not in _DECISIONS:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
+        if not body.strip():
+            raise TaskError("validation", "a failed decision requires a non-empty reason", 2)
+        marker = "decision:failed"
+
+        def mutation(task: dict[str, Any]) -> Any:
+            if task["state"] != "assessment":
+                raise TaskError("transition_forbidden", "a decision only fails on a card in Assessment", 3)
+            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
+
+        return self._write(
+            "decision_failed", role, actor, reference, request_id,
             {"marker": marker, "decision": kind, "body_sha256": _digest(body)}, mutation,
         )
 
@@ -1070,7 +1112,7 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            self._check_decision(task, source, target, decision)
+            self._check_decision(task, source, target, decision, role, bool(override_payload))
             self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
             try:
                 if target in {"ready", "done"}:
@@ -1092,23 +1134,47 @@ class TaskWriter:
             mutation,
         )
 
-    def _check_decision(self, task: dict[str, Any], source: str, target: str, decision: str) -> None:
+    def _check_decision(
+        self, task: dict[str, Any], source: str, target: str, decision: str, role: str,
+        overridden: bool,
+    ) -> None:
         """A card leaves Assessment on a decision somebody recorded, or it does not leave.
 
-        Only `done` and `in_progress` are held to it: those are the two ways a parked card
-        rejoins the pipeline. `blocked` is left open on purpose: the steward's stale escalation
-        and the dispatcher's own failure paths reach it without anyone having decided anything,
-        and a card that cannot be blocked is a card nothing can rescue.
+        Each decision has exactly one destination, so the recorded decision and the move that
+        performs it cannot say different things: a `release` paired with a move back to In
+        progress is a rework nobody decided.
+
+        `blocked` without a decision is left open on purpose: the steward's stale escalation and
+        the dispatcher's own failure paths reach it without anyone having decided anything, and a
+        card that cannot be blocked is a card nothing can rescue. The three remaining exits are
+        not left open, because each of them leaves the column with the decision still unmade;
+        an automated role reaches them only through a sprint override, which is recorded.
         """
         if decision and decision not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
         if decision and source != "assessment":
             raise TaskError("validation", "a decision is only carried by a move out of Assessment", 2)
+        if decision and _DECISION_TARGETS[decision] != target:
+            raise TaskError(
+                "decision_mismatch",
+                f"a {decision} decision moves the card to {_DECISION_TARGETS[decision]}, not {target}",
+                3,
+            )
         if source == "assessment" and target in _DECIDED_TARGETS and not decision:
             raise TaskError(
                 "decision_required",
                 "a card leaves Assessment only on a recorded decision: record one with "
                 "`task decide` and pass it as --decision",
+                3,
+            )
+        if (
+            source == "assessment" and target in _UNDECIDED_EXITS
+            and role in _DECISION_BOUND_ROLES and not overridden
+        ):
+            raise TaskError(
+                "decision_required",
+                f"{role} may not move a parked card to {target}: that leaves Assessment with "
+                "nothing decided. Decide the card, or move it with --sprint-override and a reason",
                 3,
             )
         if decision and not self._decision_recorded(task["ref"], decision):

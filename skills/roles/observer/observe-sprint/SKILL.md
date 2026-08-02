@@ -231,9 +231,15 @@ python3 -m secretary task decide --role observer --actor observer --ref <card-re
 ```
 
 Do not move the card out of Assessment yourself: the move is refused unless it carries a decision
-somebody recorded, and the effect has to run before the card moves. The `triggered_agents pipeline`
-CLI does not serve this either, it only carries the steward's escalation to Blocked. Left alone the
-card wakes the steward as a stale one, which is an escalation, not a decision.
+somebody recorded, it is refused outright towards Ready, Validate and Issues, and the effect has to
+run before the card moves. The `triggered_agents pipeline` CLI does not serve this either, it only
+carries the steward's escalation to Blocked. Left alone the card wakes the steward as a stale one,
+which is an escalation, not a decision.
+
+A release the dispatcher could not carry out comes back to you: the card is still parked, a
+`[decision:failed]` comment on it says what went wrong, and your decision is no longer standing.
+Read that comment before deciding again; if it says the branch is merged, the card is done work and
+the answer is not another release.
 
 Default to release. The seam exists so drift is caught at every round, not so every round is
 argued: hold a card only when there is a reason to think about recutting or fixing the task, and say

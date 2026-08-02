@@ -63,22 +63,38 @@ Assessment to Blocked with a reason, its usual escalation when nobody comes back
 workers and reviewers move nothing, there as everywhere else. A card left in Assessment past the
 steward's stale threshold is reported like any other stuck card.
 
-The decision and its effect are two writes. The observer (or the PO) records the decision on the
-card, and the dispatcher performs it: merge and `assessment -> done` for a release, a new worker
-round and `assessment -> in_progress` for a rework, `assessment -> blocked` for a reslice. A release
-that cannot land leaves the decision standing and the card parked or blocked, never half merged.
+A card parks only where a decision can come from: its sprint is open and declares a concrete
+observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
+closed, keeps the immediate behaviour, where the verdict acts on its own tick.
+
+The decision and its effect are two writes. The observer records the decision on the card, and the
+dispatcher performs it: merge and `assessment -> done` for a release, a new worker round and
+`assessment -> in_progress` for a rework, `assessment -> blocked` for a reslice.
 
 ```bash
 python3 -m secretary task decide --role observer --ref PROJECT-N \
   --kind release --reason-file REASON.md --request-id REQUEST_ID
 ```
 
-`--kind` is `release`, `rework` or `reslice`, and the reason is required. The move out of Assessment
-carries the decision it performs: `assessment -> done` and `assessment -> in_progress` are refused
-unless `--decision` names a decision recorded on that card since it entered the column, which is
-what makes the seam checkable from the audit alone. `assessment -> blocked` takes no decision: it
-is the escalation path the steward and the dispatcher's own failures use, and a card that cannot be
-blocked is a card nothing can rescue.
+`--kind` is `release`, `rework` or `reslice`, and the reason is required. The observer is the only
+role that decides; a PO that has to intervene moves the card with `--sprint-override` and a reason,
+which reads in the audit as the override it is.
+
+The move out of Assessment carries the decision it performs, and each decision has one destination:
+`release` goes to Done, `rework` to In progress, `reslice` to Blocked. A move to Done or In progress
+is refused unless `--decision` names a decision recorded on that card since it entered the column,
+and a decision paired with the wrong destination is refused as well, which is what makes the seam
+checkable from the audit alone. `assessment -> ready`, `-> validate` and `-> issues` are refused for
+the observer and the dispatcher: each leaves the column with nothing decided, and Ready additionally
+clears the claim. `assessment -> blocked` takes no decision: it is the escalation path the steward
+and the dispatcher's own failures use, and a card that cannot be blocked is a card nothing can
+rescue.
+
+A release the dispatcher cannot carry out never leaves the card looking reworkable. If the branch
+did not reach the base, the card stays parked, the failure is recorded on it and the decision comes
+back down, so the observer decides again. If the branch did reach the base, the work is merged: the
+release is finished on top of that fact, and where it cannot be, the card goes to Blocked with a
+reason saying the branch is merged and the release was not finalised.
 
 `secretary task move` is the writer for the transition itself. The board has one role and transition
 model, this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries

@@ -65,7 +65,7 @@ from secretary.dispatcher_watchdog import (
     wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
@@ -430,6 +430,10 @@ class FakeHost:
         # out of band, a merge push the remote rejects, an orca terminal inventory that errors.
         self.fail_restart_reason = ""
         self.fail_complete_reason = ""
+        # Whether a failing merge got the branch onto the base before it failed, and whether the
+        # remote can be asked about it at all. Those are the two facts the release path splits on.
+        self.publish_before_failing = False
+        self.fail_publish_probe_reason = ""
         self.review_running_error: Exception | None = None
         # None keeps the default "a review started in this process is live"; set a bool to model a
         # reviewer terminal that died after launch, which is what recovery actually has to detect.
@@ -681,8 +685,18 @@ class FakeHost:
     def complete_green(self, task: dict, record) -> None:
         self.calls.append("complete_green")
         if self.fail_complete_reason:
+            # The real host publishes and then refreshes the local checkout as separate steps, so
+            # a failure with the branch already on the base is a real shape, not a contrivance.
+            if self.publish_before_failing:
+                self.completed.append(task["ref"])
             raise HostError(self.fail_complete_reason)
         self.completed.append(task["ref"])
+
+    def merge_published(self, task: dict, record) -> bool:
+        self.calls.append("merge_published")
+        if self.fail_publish_probe_reason:
+            raise HostError(self.fail_publish_probe_reason)
+        return task["ref"] in self.completed
 
     def stop(self, record) -> None:
         self.calls.append("stop")
@@ -807,6 +821,26 @@ class FakePusher:
         return {**(state or {}), **self.outcome}
 
 
+class FakeSprints:
+    """The sprint facts the card cycle asks about, and nothing else.
+
+    `show` answers what a card's sprint declares, which is what decides whether a verdict parks.
+    `list` stays empty on purpose: the observer *head* lifecycle is reconciled from it, and these
+    tests are about the cards, not about the head that watches them.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+
+    def list(self, *args, **kwargs) -> list[dict]:
+        return []
+
+    def show(self, reference: str, **kwargs) -> dict:
+        if reference not in self.rows:
+            raise TaskError("not_found", f"no sprint {reference}", 3)
+        return self.rows[reference]
+
+
 class FakeLegacyPause:
     def __init__(self) -> None:
         self.sufficient = True
@@ -863,6 +897,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
         self.legacy_pause = FakeLegacyPause()
+        self.sprints = FakeSprints()
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -872,13 +907,32 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=self.legacy_pause,  # type: ignore[arg-type]
+            sprints=self.sprints,
         )
         self.selector = PilotSelector.exact("secretary-510-pilot")
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def observed_sprint(self, *, profile: str = "claude-observer", status: str = "open") -> None:
+        """Put the pilot card in a sprint that declares a concrete observer head.
+
+        That declaration is what makes a substantive verdict park for a decision: a card with
+        nobody to release it keeps the immediate behaviour, which `unobserved_card` restores.
+        """
+        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        self.sprints.rows["sprint:1031"] = {
+            "ref": "sprint:1031", "status": status,
+            "observer": {"kind": "head", "profile": profile},
+        }
+
+    def unobserved_card(self) -> None:
+        """Take the observer away again: the card parks nowhere and its verdicts act at once."""
+        self.board.metadata[12].pop("sprint_ref", None)
+        self.sprints.rows.clear()
+
     def start_pilot(self) -> None:
+        self.observed_sprint()
         self.runtime.pause_old(self.selector, actor="operator", evidence="legacy hard pause")
         started = self.runtime.start_new_pilot(self.selector, actor="operator")
         self.assertEqual(started["status"], "ok")
@@ -1445,6 +1499,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     def test_production_requeue_after_failed_rework_requires_the_preserved_workspace(self) -> None:
         """A fresh production attempt must retain the failed rework's resume provenance."""
+        self.observed_sprint()
         self.commit_cutover()
         self.runtime.production_tick()
         self.writer.report(
@@ -3017,11 +3072,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         return self.runtime.state.load()["records"]["secretary-510-pilot"]
 
     def test_a_green_verdict_parks_before_it_merges(self) -> None:
-        """The ordering proof: the release effect is broken, and nothing is merged anyway.
+        """The ordering proof, in two halves.
 
-        A merge that cannot land is the sharpest way to ask whether the merge was even reached.
-        It is not: the verdict's own tick parks the card and stops there, so the failure the
-        host is primed with never happens and the card is waiting for a decision, not blocked.
+        The release effect is broken before the verdict is even given. The verdict's own tick
+        parks the card and stops there, so the failure never happens: nothing merged, nothing
+        torn down. Then the decision is recorded and the broken effect does run, and the card is
+        still parked in Assessment rather than merged, blocked or sent back for rework.
         """
         self.start_pilot()
         self.host.fail_complete_reason = "merge push failed: ! [rejected] non-fast-forward"
@@ -3056,6 +3112,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(waiting["action"], "waiting-observer-decision")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
         self.assertEqual(self.host.completed, [])
+
+        # Now record the decision, so the broken effect is actually reached.
+        self._decide("release")
+
+        held = self.runtime.tick(self.selector)
+
+        self.assertEqual(held["action"], "release-failed-held")
+        self.assertIn("complete_green", self.host.calls, "the release effect was exercised")
+        self.assertEqual(self.host.completed, [], "nothing was merged")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(self.host.torn_down, [])
+        self.assertEqual(self.host.resumed_workers, [], "and it was not reworked either")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PARKED.value,
+        )
+        # The failure is on the card and the decision is back down, so the next tick waits for
+        # the observer instead of retrying the same doomed merge.
+        card = self.reader.show("secretary-510-pilot")
+        self.assertIn("non-fast-forward", card["comments"][-1]["body"])
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-observer-decision")
+        self.assertEqual(self.host.calls.count("complete_green"), 1)
 
     def test_a_red_verdict_parks_before_the_worker_continues(self) -> None:
         self.host.fail_resume_worker_reason = ""
@@ -3195,9 +3273,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(len(moved), 1)
         self.assertEqual((moved[0]["payload"]["to"], moved[0]["payload"]["decision"]), ("done", "release"))
 
-    def test_a_checkout_that_moved_while_parked_blocks_instead_of_releasing(self) -> None:
+    def test_a_checkout_that_moved_while_parked_holds_the_decision(self) -> None:
         """The reviewed commit is the only thing a release may land, and a park can last a while.
-        A card whose checkout moved under it is a question for a person, not another round."""
+        A card whose checkout moved under it is a decision that cannot be carried out: nothing
+        external happened, so the card keeps waiting and the observer is asked again."""
         self.start_pilot()
         self._run_worker_to_validate()
         self.runtime.tick(self.selector)
@@ -3210,14 +3289,155 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.commit = "moved-under-the-park-c0ffee"
         self._decide("release")
 
-        blocked = self.runtime.tick(self.selector)
+        held = self.runtime.tick(self.selector)
 
-        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(held["action"], "release-drift-held")
         card = self.reader.show("secretary-510-pilot")
-        self.assertEqual(card["state"], "blocked")
+        self.assertEqual(card["state"], "assessment")
         self.assertIn(reviewed[:12], card["comments"][-1]["body"])
         self.assertEqual(self.host.completed, [])
         self.assertEqual(self.host.torn_down, [])
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-observer-decision")
+
+    def test_a_release_that_published_before_failing_finishes_the_merge(self) -> None:
+        """The publish landed and a later step did not. The work is merged, and that is a fact
+        about the world: the card is finished on top of it, never reworked and never re-pushed."""
+        self.start_pilot()
+        self.host.fail_complete_reason = "post-merge fast-forward failed: local checkout diverged"
+        self.host.publish_before_failing = True
+        self._drive_to_green_verdict()
+
+        released = self._park_and_decide("release")
+
+        self.assertEqual(released["to"], "done")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+        self.assertEqual(self.host.torn_down, ["secretary-510-pilot-pilot"])
+        self.assertIn("post-merge fast-forward failed", card["comments"][-1]["body"])
+
+    def test_a_release_that_cannot_be_finalised_says_the_branch_is_merged(self) -> None:
+        """The one case that ends in Blocked: published, and the rest of the release cannot be
+        finished. The reason has to say the branch is merged, or somebody reworks a landed card."""
+        self.start_pilot()
+        self._drive_to_green_verdict()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+        self._decide("release")
+        real_move = self.writer.move
+
+        def refuse_the_done_move(**kwargs):
+            if kwargs.get("target") == "done":
+                raise TaskError("backend_error", "Kanboard refused the Done column", 1)
+            return real_move(**kwargs)
+
+        with mock.patch.object(self.writer, "move", refuse_the_done_move):
+            blocked = self.runtime.tick(self.selector)
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "release not finalised")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        self.assertIn("The branch is merged", card["comments"][-1]["body"])
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_a_release_whose_publish_cannot_be_read_does_nothing(self) -> None:
+        """Neither answer is safe to guess, so neither is taken: the release intent stays on
+        disk, the card does not move, and the next tick asks the remote again."""
+        self.start_pilot()
+        self.host.fail_complete_reason = "merge push failed: connection reset"
+        self.host.fail_publish_probe_reason = "cannot reach origin"
+        self._drive_to_green_verdict()
+
+        unknown = self._park_and_decide("release")
+
+        self.assertEqual(unknown["action"], "release-publish-unreadable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.RELEASE_PENDING.value,
+        )
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual(self.host.torn_down, [])
+
+        # The remote comes back and says the branch never landed: the release runs again.
+        self.host.fail_publish_probe_reason = ""
+        self.host.fail_complete_reason = ""
+
+        released = self.runtime.tick(self.selector)
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_a_crash_inside_the_release_is_resumed_from_the_remote(self) -> None:
+        """Boundary three: a tick that died with a publish in flight. What landed is read from
+        the remote, so a merge that happened is finished and one that did not is retried."""
+        self.start_pilot()
+        self._drive_to_green_verdict()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "assessment")
+        self._decide("release")
+
+        def die_after_publishing(task: dict, record) -> None:
+            self.host.completed.append(task["ref"])
+            raise OSError("dispatcher died with the publish in flight")
+
+        with mock.patch.object(self.host, "complete_green", die_after_publishing):
+            with self.assertRaises(OSError):
+                self.runtime.tick(self.selector)
+
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.RELEASE_PENDING.value,
+            "the release intent is on disk before the merge is attempted",
+        )
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["to"], "done")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"], "and never a second push")
+
+    def test_a_card_with_no_observer_merges_on_the_verdict_tick(self) -> None:
+        """Criterion: a card nobody watches must not be parked, because nothing would release it.
+        Its green verdict merges and its red verdict reworks, exactly as before the seam."""
+        self.start_pilot()
+        self.unobserved_card()
+        self._drive_to_green_verdict()
+
+        merged = self.runtime.tick(self.selector)
+
+        self.assertEqual(merged["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_a_card_whose_sprint_declares_no_observer_reworks_on_the_verdict_tick(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.sprints.rows["sprint:1031"]["observer"] = {"kind": "none"}
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+
+        reworked = self.runtime.tick(self.selector)
+
+        self.assertEqual(reworked["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_closed_sprint_does_not_park_the_cards_it_left_behind(self) -> None:
+        self.start_pilot()
+        self.sprints.rows["sprint:1031"]["status"] = "closed"
+        self._drive_to_green_verdict()
+
+        merged = self.runtime.tick(self.selector)
+
+        self.assertEqual(merged["to"], "done")
+
+    def test_an_unreadable_sprint_board_does_not_park(self) -> None:
+        """An answer that cannot be read is not a reason to put a card in a wait nobody can end."""
+        self.start_pilot()
+        self.sprints.rows.clear()
+        self._drive_to_green_verdict()
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "done")
 
     def test_a_crash_between_the_verdict_and_the_park_resumes_parked(self) -> None:
         """Boundary one. The verdict is durable before the board moves, so the recovery of a
@@ -3730,14 +3950,19 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
 
     def test_rejected_merge_blocks_the_card_instead_of_escaping_the_tick(self) -> None:
-        """The merge push is rejected when the branch is not a fast-forward of main. That must
-        park the card in Blocked: an escaping HostError would leave a released card in Assessment
-        and every later tick would retry the same doomed merge with the worker terminals still up."""
+        """The merge push is rejected when the branch is not a fast-forward of main.
+
+        On a card that merges on its own tick there is no parked state to hold it in, so the
+        card lands in Blocked: an escaping HostError would leave a green verdict in Validate and
+        every later tick would retry the same doomed merge with the worker terminals still up.
+        A card with an observer holds the decision instead, which is the test below.
+        """
         self.start_pilot()
+        self.unobserved_card()
         self.host.fail_complete_reason = "merge push failed: ! [rejected] non-fast-forward"
         self._drive_to_green_verdict()
 
-        result = self._park_and_decide("release")
+        result = self.runtime.tick(self.selector)
 
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "merge failed")
@@ -5949,7 +6174,9 @@ class DispatcherLauncherTests(unittest.TestCase):
             )
             records = {"secretary-510-pilot": record}
 
-            result = runtime._finish_green(
+            # The card carries no sprint, so the green verdict merges on its own tick: the
+            # entry point moved with the seam, what it does on this path did not.
+            result = runtime._park_green_verdict(
                 TaskReader(board).show("secretary-510-pilot"),  # type: ignore[arg-type]
                 record,
                 records,

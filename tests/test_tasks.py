@@ -25,6 +25,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    standing_decision,
     _STATE_BY_COLUMN,
     _STATES,
     _TRANSITIONS,
@@ -1255,6 +1256,91 @@ class AssessmentStateTests(unittest.TestCase):
 
         self.assertEqual(escalated["task"]["state"], "blocked")
 
+    def test_only_the_observer_decides(self) -> None:
+        """One authority for the decision. A PO that has to intervene overrides visibly."""
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "role is not permitted"):
+            self.writer.decide(
+                role="po", actor="operator", reference="secretary-468",
+                kind="release", body="ship it", request_id="po-decision",
+            )
+
+    def test_a_decision_moves_the_card_where_that_decision_goes(self) -> None:
+        """A recorded release paired with a move back to In progress is a rework nobody decided."""
+        self._park()
+        self._decide("release")
+
+        with self.assertRaisesRegex(TaskError, "release decision moves the card to done") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="in_progress",
+                reason="", decision="release", request_id="release-to-in-progress",
+            )
+
+        self.assertEqual(raised.exception.code, "decision_mismatch")
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_the_undecided_exits_from_assessment_are_closed(self) -> None:
+        """Ready, Validate and Issues all leave the column with nothing decided, and Ready also
+        clears the claim, which is what would let a second worker start on a reviewed checkout."""
+        self._park()
+
+        # The observer is the role that owns this column, so it is the one whose refusal has to
+        # come from the decision rule rather than from the sprint's reservation guard.
+        with mock.patch.object(TaskWriter, "_sprint_holds_project", return_value=True):
+            for target in ("ready", "validate", "issues"):
+                with self.assertRaises(TaskError) as raised:
+                    self.writer.move(
+                        role="observer", actor="o", reference="secretary-468", target=target,
+                        reason="", request_id=f"observer-bypass-{target}",
+                    )
+                self.assertEqual(raised.exception.code, "decision_required")
+        for target in ("ready", "validate", "issues"):
+            with self.assertRaises(TaskError) as raised:
+                self.writer.move(
+                    role="dispatcher", actor="d", reference="secretary-468", target=target,
+                    reason="", request_id=f"dispatcher-bypass-{target}",
+                )
+            self.assertIn(raised.exception.code, {"decision_required", "transition_forbidden"})
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:
+        """The escape hatch stays open, and it is recorded as the override it is."""
+        self._park()
+
+        requeued = self.writer.move(
+            role="po", actor="operator", reference="secretary-468", target="ready",
+            reason="taking this one back by hand", request_id="po-requeue",
+        )
+
+        self.assertEqual(requeued["task"]["state"], "ready")
+
+    def test_a_failed_decision_takes_the_decision_back_down(self) -> None:
+        """What keeps a card the dispatcher could not release from being retried forever."""
+        self._park()
+        self._decide("release")
+
+        failed = self.writer.decision_failed(
+            role="dispatcher", actor="d", reference="secretary-468", kind="release",
+            body="the merge did not land", request_id="release-failed",
+        )
+
+        self.assertEqual(failed["action"], "decision_failed")
+        self.assertEqual(failed["task"]["comments"][-1]["marker"], "decision:failed")
+        self.assertEqual(failed["task"]["state"], "assessment")
+        self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
+        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="release-after-failure",
+            )
+
+        # And the observer deciding again puts it back up.
+        self._decide("release", request_id="decision-release-again")
+        self.assertEqual(
+            standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "release"
+        )
+
     def test_worker_may_not_move_a_card_out_of_assessment(self) -> None:
         self.client.tasks[0]["column_id"] = 7
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
@@ -1307,11 +1393,19 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(json.loads(errors)["error"]["code"], "decision_required")
 
         # The CLI writes its audit under its own data dir, so the decision it will be checked
-        # against has to be recorded there too.
-        TaskWriter(self.client, data_dir=str(Path(self.tmpdir.name) / "data")).decide(
-            role="observer", actor="observer", reference="secretary-468", kind="release",
-            body="ship it", request_id="cli-decision",
-        )
+        # against has to be recorded there too, through the CLI that records decisions.
+        reason = Path(self.tmpdir.name) / "reason.md"
+        reason.write_text("ship it", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            decided = main([
+                "task", "decide", "--ref", "secretary-468", "--role", "observer",
+                "--kind", "release", "--reason-file", str(reason),
+                "--data-dir", str(Path(self.tmpdir.name) / "data"), "--request-id", "cli-decision",
+            ])
+        self.assertEqual((decided, errors.getvalue()), (0, ""))
+        self.assertEqual(json.loads(output.getvalue())["action"], "decided")
         code, output, errors = self._move_cli(
             "--role", "dispatcher", "--to", "done", "--decision", "release",
             "--request-id", "cli-to",

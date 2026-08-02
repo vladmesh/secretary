@@ -40,7 +40,13 @@ from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerCont
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
-from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
+from tests.test_dispatcher import (
+    FakeCatalog,
+    FakeHost,
+    FakeKanboard,
+    FakeLegacyPause,
+    FakeSprints,
+)
 
 REF = "secretary-510-pilot"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.
@@ -66,6 +72,14 @@ class LaunchIntentTests(unittest.TestCase):
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        # The card belongs to a sprint with a concrete observer, so a substantive verdict parks
+        # for a decision: these tests drive the rework that decision opens.
+        self.sprints = FakeSprints()
+        self.sprints.rows["sprint:1031"] = {
+            "ref": "sprint:1031", "status": "open",
+            "observer": {"kind": "head", "profile": "claude-observer"},
+        }
+        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -75,6 +89,7 @@ class LaunchIntentTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+            sprints=self.sprints,
         )
         self.selector = PilotSelector.exact(REF)
         self.runtime.pause_old(self.selector, actor="operator", evidence="legacy hard pause")
@@ -2373,6 +2388,14 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        # The card belongs to a sprint with a concrete observer, so a substantive verdict parks
+        # for a decision: these tests drive the rework that decision opens.
+        self.sprints = FakeSprints()
+        self.sprints.rows["sprint:1031"] = {
+            "ref": "sprint:1031", "status": "open",
+            "observer": {"kind": "head", "profile": "claude-observer"},
+        }
+        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -2382,6 +2405,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
             legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
+            sprints=self.sprints,
         )
         self.runtime.state.save({
             "version": 1,
