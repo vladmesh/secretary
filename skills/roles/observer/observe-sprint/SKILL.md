@@ -230,9 +230,10 @@ python3 -m secretary task decide --role observer --actor observer --ref <card-re
   --kind release|rework|reslice --reason-file <reason.md>
 ```
 
-Do not move the card out of Assessment yourself: the move is refused unless it carries a decision
-somebody recorded, it is refused outright towards Ready, Validate and Issues, and the effect has to
-run before the card moves. The `triggered_agents pipeline` CLI does not serve this either, it only
+You cannot move the card out of Assessment yourself, and a matching decision does not buy you the
+move: every exit from that column is refused to you, because the merge or the rework round has to
+run before the card moves and the dispatcher is what runs it. Recording the decision is the whole
+of your part. The `triggered_agents pipeline` CLI does not serve this either, it only
 carries the steward's escalation to Blocked. Left alone the card wakes the steward as a stale one,
 which is an escalation, not a decision.
 

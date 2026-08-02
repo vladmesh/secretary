@@ -119,7 +119,16 @@ _TRANSITIONS = {
         ("validate", "assessment"), ("assessment", "in_progress"),
         ("assessment", "done"), ("assessment", "blocked"),
     },
-    "observer": {(source, target) for source in _STATES for target in _STATES if source != target},
+    # The observer moves any card except one that is parked. `release`, `rework` and `reslice`
+    # are effects the dispatcher performs, a merge, a rework round, a reslice, and a board move
+    # that skipped them would put the card in Done with nothing merged. The observer's authority
+    # over a parked card is `task decide`; the PO's override and the steward's Blocked escalation
+    # are the two ways a card leaves Assessment without the dispatcher.
+    "observer": {
+        (source, target)
+        for source in _STATES for target in _STATES
+        if source != target and source != "assessment"
+    },
     "worker": set(), "reviewer": set(), "retro": set(),
     "steward": {
         ("blocked", "ready"), ("blocked", "done"),
@@ -147,10 +156,11 @@ _DECISIONS = set(_DECISION_TARGETS)
 _DECIDED_TARGETS = {"done", "in_progress"}
 # The other three ways out of Assessment. Each of them leaves the column with nothing decided,
 # and Ready additionally clears the claim and lets a second worker start on the reviewed
-# checkout, so the two automated roles do not take them at all. The PO still can: it is the
-# human operator, and on a reserved project that move is a recorded sprint override.
+# checkout, so the dispatcher does not take them. The PO still can: it is the human operator,
+# and on a reserved project that move is a recorded sprint override. The observer needs no entry
+# here: it leaves Assessment by no exit at all.
 _UNDECIDED_EXITS = {"ready", "validate", "issues"}
-_DECISION_BOUND_ROLES = {"observer", "dispatcher"}
+_DECISION_BOUND_ROLES = {"dispatcher"}
 # States in which a card holds a workspace, a suspended worker or a running head. `assessment`
 # is one of them: the reviewer is gone, but the worker and its checkout are retained for a
 # rework decision, so a second writer in the same project is as wrong there as in Validate.
@@ -169,6 +179,21 @@ def _check_execution_record(task: dict[str, Any]) -> None:
             "Product issues and products cannot enter execution task columns",
             3,
         )
+
+
+def _forbidden_move_message(role: str, source: str, target: str) -> str:
+    """Why a role may not make this move, said in the terms of the role that asked.
+
+    The observer out of Assessment is the one case worth its own sentence: the refusal is not
+    that the card cannot go there, it is that the observer records the decision and the
+    dispatcher performs it, so the answer is `task decide` rather than another move.
+    """
+    if role == "observer" and source == "assessment":
+        return (
+            "the observer decides about a parked card and the dispatcher performs the decision: "
+            "record it with `task decide` instead of moving the card"
+        )
+    return f"{role} may not move {source} to {target}"
 
 
 def standing_decision(events: Iterable[dict[str, Any]]) -> str:
@@ -208,6 +233,14 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     own decision on a parked card is the event that would otherwise wake it to read its own
     work: the release decision produces a card event, the card event produces a delivery, and
     the delivery has nothing in it the observer does not already know.
+
+    The role alone is enough to say "itself" here, and the reason is the writer's guards rather
+    than luck. `linked_refs` already narrows this to the sprint's own cards, and every
+    observer-authored write on such a card goes through the sprint reservation guard, which
+    admits an observer only on a project its own open sprint holds. Two open sprints cannot hold
+    one project, so an observer-authored event on a linked card can only have been authored by
+    this sprint's observer. Another sprint's observer cannot write it, and its own events are on
+    its own cards, which are not in `linked_refs`.
     """
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
     return (
@@ -934,15 +967,29 @@ class TaskWriter:
         card with `--sprint-override` and a reason, which reads in the audit as the override it
         is rather than as an unmarked decision.
 
-        No sprint reservation guard here, unlike `move`: this write changes nothing on its own,
-        and the move that acts on it carries that guard already.
+        Which observer is fixed by the same sprint reservation guard `move` carries: an observer
+        decides only about a card whose project its own open sprint holds. Two open sprints
+        cannot reserve one project, so project to sprint to observer is one to one, and a
+        decision on a linked card can only have come from that card's own observer.
         """
         self._role(role, {"observer"})
         if kind not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
         if not body.strip():
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
-        if self.reader.show(reference)["state"] != "assessment":
+        request_id = request_id or str(uuid.uuid4())
+        current = self.reader.show(reference)
+        # Authorization before anything about the card: which sprint holds the project is the
+        # question of whether this observer may write here at all.
+        self._guard_sprint_write(
+            role=role, actor=actor, project=current["project"],
+            card_sprint=str(current.get("sprint") or ""), linked_sprint=None,
+            sprint_override=False, sprint_override_reason="", request_id=request_id,
+            reference=reference,
+        )
+        if not self._sprint_holds_project(current["project"]):
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+        if current["state"] != "assessment":
             raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
         marker = f"decision:{kind}"
 
@@ -1110,7 +1157,7 @@ class TaskWriter:
             if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
                 raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
             if (source, target) not in _TRANSITIONS[role]:
-                raise TaskError("transition_forbidden", f"{role} may not move {source} to {target}", 3)
+                raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
             self._check_decision(task, source, target, decision, role)
@@ -1147,9 +1194,11 @@ class TaskWriter:
         `blocked` without a decision is left open on purpose: the steward's stale escalation and
         the dispatcher's own failure paths reach it without anyone having decided anything, and a
         card that cannot be blocked is a card nothing can rescue. The three remaining exits are
-        not left open for the observer or the dispatcher, because each of them leaves the column
-        with the decision still unmade. The PO is not held to it: it is the human operator, and on
-        a sprint-reserved project its move is already a recorded override.
+        not left open for the dispatcher, because each of them leaves the column with the decision
+        still unmade. The PO is not held to it: it is the human operator, and on a sprint-reserved
+        project its move is already a recorded override. The observer reaches none of this: the
+        authority matrix gives it no exit from Assessment at all, because performing a decision is
+        the dispatcher's part of the seam.
         """
         if decision and decision not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)

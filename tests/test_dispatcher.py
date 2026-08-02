@@ -919,17 +919,29 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         That declaration is what makes a substantive verdict park for a decision: a card with
         nobody to release it keeps the immediate behaviour, which `unobserved_card` restores.
+
+        The sprint goes onto the sprint board as well, reserving the pilot's project, because the
+        observer's decision is guarded by that reservation: an observer decides only about a card
+        whose project its own open sprint holds.
         """
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
         self.sprints.rows["sprint:1031"] = {
             "ref": "sprint:1031", "status": status,
             "observer": {"kind": "head", "profile": profile},
         }
+        row = next((row for row in self.board.sprints if row["reference"] == "sprint:1031"), None)
+        if row is None:
+            self.board.add_sprint(
+                "sprint:1031", status=status, sprint_reservations='["secretary"]',
+            )
+        else:
+            self.board.metadata[int(row["id"])]["sprint_status"] = status
 
     def unobserved_card(self) -> None:
         """Take the observer away again: the card parks nowhere and its verdicts act at once."""
         self.board.metadata[12].pop("sprint_ref", None)
         self.sprints.rows.clear()
+        self.board.sprints.clear()
 
     def start_pilot(self) -> None:
         self.observed_sprint()
@@ -1531,6 +1543,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="secretary-510-pilot",
             target="ready",
             reason="retry after infrastructure outage",
@@ -1638,6 +1652,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="secretary-510-pilot",
             target="ready",
             reason="retry preserved merge-gate workspace after infrastructure outage",
@@ -2670,6 +2686,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="secretary-510-pilot",
             target="in_progress",
             reason="operator retries the card",
@@ -2719,6 +2737,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="secretary-510-pilot",
             target="in_progress",
             reason="operator restored the workspace",
@@ -2838,6 +2858,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="secretary-510-pilot",
             target="ready",
             reason="retry after outage",
@@ -4276,7 +4298,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
         self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot",
+            role="po", actor="operator", reference="secretary-510-pilot", sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             target="ready", reason="retry", request_id="po-requeue-attempt-2",
         )
         self.board.metadata[12]["head"] = "claude-opus"
@@ -4307,7 +4330,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.state.save(payload)
         Path(pid_file_path("worker", "secretary-510-pilot")).unlink(missing_ok=True)
         self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot",
+            role="po", actor="operator", reference="secretary-510-pilot", sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             target="ready", reason="preempted", request_id="po-preempt-attempt-2",
         )
         self.board.metadata[12]["head"] = "claude-opus"
@@ -4334,7 +4358,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
         first_attempt = self.runtime.state.load()["attempt_id"]
         self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot",
+            role="po", actor="operator", reference="secretary-510-pilot", sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             target="ready", reason="preempted in review", request_id="po-preempt-validate",
         )
 
@@ -4367,7 +4392,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             retained["worker_continuation"]["stage"], WorkerContinuationStage.RETAINED.value
         )
         self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot",
+            role="po", actor="operator", reference="secretary-510-pilot", sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             target="ready", reason="preempted while validating", request_id="po-preempt-retained",
         )
 

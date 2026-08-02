@@ -80,6 +80,8 @@ class LaunchIntentTests(unittest.TestCase):
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        # And that sprint reserves the card's project, which is what lets its observer decide.
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -1773,6 +1775,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.writer.move(
             role="po", actor="operator", reference=REF, target="ready",
             reason="requeued", request_id="requeue-after-workspace-mismatch",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
         recovered = self.tick()
 
@@ -2396,6 +2400,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        # And that sprint reserves the card's project, which is what lets its observer decide.
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -2500,6 +2506,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         )
 
     def move_card(self, target: str, reason: str, request_id: str) -> None:
+        # The card's sprint reserves its project, so an operator move is a recorded override.
         self.writer.move(
             role="po",
             actor="operator",
@@ -2507,6 +2514,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             target=target,
             reason=reason,
             request_id=request_id,
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
 
     def head_alive(self, kind: str) -> bool:
@@ -2544,6 +2553,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             target="issues",
             reason="park the neighbour",
             request_id="park-neighbor",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
         self.move_card("ready", "back to the queue", "move-back-to-ready")
         for _ in range(3):
@@ -2561,6 +2572,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             reference="secretary-510-neighbor",
             target="issues",
             reason="make the requeue claimable",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
             request_id="park-neighbor-for-ready-intent",
         )
         self.move_card("ready", "requeue during bring-up", "ready-with-live-intent")

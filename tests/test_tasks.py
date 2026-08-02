@@ -13,6 +13,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.data import export_board
+from secretary.sprints import refresh_active_sprint_projects
 from secretary.routing_journal import (
     HeadRun,
     attempts,
@@ -42,6 +43,25 @@ def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
     sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
     with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
         yield ref
+
+
+# The sprint the assessment fixture's card belongs to.
+SPRINT = "sprint:1031"
+
+
+class FakeSprintReader:
+    """The sprint board as the task writer's reservation guard reads it: one open sprint."""
+
+    def __init__(self, sprint: dict[str, object]) -> None:
+        self.sprint = sprint
+
+    def list(self, **kwargs: object) -> list[dict[str, object]]:
+        return [self.sprint]
+
+    def show(self, reference: str, **kwargs: object) -> dict[str, object]:
+        if reference != self.sprint["ref"]:
+            raise TaskError("not_found", f"no sprint {reference}", 3)
+        return self.sprint
 
 
 class FakeKanboard:
@@ -1106,6 +1126,22 @@ class AssessmentStateTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
 
+    def reserve_project(
+        self, *, card_sprint: str = SPRINT, project: str = "secretary", data_dir: str = "",
+    ) -> None:
+        """Put the card in an open sprint that reserves its project.
+
+        That reservation is what entitles an observer to decide about the card, so the tests of
+        the decision path set it up as the board would have it: the guard index and the live
+        sprint row both naming the sprint the card is linked to.
+        """
+        self.client.metadata[12]["sprint_ref"] = card_sprint
+        reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": [project]})
+        patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        refresh_active_sprint_projects(data_dir or self.tmpdir.name, reader)
+
     def test_column_order_and_state_map(self) -> None:
         self.assertEqual(
             _STATES,
@@ -1135,11 +1171,19 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(_TRANSITIONS["reviewer"], set())
         for role in ("po", "observer"):
             self.assertIn(("validate", "assessment"), _TRANSITIONS[role])
-            self.assertIn(("assessment", "ready"), _TRANSITIONS[role])
+        self.assertIn(("assessment", "ready"), _TRANSITIONS["po"])
         self.assertEqual(
             {edge for edge in _TRANSITIONS["steward"] if "assessment" in edge},
             {("assessment", "blocked")},
         )
+
+    def test_the_observer_takes_no_exit_out_of_assessment(self) -> None:
+        """The observer decides; the dispatcher performs. A board move by the observer would be a
+        release with nothing merged, so the authority matrix has no exit for it at all."""
+        self.assertEqual(
+            {edge for edge in _TRANSITIONS["observer"] if edge[0] == "assessment"}, set()
+        )
+        self.assertIn(("validate", "assessment"), _TRANSITIONS["observer"])
 
     def _park(self, request_id: str = "into-assessment") -> None:
         self.client.tasks[0]["column_id"] = 4  # Validate
@@ -1151,6 +1195,8 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
     def _decide(self, kind: str, request_id: str = "") -> dict:
+        if not self.client.metadata[12].get("sprint_ref"):
+            self.reserve_project()
         return self.writer.decide(
             role="observer", actor="observer", reference="secretary-468", kind=kind,
             body="the round converged", request_id=request_id or f"decision-{kind}",
@@ -1238,6 +1284,9 @@ class AssessmentStateTests(unittest.TestCase):
                 role="worker", actor="w", reference="secretary-468",
                 kind="release", body="ship it", request_id="worker-decision",
             )
+        # The card leaves the column. Its project stays reserved by the observer's own sprint, so
+        # what refuses this is the state and not the reservation.
+        self.reserve_project()
         self.client.tasks[0]["column_id"] = 4
         with self.assertRaisesRegex(TaskError, "only recorded on a card in Assessment"):
             self.writer.decide(
@@ -1285,16 +1334,6 @@ class AssessmentStateTests(unittest.TestCase):
         clears the claim, which is what would let a second worker start on a reviewed checkout."""
         self._park()
 
-        # The observer is the role that owns this column, so it is the one whose refusal has to
-        # come from the decision rule rather than from the sprint's reservation guard.
-        with mock.patch.object(TaskWriter, "_sprint_holds_project", return_value=True):
-            for target in ("ready", "validate", "issues"):
-                with self.assertRaises(TaskError) as raised:
-                    self.writer.move(
-                        role="observer", actor="o", reference="secretary-468", target=target,
-                        reason="", request_id=f"observer-bypass-{target}",
-                    )
-                self.assertEqual(raised.exception.code, "decision_required")
         for target in ("ready", "validate", "issues"):
             with self.assertRaises(TaskError) as raised:
                 self.writer.move(
@@ -1303,6 +1342,60 @@ class AssessmentStateTests(unittest.TestCase):
                 )
             self.assertIn(raised.exception.code, {"decision_required", "transition_forbidden"})
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+    def test_the_observer_may_not_perform_its_own_decision(self) -> None:
+        """The observer records the decision; the dispatcher performs it.
+
+        A matching decision is checkable, but a board move is not a release: the card would read
+        Done with nothing merged, In progress with no worker relaunched. So every
+        decision-carrying exit is refused to the observer, on its own sprint's card and with the
+        decision standing on the card.
+        """
+        self._park()
+
+        for kind, target in (("release", "done"), ("rework", "in_progress"), ("reslice", "blocked")):
+            self._decide(kind, request_id=f"decision-performed-by-{kind}")
+            with self.assertRaises(TaskError) as raised:
+                self.writer.move(
+                    role="observer", actor="observer", reference="secretary-468", target=target,
+                    reason="", decision=kind, request_id=f"observer-performs-{kind}",
+                )
+            self.assertEqual(raised.exception.code, "transition_forbidden")
+            self.assertIn("task decide", str(raised.exception))
+            self.assertEqual(self.client.tasks[0]["column_id"], 7)
+
+        # And the dispatcher performs the decision that is standing, from the same state.
+        performed = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="blocked",
+            reason="", decision="reslice", request_id="dispatcher-performs-reslice",
+        )
+        self.assertEqual(performed["task"]["state"], "blocked")
+
+    def test_a_decision_needs_the_observers_own_sprint_to_hold_the_project(self) -> None:
+        """Which observer may decide is settled by the reservation `move` already checks.
+
+        Two open sprints cannot hold one project, so a card's project names exactly one sprint
+        and one observer. Without that guard any observer could record a decision on any card.
+        """
+        self._park()
+
+        with self.assertRaisesRegex(TaskError, "role is not permitted") as unheld:
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="ship it", request_id="decision-without-a-sprint",
+            )
+        self.assertEqual(unheld.exception.code, "role_forbidden")
+
+        # A card linked to another sprint than the one holding its project is refused too, and
+        # refused as the reservation it crosses.
+        self.reserve_project(card_sprint="sprint:1030")
+        with self.assertRaises(TaskError) as other:
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="ship it", request_id="decision-from-another-sprint",
+            )
+        self.assertEqual(other.exception.code, "sprint_write_forbidden")
+        self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
 
     def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:
         """The escape hatch stays open, and it is recorded as the override it is."""
@@ -1392,8 +1485,9 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(json.loads(errors)["error"]["code"], "decision_required")
 
-        # The CLI writes its audit under its own data dir, so the decision it will be checked
-        # against has to be recorded there too, through the CLI that records decisions.
+        # The CLI writes its audit and its sprint guard index under its own data dir, so both the
+        # decision and the reservation that authorizes it have to be set up there.
+        self.reserve_project(data_dir=str(Path(self.tmpdir.name) / "data"))
         reason = Path(self.tmpdir.name) / "reason.md"
         reason.write_text("ship it", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()

@@ -86,10 +86,20 @@ The move out of Assessment carries the decision it performs, and each decision h
 is refused unless `--decision` names a decision recorded on that card since it entered the column,
 and a decision paired with the wrong destination is refused as well, which is what makes the seam
 checkable from the audit alone. `assessment -> ready`, `-> validate` and `-> issues` are refused for
-the observer and the dispatcher: each leaves the column with nothing decided, and Ready additionally
-clears the claim. `assessment -> blocked` takes no decision: it is the escalation path the steward
-and the dispatcher's own failures use, and a card that cannot be blocked is a card nothing can
-rescue.
+the dispatcher: each leaves the column with nothing decided, and Ready additionally clears the
+claim. `assessment -> blocked` takes no decision: it is the escalation path the steward and the
+dispatcher's own failures use, and a card that cannot be blocked is a card nothing can rescue.
+
+The observer takes no exit out of Assessment at all, not even one carrying a matching decision. A
+matching move is checkable but it is not a release: the board would read Done with nothing merged.
+The observer's authority over a parked card is `task decide`; the effect is the dispatcher's. The
+PO's override and the steward's escalation to Blocked are the two moves out of the column that do
+not go through the dispatcher.
+
+An observer decides only about a card whose project its own open sprint reserves, the same guard
+`task move` carries. Two open sprints cannot hold one project, so a card's project names one sprint
+and one observer, and a decision recorded on a linked card can only have come from that card's own
+observer.
 
 A release the dispatcher cannot carry out never leaves the card looking reworkable. If the branch
 did not reach the base, the card stays parked, the failure is recorded on it and the decision comes
