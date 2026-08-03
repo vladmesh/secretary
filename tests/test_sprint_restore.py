@@ -35,6 +35,7 @@ from secretary.tasks import TaskWriter
 
 from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.test_sprints import ProductSprintKanboard, _write_project_registry
+from tests.observer_identity import as_observer
 
 
 def _root(name: str) -> str:
@@ -87,11 +88,12 @@ class SprintRestoreTests(unittest.TestCase):
             issues=["issue:open"], projects=["secretary", "secretary-instance"],
             observer=head_choice("codex-observer"), request_id="seed-create",
         )["sprint"]["ref"]
-        card = TaskWriter(self.source, data_dir=self.source_data).create(  # type: ignore[arg-type]
-            # The sprint holds `secretary`, so its own observer is the writer of its cards.
-            role="observer", actor="observer", project="secretary", task_type="code", title="linked",
-            target="ready", sprint=ref, request_id="seed-card",
-        )["task"]
+        with as_observer(ref):
+            card = TaskWriter(self.source, data_dir=self.source_data).create(  # type: ignore[arg-type]
+                # The sprint holds `secretary`, so its own observer is the writer of its cards.
+                role="observer", actor="observer", project="secretary", task_type="code",
+                title="linked", target="ready", sprint=ref, request_id="seed-card",
+            )["task"]
         writer.comment(role="po", actor="operator", reference=ref, body="first note", request_id="seed-comment")
         writer.record_budget(role="po", actor="operator", reference=ref, event_type="red_ci", request_id="seed-budget")
         writer.set_current_task(

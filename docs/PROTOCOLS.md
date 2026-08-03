@@ -484,6 +484,15 @@ steward and every other role. The refusal names the holding sprint and asks the 
 its entity. The refusal itself is audited as `sprint_guard_denied` and is not duplicated when the same
 request id is retried.
 
+A write of role `observer` is authenticated against the sprint it names before any of that. The
+dispatcher launches a head for one sprint and binds `SECRETARY_OBSERVER_SPRINT` and
+`SECRETARY_OBSERVER_GENERATION` into that head's own command line; `runtime.env` cannot supply or
+replace them. A card linked to another sprint, and a `sprint resume` or `sprint current-task` naming
+another entity, are refused as `observer_sprint_mismatch`; a head that carries no binding is refused as
+`observer_identity_unbound` on its first write, because a caller that cannot name its sprint cannot
+be placed at all. Both refusals are audited as `sprint_guard_denied` with that code, which is how an
+identity failure reads apart from a role that has no such right.
+
 The index of the projects open sprints reserve is kept locally next to the audit log, keyed by project id.
 An index written in an older key space is rebuilt from the sprints board before it answers. For a project
 outside any open

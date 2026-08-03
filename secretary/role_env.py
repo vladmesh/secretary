@@ -39,13 +39,29 @@ NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO"
 # root renders the dispatcher unit against that root; a head it launches has to import the product
 # the installation was moved onto, not whatever ~/secretary still is or what a runtime.env written
 # before the move says.
-UNIT_BOUND_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
+#
+# Which sprint an observer head belongs to is bound the same way. The launcher reads it off the
+# record it is bringing the head up for, and the head proves its identity with it on every write.
+# A runtime.env that could name another sprint would be a head able to name itself the observer of
+# somebody else's sprint, which is the whole thing the binding exists to refuse.
+OBSERVER_SPRINT_ENV = "SECRETARY_OBSERVER_SPRINT"
+OBSERVER_GENERATION_ENV = "SECRETARY_OBSERVER_GENERATION"
+UNIT_BOUND_ENV = (
+    "SECRETARY_INSTANCE",
+    "TA_SECRETARY_REPO",
+    OBSERVER_SPRINT_ENV,
+    OBSERVER_GENERATION_ENV,
+)
+# Of the bound names, the ones only a launcher may supply: they name the caller rather than the
+# installation, so `runtime.env` cannot fill them in when the launcher passed none.
+LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV)
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),
     # The sprint observer is a dispatcher-launched head like the other two: it reads the sprint
-    # entity and its cards off the board and gets nothing else out of runtime.env.
-    "observer": (*BOARD_ENV, *NONSECRET_ENV),
+    # entity and its cards off the board and gets nothing else out of runtime.env. The two names
+    # beyond that are its identity, bound by the launcher rather than read from the file.
+    "observer": (*BOARD_ENV, *NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
 }
 ROLE_REQUIRED: dict[str, tuple[str, ...]] = {
     "worker": BOARD_ENV,
@@ -136,6 +152,12 @@ def runtime_env(
     for key in allowed:
         if key in base and key in UNIT_BOUND_ENV:
             env[key] = base[key]
+        elif key in LAUNCHER_ONLY_ENV:
+            # The installation binding may fall back to the file, because a head that was not
+            # told which installation it belongs to still belongs to the one whose file it reads.
+            # An identity has no such fallback: a head the launcher named no sprint for is a head
+            # that cannot prove one, and a line in the file must not be able to supply it.
+            env.pop(key, None)
         elif key in source:
             env[key] = source[key]
         elif key in base:
@@ -152,6 +174,34 @@ def runtime_env(
                 f"runtime env for role {role!r} missing {', '.join(missing)}"
             )
     return env
+
+
+def observer_binding(sprint: str, generation: str) -> dict[str, str]:
+    """The identity a launcher renders into one observer head's command line.
+
+    Both names or neither. The generation is the record's own token, carried so the head's
+    environment says which lifecycle of that reference launched it; the write path reads it as a
+    presence flag only, and does not compare it to the record a sprint currently has.
+    """
+    sprint = str(sprint or "").strip()
+    generation = str(generation or "").strip()
+    if not sprint or not generation:
+        return {}
+    return {OBSERVER_SPRINT_ENV: sprint, OBSERVER_GENERATION_ENV: generation}
+
+
+def declared_observer_sprint(env: dict[str, str] | None = None) -> str:
+    """The sprint this process was launched to observe, or an empty string.
+
+    Empty is not a privilege. A caller that cannot name its sprint cannot prove which one it is,
+    and the writes of role `observer` refuse on that. Half a binding is no binding: the launcher
+    renders both names together, so a sprint arriving without its generation did not come from
+    one and is not read as an identity.
+    """
+    source = os.environ if env is None else env
+    sprint = str(source.get(OBSERVER_SPRINT_ENV, "") or "").strip()
+    generation = str(source.get(OBSERVER_GENERATION_ENV, "") or "").strip()
+    return sprint if generation else ""
 
 
 def _main_exec(argv: list[str]) -> int:

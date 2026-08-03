@@ -32,6 +32,7 @@ from secretary.tasks import (
     _STATES,
     _TRANSITIONS,
 )
+from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
 
 @contextlib.contextmanager
@@ -40,9 +41,12 @@ def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
 
     These tests are about the create and audit path; the sprint link is a precondition of a
     create on the board, and the guard behind it is covered in tests/test_sprints.py.
+
+    The caller is bound to the same sprint, because the observer creating a card linked to it is
+    that sprint's own head; an unbound caller is refused before the create path is reached.
     """
     sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
-    with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
+    with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
         yield ref
 
 
@@ -1135,7 +1139,11 @@ class AssessmentStateTests(unittest.TestCase):
         That reservation is what entitles an observer to decide about the card, so the tests of
         the decision path set it up as the board would have it: the guard index and the live
         sprint row both naming the sprint the card is linked to.
+
+        The caller is bound to the card's own sprint, which is the head that would be deciding
+        here. A test about a caller from elsewhere binds its own.
         """
+        bind_observer(self, card_sprint)
         self.client.metadata[12]["sprint_ref"] = card_sprint
         reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": [project]})
         patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)
@@ -1377,6 +1385,9 @@ class AssessmentStateTests(unittest.TestCase):
         `move` already checks. What it does not do is say who the caller is: see the test below.
         """
         self._park()
+        # A bound caller, so what is being tested is the reservation and not the identity: this
+        # observer is somebody's head, and the card it reaches for is held by no open sprint.
+        bind_observer(self, SPRINT)
 
         with self.assertRaisesRegex(TaskError, "role is not permitted") as unheld:
             self.writer.decide(
@@ -1396,29 +1407,46 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(other.exception.code, "sprint_write_forbidden")
         self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
 
-    def test_the_decision_guard_is_positional_and_not_a_caller_identity(self) -> None:
-        """What the guard above does not do, pinned so nothing is built on top of it.
+    def test_the_decision_guard_also_places_the_caller(self) -> None:
+        """The other half of the guard: which sprint's observer is writing.
 
-        Every observer process runs as `--role observer --actor observer`, so the writer has no
-        fact that tells one sprint's observer from another's: the guard admits any observer once
-        some open sprint holds the card's project, and the recorded actor is the same either way.
-        This is the accepted behaviour of this card, and it is why no rule may treat an
-        observer-authored event as self-authored until a sprint-bound identity exists.
+        Every observer process still runs as `--role observer --actor observer`, so the actor id
+        places nobody. The sprint its head was launched for does: the card's own observer decides,
+        and a head of another sprint is refused as the identity failure it is.
         """
         self._park()
         self.reserve_project()
 
         decided = self.writer.decide(
             role="observer", actor="observer", reference="secretary-468", kind="release",
-            body="deciding from a head this guard cannot place", request_id="decision-positional",
+            body="deciding from this card's own head", request_id="decision-from-its-own-head",
         )
 
         self.assertEqual(decided["action"], "decided")
         event = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")[-1]
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
-        # And nothing in the record names the sprint the caller was observing, which is the fact
-        # a suppression or an authorisation by author would need.
-        self.assertNotIn("sprint", event["payload"])
+
+        self._park(request_id="park-again")
+        with as_observer("sprint:2000"):
+            with self.assertRaises(TaskError) as stranger:
+                self.writer.decide(
+                    role="observer", actor="observer", reference="secretary-468",
+                    kind="release", body="deciding about a sprint I do not observe",
+                    request_id="decision-from-another-head",
+                )
+        self.assertEqual(stranger.exception.code, "observer_sprint_mismatch")
+        denial = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="sprint_guard_denied")[-1]
+        self.assertEqual(denial["payload"]["code"], "observer_sprint_mismatch")
+        self.assertEqual(denial["payload"]["sprint"], "sprint:2000")
+
+        with self.assertRaises(TaskError) as unbound:
+            with unbound_observer():
+                self.writer.decide(
+                    role="observer", actor="observer", reference="secretary-468",
+                    kind="release", body="deciding from a head nobody bound",
+                    request_id="decision-from-an-unbound-head",
+                )
+        self.assertEqual(unbound.exception.code, "observer_identity_unbound")
 
     def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:
         """The escape hatch stays open, and it is recorded as the override it is."""
@@ -1827,6 +1855,7 @@ class BlockedContractTests(unittest.TestCase):
             return [event for event in map(json.loads, events) if event["kind"] == kind]
 
     def _reserve(self) -> None:
+        bind_observer(self, SPRINT)
         self.client.metadata[12]["sprint_ref"] = SPRINT
         reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": ["secretary"]})
         patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)

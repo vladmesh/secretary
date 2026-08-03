@@ -38,7 +38,8 @@ from secretary import (
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_launcher import wrap_role_shell_command
+from secretary.dispatcher_launcher import HeadLaunchError, wrap_role_shell_command
+from secretary.role_env import observer_binding
 from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
 from secretary import upgrade
@@ -781,9 +782,49 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         (self.instance / "runtime.env").write_text(
             "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
             "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n"
-            "SECRETARY_INSTANCE=/home/dev/secretary-instance\n",
+            "SECRETARY_INSTANCE=/home/dev/secretary-instance\n"
+            "SECRETARY_OBSERVER_SPRINT=sprint:somebody-else\n"
+            "SECRETARY_OBSERVER_GENERATION=forged\n",
             encoding="utf-8",
         )
+
+    def test_an_observer_head_carries_the_sprint_the_launcher_bound_it_to(self) -> None:
+        """End to end, against a `runtime.env` claiming another sprint.
+
+        The identity travels in the command the launcher renders, and `runtime_env` treats it the
+        way it treats the installation: a file inside the installation may not rename the caller,
+        or a copied line would let a head sign for a sprint it was never launched for.
+        """
+        self.decoy_runtime_env()
+        identity = observer_binding("sprint:1126", "abc123def456")
+        with mock.patch.dict(
+            os.environ, self.unit_env("secretary-dispatcher-production.service"), clear=True
+        ):
+            command = wrap_role_shell_command(
+                "observer",
+                "printenv SECRETARY_OBSERVER_SPRINT; printenv SECRETARY_OBSERVER_GENERATION",
+                identity=identity,
+            )
+
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            capture_output=True, text=True, timeout=120,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(self.root),
+                "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["sprint:1126", "abc123def456"], result.stderr)
+
+    def test_a_worker_head_is_never_given_an_observer_binding(self) -> None:
+        """The binding is one role's, and a launcher asking for it elsewhere is a defect."""
+        with self.assertRaisesRegex(HeadLaunchError, "SECRETARY_OBSERVER_SPRINT"):
+            wrap_role_shell_command(
+                "worker", "true", identity=observer_binding("sprint:1126", "abc123def456"),
+            )
 
 
 if __name__ == "__main__":

@@ -529,7 +529,17 @@ that are already linked. If an operator needs to intervene, the PO passes `--spr
 `--sprint-override-reason-file` to `secretary task create`, `move` or `edit`; the reason stays in the durable
 audit. A `sprint_write_forbidden` refusal names the sprint and suggests recording the change on its entity.
 `sprint_guard_unavailable` means the live sprints board could not be checked, so the write was deliberately
-refused.
+refused. `observer_sprint_mismatch` means the observer that wrote belongs to another sprint, and
+`observer_identity_unbound` means the head carries no sprint binding at all.
+
+The head's binding is rendered into its command line at launch, so a head that is already running when the
+binding is deployed cannot acquire one, and no probe of that process can tell it from a bound head. Its record
+answers instead: `bound` is false for a record written before the binding existed, `status --json` shows it per
+observer beside `alive`, and the first production tick after the deploy stops such a head with
+`observer head predates the sprint binding` in the durable stop event. The tick after that brings the sprint's
+head back up bound. No operator step: an installation upgraded while its observer runs performs the changeover
+on its own, one stop and one launch, and pays for it with the head's delivery cursor, which the new head
+baselines from the current board like any first launch.
 
 Before launching, the production tick checks the budget audit of the linked cards. At the signal threshold the
 observer's prompt carries a note that the threshold was reached, and the role skill tells it to reconsider the

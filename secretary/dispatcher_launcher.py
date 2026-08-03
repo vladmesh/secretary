@@ -12,12 +12,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from secretary.role_env import RUNTIME_ENV_FILE_ENV, UNIT_BOUND_ENV, RoleEnvError, runtime_env
+from secretary.role_env import (
+    OBSERVER_GENERATION_ENV,
+    OBSERVER_SPRINT_ENV,
+    ROLE_ALLOWLIST,
+    RUNTIME_ENV_FILE_ENV,
+    UNIT_BOUND_ENV,
+    RoleEnvError,
+    runtime_env,
+)
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 
 # What a launched head has to be told about the installation it belongs to. The env file name
 # first: everything else about the head's runtime comes out of that file.
-LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
+#
+# The observer identity is bound the same way but not taken from here: it names one head rather
+# than the installation, so it comes from the record being launched and is passed per call. The
+# dispatcher's own environment must never answer for it.
+LAUNCH_BOUND_ENV = tuple(
+    name for name in (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
+    if name not in {OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV}
+)
 
 CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
@@ -457,8 +472,20 @@ def launch_binding() -> list[str]:
     ]
 
 
-def wrap_role_shell_command(role: str, command: str) -> str:
-    binding = " ".join(launch_binding())
+def wrap_role_shell_command(role: str, command: str, *, identity: dict[str, str] | None = None) -> str:
+    """Render one head's command with the installation binding and, for a head that has one, its
+    identity.
+
+    `identity` is rendered beside the installation binding rather than left to `runtime.env`, so
+    the same `UNIT_BOUND_ENV` rule that keeps the file from moving the installation keeps it from
+    renaming the caller. Only names the role's allowlist knows are rendered; anything else would
+    be dropped by `runtime_env` on the way in and is refused here instead of silently ignored.
+    """
+    unknown = sorted(set(identity or {}) - set(ROLE_ALLOWLIST.get(role, ())))
+    if unknown:
+        raise HeadLaunchError(f"role {role!r} carries no binding named {', '.join(unknown)}")
+    rendered = [f"{name}={shlex.quote(value)}" for name, value in sorted((identity or {}).items())]
+    binding = " ".join([*launch_binding(), *rendered])
     return (
         f"{binding} {pythonpath_prefix(os.environ)} python3 -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"

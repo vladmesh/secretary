@@ -46,10 +46,19 @@ from secretary.dispatcher_production import _budget_event_type, _production_clai
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
-from secretary.role_env import ROLE_ALLOWLIST, ROLE_REQUIRED, runtime_env
+from secretary.role_env import (
+    OBSERVER_GENERATION_ENV,
+    OBSERVER_SPRINT_ENV,
+    ROLE_ALLOWLIST,
+    ROLE_REQUIRED,
+    declared_observer_sprint,
+    observer_binding,
+    runtime_env,
+)
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 
+from tests.observer_identity import as_observer, bind_observer
 from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -136,6 +145,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
+        # These tests call the writers as the head of `sprint:1`, which is the head the dispatcher
+        # launches here; a test acting as another sprint's head binds its own.
+        bind_observer(self, "sprint:1")
         (self.data_dir / "bodies").mkdir(parents=True, exist_ok=True)
         self.board = FakeKanboard()
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
@@ -190,15 +202,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def acknowledge_delivery(self, entry: dict[str, str], *, request_id: str) -> None:
         delivery = self.observers()["sprint:1"].delivery
-        SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
-            role="observer",
-            actor="observer",
-            reference="sprint:1",
-            entry=entry,
-            request_id=request_id,
-            delivery_id=delivery.delivery_id,
-            through_event=delivery.through_event,
-        )
+        # The acknowledgement is this sprint's own head answering for what it was sent.
+        with as_observer("sprint:1"):
+            SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
+                role="observer",
+                actor="observer",
+                reference="sprint:1",
+                entry=entry,
+                request_id=request_id,
+                delivery_id=delivery.delivery_id,
+                through_event=delivery.through_event,
+            )
 
     def expire_wake_retry(self, reference: str = "sprint:1") -> None:
         """Age a deferred wake past its backoff so the next tick retries the delivery."""
@@ -250,6 +264,104 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.state, "running")
         self.assertTrue(record.workspace)
         self.assertTrue(record.handle)
+
+    def test_the_head_is_launched_bound_to_its_own_record(self) -> None:
+        """The binding a head writes with comes off the record it was brought up for.
+
+        Sprint and generation together: the reference says whose cards this head may write, and
+        the generation tells this lifecycle of that reference from the one before it, so a record
+        rebuilt after a close and a reopen does not launch a head signing as the old one.
+        """
+        self.open_sprint()
+
+        self.runtime.production_tick()
+
+        record = self.observers()["sprint:1"]
+        self.assertEqual(
+            self.host.observer_identities,
+            [{OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation}],
+        )
+        self.assertTrue(record.generation)
+
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="replacement-event",
+        )
+        self.runtime.production_tick()
+
+        relaunched = self.observers()["sprint:1"]
+        self.assertEqual(relaunched.launches, 2)
+        # A respawn is the same head of the same sprint, so it carries the same identity.
+        self.assertEqual(
+            self.host.observer_identities[-1],
+            {OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation},
+        )
+
+    def _unbind_record(self, reference: str = "sprint:1") -> None:
+        """Rewrite the record the way a state file written before the binding existed reads.
+
+        The key is removed rather than set to False, because that is the on-disk shape a running
+        installation is upgraded from, and `from_json` reading a missing key as bound is exactly
+        the head that would be left running and refused.
+        """
+        payload = self.runtime.production_state.load()
+        raw = payload["observers"][reference]
+        raw.pop("bound", None)
+        self.runtime.production_state.save(payload)
+        self.assertFalse(self.observers()[reference].bound)
+
+    def test_a_head_from_before_the_binding_is_retired_and_comes_back_bound(self) -> None:
+        """The changeover: a live head nobody bound is stopped, and the next tick binds it.
+
+        Its writes are all refused as `observer_identity_unbound`, and nothing it does can bind
+        it: the binding is in the environment it started with. No probe of the process can ask,
+        so the record is what says whether the head that is up carries one.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.assertTrue(self.observers()["sprint:1"].bound)
+        first_generation = self.observers()["sprint:1"].generation
+        self._unbind_record()
+        # Alive, watched-looking on every other field, and unable to write: `status --json` says so
+        # rather than leaving the operator to read the refusals.
+        unbound_status = status_observers(self.runtime.production_state.load())[0]
+        self.assertTrue(unbound_status["alive"])
+        self.assertFalse(unbound_status["bound"])
+
+        retired = self.runtime.production_tick()
+
+        actions = self.actions(retired)
+        self.assertEqual([action["action"] for action in actions], ["observer-stopped"])
+        self.assertIn("predates the sprint binding", actions[0]["reason"])
+        self.assertNotIn("sprint:1", self.observers())
+        stopped = [event for event in self.audit.events() if event["kind"] == "observer_stopped"]
+        self.assertIn("predates the sprint binding", stopped[-1]["payload"]["reason"])
+
+        relaunched = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(relaunched)], ["observer-launched"],
+        )
+        record = self.observers()["sprint:1"]
+        self.assertTrue(record.bound)
+        self.assertNotEqual(record.generation, first_generation)
+        self.assertEqual(
+            self.host.observer_identities[-1],
+            {OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation},
+        )
+
+    def test_a_bound_head_is_not_retired(self) -> None:
+        """The changeover applies once. A head this dispatcher launched is left where it is."""
+        self.open_sprint()
+        self.runtime.production_tick()
+
+        second = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(second)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(len(self.host.observer_identities), 1)
 
     def test_second_tick_does_not_launch_a_second_head(self) -> None:
         self.open_sprint()
@@ -1996,9 +2108,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         seen: list = []
         real = self.host.prepare_observer
 
-        def spy(sprint, head, *, prompt):
+        def spy(sprint, head, *, prompt, identity=None):
             seen.append(load_observers(self.runtime.production_state.load()).get("sprint:1"))
-            return real(sprint, head, prompt=prompt)
+            return real(sprint, head, prompt=prompt, identity=identity)
 
         with mock.patch.object(self.host, "prepare_observer", spy):
             self.runtime.production_tick()
@@ -2724,7 +2836,11 @@ class ObserverConfigurationTests(unittest.TestCase):
 
     def test_the_observer_runs_with_the_role_scoped_environment(self) -> None:
         self.assertIn("observer", ROLE_ALLOWLIST)
-        self.assertEqual(ROLE_ALLOWLIST["observer"], ROLE_ALLOWLIST["worker"])
+        # The worker's environment plus the two names that say which sprint this head observes.
+        self.assertEqual(
+            ROLE_ALLOWLIST["observer"],
+            (*ROLE_ALLOWLIST["worker"], OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
+        )
         self.assertIn("observer", ROLE_REQUIRED)
 
         env_file = Path(tempfile.mkdtemp()) / "runtime.env"
@@ -2739,6 +2855,44 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertEqual(env["BOARD_ROLE"], "observer")
         self.assertEqual(env["KANBOARD_URL"], "http://board")
         self.assertNotIn("UNRELATED_SECRET_TOKEN", env)
+
+    def test_runtime_env_cannot_rename_the_sprint_a_head_observes(self) -> None:
+        """`runtime.env` is a file inside an installation, and the binding is not its to give.
+
+        A line there naming another sprint is how a head would come up able to write on work it
+        was never launched for, so the launcher's value wins the way the installation binding
+        does. A head the launcher bound to nothing takes nothing from the file either.
+        """
+        env_file = Path(tempfile.mkdtemp()) / "runtime.env"
+        env_file.write_text(
+            "KANBOARD_URL=http://board\nKANBOARD_API_USER=u\nKANBOARD_API_TOKEN=t\n"
+            f"{OBSERVER_SPRINT_ENV}=sprint:somebody-else\n"
+            f"{OBSERVER_GENERATION_ENV}=forged\n",
+            encoding="utf-8",
+        )
+
+        bound = runtime_env(
+            "observer",
+            base_env={"PATH": "/usr/bin", **observer_binding("sprint:1126", "abc123")},
+            env_file=env_file,
+        )
+        self.assertEqual(bound[OBSERVER_SPRINT_ENV], "sprint:1126")
+        self.assertEqual(bound[OBSERVER_GENERATION_ENV], "abc123")
+
+        unbound = runtime_env("observer", base_env={"PATH": "/usr/bin"}, env_file=env_file)
+        self.assertNotIn(OBSERVER_SPRINT_ENV, unbound)
+        self.assertNotIn(OBSERVER_GENERATION_ENV, unbound)
+
+    def test_half_a_binding_is_no_identity(self) -> None:
+        """The launcher renders both names or neither, so a lone sprint came from somewhere else."""
+        self.assertEqual(observer_binding("sprint:1126", ""), {})
+        self.assertEqual(observer_binding("", "abc123"), {})
+        self.assertEqual(
+            declared_observer_sprint({OBSERVER_SPRINT_ENV: "sprint:1126"}), "",
+        )
+        self.assertEqual(
+            declared_observer_sprint(observer_binding("sprint:1126", "abc123")), "sprint:1126",
+        )
 
     def test_the_prompt_is_rendered_from_the_live_sprint(self) -> None:
         prompt = render_observer_prompt(
@@ -3693,6 +3847,7 @@ class _ObserverCatalog(FakeCatalog):
         role: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
+        identity: dict[str, str] | None = None,
     ):
         return HeadLaunch(f"run-{role}")
 
@@ -3709,6 +3864,7 @@ class _TuiCatalog(FakeCatalog):
         role: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
+        identity: dict[str, str] | None = None,
     ):
         return HeadLaunch(f"run-{role}", prompt_after_start=True)
 
