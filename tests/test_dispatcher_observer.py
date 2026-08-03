@@ -2592,9 +2592,18 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
         )
+        # Through the command in the checkout: that id is what attributes the report to the round
+        # the dispatcher is waiting for (secretary-1063).
+        workspace = (self.runtime.production_state.load()["records"]
+                     ["secretary-510-neighbor"]["workspace"])
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+        done_command = next(
+            line for line in document.splitlines() if "--kind done" in line
+        )
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-neighbor", kind="done",
-            body="ready for validation", request_id="rework-worker-done",
+            body="ready for validation",
+            request_id=done_command.split("--request-id ", 1)[1].split()[0],
         )
         self.assertEqual(self.runtime.production_tick()["status"], "ok")  # moved to validate
         self.assertIn("review-started", [action["action"] for action in self.runtime.production_tick()["actions"] if action["step"] == "review"])

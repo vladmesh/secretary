@@ -53,6 +53,17 @@ REF = "secretary-510-pilot"
 DEAD_PID = 999999
 
 
+def _document_report_id(workspace: str) -> str:
+    """The done-report request id from the `TASK.md` in this checkout.
+
+    A report is attributed to its round through the id the round's command carried, so a test that
+    invents one is testing a call no worker makes.
+    """
+    document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    line = next(line for line in document.splitlines() if "--kind done" in line)
+    return line.split("--request-id ", 1)[1].split()[0]
+
+
 class LaunchIntentTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -104,6 +115,10 @@ class LaunchIntentTests(unittest.TestCase):
 
     def record(self) -> DispatcherRecord | None:
         return self.runtime.state.records(self.runtime.state.load()).get(REF)
+
+    def workspace_of_record(self) -> str:
+        record = self.record()
+        return record.workspace if record else ""
 
     def stored_intent(self) -> dict:
         """The intent as it is on disk, which is the only copy a next tick can read."""
@@ -202,14 +217,16 @@ class LaunchIntentTests(unittest.TestCase):
                 with mock.patch.object(self.host, host_method, call):
                     yield
 
-    def report_done(self, request_id: str = "worker-done") -> None:
+    def report_done(self) -> None:
+        """Report through the done command the checkout holds: that id names the round the
+        dispatcher is waiting for (secretary-1063)."""
         self.writer.report(
             role="worker",
             actor="worker",
             reference=REF,
             kind="done",
             body="done",
-            request_id=request_id,
+            request_id=_document_report_id(self.workspace_of_record()),
         )
 
     def verdict(self, kind: str, body: str, request_id: str) -> None:
@@ -406,7 +423,7 @@ class LaunchIntentTests(unittest.TestCase):
             seen.append(self.stored_intent())
             return real(*args, **kwargs)
 
-        self.report_done(request_id="worker-done-again")
+        self.report_done()
         with mock.patch.object(self.host, "restart_worker", spy):
             outcome = self.tick()
 
@@ -420,7 +437,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()  # the verdict parks the card
         self.decide("rework")
         self.tick()  # rework head up on the rejected sha
-        self.report_done(request_id="worker-done-again")
+        self.report_done()
         self.host.calls.clear()
         self.host.fail_stop_head_reason = "orca terminal stop failed"
 
@@ -551,7 +568,7 @@ class LaunchIntentTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.tick()
 
-        self.report_done("worker-done-after-red-delivery")
+        self.report_done()
         recovered = self.tick()
 
         self.assertEqual(recovered["action"], "gate-red-reused-worker")
@@ -610,7 +627,7 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_freeze_crash_replays_the_validate_move_without_waking_the_worker(self) -> None:
         self.tick()
-        self.report_done("worker-done-freeze-crash")
+        self.report_done()
         real_move = self.writer.move
 
         def die_before_move(**kwargs):
@@ -638,7 +655,7 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_crash_after_validate_move_keeps_the_worker_frozen_for_review(self) -> None:
         self.tick()
-        self.report_done("worker-done-after-validate-move")
+        self.report_done()
         real_save = self.runtime.state.save
 
         def die_after_move(payload: dict) -> None:
@@ -2439,6 +2456,9 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         return payload.get("records") or {}
 
+    def workspace_of_record(self) -> str:
+        return str((self.records().get(REF) or {}).get("workspace") or "")
+
     def stored_intent(self) -> dict:
         return dict((self.records().get(REF) or {}).get("launch_intent") or {})
 
@@ -2501,14 +2521,16 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.assertEqual((intent["action"], intent["round"], intent["opens_round"]),
                          ("review-red-rework", 2, True))
 
-    def report_done(self, request_id: str = "worker-done") -> None:
+    def report_done(self) -> None:
+        """Report through the done command the checkout holds: that id names the round the
+        dispatcher is waiting for (secretary-1063)."""
         self.writer.report(
             role="worker",
             actor="worker",
             reference=REF,
             kind="done",
             body="done",
-            request_id=request_id,
+            request_id=_document_report_id(self.workspace_of_record()),
         )
 
     def move_card(self, target: str, reason: str, request_id: str) -> None:

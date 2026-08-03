@@ -17,6 +17,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from secretary.dispatcher_observer import (
     ObserverRecord,
     put_observers,
 )
+from secretary.dispatcher_watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
@@ -292,6 +294,46 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             self.assertEqual(steward_cli.cmd_scan(True), 0)
             self.assertEqual(steward_cli.cmd_advance(), 0)
             self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
+
+    def test_an_idle_worker_bounce_is_a_degraded_tick(self) -> None:
+        """secretary-1063: a head that is alive, idle and has delivered nothing for the round the
+        dispatcher is waiting on is the pipeline failing to move a card. The bounce that retries it
+        has to reach the operator as degradation, or the telemetry reads green right up to the
+        Blocked and the one signal before it is lost."""
+        ref = "secretary-510-pilot"
+        self.runtime.production_tick()  # claims the card and launches its worker
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": time.time(),
+            "pid_confirmed": True, "idle": True,
+        }
+        self.runtime.production_tick()  # first reading of an idle pane only stamps it
+        payload = self.runtime.production_state.load()
+        payload["records"][ref]["worker_idle_since"] -= idle_stall_seconds() + 60
+        self.runtime.production_state.save(payload)
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(
+            [action["action"] for action in result["actions"] if action.get("pilot_ref") == ref],
+            ["worker-respawned"],
+        )
+        telemetry = self.read_through_the_agent_reader()
+        self.assertFalse(telemetry.last["healthy"])
+        self.assertEqual(telemetry.last["degraded_count"], 1)
+        degradation = telemetry.last["degradations"][0]
+        self.assertEqual(
+            (degradation["ref"], degradation["step"], degradation["action"]),
+            (ref, "advance", "worker-respawned"),
+        )
+        self.assertIn("generation 1", degradation["reason"])
+        self.assertIn("idle", degradation["reason"])
+
+        with mock.patch.dict(
+            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
+        ):
+            problems, _ = health._pipeline_status()
+        self.assertTrue(any("worker-respawned" in problem for problem in problems))
 
     def test_a_blocked_card_is_the_dispatcher_working_not_a_degraded_tick(self) -> None:
         """A card parked in Blocked keeps the tick healthy, on purpose.
