@@ -335,7 +335,9 @@ an `open_sprint_limit` finding, because failing closed is otherwise silent to th
 The limit is read from the installation config at the moment admission asks for it, so changing it needs
 no restart and an installation whose config cannot be read answers 1.
 
-At limit 1 nothing below applies: the second `create` is refused on the count, exactly as before.
+At limit 1 the disjointness requirements below are not checked at all, and admission reads exactly as it
+did before the pilot: a project another open sprint reserves is refused first, and anything else is
+refused on the count.
 
 At limit 2 a second sprint is admitted only when it can be proven disjoint from the one already open.
 Three requirements, all of them checked against live state before the first board write:

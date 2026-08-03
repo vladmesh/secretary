@@ -401,15 +401,18 @@ python3 -c 'import sys; from pathlib import Path; from secretary.sprints import 
 
 `1` after writing `2` means the file the command read is not the file that was edited, or the value was
 refused; check `secretary doctor` and the `--instance` path. The other observable difference is the
-wording of the refusal when the installation is full: at limit one it reads `installation already has an
-open sprint`, at limit two `installation already holds its limit of 2 open sprints`.
+wording of the count refusal, the one a full installation gives a candidate that collides with nothing
+more specific: at limit one it reads `installation already has an open sprint`, at limit two
+`installation already holds its limit of 2 open sprints`.
 
 ### Reading a refusal
 
 Every refusal happens before any board row, metadata or audit event is written, so a refused `sprint
 create` leaves nothing behind and is repeated by fixing the argument. Resource collisions are reported
 before the generic count refusal, so the message names something to act on rather than just a full
-installation.
+installation. Which collisions are checked depends on the limit: the reservation clash is checked at
+either limit and comes before the count at either limit; the product, repository-root and observer
+collisions are checked only at limit two.
 
 | refusal | what it says | what to do |
 | --- | --- | --- |
@@ -455,7 +458,11 @@ claims that cycle, and nothing beyond them.
 
 The limit is checked when a sprint is admitted, not continuously, so lowering it does not close anything.
 An installation that already holds two open sprints and then sets the limit back to one keeps both open,
-keeps ticking both, and refuses the next `create` or `reopen` on the count. The one place this bites is
+keeps ticking both, and refuses every new `create` and `reopen` while it is over its limit. Which refusal
+the caller gets is the ordinary one: a candidate that reserves a project either open sprint holds is
+refused as `resource_conflict` naming that sprint, because the reservation check runs before the count at
+either limit, and a candidate that collides with neither reservation is refused on the count naming both
+sprints. The one place this bites is
 recovery: a checkpoint taken while two sprints were open cannot be restored onto an installation whose
 limit is one, because restore judges the exported open set against the target's limit and refuses the
 whole restore with `restored open sprints are not admissible on this installation`.
