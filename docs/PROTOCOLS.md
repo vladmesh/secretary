@@ -624,12 +624,14 @@ What such a replay does is worth being exact about, because the id alone does no
 id is an ownership claim over its payload: a stale command carrying a new body is refused with
 `validation` and exit code 2, but an identical retry is a retry, and the protocol answers it from
 its committed event with `replayed: true` while the board gains no marker. So the round's body files
-go when the next round opens, all of them, the round about to start included; the replayed command
-then fails on its first step, reading a body file that is not there, and reports nothing. What
-remains is a worker that types the same bytes into the old path again, which the protocol is
-entitled to answer as the retry it looks like. Refusing that too means authorising the open
-generation inside the report protocol itself, which is a durable protocol change and is not part of
-this contour.
+go when the next round opens, all of them, the round about to start included; a replayed command
+that reads one of them fails on its first step. What it cannot do is refuse a worker that writes the
+old path again with the same contents, which the protocol answers as the retry it looks like. So the
+guarantee here is exactly this and no more: a command from a round that is over never records a
+report of the current round, and it can still answer its caller with a success that belongs to the
+round it came from. Refusing that call outright means authorising the attempt's open generation
+inside the report protocol, which is a durable protocol change with its own compatibility promise
+for stale retries, and it is not part of this contour.
 
 It is dispatcher state, so a dispatcher that lost its record recovers it: the `TASK.md` in the
 checkout names the round its live worker is working from, and the reports already on the card are

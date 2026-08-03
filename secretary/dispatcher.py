@@ -1957,9 +1957,12 @@ class CommandHostRuntime:
             "",
             "Report through the secretary task protocol only:",
             f"This document is report generation {generation}. Every request id below ends in "
-            f"-{generation}, and the body file below is this round's. A report command carrying any",
-            "other number belongs to a round that is over: its body file has been removed, so the",
-            "call fails and reports nothing. Copy the command from here, not from an earlier turn.",
+            f"-{generation}, and so does the body file. A command carrying any other number belongs",
+            "to a round that is over: that id already names that round's report, and its body file",
+            "has been removed. Running it does not report this round. It either fails on the missing",
+            "body or answers from the old round's record without writing anything to the card, and",
+            "either way this round is left waiting. Copy the command from here, never from an",
+            "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_requests["external_fact"]} --body-file {body_file}',
@@ -4713,7 +4716,8 @@ def _continuation_prompt(phase: str, generation: int = 0, reference: str = "") -
         f"has been rewritten for it: read it again, {work}, then report with the command in that "
         f"file. Its --request-id and its body file both end in {generation}. A report command from "
         "an earlier turn of this conversation ends in a different number and belongs to a round "
-        "that is over: its body file has been removed, so the call fails and reports nothing."
+        "that is over: that id already names that round's report and its body file is gone, so "
+        "running it reports nothing here, whether it fails or answers from the old round's record."
     )
 
 

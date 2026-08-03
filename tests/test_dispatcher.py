@@ -5604,6 +5604,40 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(refused.exception.exit_code, 2)
         self.assertEqual(refused.exception.code, "usage")
 
+    def test_a_recreated_body_file_still_answers_a_stale_command_with_its_own_round(self) -> None:
+        """The boundary this contour does not close, pinned so it is read rather than assumed.
+
+        Nothing stops a worker writing the previous round's body path again. The command then
+        carries the payload the previous round committed, and the protocol answers it as the retry
+        it looks like: no new marker, no new event, and the card still waiting for this round's
+        report. Refusing it means authorising the attempt's open generation inside the report
+        protocol, which is a durable protocol change with its own promise about stale retries.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        stale_id = self._worker_report_request_id()
+        stale_body = Path(_body_file_path("report", "secretary-510-pilot", 1))
+        stale_body.parent.mkdir(parents=True, exist_ok=True)
+        stale_body.write_text("same body", encoding="utf-8")
+        self._report_done("same body")
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+        markers = len(self.reader.show("secretary-510-pilot")["comments"])
+
+        # The retained conversation writes its old body file again and repeats its old command.
+        stale_body.write_text("same body", encoding="utf-8")
+        replay = self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body=_read_body(str(stale_body)), request_id=stale_id,
+        )
+
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(self.reader.show("secretary-510-pilot")["comments"]), markers)
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+
     def test_an_adopted_card_recovers_the_generation_its_worker_is_holding(self) -> None:
         """The generation is dispatcher state, and this is the path where that state is lost. The
         document in the checkout is what the live worker is working from, so it answers."""
