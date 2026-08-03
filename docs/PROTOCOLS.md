@@ -650,7 +650,21 @@ Which ids a round issued is read from the checkout first and from the dispatcher
 as a fallback, and for the same reason the generation is: the document is what the live worker is
 holding, and a record that was lost and re-adopted carries a fresh attempt id while that worker
 keeps reporting through the commands it was given. Only ids that name the open generation are taken
-from the document, so a checkout a round behind cannot hand back the previous round's ids.
+from the document, so a checkout a round behind cannot hand back the previous round's ids. When the
+checkout cannot be read at all, the ids are the ones the dispatcher would issue itself from the
+record's attempt and the open generation, which is what makes a live worker holding older ids get
+bounced once and re-materialised on the same round.
+
+The document answers through a record of the dispatcher's own, never by scanning it for report
+commands. Every worker `TASK.md` ends with a hidden `<!-- report-round generation=N ids=... -->`
+line carrying that round's request ids base64-encoded, on the same terms as the decision record
+below it: written last, after every section a card description or an observer decision is rendered
+into, matched as a whole line, and the last such line in the file taken. A card description is
+arbitrary Markdown that is copied into the document unchanged, so a `--request-id` token in ordinary
+prose is indistinguishable from a rendered command; reading the commands would make such a token an
+id "this round issued" and let a report committed under it end a round the dispatcher never handed
+it to. The generation the checkout names is read from the same record, and the same reasoning
+applies to it.
 
 Only a committed audit event ends a round. A write stages its event before it touches the backend,
 so a staged `reported` event is a report that may never reach the card, and a tick that consumed one

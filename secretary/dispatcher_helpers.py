@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from secretary.dispatcher_state import attempt_request_id, request_token
 
@@ -82,6 +82,56 @@ def _decision_record_line(generation: int, decision: str) -> str:
     encoded = base64.b64encode((decision or "").strip().encode("utf-8")).decode("ascii")
     return f"<!-- observer-decision generation={int(generation)} body={encoded} -->"
 
+
+# The round's own identity, recorded the same way and for the same reason as the decision above:
+# the report commands are rendered as prose in the same document as the card description, and a
+# description is arbitrary Markdown. Reading the ids back by scanning every `--request-id` token in
+# the file made any description carrying such a token an id "this round issued", so a report
+# committed under it ended a round the dispatcher never handed it to (secretary-1065).
+#
+# A second record rather than a field on the decision line: the two answer different questions and
+# fail independently. A decision body that cannot be decoded must read back as "no decision", which
+# is a legitimate state; the round's ids failing to decode must fall through to what the dispatcher
+# would issue itself. One line would tie those two fallbacks together, and would make the ids
+# unreadable on every document whose decision payload is malformed.
+_ROUND_RECORD_RE = re.compile(
+    r"^<!-- report-round generation=(\d+) ids=([A-Za-z0-9+/]*={0,2}) -->$", re.MULTILINE
+)
+
+
+def _round_record_line(generation: int, request_ids: Iterable[str]) -> str:
+    """The hidden line naming the report request ids this document handed its worker."""
+    payload = "\n".join(sorted(request_ids))
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return f"<!-- report-round generation={int(generation)} ids={encoded} -->"
+
+
+def _task_doc_round_record(workspace: str) -> tuple[int, set[str]]:
+    """The round this checkout's `TASK.md` names, as `(generation, request ids)`.
+
+    The last record in the file wins, and the dispatcher writes its own last, after every section a
+    card description or an observer decision can write into. So a forged line earlier in the
+    document is outranked, and the line is written on every worker document, empty round included:
+    the absence of a record has to read as absence rather than as whatever the description happens
+    to contain.
+    """
+    if not workspace:
+        return 0, set()
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return 0, set()
+    records = _ROUND_RECORD_RE.findall(document)
+    if not records:
+        return 0, set()
+    generation, encoded = records[-1]
+    try:
+        decoded = base64.b64decode(encoded.encode("ascii"), validate=True).decode("utf-8")
+    except (ValueError, UnicodeError):
+        return 0, set()
+    return int(generation), {line for line in decoded.splitlines() if line}
+
+
 _GATE_RED_PREFIX = "The mechanical validation gate is red"
 # Hidden marker line carrying the SHA-independent failure fingerprint (secretary-766): a visible
 # GitHub `detail` always contains the head SHA, which changes on every rework commit, so repeat
@@ -153,10 +203,17 @@ def _round_report_ids(workspace: str, attempt_id: str, reference: str, generatio
     generation persisted and the tick that rewrites the document lost, cannot hand back the previous
     round's ids. What the dispatcher would issue itself is the fallback for a checkout it cannot
     read.
+
+    The checkout answers through the dispatcher's own record line, never by scanning the document
+    for report commands: the card description is rendered into the same file, so a `--request-id`
+    token in ordinary prose would otherwise be admitted as an id this round issued, and a report
+    committed under it would end a round the dispatcher never handed it to (secretary-1065).
     """
+    recorded_generation, recorded_ids = _task_doc_round_record(workspace)
     from_document = {
-        request_id for request_id in _task_doc_report_request_ids(workspace)
-        if request_id.endswith(f"-{request_token(reference)}-{generation}")
+        request_id for request_id in recorded_ids
+        if recorded_generation == generation
+        and request_id.endswith(f"-{request_token(reference)}-{generation}")
     }
     if from_document:
         return from_document
@@ -223,38 +280,16 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
     return baseline
 
 
-def _task_doc_report_request_ids(workspace: str) -> list[str]:
-    """The report request ids in this checkout's `TASK.md`, in document order.
-
-    This is what the live worker is holding, which is the only durable record of a round's identity
-    outside the dispatcher's own state: the ids name the attempt that handed them out and the round
-    they belong to, and the document survives everything the state file does not.
-    """
-    if not workspace:
-        return []
-    try:
-        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return []
-    return [
-        request_id for request_id in re.findall(r"--request-id\s+(\S+)", document)
-        if "-worker-report-" in request_id
-    ]
-
-
 def _task_doc_report_generation(workspace: str) -> int:
     """The report generation the worker in this checkout was actually handed, or 0.
 
     A dispatcher record can be lost at any point, and the generation is dispatcher state. What is
-    not lost is the document the live worker is working from: its report commands carry the round
-    they belong to, so the checkout answers the question the state file no longer can.
+    not lost is the document the live worker is working from: its record line names the round it
+    was given, so the checkout answers the question the state file no longer can. Read from the
+    record and not from the report commands rendered beside it, for the reason in
+    `_task_doc_round_record`.
     """
-    generation = 0
-    for request_id in _task_doc_report_request_ids(workspace):
-        suffix = request_id.rsplit("-", 1)[-1]
-        if suffix.isdigit():
-            generation = max(generation, int(suffix))
-    return generation
+    return _task_doc_round_record(workspace)[0]
 
 
 def _task_doc_decision(workspace: str) -> str:

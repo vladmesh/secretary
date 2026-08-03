@@ -37,6 +37,7 @@ from secretary.dispatcher_helpers import (
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
+    _round_record_line,
     _round_report_ids,
     _round_report_marker,
     _last_marker_body,
@@ -2017,6 +2018,10 @@ class CommandHostRuntime:
             # decision-shaped string that arrived in somebody's prose. Written on every document,
             # empty body included: a round with no decision has to read back as none.
             _decision_record_line(generation, decision),
+            # And the round's own ids, on the same terms and for the same reason: the report
+            # commands above are prose in a document that also renders the card description, so
+            # they cannot be the authority on which ids this round issued. This line can.
+            _round_record_line(generation, [request, *blocked_requests.values()]),
             "",
         ]
         return "\n".join(sections)

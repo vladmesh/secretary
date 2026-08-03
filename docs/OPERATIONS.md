@@ -1222,6 +1222,14 @@ therefore means copying the command out of that worker's `TASK.md`, ids included
 id names the attempt as well as the round, so a card retried through Ready starts with a clean slate: the reports of
 the attempt that was blocked stay in the audit and cannot end a round of the new one.
 
+Which ids belong to the open round comes from a hidden `<!-- report-round generation=N ids=... -->` line the
+dispatcher writes at the end of every worker `TASK.md`, not from the report commands printed above it. The card
+description is copied into that document unchanged, so a `--request-id` token that happens to appear in a spec, an
+example or an operator note is prose and names no round: a report committed under it is written to the card and
+moves nothing, exactly like any other id the round did not issue. Neither the hidden line nor the round number in
+it is edited by hand; a checkout with no readable document falls back to the ids the dispatcher would issue itself,
+which bounces the head once onto the current command.
+
 A report the audit could not record is not a report yet. `secretary task report` answers `audit_pending` when the
 comment reached the card and the audit write did not, and the card stays where it is until that is repaired: run the
 same command again, ids and body unchanged, and it commits the pending event and answers `replayed`. `secretary task
