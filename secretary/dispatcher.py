@@ -37,6 +37,9 @@ from secretary.dispatcher_helpers import (
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
+    _round_record_line,
+    _round_report_ids,
+    _round_report_marker,
     _last_marker_body,
     _last_review_red_body,
     _legacy_worker_branch,
@@ -102,6 +105,7 @@ from secretary.dispatcher_review import (
 )
 from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
+    idle_stall_seconds as _idle_stall_seconds,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
     reset_wait as _reset_wait,
@@ -2014,6 +2018,10 @@ class CommandHostRuntime:
             # decision-shaped string that arrived in somebody's prose. Written on every document,
             # empty body included: a round with no decision has to read back as none.
             _decision_record_line(generation, decision),
+            # And the round's own ids, on the same terms and for the same reason: the report
+            # commands above are prose in a document that also renders the card description, so
+            # they cannot be the authority on which ids this round issued. This line can.
+            _round_record_line(generation, [request, *blocked_requests.values()]),
             "",
         ]
         return "\n".join(sections)
@@ -2993,7 +3001,14 @@ class DispatcherRuntime:
             return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
-        marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
+        # The round the dispatcher is holding, not merely the last report marker on the card: a
+        # marker is attributed to a round through the request id its command carried, which is what
+        # the audit keeps (secretary-1063).
+        marker = _round_report_marker(
+            self.audit,
+            ref,
+            _round_report_ids(record.workspace, record.attempt_id or attempt_id, ref, record.report_generation),
+        )
         continuation = record.worker_continuation
         if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:
@@ -3415,16 +3430,36 @@ class DispatcherRuntime:
                 setattr(record, f"{kind}_progress_at", progress_at)
                 self.save_records(payload, records)
         now = time.time()
-        if status.get("pid_confirmed"):
-            # The pid heartbeat proves this exact head process is still running. Silence is not
-            # evidence of anything for a runtime that can prove liveness this way, so none of the
-            # timing ceilings below apply; only an actual exit (handled above) ends this wait. The
-            # long inactivity ceiling stays live only for runtimes that cannot expose this signal.
+        pid_confirmed = bool(status.get("pid_confirmed"))
+        if pid_confirmed and "idle" in status:
+            # The pid heartbeat proves this exact head process is still running, and the pane says
+            # whether it is doing anything. Between them they answer better than any clock, so the
+            # timing ceilings below do not apply here: a head that is working waits as long as it
+            # needs, and one that has stopped without delivering ends the wait now rather than at a
+            # ceiling.
+            idle_trigger = self._idle_wait_trigger(
+                record, records, payload, status, kind=kind, now=now
+            )
+            if idle_trigger:
+                # Degraded, not ok. A head that stopped without delivering is the pipeline failing
+                # to make progress on a card, and the operator learns about it from the tick's own
+                # health: an `ok` bounce would write healthy telemetry over the one signal that
+                # says this card needs looking at before it reaches Blocked.
+                return self._trigger_wait_watchdog(
+                    task, record, records, payload, attempt_id, kind=kind,
+                    trigger=idle_trigger, stall=_idle_stall_seconds(), degraded=True,
+                )
             return unavailable() if runtime_reason else None
+        # Either no heartbeat, or a heartbeat with nothing that can say what the head is doing: an
+        # adopted head whose pane identity was never persisted, a pane binding Orca has lost, a
+        # probe it refuses. A live pid is not on its own a reason to wait forever, so those fall
+        # back to the ordinary ceilings, the same fallback a runtime with no signals at all gets.
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
-        if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
+        # Except the short first-output window, which stays off for a confirmed pid: silence right
+        # after launch is exactly what that heartbeat exists to answer (secretary-751).
+        if not pid_confirmed and activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
             return self._trigger_wait_watchdog(
                 task, record, records, payload, attempt_id, kind=kind,
                 trigger=f"no terminal output since launch for {int(now - started_at)}s",
@@ -3456,10 +3491,64 @@ class DispatcherRuntime:
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
 
-    def _trigger_wait_watchdog(self, task, record, records, payload, attempt_id, *, kind: str, trigger: str):
+    def _idle_wait_trigger(
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        status: dict[str, Any],
+        *,
+        kind: str,
+        now: float,
+    ) -> str:
+        """Why this wait should end because its head stopped working, or "" to keep waiting.
+
+        The invariant this enforces is that a round ends only when its own report is on the board
+        (secretary-1063). The dispatcher is here because no marker for the generation it is holding
+        has arrived, and a head that is ready for input has finished whatever it was doing without
+        producing one: the report call was never made, or it was made against a round that is over
+        and answered as that round's replay, which leaves nothing on the card and no error the
+        dispatcher can see. Both end here rather than in the report protocol, which cannot tell a
+        stale round's payload from the retry it must keep answering.
+
+        Readiness is sampled per tick and only counts once it has held for the idle window, so a
+        head between turns — a prompt delivered whose turn has not started, a conversation just
+        resumed — is not mistaken for one that has stopped. A working head is never ready, so this
+        never fires on it. A head held in a dialog is not working either and nothing in the
+        pipeline answers a dialog, so it ends the wait the same way and says so.
+        """
+        idle_since = float(getattr(record, f"{kind}_idle_since") or 0.0)
+        if not status.get("idle"):
+            if idle_since:
+                setattr(record, f"{kind}_idle_since", 0.0)
+                self.save_records(payload, records)
+            return ""
+        if not idle_since:
+            setattr(record, f"{kind}_idle_since", now)
+            self.save_records(payload, records)
+            return ""
+        idle_for = int(now - idle_since)
+        if idle_for <= _idle_stall_seconds():
+            return ""
+        expectation = _wait_expectation(kind)
+        if kind == "worker":
+            expectation = f"{expectation} for generation {record.report_generation}"
+        state = "held in a dialog" if status.get("idle_reason") == "dialog" else "idle"
+        return f"the head has been {state} for {idle_for}s with no {expectation}"
+
+    def _trigger_wait_watchdog(
+        self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
+        stall: int | None = None, degraded: bool = False,
+    ):
         if int(getattr(record, f"{kind}_respawns") or 0) < 1:
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
-        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=_stall_seconds(kind), trigger=trigger)
+            return self._respawn_wait(
+                task, record, records, payload, attempt_id, kind=kind, now=time.time(),
+                trigger=trigger, degraded=degraded,
+            )
+        return self._escalate_wait(
+            task, record, records, payload, attempt_id, kind=kind,
+            stall=_stall_seconds(kind) if stall is None else stall, trigger=trigger,
+        )
 
     def _respawn_wait(
         self,
@@ -3472,6 +3561,7 @@ class DispatcherRuntime:
         kind: str,
         now: float,
         trigger: str,
+        degraded: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -3541,6 +3631,9 @@ class DispatcherRuntime:
         # a writer.comment that raises would otherwise escape with the head already respawned and
         # respawns still 0: the next tick respawns again and the escalation never arrives.
         setattr(record, f"{kind}_waiting_since", now)
+        # The replacement head owns its own readiness: whatever the one it replaces was doing when
+        # the watchdog fired is not charged against it.
+        setattr(record, f"{kind}_idle_since", 0.0)
         respawns = int(getattr(record, f"{kind}_respawns") or 0) + 1
         setattr(record, f"{kind}_respawns", respawns)
         records[ref] = record
@@ -3553,7 +3646,13 @@ class DispatcherRuntime:
             reference=ref,
             body=(
                 f"Dispatcher wait watchdog: {trigger}, "
-                f"respawned the {kind} head (respawn {respawns}). Another stall escalates to Blocked."
+                f"respawned the {kind} head (respawn {respawns})."
+                + (
+                    " The report round did not move: the same TASK.md is back in the checkout, "
+                    f"with the report commands for generation {record.report_generation}."
+                    if kind == "worker" else ""
+                )
+                + " Another stall escalates to Blocked."
             ),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id,
@@ -3563,11 +3662,16 @@ class DispatcherRuntime:
             ),
         )
         return {
-            "status": "ok",
+            # A stall the timing ceilings caught is the watchdog working as designed on a head that
+            # went quiet. A head that is alive, idle and has delivered nothing is the pipeline
+            # failing to move a card, and the tick says so: `degraded` is what puts it in the
+            # production telemetry an operator and the steward read (secretary-1063).
+            "status": "degraded" if degraded else "ok",
             "step": step,
             "pilot_ref": ref,
             "attempt_id": attempt_id,
             "action": f"{kind}-respawned",
+            **({"reason": trigger} if degraded else {}),
         }
 
     def _escalate_wait(

@@ -1137,14 +1137,14 @@ outside the workspace, like report and verdict bodies, under `SECRETARY_DISPATCH
 respawn deletes it before a new launch so a dead predecessor's pid is not read before the new head overwrites it.
 
 If the pid probe confirms the head's process is alive, that is a positive liveness signal rather than merely an
-absence of proof of death, and the tick skips both timeouts — the short first-output window and the long idle
-ceiling — regardless of whether the last-output timestamp moved. Silence from a live head with a confirmed pid
-proves nothing, so only a real process exit triggers respawn or Blocked for it. While the file does not exist yet —
-a fresh launch has not run its write, or the runner does not provide this signal at all — that is read as neither
-death nor confirmed life, and the tick keeps using the ordinary last-output checks. The only runner without the
-signal is the raw command override, which substitutes a command bypassing the head registry and therefore gets no
-heartbeat wrapper. For it, as for a session manager without a last-output timestamp, the long ceiling is the only
-fallback, precisely because there is no way to confirm liveness independently of pane output.
+absence of proof of death, and silence from it proves nothing. The short first-output window never applies to such a
+head: printing nothing right after launch is exactly what the heartbeat answers. Whether the long ceiling applies
+depends on the work state below. While the file does not exist yet — a fresh launch has not run its write, or the
+runner does not provide this signal at all — that is read as neither death nor confirmed life, and the tick keeps
+using the ordinary last-output checks. The only runner without the signal is the raw command override, which
+substitutes a command bypassing the head registry and therefore gets no heartbeat wrapper. For it, as for a session
+manager without a last-output timestamp, the long ceiling is the only fallback, precisely because there is no way to
+confirm liveness independently of pane output.
 
 Every fresh progress signal starts a new waiting window. So the ceiling measures how long a head has been silent,
 not how long a task has run: a head producing output is not respawned merely because its card is old. If the
@@ -1157,14 +1157,48 @@ compromise for the alternate screen: it inspects file metadata only and never re
 is one respawn of the same head in the same workspace; the second moves the card to Blocked with a signal to the
 operator.
 
+A confirmed pid says the process is running; it does not say the head is doing anything. A head that finished its
+turn and went back to its prompt holds the same live pid as one that is thinking, which is how a card could sit in
+`waiting-worker-report` forever with the work already done: the report call was never made, or it was made with the
+command of a round that is over, which the task protocol answers as that round's retry and which therefore leaves
+nothing on the card and no error the dispatcher can see. So on a pid-confirmed head the dispatcher also asks the
+session manager whether the pane is ready for input, the same readiness the prompt delivery waits on. A pane that is
+working is never ready, so this never touches a head that is thinking. Readiness that holds for the idle window
+(5 minutes by default) while nothing has landed for the round being waited on takes the ordinary path: one respawn,
+then Blocked. A pane held in a dialog counts the same way: nothing in the pipeline answers a dialog, so that head has
+stopped as surely as one at its prompt, and the comment says which of the two it was.
+
+That leaves the heads nothing can be read about: one adopted from a launch intent whose pane identity was never
+persisted, and one whose pane binding the session manager has lost, where the inventory still lists the pane but the
+readiness probe is refused. Neither is a working head and neither is a stopped one, so neither answer is invented for
+them. They fall back to the long ceiling, the same fallback a runtime with no signals at all gets: silence for the
+whole ceiling is one respawn and then Blocked. The respawn gives that card a head with a fresh pane and a fresh
+heartbeat, which is also how the identity comes back.
+
+For a worker that means the round does not move. The same TASK.md is written back into the checkout with the same
+report commands and the same generation, and the head is pointed at them again; the report the dispatcher is waiting
+for is still the one the operator will see land. The respawn comment names the generation, and the Blocked reason
+names it too along with the fact that a respawn was already tried. A card blocked this way has the worker's work in
+its workspace: the operator's question is why the report never arrived, not what the head was doing.
+
+That bounce is a degraded tick, unlike a stall the timing ceilings catch. A head that is alive, idle and has
+delivered nothing is the pipeline failing to move a card rather than the watchdog doing its job, so the tick reports
+`degraded` with the trigger as its reason, the production telemetry records it as unhealthy with the card and the
+round in the diagnostic, and `triggered_agents health` shows the pipeline line red until a healthy tick follows. The
+operator therefore sees this one round before the card blocks, rather than finding a Blocked card hours later under
+an unbroken run of green ticks. The Blocked that follows is not itself degraded, on the same rule every other
+blocked card follows: the board carries the reason and the steward reports it as a `new_blocked` signal.
+
 A respawn writes a comment on the board, so the operator can tell a first stall from a card whose head has already
 been restarted, without waiting for the final Blocked.
 
 - `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — the short first-output window, default 180 seconds.
 - `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — the ceiling for a verdict after first output, default 5400 seconds.
 - `SECRETARY_WORKER_REPORT_STALL_SECONDS` — the ceiling for a report after first output, default 21600 seconds.
+- `SECRETARY_HEAD_IDLE_STALL_SECONDS` — how long a head ready for input with nothing delivered is left alone,
+  default 300 seconds.
 
-All three are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
+All four are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
 not stop the dispatcher from starting.
 
 A head writes report and verdict bodies to a file outside the workspace
@@ -1178,6 +1212,29 @@ The round number is also part of the verdict request id. The attempt id lives fo
 change across review-red, rework and report-done, so without the round a second red inside one attempt would look
 like a replay of the first to the task writer: no comment written, the CLI still answering "verdict recorded", the
 reviewer exiting, and the card standing in validate until the watchdog.
+
+Which report ends a worker round is decided by that id, not by the comment. The board comment reads `[report:done]`
+whoever filed it and for whichever round, so the dispatcher matches the report against the round it is holding
+through the request id the audit recorded with it. A report filed under some other id is written to the card and
+answered normally by `secretary task report`, and it moves nothing: the round it was meant for is still open, the
+head is bounced once and the card blocks if the round stays unreported. Reporting on behalf of a worker by hand
+therefore means copying the command out of that worker's `TASK.md`, ids included, not writing one of your own. The
+id names the attempt as well as the round, so a card retried through Ready starts with a clean slate: the reports of
+the attempt that was blocked stay in the audit and cannot end a round of the new one.
+
+Which ids belong to the open round comes from a hidden `<!-- report-round generation=N ids=... -->` line the
+dispatcher writes at the end of every worker `TASK.md`, not from the report commands printed above it. The card
+description is copied into that document unchanged, so a `--request-id` token that happens to appear in a spec, an
+example or an operator note is prose and names no round: a report committed under it is written to the card and
+moves nothing, exactly like any other id the round did not issue. Neither the hidden line nor the round number in
+it is edited by hand; a checkout with no readable document falls back to the ids the dispatcher would issue itself,
+which bounces the head once onto the current command.
+
+A report the audit could not record is not a report yet. `secretary task report` answers `audit_pending` when the
+comment reached the card and the audit write did not, and the card stays where it is until that is repaired: run the
+same command again, ids and body unchanged, and it commits the pending event and answers `replayed`. `secretary task
+reconcile-audit` repairs it too. An unrepaired one shows up as an ordinary unreported round, so the head is bounced
+and the card eventually blocks with the report visible on the card, which reads as the audit failure it is.
 
 ## Background-role telemetry
 

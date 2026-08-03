@@ -633,10 +633,57 @@ round it came from. Refusing that call outright means authorising the attempt's 
 inside the report protocol, which is a durable protocol change with its own compatibility promise
 for stale retries, and it is not part of this contour.
 
+What ends the round instead is the dispatcher, which is the only place that knows which round is
+open, and it ends it on two facts of its own. The first is which report belongs to the round. The
+marker on the card cannot say: it is `[report:done]` whoever filed it and for whichever round. The
+request id can, and the audit keeps it beside the marker, so a report is attributed to a round by
+the id its command carried and by nothing else. That id is the round's identity in full, attempt
+and generation both, so an id from a round that is over names that round, an id from an earlier
+attempt on the same card names that attempt, and an id a head invented for itself names nothing.
+None of them ends the round that is open, and all of them leave the card exactly where it was,
+which is the second fact: a head that has stopped working with its round unreported is pointed at
+the current command once and then the card is blocked. That covers a stale call as it covers a call
+never made, whatever the head did or did not run, because both leave the same nothing behind. The
+mechanics of that wait are in `docs/OPERATIONS.md`.
+
+Which ids a round issued is read from the checkout first and from the dispatcher's own state only
+as a fallback, and for the same reason the generation is: the document is what the live worker is
+holding, and a record that was lost and re-adopted carries a fresh attempt id while that worker
+keeps reporting through the commands it was given. Only ids that name the open generation are taken
+from the document, so a checkout a round behind cannot hand back the previous round's ids. When the
+checkout cannot be read at all, the ids are the ones the dispatcher would issue itself from the
+record's attempt and the open generation, which is what makes a live worker holding older ids get
+bounced once and re-materialised on the same round.
+
+The document answers through a record of the dispatcher's own, never by scanning it for report
+commands. Every worker `TASK.md` ends with a hidden `<!-- report-round generation=N ids=... -->`
+line carrying that round's request ids base64-encoded, on the same terms as the decision record
+below it: written last, after every section a card description or an observer decision is rendered
+into, matched as a whole line, and the last such line in the file taken. A card description is
+arbitrary Markdown that is copied into the document unchanged, so a `--request-id` token in ordinary
+prose is indistinguishable from a rendered command; reading the commands would make such a token an
+id "this round issued" and let a report committed under it end a round the dispatcher never handed
+it to. The generation the checkout names is read from the same record, and the same reasoning
+applies to it.
+
+Only a committed audit event ends a round. A write stages its event before it touches the backend,
+so a staged `reported` event is a report that may never reach the card, and a tick that consumed one
+would end the round on a call that had not happened. The other side of that window is a report whose
+comment landed and whose audit append then failed: the round stays open until the audit is repaired,
+which is what retrying the same command does, and until then the wait is a wait like any other.
+
+Reading the round out of the audit rather than off the board is what keeps this inside the
+dispatcher. Nothing is added to the report protocol: the same call from the same worker is still
+accepted, still idempotent under its own id, and still answers a same-payload retry with the
+original event.
+
 It is dispatcher state, so a dispatcher that lost its record recovers it: the `TASK.md` in the
-checkout names the round its live worker is working from, and the reports already on the card are
-the floor when no document can be read. Both are lower bounds and the larger one wins, so a
-recovered generation may skip a number but cannot reuse one.
+checkout names the round its live worker is working from, and the rounds already reported and
+consumed are the floor when no document can be read. Both are lower bounds and the larger one wins,
+so a recovered generation may skip a number but cannot reuse one. Only consumed reports count in
+that floor. A report still waiting to be read belongs to the round that is running, so counting it
+would hand the adopted record a generation that no report on the board names, and the report that
+is already there could never end its round.
 
 The comment index a new report marker is scanned against is a separate value and stays a comment
 count. A generation that skips or lags the card's comments does not blind the dispatcher to a fresh
