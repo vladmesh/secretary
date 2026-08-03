@@ -5615,6 +5615,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         it looks like: no new marker, no new event, and the card still waiting for this round's
         report. Refusing it means authorising the attempt's open generation inside the report
         protocol, which is a durable protocol change with its own promise about stale retries.
+
+        What the wait does with that is no longer nothing (secretary-1063): the round it leaves
+        open is closed by the dispatcher, which is the only component that knows which generation
+        that is.
         """
         self.host.fail_resume_worker_reason = ""
         self.start_pilot()
@@ -5640,6 +5644,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(len(self.reader.show("secretary-510-pilot")["comments"]), markers)
         self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+
+        # And that wait ends: the head is at its prompt with nothing on the card for the open
+        # generation, so it is pointed at the current command once and then the card is blocked.
+        self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
+        self.runtime.tick(self.selector)
+        self._rewind_idle()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
 
     def test_an_adopted_card_recovers_the_generation_its_worker_is_holding(self) -> None:
         """The generation is dispatcher state, and this is the path where that state is lost. The
