@@ -145,7 +145,9 @@ python3 -m secretary sprint create --role po --actor <you> \
   Product the sprint serves, and at least one is required. Read them with `secretary issue list --product
   <product-id>`.
 - `--project` is repeated once per registered project the sprint reserves. While the sprint is open, no
-  other sprint may reserve them, and the installation holds only this one open sprint.
+  other sprint may reserve them. By default the installation holds only this one open sprint; a second
+  one is a pilot that opens only when the `open_sprint_limit` instance setting is deliberately raised to
+  2, and what admission then checks is in "The open-sprint limit" in `docs/PROTOCOLS.md`.
 - `--repository` is repeated once per repository.
 - `--observer` is required and has no fallback: pass the profile the owner chose, or `none`. The
   sprint stores exactly that value; the dispatcher launches from it and never from a role default.
