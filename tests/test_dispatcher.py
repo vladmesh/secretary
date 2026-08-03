@@ -68,6 +68,7 @@ from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
     head_process_status,
+    initial_output_stall_seconds,
     pid_file_path,
     stall_seconds,
     wait_outcome,
@@ -688,6 +689,11 @@ class FakeHost:
         # A retained session the heartbeat can no longer confirm as suspended: set False to model
         # the head dying while the reviewer judged its checkout.
         self.retained_worker_alive = True
+        # A dispatcher death in the gap between the round's document reaching disk and the head
+        # being woken or launched. Both bring-ups write the document and then, separately, wake or
+        # launch, so both can be interrupted there. Fires once and clears itself, so the tick that
+        # recovers runs the same path for real.
+        self.crash_after_task_doc: BaseException | None = None
 
     def _write_task_doc(
         self, task: dict, workspace: Path, attempt_id: str, generation: int, decision: str = ""
@@ -710,6 +716,9 @@ class FakeHost:
             decision,
         )
         (workspace / "TASK.md").write_text(document, encoding="utf-8")
+        if self.crash_after_task_doc is not None:
+            crash, self.crash_after_task_doc = self.crash_after_task_doc, None
+            raise crash
 
     def _write_head_pid(self, kind: str, reference: str) -> None:
         path = Path(pid_file_path(kind, reference))
@@ -2734,6 +2743,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.state.load()
         self.runtime.state.put_records(payload, {})
         payload["attempt_id"] = "attempt-after-restart"
+        self.runtime.state.save(payload)
+
+    def _age_launch_intent(self, seconds: float) -> None:
+        """Push a stored launch intent back in time, so its grace window has run out."""
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["launch_intent"]["at"] -= seconds
         self.runtime.state.save(payload)
 
     def _rewind_wait(self, kind: str, seconds: float = 100_000.0) -> None:
@@ -5889,6 +5904,75 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(recovered["action"], "review-red-reused-worker")
         self.assertEqual(self._document_decision(), "add a live check")
+
+    def test_a_crash_between_the_document_and_the_wake_keeps_the_decision(self) -> None:
+        """The third order, inside the bring-up: the round's TASK.md is on disk and the retained
+        conversation has not been woken. The document already carries the decision, and the tick
+        that finishes the wake delivers that same one rather than what the board says by then."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(body="the fixture proves nothing")
+
+        class DispatcherDied(BaseException):
+            pass
+
+        self.host.crash_after_task_doc = DispatcherDied()
+        with self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework", reason="add a live check")
+
+        self.assertEqual(self._document_decision(), "add a live check", "the document is written")
+        self.assertEqual(self.host.resumed_workers, [], "nothing was woken on this round yet")
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.resumed_workers, ["term:secretary-510-pilot-pilot"])
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertIn("Observer rework decision to follow", self.host.resumed_continuations[-1])
+        self.assertNotIn("revert the whole thing", self._task_document())
+
+    def test_a_crash_between_the_document_and_the_launch_keeps_the_decision(self) -> None:
+        """The same boundary on the replacement path, where the wake is a launch rather than a
+        continuation. The crash leaves the round in progress with no head, and the replacement the
+        dispatcher eventually puts on it is handed the decision that opened the round, not the
+        decision the board has by then."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(body="the fixture proves nothing")
+
+        class DispatcherDied(BaseException):
+            pass
+
+        self.host.crash_after_task_doc = DispatcherDied()
+        with self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework", reason="add a live check")
+
+        self.assertEqual(self._document_decision(), "add a live check", "the document is written")
+        self.assertNotEqual(
+            self._pilot_record()["handle"], "rework:secretary-510-pilot",
+            "no replacement head was launched on this round yet",
+        )
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        # The launch intent was durable before the document was written, so the recovery first
+        # settles whether that launch left a head running. It never wrote a heartbeat, so it counts
+        # as one that left nothing only once its grace window has run out, and the round is then a
+        # card in progress with no head, which the worker stall replaces.
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "worker-launch-pending")
+        self._age_launch_intent(initial_output_stall_seconds() + 60)
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "worker-respawned")
+        self.assertEqual(self._pilot_record()["handle"], "rework:secretary-510-pilot")
+        self.assertEqual(self._pilot_record()["report_decision"], "add a live check")
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertNotIn("revert the whole thing", self._task_document())
 
     def test_an_adopted_card_recovers_the_decision_its_worker_is_holding(self) -> None:
         """The decision is dispatcher state, and this is the path where that state is lost. The
