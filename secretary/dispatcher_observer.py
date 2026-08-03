@@ -330,6 +330,11 @@ class ObserverRecord:
     # head never got its prompt, so a live pid there is not a working observer: the terminal has to
     # be closed before this sprint counts as headed again.
     abandoned_handle: bool = False
+    # This record's bring-up rendered the sprint binding into its head's command line. False on a
+    # record written before the binding existed, which is the only fact that tells a head able to
+    # write from one whose every write is refused as `observer_identity_unbound`: the process
+    # carries the binding or it does not, and no probe of a running head can ask it.
+    bound: bool = False
     state: str = "pending"
     launched_at: float = 0.0
     last_action: str = ""
@@ -364,6 +369,7 @@ class ObserverRecord:
             "head_possible": self.head_possible,
             "workspace_live": self.workspace_live,
             "abandoned_handle": self.abandoned_handle,
+            "bound": self.bound,
             "state": self.state,
             "launched_at": self.launched_at,
             "last_action": self.last_action,
@@ -406,6 +412,10 @@ class ObserverRecord:
             # a path it never learned about.
             workspace_live=bool(payload.get("workspace_live", bool(payload.get("workspace")))),
             abandoned_handle=bool(payload.get("abandoned_handle")),
+            # No default beyond False: a record written before this field existed describes a head
+            # launched without a binding, and reading it as bound is exactly the head that would be
+            # left running and refused on every write.
+            bound=bool(payload.get("bound")),
             state=str(payload.get("state") or "pending"),
             launched_at=_float(payload.get("launched_at")),
             last_action=str(payload.get("last_action") or ""),
@@ -473,6 +483,10 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             # died with the tick that started it: it is stopped by workspace, not by handle.
             "handle_known": bool(record.handle),
             "abandoned_handle": record.abandoned_handle,
+            # Whether the head that is up was launched with its sprint binding. False on a head
+            # from before the binding: it is alive and every write of its role is refused, which
+            # reads as a watched sprint from every other field.
+            "bound": record.bound,
             "last_action": record.last_action,
             "last_action_at": record.last_action_at,
             "deferred_reason": record.deferred_reason,
@@ -626,6 +640,23 @@ def _reconcile_open_sprint(
         if adopted is not None:
             return adopted
         _abandon_launch_intent(runtime, ref, record)
+    # A head from before the sprint binding is retired here, whatever its pid says. Its writes are
+    # all refused as `observer_identity_unbound`, so it is a live process that cannot work the
+    # sprint, and nothing it does can bind it: the binding is in the environment it started with.
+    # Stopping it is the changeover — this tick closes the terminal, the next one brings the head
+    # back up bound. It comes before the drain check on purpose: a drained pipeline is a reason to
+    # start nothing, not a reason to keep a head that can only be refused.
+    if (
+        record is not None
+        and not unresolved_intent
+        and not record.bound
+        and record.launches > 0
+        and _head_may_be_running(record)
+    ):
+        return _stop_observer(
+            runtime, payload, observers, ref,
+            reason="observer head predates the sprint binding and cannot authenticate its writes",
+        )
     # A terminal left over from an aborted bring-up is skipped here whatever its pid says: that
     # head never received its sprint, and reading it as the live observer would park the sprint
     # forever on a head that is doing nothing.
@@ -1720,6 +1751,7 @@ def _launch_observer(
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}
     record.launches = attempt
     record.pending_launch = 0
+    record.bound = True
     record.head_possible = True
     record.workspace_live = True
     record.state = "running"
@@ -1796,6 +1828,9 @@ def _write_launch_intent(
     record.pending_launch = attempt
     record.head_possible = True
     record.workspace_live = True
+    # The identity is rendered into the command this intent is written for, so a head adopted from
+    # the intent is a bound head: the flag belongs to the launch, not to its confirmation.
+    record.bound = True
     record.state = "launching"
     record.launched_at = now
     record.last_action = "launching"

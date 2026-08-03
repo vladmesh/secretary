@@ -299,6 +299,70 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation},
         )
 
+    def _unbind_record(self, reference: str = "sprint:1") -> None:
+        """Rewrite the record the way a state file written before the binding existed reads.
+
+        The key is removed rather than set to False, because that is the on-disk shape a running
+        installation is upgraded from, and `from_json` reading a missing key as bound is exactly
+        the head that would be left running and refused.
+        """
+        payload = self.runtime.production_state.load()
+        raw = payload["observers"][reference]
+        raw.pop("bound", None)
+        self.runtime.production_state.save(payload)
+        self.assertFalse(self.observers()[reference].bound)
+
+    def test_a_head_from_before_the_binding_is_retired_and_comes_back_bound(self) -> None:
+        """The changeover: a live head nobody bound is stopped, and the next tick binds it.
+
+        Its writes are all refused as `observer_identity_unbound`, and nothing it does can bind
+        it: the binding is in the environment it started with. No probe of the process can ask,
+        so the record is what says whether the head that is up carries one.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.assertTrue(self.observers()["sprint:1"].bound)
+        first_generation = self.observers()["sprint:1"].generation
+        self._unbind_record()
+        # Alive, watched-looking on every other field, and unable to write: `status --json` says so
+        # rather than leaving the operator to read the refusals.
+        unbound_status = status_observers(self.runtime.production_state.load())[0]
+        self.assertTrue(unbound_status["alive"])
+        self.assertFalse(unbound_status["bound"])
+
+        retired = self.runtime.production_tick()
+
+        actions = self.actions(retired)
+        self.assertEqual([action["action"] for action in actions], ["observer-stopped"])
+        self.assertIn("predates the sprint binding", actions[0]["reason"])
+        self.assertNotIn("sprint:1", self.observers())
+        stopped = [event for event in self.audit.events() if event["kind"] == "observer_stopped"]
+        self.assertIn("predates the sprint binding", stopped[-1]["payload"]["reason"])
+
+        relaunched = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(relaunched)], ["observer-launched"],
+        )
+        record = self.observers()["sprint:1"]
+        self.assertTrue(record.bound)
+        self.assertNotEqual(record.generation, first_generation)
+        self.assertEqual(
+            self.host.observer_identities[-1],
+            {OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation},
+        )
+
+    def test_a_bound_head_is_not_retired(self) -> None:
+        """The changeover applies once. A head this dispatcher launched is left where it is."""
+        self.open_sprint()
+        self.runtime.production_tick()
+
+        second = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(second)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(len(self.host.observer_identities), 1)
+
     def test_second_tick_does_not_launch_a_second_head(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
