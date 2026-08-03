@@ -306,18 +306,13 @@ def _refuse_open_sprint(
     """Refuse a sprint this installation has no room, or no disjoint room, for.
 
     Every collision the caller can act on is reported before the generic count refusal,
-    because the caller of a colliding project, product or repository has to see which
-    resource it is, not only that some sprint is open.
-
-    Above the singleton limit an installation already holding its limit is the other way
-    round: nothing about the candidate's resources can admit it, so it is told the count
-    it collided with rather than a resource it might try to move.  At the singleton limit
-    the order is the one every installation prints today, where the reservation refusal
-    predates the limit and reads the same either way.
+    at every limit and whether or not the installation is already at it.  A resource
+    refusal names the sprint holding the resource, so closing that one sprint both frees
+    a slot and clears the collision.  The count refusal names every open sprint and
+    distinguishes none of them, so a caller who acts on it can close the wrong one and
+    come back for a second refusal.
     """
     saturated = len(others) >= limit
-    if saturated and limit > DEFAULT_OPEN_SPRINT_LIMIT:
-        raise _open_sprint_count_error(others, limit)
     _refuse_shared_reservations(
         [str(project) for project in candidate.get("reservations") or []], others,
     )

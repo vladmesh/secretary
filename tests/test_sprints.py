@@ -22,6 +22,7 @@ from secretary.sprints import (
     active_sprint_projects,
     budget_thresholds,
     ensure_sprint_board,
+    open_sprint_admission_error,
     open_sprint_limit,
     open_sprint_limit_invalid,
     refresh_active_sprint_projects,
@@ -1217,25 +1218,60 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
         )
         self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
 
-    def test_a_third_sprint_is_refused_on_the_count_even_when_it_collides(self) -> None:
-        """At capacity nothing about the candidate's resources can admit it."""
+    def test_a_third_sprint_that_collides_is_told_the_resource_not_the_count(self) -> None:
+        """At capacity too, the refusal names the holder the caller has to close.
+
+        The count names every open sprint and distinguishes none of them, so a caller
+        acting on it can close the wrong one and be refused again.
+        """
         self._limit(2)
         first = self._first()
         second = self._second()["sprint"]["ref"]
 
-        for name, candidate in (
-            ("reservation", lambda: self._third(projects=["other"])),
-            ("product", lambda: self._third(product="other", issues=["issue:foreign"])),
-            ("repository", lambda: self._third(repositories=[str(self.roots / "other")])),
-            ("observer", lambda: self._third(observer=head_choice("claude-observer"))),
+        for name, candidate, code, message in (
+            (
+                "reservation", lambda: self._third(projects=["other"]),
+                "resource_conflict", f"other held by {second}",
+            ),
+            (
+                "product", lambda: self._third(product="other", issues=["issue:foreign"]),
+                "resource_conflict",
+                f"product other is already the product of open sprint {second}",
+            ),
+            (
+                "repository", lambda: self._third(repositories=[str(self.roots / "other")]),
+                "resource_conflict",
+                f"overlaps {self.roots / 'other'}, held by open sprint {second}",
+            ),
+            (
+                "observer", lambda: self._third(observer=head_choice("claude-observer")),
+                "sprint_conflict", "one-observer ceiling",
+            ),
         ):
             with self.subTest(collision=name):
-                self._assert_refusal_left_nothing(
-                    candidate, "sprint_conflict",
-                    "installation already holds its limit of 2 open sprints: "
-                    + ", ".join(sorted([first, second])),
-                )
+                self._assert_refusal_left_nothing(candidate, code, message)
         self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
+
+    def test_a_pair_that_cannot_be_proven_disjoint_is_refused_in_either_order(self) -> None:
+        """Both orderings of the pair refuse, whichever row carries the opaque value.
+
+        A one-way comparison would admit the pair whenever the opaque row happened to be
+        the one already open, which the repository check got wrong once.
+        """
+        for attribute, opaque in (
+            ("product", {"product": "", "repositories": [str(self.roots / "opaque")]}),
+            ("repository", {"product": "opaque", "repositories": ["."]}),
+        ):
+            for refs in (("sprint:a", "sprint:b"), ("sprint:b", "sprint:a")):
+                with self.subTest(attribute=attribute, opaque_ref=refs[0]):
+                    rows = [
+                        {"ref": refs[0], "reservations": [], **opaque},
+                        {
+                            "ref": refs[1], "reservations": [], "product": "plain",
+                            "repositories": [str(self.roots / "plain")],
+                        },
+                    ]
+                    self.assertIsNotNone(open_sprint_admission_error(rows, limit=2))
 
     def test_reopen_obeys_the_same_rules_excluding_only_its_own_row(self) -> None:
         self._limit(2)
@@ -1259,12 +1295,12 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
         )
 
         third = self._third(projects=["other"])["sprint"]["ref"]
-        # At its limit the installation refuses on the count, whatever this row collides on.
+        # At its limit too, the reservation it collides on is named ahead of the count.
         self._assert_refusal_left_nothing(
             lambda: self.writer.reopen(
                 role="po", actor="operator", reference=second, observer=none_choice(),
             ),
-            "sprint_conflict", "installation already holds its limit of 2 open sprints",
+            "resource_conflict", f"other held by {third}",
         )
         self.assertEqual(sorted(self._open_refs()), sorted([first, third]))
 
