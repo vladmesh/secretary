@@ -5915,14 +5915,20 @@ class DispatcherRuntimeTests(unittest.TestCase):
         return stale_id
 
     def _bounce_the_idle_worker(self) -> dict:
-        """Drive the tick that acts on a head sitting idle with nothing delivered."""
+        """Drive the tick that acts on a head sitting idle with nothing delivered.
+
+        Every caller gets the health check with it: this tick is the pipeline failing to move a
+        card, so it is degraded wherever it happens, not only on the path one test drives.
+        """
         self._head_at_its_prompt()
         self.assertEqual(
             self.runtime.tick(self.selector)["action"], "waiting-worker-report",
             "one reading of an idle pane is a head between turns, not a stalled one",
         )
         self._rewind_idle()
-        return self.runtime.tick(self.selector)
+        bounced = self.runtime.tick(self.selector)
+        self.assertEqual(bounced["status"], "degraded")
+        return bounced
 
     def test_a_head_held_in_a_dialog_is_bounded_like_an_idle_one(self) -> None:
         """A pane waiting on a dialog is not working either, and nothing in the pipeline answers a
@@ -5997,6 +6003,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         bounced = self._bounce_the_idle_worker()
 
         self.assertEqual(bounced["action"], "worker-respawned")
+        # The reason travels with the degraded status, because a degradation with no diagnostic
+        # sends the operator back to the pane to work out which round was waited for.
+        self.assertIn("generation 2", bounced["reason"])
         self.assertIn("restart_worker", self.host.calls)
         self._assert_one_generation(2)
         comment = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]

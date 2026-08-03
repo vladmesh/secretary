@@ -1181,6 +1181,14 @@ for is still the one the operator will see land. The respawn comment names the g
 names it too along with the fact that a respawn was already tried. A card blocked this way has the worker's work in
 its workspace: the operator's question is why the report never arrived, not what the head was doing.
 
+That bounce is a degraded tick, unlike a stall the timing ceilings catch. A head that is alive, idle and has
+delivered nothing is the pipeline failing to move a card rather than the watchdog doing its job, so the tick reports
+`degraded` with the trigger as its reason, the production telemetry records it as unhealthy with the card and the
+round in the diagnostic, and `triggered_agents health` shows the pipeline line red until a healthy tick follows. The
+operator therefore sees this one round before the card blocks, rather than finding a Blocked card hours later under
+an unbroken run of green ticks. The Blocked that follows is not itself degraded, on the same rule every other
+blocked card follows: the board carries the reason and the steward reports it as a `new_blocked` signal.
+
 A respawn writes a comment on the board, so the operator can tell a first stall from a card whose head has already
 been restarted, without waiting for the final Blocked.
 

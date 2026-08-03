@@ -3388,9 +3388,13 @@ class DispatcherRuntime:
                 record, records, payload, status, kind=kind, now=now
             )
             if idle_trigger:
+                # Degraded, not ok. A head that stopped without delivering is the pipeline failing
+                # to make progress on a card, and the operator learns about it from the tick's own
+                # health: an `ok` bounce would write healthy telemetry over the one signal that
+                # says this card needs looking at before it reaches Blocked.
                 return self._trigger_wait_watchdog(
                     task, record, records, payload, attempt_id, kind=kind,
-                    trigger=idle_trigger, stall=_idle_stall_seconds(),
+                    trigger=idle_trigger, stall=_idle_stall_seconds(), degraded=True,
                 )
             return unavailable() if runtime_reason else None
         # Either no heartbeat, or a heartbeat with nothing that can say what the head is doing: an
@@ -3481,10 +3485,13 @@ class DispatcherRuntime:
 
     def _trigger_wait_watchdog(
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
-        stall: int | None = None,
+        stall: int | None = None, degraded: bool = False,
     ):
         if int(getattr(record, f"{kind}_respawns") or 0) < 1:
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=time.time(), trigger=trigger)
+            return self._respawn_wait(
+                task, record, records, payload, attempt_id, kind=kind, now=time.time(),
+                trigger=trigger, degraded=degraded,
+            )
         return self._escalate_wait(
             task, record, records, payload, attempt_id, kind=kind,
             stall=_stall_seconds(kind) if stall is None else stall, trigger=trigger,
@@ -3501,6 +3508,7 @@ class DispatcherRuntime:
         kind: str,
         now: float,
         trigger: str,
+        degraded: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
@@ -3601,11 +3609,16 @@ class DispatcherRuntime:
             ),
         )
         return {
-            "status": "ok",
+            # A stall the timing ceilings caught is the watchdog working as designed on a head that
+            # went quiet. A head that is alive, idle and has delivered nothing is the pipeline
+            # failing to move a card, and the tick says so: `degraded` is what puts it in the
+            # production telemetry an operator and the steward read (secretary-1063).
+            "status": "degraded" if degraded else "ok",
             "step": step,
             "pilot_ref": ref,
             "attempt_id": attempt_id,
             "action": f"{kind}-respawned",
+            **({"reason": trigger} if degraded else {}),
         }
 
     def _escalate_wait(
