@@ -64,15 +64,13 @@ the rollback are in [Operations](OPERATIONS.md#the-two-sprint-pilot). The code i
 tests; the pilot has not been enabled on the live installation, so there is no operational experience of
 two sprints running side by side yet.
 
-The pilot deliberately isolates admission and the per-sprint mechanisms (the observer fence when the
-board is readable, the budget and its hard stop, claim suppression by a blocked card) and nothing else.
+The pilot deliberately isolates admission and the per-sprint mechanisms (the declared observer, whose
+calls are bound to its own sprint, the observer fence when the board is readable, the budget and its hard
+stop, claim suppression by a blocked card) and nothing else.
 Pause, the single production tick writer and the blind fence stay installation-wide.
 
-Raising the limit past two, or lifting the one-observer ceiling, needs work that does not exist:
+Raising the limit past two needs work that does not exist:
 
-- an observer call bound to a sprint identity. Today the observer role's commands are not scoped to the
-  sprint they are about, so two heads observing at once would each read the other's cards as their own.
-  This is the ceiling's whole reason, and it is the first thing to build.
 - pause and drain scoped to a sprint rather than to the installation, so one sprint can be stopped for
   repair without stopping the other.
 - a way for a tick that cannot read the sprint board to fence less than everything, which needs a

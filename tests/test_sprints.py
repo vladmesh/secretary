@@ -1200,19 +1200,19 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
             SprintReader(self.client).show(first, include_cards=False)["status"], "closed",  # type: ignore[arg-type]
         )
 
-    def test_the_one_observer_ceiling_admits_a_second_sprint_only_without_a_head(self) -> None:
-        """Nothing binds an observer call to a sprint yet, so only one head may run."""
+    def test_a_disjoint_second_sprint_may_declare_its_own_observer_head(self) -> None:
+        """An observer call is bound to its sprint, so both open sprints may run a head.
+
+        The ceiling this replaces refused the second head because nothing scoped an
+        observer call to the sprint it was about.  That binding exists now, and the
+        declaration is judged on the disjointness rules alone.
+        """
         self._limit(2)
         first = self._first()
 
-        self._assert_refusal_left_nothing(
-            lambda: self._second(observer=head_choice("claude-observer")),
-            "sprint_conflict", "one-observer ceiling",
-        )
+        second = self._second(observer=head_choice("claude-observer"))["sprint"]
 
-        second = self._second()["sprint"]
-
-        self.assertEqual(second["observer"], none_choice())
+        self.assertEqual(second["observer"], head_choice("claude-observer"))
         self.assertEqual(sorted(self._open_refs()), sorted([first, second["ref"]]))
 
     def test_a_third_sprint_is_refused_however_disjoint_it_is(self) -> None:
@@ -1252,13 +1252,16 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
                 "resource_conflict",
                 f"overlaps {self.roots / 'other'}, held by open sprint {second}",
             ),
-            (
-                "observer", lambda: self._third(observer=head_choice("claude-observer")),
-                "sprint_conflict", "one-observer ceiling",
-            ),
         ):
             with self.subTest(collision=name):
                 self._assert_refusal_left_nothing(candidate, code, message)
+
+        # A declared head is not a collision of its own: a disjoint third sprint is told the
+        # count, which is the only thing left standing in its way.
+        self._assert_refusal_left_nothing(
+            lambda: self._third(observer=head_choice("claude-observer")),
+            "sprint_conflict", "installation already holds its limit of 2 open sprints",
+        )
         self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
 
     def test_a_pair_that_cannot_be_proven_disjoint_is_refused_in_either_order(self) -> None:
@@ -1295,14 +1298,14 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
         self.assertEqual(reopened["sprint"]["status"], "open")
 
         self.writer.close(role="po", actor="operator", reference=second)
-        self._assert_refusal_left_nothing(
-            lambda: self.writer.reopen(
-                role="po", actor="operator", reference=second,
-                observer=head_choice("claude-observer"),
-            ),
-            "sprint_conflict", "one-observer ceiling",
+        # A reopen may declare its own head beside the one the other sprint already runs.
+        with_head = self.writer.reopen(
+            role="po", actor="operator", reference=second,
+            observer=head_choice("claude-observer"),
         )
+        self.assertEqual(with_head["sprint"]["observer"], head_choice("claude-observer"))
 
+        self.writer.close(role="po", actor="operator", reference=second)
         third = self._third(projects=["other"])["sprint"]["ref"]
         # At its limit too, the reservation it collides on is named ahead of the count.
         self._assert_refusal_left_nothing(

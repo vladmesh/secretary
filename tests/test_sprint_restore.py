@@ -387,8 +387,8 @@ class SprintRestoreTests(unittest.TestCase):
         """Restore reproduces rows one by one, so the set is judged once, before the first write.
 
         Otherwise an archive is the way around admission: two open sprints sharing a
-        product, a reservation, a repository tree and an observer head would come back
-        exactly as the rules refuse to create them.
+        product, a reservation and a repository tree would come back exactly as the rules
+        refuse to create them.
         """
         self._two_open_rows()
         client = _EmptyBoardsKanboard()
@@ -429,14 +429,6 @@ class SprintRestoreTests(unittest.TestCase):
                 },
                 "overlaps",
             ),
-            (
-                "observer",
-                {
-                    "product": "other", "reservations": ["other"], "repositories": [_root("other")],
-                    "observer": head_choice("codex-observer"),
-                },
-                "one-observer ceiling",
-            ),
         ):
             with self.subTest(collision=name):
                 self.setUp()
@@ -451,11 +443,13 @@ class SprintRestoreTests(unittest.TestCase):
 
                 self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
 
+        # Disjoint on everything the rules judge, and each row carrying its own observer
+        # head: a declared head is no longer something the open set is refused for.
         self.setUp()
         self._set_open_sprint_limit(2)
         self._two_open_rows(
             product="other", reservations=["other"], repositories=[_root("other")],
-            observer=none_choice(),
+            observer=head_choice("codex-observer"),
         )
         client, _ = self._restore()
 

@@ -1710,10 +1710,11 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
     HELD = "the sprint holding this project has no working declared observer"
 
-    def open_pair(self, *, observer=None) -> None:
+    def open_pair(self, *, observer=None, second_observer=None) -> None:
         self.go_strict()
         self.sprint_writer = self.admit_two_open_sprints(
-            observer=observer or head_choice("claude-observer")
+            observer=observer or head_choice("claude-observer"),
+            second_observer=second_observer,
         )
         self.link_pair_cards()
 
@@ -1908,6 +1909,33 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         records = set(self.runtime.production_state.load()["records"])
         self.assertNotIn("secretary-510-pilot", records)
         self.assertNotIn("secretary-510-neighbor", records)
+
+    def test_one_sprints_broken_head_does_not_fence_the_other_sprints_head(self) -> None:
+        """Both sprints declaring a head: the fence is still one sprint's, not the pair's.
+
+        The scenario admission used to refuse. Each sprint is judged on its own declaration and
+        its own record, so the sprint whose head is fine keeps its projects and its cards.
+        """
+        self.open_pair(second_observer=head_choice("codex-observer"))
+        self.runtime.production_tick()  # both heads launched and adopted
+        self.rewrite_observer(self.FIRST, "{not json")
+
+        fence = self.fence()
+
+        self.assertEqual(fence["sprints"], {self.FIRST})
+        self.assertEqual(fence["projects"], {"secretary", "fourth"})
+        self.assertEqual(fence["refs"], {"secretary-510-pilot", "fourth-1"})
+        self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_MALFORMED)
+        self.assertFalse(fenced_task(
+            fence, {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
+        ))
+        self.assertFalse(fenced_task(
+            fence, {"ref": "third-1", "sprint": self.SECOND, "project": "third"},
+        ))
+        # The second sprint's head is not what the fence was about, and it is still alive.
+        self.assertTrue(observer_alive(load_observers(self.runtime.production_state.load())[
+            self.SECOND
+        ])["alive"])
 
 
 if __name__ == "__main__":
