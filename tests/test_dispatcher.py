@@ -600,7 +600,9 @@ class FakeCatalog:
         )
 
     def binding(self, project: str) -> dict:
-        binding = {"repo": f"/home/dev/{project}"}
+        # `orca_binding` is required of every enabled binding, so the double carries one too. Here
+        # it spells the project the same way; the projects where it does not have their own tests.
+        binding = {"repo": f"/home/dev/{project}", "orca_binding": project}
         if self._default_branch:
             binding["default_branch"] = self._default_branch
         return binding
@@ -8066,7 +8068,7 @@ class _StackedBaseCatalog:
         self._repo = repo
 
     def binding(self, project: str) -> dict:
-        return {"repo": str(self._repo), "default_branch": "main"}
+        return {"repo": str(self._repo), "default_branch": "main", "orca_binding": project}
 
     def default_branch(self, project: str, override: str | None) -> str:
         return override or "main"
@@ -8161,7 +8163,7 @@ class WorkspaceResumeTests(unittest.TestCase):
 
             class Catalog(FakeCatalog):
                 def binding(self, project: str) -> dict:
-                    return {"repo": str(repo), "default_branch": "main"}
+                    return {"repo": str(repo), "default_branch": "main", "orca_binding": project}
 
             host = GitBranchHost(root)
             host.catalog = Catalog()  # type: ignore[assignment]
@@ -8222,7 +8224,7 @@ class WorkspaceResumeTests(unittest.TestCase):
 
             class Catalog(FakeCatalog):
                 def binding(self, project: str) -> dict:
-                    return {"repo": str(repo), "default_branch": "main"}
+                    return {"repo": str(repo), "default_branch": "main", "orca_binding": project}
 
             host = GitBranchHost(root)
             host.catalog = Catalog()  # type: ignore[assignment]
