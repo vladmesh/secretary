@@ -241,9 +241,9 @@ Product, and every `--project` is an id from the instance project registry; `--r
 meaning as the write-guard scope. A repository root is canonicalized where it is declared, so the row
 persists the absolute path and a root this host cannot resolve is refused with the value it could not
 resolve. An Issue of another Product and a closed Issue are refused with their
-own messages. One installation holds at most one open sprint: a second `create` is refused as
-`sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
-that, as `resource_conflict` naming the project and its holder. Every one of these checks is a read, so a
+own messages. By default one installation holds at most one open sprint, and the gated pilot that raises
+that to two is [below](#the-open-sprint-limit), which is also where what admission checks and in what
+order is stated. Every one of these checks is a read, so a
 refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
 returns the first event instead of colliding with the sprint it already opened.
 
@@ -323,6 +323,62 @@ same entity-derived state for every sprint in `installation.sprints.items`, incl
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.
 
+### The open-sprint limit
+
+How many sprints an installation may hold open at once is the instance setting `open_sprint_limit`, an
+integer that is either 1 or 2. Absent means 1, which is what every installation does and what the shipped
+default is. Two is a gated pilot and nothing enables it by itself. A value the setting cannot honour
+(3, a string, `true`, anything the schema refuses) fails closed to 1 rather than raising, so a malformed
+setting can never widen the limit and can never stop admission either; `validate_instance` reports it as
+an `open_sprint_limit` finding, because failing closed is otherwise silent to the operator who wrote it.
+The limit is read from the installation config at the moment admission asks for it, so changing it needs
+no restart and an installation whose config cannot be read answers 1.
+
+What admission checks, in which order, and at which limit is stated here and nowhere else; every other
+passage in these docs points here rather than repeating it. Each check is a read of live state, and all
+of them run before the first board write. In the order admission applies them:
+
+1. **disjoint project reservations**, at either limit. A project another open sprint already reserves is
+   refused, naming the project and its holder. This rule predates the limit and reads the same at 1 and
+   at 2.
+2. **a different product**, at limit 2 only. Two open sprints may not share the owning Product. A sprint
+   that declares no product at all, a row from before sprints owned one, cannot be proven disjoint and is
+   refused, whichever of the two it is: the candidate is judged on its own value first, so the answer
+   does not depend on which row was looked at first.
+3. **non-overlapping canonical repository roots**, at limit 2 only. Roots are compared as absolute
+   resolved paths, and overlap includes nesting: two spellings of one working tree are one working tree,
+   and a root that contains another's is the same tree twice. A stored root that is not already absolute
+   is refused on either side rather than resolved at check time, because resolving it would answer
+   against the working directory of whichever process happens to run admission. The candidate's own roots
+   are judged before any pairwise comparison and whether or not another sprint is open, so a one-row open
+   set published by restore or by a reopen cannot carry a root the next check would read as a different
+   tree.
+4. **the observer ceiling**, at limit 2 only, and a ceiling rather than a disjointness rule: at most one
+   of the open sprints may declare an observer head. Nothing binds an observer call to the sprint it is
+   about, so two heads observing at once would each read the other's cards as their own. The second
+   sprint is opened with `--observer none`, and the refusal says so. Only `{"kind": "none"}` proves a
+   sprint runs without a head: a row whose observer is missing or unreadable is counted as one, because
+   admitting a second head because one row could not be read is the collision the ceiling exists to
+   prevent.
+5. **the count**, at either limit: the installation already holds as many open sprints as it may.
+
+The count is last because it names every open sprint and distinguishes none of them, so a caller who acts
+on it can close the wrong one and come back for a second refusal. A resource refusal names the sprint
+holding the resource, and closing that one sprint both frees a slot and clears the collision. Every
+collision above the count is therefore reported before it, including when the installation is already at
+its limit.
+
+At limit 1, where checks 2 to 4 do not run, admission reads exactly as it did before the pilot: a project
+another open sprint reserves is refused first, and everything else is refused on the count.
+
+`create`, `reopen` and restore are held to the same invariants, under the same
+`sprints/admission.lock`. `restore_create` is deliberately not an admission decision, since it reproduces
+exported rows one after another, so recovery judges the exported open sprints as a *set* instead: once,
+before the first backend write of either set, by admitting the rows one at a time in reference order
+against the rows already accepted. An archive is therefore not a way to arrive at a pair admission would
+have refused. The limit applied is the target installation's, not the source's, and the whole restore runs
+inside the admission lock so a `create` cannot slip between recovery's check and its write.
+
 ### The declared observer
 
 A sprint carries exactly one observer value in `sprint_observer`. There is no dynamic default, no
@@ -391,7 +447,13 @@ board are separate Kanboard projects and fail separately, so the tick can read a
 while its declaration is unreadable, and advancing them would be moving cards whose observer nobody
 could check. Each successful pass records every open sprint's reservations in the production state;
 a pass that cannot read the board fences from that snapshot, plus every card whose own metadata
-names a sprint. Cards belonging to no sprint keep running. The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
+names a sprint. Cards belonging to no sprint keep running. A sprint admitted since that last
+successful pass is in neither source's reach: the snapshot predates its reservations, so a card
+sitting in a project it reserves without naming the sprint itself is fenced by neither and can
+advance or be claimed while the board is down. That window runs from the admission to the next pass
+that reads the sprint board.
+
+The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
 clears with `observer_fence_cleared` once adoption is confirmed: a record for that sprint naming
 exactly the declared profile, with a pid on disk that is alive. A pid that has not been written yet
 does not clear it. The lifecycle grace window that reads an unwritten pid as alive exists to decide

@@ -334,7 +334,8 @@ from their resume entries and comments, roadmap, the Issues backlog of the affec
 open sprint is holding the repositories needed, an interview on unresolved product forks, and a Definition of
 Done phrased as checkable items. Choosing the goal stays with the person and is not delegated. A sprint also
 needs the Product it belongs to, at least one of its open Issues and at least one reserved registered
-project; an installation holds one open sprint at a time, and a project another open sprint reserves is
+project; an installation holds one open sprint at a time unless the [two-sprint
+pilot](#the-two-sprint-pilot) is deliberately enabled, and a project another open sprint reserves is
 refused as a resource conflict.
 
 The entity is created by the product command, as the `po` role:
@@ -361,6 +362,147 @@ Storage split: the goal, Definition of Done text, repositories, status, budget, 
 fields of the entity; a knowledge document holds only the "why" (the context of the moment, the choice of
 goal, the alternatives rejected) plus a pointer to the sprint reference. The document does not duplicate the
 entity's fields.
+
+## The two-sprint pilot
+
+The shipped default is one open sprint per installation. A second one is a pilot behind an instance
+setting, it is off unless somebody turns it on, and turning it on is a deliberate act with consequences
+listed under [what stays installation-wide](#what-the-pilot-does-not-isolate) below. Read those first: they
+are the part an operator meets during an incident, not during setup.
+
+What admission checks, in what order and at which limit is stated once, in
+[Protocols](PROTOCOLS.md#the-open-sprint-limit). Read it before enabling the setting: it is what decides
+whether a second sprint you have in mind can be opened at all. In operator terms the second sprint has to
+be work that touches nothing the first one touches, and it runs without an observer head if the first one
+has one.
+
+### Enabling it
+
+Add the setting to `instance.yaml` in the instance repository and commit it the way any other config
+change lands:
+
+```yaml
+open_sprint_limit: 2
+```
+
+The only accepted values are the integers 1 and 2. Anything else fails closed: the installation keeps the
+limit of one and `secretary doctor` reports the value as an `open_sprint_limit` finding. Nothing restarts;
+the limit is read from the config each time an admission asks for it.
+
+### Verifying it took effect
+
+`secretary doctor --instance <instance>` proves the value is not one the installation refused, but a
+clean doctor run does not distinguish `2` from an absent setting. Read the effective limit back directly;
+this only reads config:
+
+```bash
+python3 -c 'import sys; from pathlib import Path; from secretary.sprints import instance_open_sprint_limit; print(instance_open_sprint_limit(Path(sys.argv[1])))' <instance>
+```
+
+`1` after writing `2` means the file the command read is not the file that was edited, or the value was
+refused; check `secretary doctor` and the `--instance` path. The other observable difference is the
+wording of the count refusal: at limit one it reads `installation already has an open sprint`, at limit
+two `installation already holds its limit of 2 open sprints`. That is the refusal a candidate gets when
+nothing more specific collided, so it is a confirmation when it appears, not a check you can force.
+
+### Reading a refusal
+
+Every refusal happens before any board row, metadata or audit event is written, so a refused `sprint
+create` leaves nothing behind and is repeated by fixing the argument. Which of these a given candidate
+meets, and which are checked at which limit, follows the rule in
+[Protocols](PROTOCOLS.md#the-open-sprint-limit). This table is for reading the message that came back.
+
+| refusal | what it says | what to do |
+| --- | --- | --- |
+| `resource_conflict` | `project(s) already reserved by an open sprint: <project> held by sprint:ID` | the two sprints want the same project. Give the new sprint different projects, or close the holder. |
+| `resource_conflict` | `product <id> is already the product of open sprint sprint:ID; a second open sprint needs a different product` | one Product may have one open sprint. Sequence the two, or open the second sprint on another Product. |
+| `resource_conflict` | `... declares no product, so it cannot be proven disjoint ...` | one of the rows predates sprint ownership and carries no Product. Such a sprint cannot be paired; close it, and open a new sprint that declares its Product. |
+| `resource_conflict` | `repository root <a> overlaps <b>, held by open sprint sprint:ID` | the two sprints would write in one working tree, including one nested in the other. Narrow the roots, or sequence the sprints. |
+| `resource_conflict` | `declares repository root '<value>', which is not an absolute path` | a row stores a relative root, which names a different tree to every process that reads it. New sprints canonicalize their roots at declaration, so this is an old or hand-written row: close it, or correct its `sprint_repositories` metadata before pairing. |
+| `sprint_conflict` | `the pilot's one-observer ceiling allows one open sprint with an observer head, and sprint:ID already declares one; open this sprint with observer none` | pass `--observer none` for the second sprint, or close the one holding the head. A sprint whose observer metadata is unreadable also counts as holding it. |
+| `sprint_conflict` | `installation already holds its limit of 2 open sprints: ...; close one before opening another` | the installation is full and the candidate collided with nothing specific. Close one of the named sprints. |
+
+### What the pilot does not isolate
+
+Four behaviours stay installation-wide by decision. None of them is a defect to be worked around; they are
+the price of the pilot, and they change what an operator running two sprints should expect.
+
+- **`pause drain` and `pause freeze` stop both sprints.** There is no per-sprint pause. A drain called to
+  slow one sprint down stops new claims for the other one as well; cards already in flight in both keep
+  riding their cycle. A freeze stops the heads of both.
+- **One production tick writes for both sprints.** The tick is a singleton per installation and both
+  sprints advance inside it. A tick that ends badly, or a dispatcher stopped for repair, is an outage of
+  both sprints at once, and the per-tick health line and unit exit code do not say which sprint caused it.
+- **A tick that cannot read the sprint board fences the sprint-held work of both sprints.** This is the
+  one most likely to show up during an incident. The sprint board and the Pipeline board are separate
+  Kanboard projects that fail separately, so the tick can read a sprint's cards perfectly well while it
+  cannot read the declaration saying who is watching them. It fences rather than guesses: no declaration
+  could be checked, so nothing it can identify as a sprint's work moves, in either sprint. It identifies
+  that work two ways, because the board that would answer it is the one that is down: every project the
+  last pass that *could* read the sprint board recorded as reserved, kept as a snapshot in the production
+  state, plus every card whose own Pipeline metadata names a sprint. The tick reports
+  `sprint_board_unavailable` as a critical outcome naming the fenced sprints and projects, and it clears
+  by itself as soon as the board answers. The repair is the Kanboard outage, not the sprints. Cards
+  belonging to no sprint keep running.
+
+  The gap in that, which is worth knowing before an incident rather than during one: a sprint admitted
+  after the last successful pass is not in the snapshot, so its reservations are not either. Its own
+  linked cards are still fenced, by their metadata, but a card that was already sitting in a project it
+  newly reserved and is not itself linked to it is fenced by neither source, and can be advanced or
+  claimed while the board is down. The window is from the sprint's admission to the next pass that reads
+  the sprint board, so it is one tick wide in normal running and only opens if the outage starts inside
+  it. Opening a sprint and immediately losing the sprint board is the shape to watch for; if that
+  happens, `pause freeze` covers it: a frozen tick advances nothing and claims nothing, whatever the
+  fence could work out from a stale snapshot. A `drain` covers only the claim half, since cards already
+  in flight keep riding their cycle under it.
+- **At most one of the two sprints has an observer.** The other runs with `--observer none`, which is not
+  a degraded observer but no observer at all: nobody writes resume entries for it, nobody parks its
+  cards for a decision, and its cards are bounded instead by the
+  [no-observer ceiling](PROTOCOLS.md#the-no-observer-ceiling) — the third red review moves a card to
+  Blocked. Plan the unobserved sprint as work that a person checks on, and put the sprint that needs
+  judgement on the observed side.
+
+What *is* per sprint: the observer fence when the board is readable (a dead or corrupt observer stops only
+its own sprint's projects and cards), the budget counter and its hard stop, and the claim suppression a
+blocked card causes — a card blocked in one sprint closes its own sprint and its own project to new
+claims that cycle, and nothing beyond them.
+
+### Rolling back to one open sprint
+
+The limit is checked when a sprint is admitted, not continuously, so lowering it does not close anything.
+An installation that already holds two open sprints and then sets the limit back to one keeps both open,
+keeps ticking both, and refuses every new `create` and `reopen` while it is over its limit. Which refusal
+the caller gets follows the ordinary rule in [Protocols](PROTOCOLS.md#the-open-sprint-limit), so do not
+expect it to always be the count: a candidate that wants a project one of the two open sprints holds is
+told which sprint holds it. The one place this bites is
+recovery: a checkpoint taken while two sprints were open cannot be restored onto an installation whose
+limit is one, because restore judges the exported open set against the target's limit and refuses the
+whole restore with `restored open sprints are not admissible on this installation`.
+
+So the procedure is:
+
+1. close the second sprint first: `python3 -m secretary sprint close --role po --ref sprint:ID`. Its
+   terminal Done cards are archived, its linked non-terminal cards stay on the board, and its
+   reservations are released.
+2. confirm with `python3 -m secretary sprint list --status open` that exactly one sprint is open.
+3. set `open_sprint_limit: 1` in `instance.yaml`, or delete the key (absent means one), and commit it.
+4. verify with the read-back command above that the effective limit is `1`.
+5. let one production tick run and check that the checkpoint is written and pushed, so the next archive
+   is one a limit-of-one installation can restore.
+
+If the limit has to go down before a sprint can be closed (an incident, a bad canary), lower it first and
+close the second sprint afterwards: the installation is then over its limit for that window, which
+refuses new admissions and, until the second sprint closes, refuses a restore of that window's archive.
+Do not leave it in that state longer than the incident.
+
+### What is not proven yet
+
+The repository-root rule reads the roots back out of Kanboard task metadata (`sprint_repositories`). The
+exact string round trip through the live backend's `saveTaskMetadata` and `getTaskMetadata` is covered by
+in-memory fixtures only, because verifying it for real would mean mutating live sprint rows. If a real
+backend altered those strings on the way through by trimming, re-encoding or changing a path's spelling, the
+overlap check would be comparing something other than what was declared. Nothing observed says it does;
+it is untested against the real thing, and that is the state of the evidence.
 
 ## Sprint observer heads
 
