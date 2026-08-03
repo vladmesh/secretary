@@ -361,9 +361,10 @@ class TwoOpenSprintAdmission:
     A dispatcher fixture reads sprint rows the way production does, so the rows it reads have to
     be rows admission produced: the setting is written before either create, the products, issues
     and project registry the create validates against are seeded, and the pair is disjoint on
-    product, reservation and repository with only one declared head, which is the one-observer
-    ceiling.  A scenario that needs a broken declaration corrupts the persisted value afterwards,
-    which is the only way a live installation reaches one.
+    product, reservation and repository.  Each sprint declares its own observer: `observer` is the
+    first sprint's and `second_observer` the second's, which defaults to none for the scenarios
+    that only need one head.  A scenario that needs a broken declaration corrupts the persisted
+    value afterwards, which is the only way a live installation reaches one.
 
     Mixed into a fixture that owns `self.board` (a `FakeKanboard`) and `self.data_dir`.
     """

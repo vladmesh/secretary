@@ -200,14 +200,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record = self.observers()[reference]
         Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
 
-    def acknowledge_delivery(self, entry: dict[str, str], *, request_id: str) -> None:
-        delivery = self.observers()["sprint:1"].delivery
+    def acknowledge_delivery(
+        self, entry: dict[str, str], *, request_id: str, reference: str = "sprint:1",
+    ) -> None:
+        delivery = self.observers()[reference].delivery
         # The acknowledgement is this sprint's own head answering for what it was sent.
-        with as_observer("sprint:1"):
+        with as_observer(reference):
             SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
                 role="observer",
                 actor="observer",
-                reference="sprint:1",
+                reference=reference,
                 entry=entry,
                 request_id=request_id,
                 delivery_id=delivery.delivery_id,
@@ -2623,12 +2625,33 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     # two open sprints --------------------------------------------------------
 
-    def open_disjoint_pair(self) -> None:
+    def open_disjoint_pair(self, *, second_observer=None) -> None:
         """The admitted pair, with one card in each of the four reserved projects."""
         self.sprint_writer = self.admit_two_open_sprints(
-            observer=head_choice("codex-observer")
+            observer=head_choice("codex-observer"), second_observer=second_observer,
         )
         self.link_pair_cards()
+
+    def observed_pair(self) -> dict:
+        """Both sprints running their own head, both adopted, both idle for a wake.
+
+        The first tick fences each sprint on its unlaunched head and launches both; the second
+        finds both alive, so from here every sprint's cards move under its own observer.
+        """
+        # Both on the same profile, so what separates the two heads in the assertions below is
+        # the sprint each is bound to and nothing about the adapter it runs.
+        self.open_disjoint_pair(second_observer=head_choice("codex-observer"))
+        self.runtime.production_tick()
+        result = self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        return result
+
+    def observed_pair_in_flight(self) -> None:
+        """Both heads up and one card of each sprint claimed, one claim per tick."""
+        self.observed_pair()
+        self.assertEqual(
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
+        )
 
     def budget_of(self, reference: str) -> dict:
         return self.runtime.sprints.show(reference, include_cards=False)["budget"]
@@ -2816,6 +2839,202 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             [{"ref": "third-1", "reason": "linked sprint is stopped or closed"}],
         )
         self.assertEqual(self.reader.show("third-1")["state"], "ready")
+
+    # two open sprints, one head each ----------------------------------------
+
+    def test_both_open_sprints_run_their_own_head_bound_to_themselves(self) -> None:
+        """The pair the admission ceiling used to refuse: two heads observing at once.
+
+        What makes it safe is the binding each head is launched with, so the assertion is not
+        only that both came up but that neither carries the other's sprint.
+        """
+        result = self.observed_pair()
+
+        self.assertEqual(sorted(self.host.observers), [self.FIRST, self.SECOND])
+        self.assertEqual(
+            sorted(
+                identity[OBSERVER_SPRINT_ENV] for identity in self.host.observer_identities
+            ),
+            [self.FIRST, self.SECOND],
+        )
+        # One generation per head, and the record of each sprint carries its own.
+        generations = {
+            identity[OBSERVER_SPRINT_ENV]: identity[OBSERVER_GENERATION_ENV]
+            for identity in self.host.observer_identities
+        }
+        self.assertEqual(len(set(generations.values())), 2)
+        records = self.observers()
+        self.assertEqual(sorted(records), [self.FIRST, self.SECOND])
+        for reference in (self.FIRST, self.SECOND):
+            self.assertEqual(records[reference].generation, generations[reference])
+            self.assertTrue(observer_alive(records[reference])["alive"])
+        self.assertNotEqual(records[self.FIRST].workspace, records[self.SECOND].workspace)
+        self.assertNotEqual(records[self.FIRST].handle, records[self.SECOND].handle)
+        self.assertEqual(
+            {action["sprint"] for action in self.actions(result)}, {self.FIRST, self.SECOND},
+        )
+
+    def test_each_head_is_woken_only_by_the_card_events_of_its_own_sprint(self) -> None:
+        """One tick, one event per sprint, two deliveries that never touch each other."""
+        self.observed_pair()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="the first sprint's card changed", request_id="event-of-first-sprint",
+        )
+
+        first = self.runtime.production_tick()
+
+        self.assertEqual(self.host.observer_nudges, [self.FIRST])
+        self.assertEqual(
+            [(action["sprint"], action["action"]) for action in self.actions(first)],
+            [(self.FIRST, "observer-nudged"), (self.SECOND, "observer-idle")],
+        )
+        records = self.observers()
+        self.assertEqual(records[self.FIRST].delivery.stage, DeliveryStage.AWAITING_ACK)
+        # The other head is not merely unnudged: nothing of the batch reached its cursor.
+        self.assertEqual(records[self.SECOND].delivery.stage, DeliveryStage.IDLE)
+        self.assertEqual(records[self.SECOND].delivery.delivery_id, "")
+        self.assertEqual(records[self.SECOND].delivery.through_event, "")
+
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-neighbor",
+            body="the second sprint's card changed", request_id="event-of-second-sprint",
+        )
+
+        second = self.runtime.production_tick()
+
+        # The first sprint's head is redelivered its own batch, because it was seen ready for
+        # input without having acknowledged it; the second sprint's batch is a first delivery.
+        self.assertEqual(self.host.observer_nudges, [self.FIRST, self.FIRST, self.SECOND])
+        self.assertEqual(
+            [(action["sprint"], action["action"]) for action in self.actions(second)],
+            [(self.FIRST, "observer-redelivered"), (self.SECOND, "observer-nudged")],
+        )
+        records = self.observers()
+        self.assertNotEqual(
+            records[self.FIRST].delivery.delivery_id, records[self.SECOND].delivery.delivery_id,
+        )
+        self.assertNotEqual(
+            records[self.FIRST].delivery.through_event, records[self.SECOND].delivery.through_event,
+        )
+
+    def test_one_heads_acknowledgement_does_not_clear_the_others_delivery(self) -> None:
+        """Each cursor is closed by its own sprint's resume, and by no other."""
+        self.observed_pair()
+        for reference, body, request in (
+            ("secretary-510-pilot", "first changed", "cursor-event-first"),
+            ("secretary-510-neighbor", "second changed", "cursor-event-second"),
+        ):
+            self.writer.comment(
+                role="dispatcher", actor="dispatcher", reference=reference,
+                body=body, request_id=request,
+            )
+        self.runtime.production_tick()
+        self.assertEqual(sorted(self.host.observer_nudges), [self.FIRST, self.SECOND])
+        held = self.observers()[self.SECOND].delivery
+
+        self.acknowledge_delivery(
+            {
+                "selected_step": "read the board", "selected_why": "a card changed",
+                "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+                "dod_state": "open", "next_safe_step": "resume",
+            },
+            request_id="ack-of-first-sprint",
+            reference=self.FIRST,
+        )
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [(action["sprint"], action["action"]) for action in self.actions(result)],
+            [(self.FIRST, "observer-idle"), (self.SECOND, "observer-redelivered")],
+        )
+        records = self.observers()
+        self.assertEqual(records[self.FIRST].delivery.stage, DeliveryStage.IDLE)
+        self.assertTrue(records[self.FIRST].delivery.acknowledged_through)
+        # The second sprint's head still owes an answer for its own batch: the resume of the
+        # first sprint moved neither its cursor nor its stage, and it is redelivered instead.
+        self.assertEqual(records[self.SECOND].delivery.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(records[self.SECOND].delivery.through_event, held.through_event)
+        self.assertEqual(records[self.SECOND].delivery.acknowledged_through, "")
+        self.assertNotEqual(
+            records[self.SECOND].delivery.through_event,
+            records[self.FIRST].delivery.acknowledged_through,
+        )
+
+    def test_a_dead_head_holds_its_own_sprint_while_the_other_keeps_running(self) -> None:
+        """A head that failed is one sprint's outage, with two heads open as with one."""
+        self.observed_pair_in_flight()
+        self.kill_observer(self.FIRST)
+
+        result = self.runtime.production_tick()
+
+        fenced = [action for action in result["actions"] if action["step"] == "observer-fence"]
+        self.assertEqual([action["sprint"] for action in fenced], [self.FIRST])
+        # The second sprint reconciles and claims inside the same tick the first is held in.
+        self.assertEqual(
+            [action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"],
+            ["secretary-510-neighbor"],
+        )
+        self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
+        self.assertEqual(
+            self.skipped(result),
+            [{"ref": "fourth-1", "reason": "the sprint holding this project has no working "
+                                           "declared observer"}],
+        )
+        self.assertEqual(self.reader.show("fourth-1")["state"], "ready")
+        self.assertEqual(self.reader.show("third-1")["state"], "in_progress")
+        # The surviving head is untouched: the replacement of the dead one stops that head's own
+        # pane and no other, and the second sprint's record keeps its first launch.
+        self.assertTrue(observer_alive(self.observers()[self.SECOND])["alive"])
+        self.assertEqual(self.host.stopped_observers, [f"observer:{self.FIRST}"])
+        self.assertEqual(self.observers()[self.SECOND].launches, 1)
+
+    def test_a_head_that_will_not_take_its_wake_does_not_hold_the_other_sprint(self) -> None:
+        """The hang, not the crash: the pane is alive and never takes the prompt.
+
+        A wake that fails is a bounded retry on that sprint's own delivery, so the other
+        sprint's head is nudged in the same tick and both sprints keep claiming.
+        """
+        self.observed_pair_in_flight()
+        for reference, request in (
+            ("secretary-510-pilot", "hung-event-first"),
+            ("secretary-510-neighbor", "hung-event-second"),
+        ):
+            self.writer.comment(
+                role="dispatcher", actor="dispatcher", reference=reference,
+                body="card changed", request_id=request,
+            )
+        nudge = self.host.nudge_observer
+        self.host.observer_nudges.clear()
+
+        def refuse_the_first_sprints_wake(record, *, confirm=None):
+            if str(record.sprint) == self.FIRST:
+                raise HostError("the pane never took the prompt")
+            return nudge(record, confirm=confirm)
+
+        with mock.patch.object(
+            self.host, "nudge_observer", side_effect=refuse_the_first_sprints_wake
+        ):
+            result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [(action["sprint"], action["action"]) for action in self.actions(result)],
+            [(self.FIRST, "observer-wake-deferred"), (self.SECOND, "observer-nudged")],
+        )
+        self.assertEqual(self.host.observer_nudges, [self.SECOND])
+        records = self.observers()
+        self.assertEqual(records[self.FIRST].delivery.stage, DeliveryStage.RETRY_DEFERRED)
+        self.assertEqual(records[self.SECOND].delivery.stage, DeliveryStage.AWAITING_ACK)
+        # A deferred wake is not a fence: both sprints keep advancing and claiming.
+        self.assertEqual(
+            [action for action in result["actions"] if action["step"] == "observer-fence"], [],
+        )
+        self.assertEqual(
+            sorted(
+                action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"
+            ),
+            ["secretary-510-neighbor", "secretary-510-pilot"],
+        )
 
 
 class ObserverConfigurationTests(unittest.TestCase):

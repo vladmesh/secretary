@@ -386,8 +386,8 @@ are the part an operator meets during an incident, not during setup.
 What admission checks, in what order and at which limit is stated once, in
 [Protocols](PROTOCOLS.md#the-open-sprint-limit). Read it before enabling the setting: it is what decides
 whether a second sprint you have in mind can be opened at all. In operator terms the second sprint has to
-be work that touches nothing the first one touches, and it runs without an observer head if the first one
-has one.
+be work that touches nothing the first one touches. Each sprint declares its own observer independently:
+both may run a head, since an observer call is bound to the sprint it is about.
 
 ### Enabling it
 
@@ -432,12 +432,11 @@ meets, and which are checked at which limit, follows the rule in
 | `resource_conflict` | `... declares no product, so it cannot be proven disjoint ...` | one of the rows predates sprint ownership and carries no Product. Such a sprint cannot be paired; close it, and open a new sprint that declares its Product. |
 | `resource_conflict` | `repository root <a> overlaps <b>, held by open sprint sprint:ID` | the two sprints would write in one working tree, including one nested in the other. Narrow the roots, or sequence the sprints. |
 | `resource_conflict` | `declares repository root '<value>', which is not an absolute path` | a row stores a relative root, which names a different tree to every process that reads it. New sprints canonicalize their roots at declaration, so this is an old or hand-written row: close it, or correct its `sprint_repositories` metadata before pairing. |
-| `sprint_conflict` | `the pilot's one-observer ceiling allows one open sprint with an observer head, and sprint:ID already declares one; open this sprint with observer none` | pass `--observer none` for the second sprint, or close the one holding the head. A sprint whose observer metadata is unreadable also counts as holding it. |
 | `sprint_conflict` | `installation already holds its limit of 2 open sprints: ...; close one before opening another` | the installation is full and the candidate collided with nothing specific. Close one of the named sprints. |
 
 ### What the pilot does not isolate
 
-Four behaviours stay installation-wide by decision. None of them is a defect to be worked around; they are
+Three behaviours stay installation-wide by decision. None of them is a defect to be worked around; they are
 the price of the pilot, and they change what an operator running two sprints should expect.
 
 - **`pause drain` and `pause freeze` stop both sprints.** There is no per-sprint pause. A drain called to
@@ -468,17 +467,17 @@ the price of the pilot, and they change what an operator running two sprints sho
   happens, `pause freeze` covers it: a frozen tick advances nothing and claims nothing, whatever the
   fence could work out from a stale snapshot. A `drain` covers only the claim half, since cards already
   in flight keep riding their cycle under it.
-- **At most one of the two sprints has an observer.** The other runs with `--observer none`, which is not
-  a degraded observer but no observer at all: nobody writes resume entries for it, nobody parks its
-  cards for a decision, and its cards are bounded instead by the
-  [no-observer ceiling](PROTOCOLS.md#the-no-observer-ceiling) — the third red review moves a card to
-  Blocked. Plan the unobserved sprint as work that a person checks on, and put the sprint that needs
-  judgement on the observed side.
 
-What *is* per sprint: the observer fence when the board is readable (a dead or corrupt observer stops only
-its own sprint's projects and cards), the budget counter and its hard stop, and the claim suppression a
-blocked card causes — a card blocked in one sprint closes its own sprint and its own project to new
-claims that cycle, and nothing beyond them.
+What *is* per sprint: the declared observer, whose calls are bound to its own sprint and whose head
+runs beside the other sprint's; the observer fence when the board is readable (a dead or corrupt
+observer stops only its own sprint's projects and cards); the budget counter and its hard stop; and
+the claim suppression a blocked card causes, where a card blocked in one sprint closes its own
+sprint and its own project to new claims that cycle and nothing beyond them.
+
+A sprint opened with `--observer none` is the other choice, and it is not a degraded observer but no
+observer at all: nobody writes resume entries for it, nobody parks its cards for a decision, and its
+cards are bounded instead by the [no-observer ceiling](PROTOCOLS.md#the-no-observer-ceiling), where
+the third red review moves a card to Blocked. Plan such a sprint as work a person checks on.
 
 ### Rolling back to one open sprint
 

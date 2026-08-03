@@ -13,7 +13,6 @@ from typing import Any, Callable
 
 from secretary.sprint_observer import (
     KIND_HEAD,
-    KIND_NONE,
     OBSERVER_FIELD,
     ObserverMetadataError,
     check_observer_profile,
@@ -373,10 +372,6 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
     hold even the first one under a root the next check would read as a different tree.
     Recovery publishing a one-row open set, and a reopen with nothing else open, are the
     two ways such a row arrives.
-
-    The observer ceiling is last of the specific refusals: while nothing binds an
-    observer call to the sprint it is about, two heads observing at once would each read
-    the other's cards as their own, so at most one open sprint may declare one.
     """
     product = str(candidate.get("product") or "").strip()
     ordered = sorted(others, key=lambda row: str(row["ref"]))
@@ -434,23 +429,6 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
                     f"repository root {clash} overlaps {held}, held by open sprint {reference}",
                     2,
                 )
-    observer = candidate.get("observer")
-    if not (isinstance(observer, dict) and observer.get("kind") == KIND_HEAD):
-        return
-    holder = next(
-        (
-            str(sprint["ref"]) for sprint in ordered
-            if _declares_observer_head(sprint)
-        ),
-        None,
-    )
-    if holder is not None:
-        raise TaskError(
-            "sprint_conflict",
-            "the pilot's one-observer ceiling allows one open sprint with an observer head, "
-            f"and {holder} already declares one; open this sprint with observer none",
-            2,
-        )
 
 
 def ensure_sprint_board(client: KanboardClient) -> int:
@@ -1870,17 +1848,6 @@ def _scanned_roots(paths: list[Any], *, refusal: Callable[[str, str], TaskError]
 def _roots_overlap(left: Path, right: Path) -> bool:
     """Whether two canonical roots name one tree, which includes one nested in the other."""
     return left == right or left in right.parents or right in left.parents
-
-
-def _declares_observer_head(sprint: dict[str, Any]) -> bool:
-    """Whether an open sprint counts against the one-observer ceiling.
-
-    Only `none` proves a sprint runs without a head.  A row whose observer is missing or
-    unreadable proves nothing, and the ceiling has to read it as a head: admitting a
-    second head because one row could not be read is the collision it exists to prevent.
-    """
-    observer = sprint.get("observer")
-    return not (isinstance(observer, dict) and observer.get("kind") == KIND_NONE)
 
 
 def _unique_strings(values: list[str]) -> list[str]:

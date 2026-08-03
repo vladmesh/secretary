@@ -353,14 +353,7 @@ of them run before the first board write. In the order admission applies them:
    are judged before any pairwise comparison and whether or not another sprint is open, so a one-row open
    set published by restore or by a reopen cannot carry a root the next check would read as a different
    tree.
-4. **the observer ceiling**, at limit 2 only, and a ceiling rather than a disjointness rule: at most one
-   of the open sprints may declare an observer head. Nothing binds an observer call to the sprint it is
-   about, so two heads observing at once would each read the other's cards as their own. The second
-   sprint is opened with `--observer none`, and the refusal says so. Only `{"kind": "none"}` proves a
-   sprint runs without a head: a row whose observer is missing or unreadable is counted as one, because
-   admitting a second head because one row could not be read is the collision the ceiling exists to
-   prevent.
-5. **the count**, at either limit: the installation already holds as many open sprints as it may.
+4. **the count**, at either limit: the installation already holds as many open sprints as it may.
 
 The count is last because it names every open sprint and distinguishes none of them, so a caller who acts
 on it can close the wrong one and come back for a second refusal. A resource refusal names the sprint
@@ -368,7 +361,7 @@ holding the resource, and closing that one sprint both frees a slot and clears t
 collision above the count is therefore reported before it, including when the installation is already at
 its limit.
 
-At limit 1, where checks 2 to 4 do not run, admission reads exactly as it did before the pilot: a project
+At limit 1, where checks 2 and 3 do not run, admission reads exactly as it did before the pilot: a project
 another open sprint reserves is refused first, and everything else is refused on the count.
 
 `create`, `reopen` and restore are held to the same invariants, under the same
