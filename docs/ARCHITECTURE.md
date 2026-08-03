@@ -91,6 +91,11 @@ handles are kept apart in dispatcher state. A split rather than a second termina
 headless server a freshly created terminal arrives as a background surface and does not materialise
 in a worktree the client already has open. When review starts, the worker's head is stopped and its
 commit is recorded: the merge gate will not accept a green verdict if the checkout moved since.
+Where that worktree lives is Orca's answer, not the dispatcher's: workspaces are namespaced by the
+session manager's repo registration, which is the binding's `orca_binding`, and the Secretary project
+id has no say in the path. A returned worktree is accepted only when the session manager's own record
+says it belongs to this project's registered repository and carries this card's workspace name; one
+that does not is removed again before the bring-up fails, so a rejection leaves nothing registered.
 Launch and cleanup still depend on Orca's specific API; a target session protocol is a roadmap
 milestone. Head-specific rendering and delivery are confined to adapters, but that contract is not
 yet a stable plugin API.

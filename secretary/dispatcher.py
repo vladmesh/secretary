@@ -1107,10 +1107,49 @@ class CommandHostRuntime:
             raise HostError("worker reported done with uncommitted changes")
 
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
+        """Where this card's worker checkout lives, new or already cut.
+
+        The namespace under the workspaces root is Orca's, not the Secretary's: Orca puts a worktree
+        at <root>/<repo registration name>/<worktree name>, and that registration name is the
+        binding's `orca_binding`. Reconstructing it from the Secretary project id was the defect:
+        `codegen-orchestrator` and `codegen_orchestrator` are the same project spelled by two
+        different authorities, and the id is not the one that decides where the checkout goes.
+        """
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / "workspaces" / worker)
         root = Path(os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")))
-        return str(root / str(task.get("project") or "") / worker)
+        return str(root / self._orca_binding_name(str(task.get("project") or "")) / worker)
+
+    def _orca_binding_name(self, project: str) -> str:
+        """The Orca repo registration name this project's workspaces are namespaced by.
+
+        Configured `orca_binding` first: an enabled binding is required to carry it, and it is what
+        the host plan registers the repo under, so it answers without a live call. A binding without
+        one is resolved from Orca itself by repo path.
+        """
+        binding = self.catalog.binding(project)
+        name = binding.get("orca_binding")
+        if isinstance(name, str) and name:
+            return name
+        return str(self._orca_repo(project).get("displayName") or "")
+
+    def _orca_repo(self, project: str) -> dict[str, Any]:
+        """This project's Orca repo registration, resolved from the configured repo path.
+
+        The repo path is the one fact both authorities agree on, so it is the join key. The `id` it
+        answers with is what a returned worktree is checked against; no name or path is compared as
+        a string.
+        """
+        repo = Path(str(self.catalog.binding(project)["repo"])).expanduser()
+        listing = self._run_json(["orca", "repo", "list", "--json"])
+        repos = listing.get("repos") if isinstance(listing, dict) else None
+        for entry in repos if isinstance(repos, list) else []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, str) and path and _same_repo(Path(path), repo):
+                if not isinstance(entry.get("id"), str) or not entry["id"]:
+                    raise HostError(f"orca registered {repo} without an id")
+                return entry
+        raise HostError(f"project {project!r} repo {repo} is not registered with orca")
 
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         if self.mode == "noop" or not record.workspace:
@@ -1375,14 +1414,22 @@ class CommandHostRuntime:
     def _create_workspace(
         self, project: str, worker_id: str, base: str, *, expected: str = ""
     ) -> str:
-        """Cut the card's worktree, at the path the launch intent already names.
+        """Cut the card's worktree and accept it only as this card's workspace of this repo.
+
+        What Orca returns is checked against what Orca itself registered: the worktree has to belong
+        to the repo registration this project's binding resolves to, and to carry this card's worker
+        id as its own name. That is an identity check on Orca's records, so a path from another
+        repo, another card, or nowhere at all fails closed without any path being reconstructed.
 
         `expected` is `restore_workspace`'s answer, which the launch intent wrote to disk before
-        this call. A worktree Orca placed anywhere else is a deferred bring-up with a readable
-        reason, not a head the record points past: a tick that dies right after this call can only
-        find the head through the intent, and an intent naming the wrong directory would send every
-        later review, stop, respawn and teardown to a checkout with nothing in it. Same invariant
-        the observer workspace holds.
+        this call. A tick that dies right after this call can only find the head through the intent,
+        and an intent naming the wrong directory would send every later review, stop, respawn and
+        teardown to a checkout with nothing in it, so a workspace that landed anywhere else is a
+        deferred bring-up with a readable reason. Same invariant the observer workspace holds.
+
+        A create that succeeded and then failed any of this is removed before the failure is raised:
+        the path is known, so this is the deterministic case, and leaving it registered would leave
+        an orphan behind.
         """
         if self.mode == "noop":
             workspace = self.data_dir / "dispatcher" / "workspaces" / worker_id
@@ -1392,6 +1439,7 @@ class CommandHostRuntime:
         repo = Path(str(binding["repo"])).expanduser()
         if not repo.is_absolute() or not repo.is_dir():
             raise HostError(f"project repo for {project!r} is unavailable")
+        registration = self._orca_repo(project)
         self._run(["git", "-C", str(repo), "fetch", "origin", base], "git fetch")
         result = self._run_json([
             "orca", "worktree", "create",
@@ -1407,9 +1455,56 @@ class CommandHostRuntime:
         path = worktree.get("path") if isinstance(worktree, dict) else None
         if not isinstance(path, str) or not path:
             raise HostError("orca did not return a workspace path")
-        if expected and not _same_repo(Path(path), Path(expected)):
-            raise HostError(f"orca placed the worker workspace at {path}, not {expected}")
+        reason = self._workspace_rejection(path, str(registration["id"]), worker_id, expected)
+        if reason:
+            raise HostError(f"{reason}{self._discard_workspace(path)}")
         return path
+
+    def _workspace_rejection(
+        self, path: str, repo_id: str, worker_id: str, expected: str
+    ) -> str:
+        """Why this returned worktree may not be adopted, or "" when it may.
+
+        Orca's own record answers it. A worktree it will not describe is not a worktree this card
+        may run in either, so an unreadable answer is a rejection rather than a pass.
+        """
+        try:
+            shown = self._run_json(
+                ["orca", "worktree", "show", "--worktree", f"path:{path}", "--json"]
+            )
+        except HostError as exc:
+            return f"orca will not describe the worker workspace at {path}: {exc}"
+        worktree = shown.get("worktree") if isinstance(shown.get("worktree"), dict) else shown
+        if not isinstance(worktree, dict):
+            return f"orca did not describe the worker workspace at {path}"
+        if worktree.get("repoId") != repo_id:
+            return (
+                f"orca registered the worker workspace at {path} under repo "
+                f"{worktree.get('repoId')!r}, not this project's repo {repo_id!r}"
+            )
+        if worktree.get("displayName") != worker_id:
+            return (
+                f"orca registered the worker workspace at {path} as "
+                f"{worktree.get('displayName')!r}, not this card's workspace {worker_id!r}"
+            )
+        if expected and not _same_repo(Path(path), Path(expected)):
+            return f"orca placed the worker workspace at {path}, not {expected}"
+        return ""
+
+    def _discard_workspace(self, path: str) -> str:
+        """Remove a worktree that was created but must not be adopted, and say what is left.
+
+        Returns "" when Orca confirmed the removal, and otherwise a note naming the registration
+        that survived, so the failure the caller raises says whether an orphan remains. Only ever
+        called over a path Orca has just answered with, never over an adopted workspace.
+        """
+        try:
+            self._run_json(
+                ["orca", "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"]
+            )
+        except HostError as exc:
+            return f"; the rejected worktree at {path} could not be removed either: {exc}"
+        return ""
 
     def _validate_resumable_workspace(self, task: dict[str, Any], workspace: str) -> None:
         """Accept only the registered project worktree on this card's worker branch.

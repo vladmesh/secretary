@@ -27,6 +27,7 @@ from secretary.dispatcher import (
     CommandHostRuntime,
     CutoverState,
     DispatcherRuntime,
+    LaunchedHead,
     PilotSelector,
 )
 from secretary.dispatcher_launcher import HeadLaunch
@@ -1873,6 +1874,227 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual((outside["alive"], outside["pid_known"]), (False, False))
 
 
+class WorkerWorkspaceBindingTests(unittest.TestCase):
+    """Who decides where a worker checkout lives, and which returned one may be adopted (1066).
+
+    The Secretary id and the Orca registration name are two spellings of one project, and only the
+    second one puts the checkout anywhere. A card for `codegen-orchestrator` used to be refused
+    because the dispatcher rebuilt the path from its own id and Orca answered with the path under
+    `codegen_orchestrator`. These tests hold both halves: the namespace comes from the binding, and
+    a returned worktree is accepted only on Orca's own record of it.
+    """
+
+    REPO_ID = "repo-codegen"
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.data_dir = Path(self.tmpdir.name)
+        self.repo = self.data_dir / "projects" / "codegen_orchestrator"
+        self.repo.mkdir(parents=True)
+        # What Orca has registered, independent of what the binding points at: a binding whose repo
+        # is not in this list is a project Orca does not know.
+        self.orca_repo_path = str(self.repo)
+        self.workspaces = self.data_dir / "workspaces"
+        self.binding_name: str | None = "codegen_orchestrator"
+        self.host = CommandHostRuntime(self.catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.json_calls: list[list[str]] = []
+        # What Orca answers `worktree show` with, keyed by path. The create call writes into it.
+        self.registered: dict[str, dict[str, Any]] = {}
+        # What the next `worktree create` returns and registers.
+        self.created_path = str(self.workspaces / "codegen_orchestrator" / "card-1")
+        self.created_record = {"repoId": self.REPO_ID, "displayName": "card-1"}
+        self.rm_fails = False
+        self.env = mock.patch.dict(
+            os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.workspaces)}
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def catalog(self):
+        test = self
+
+        class Catalog:
+            instance_dir = Path("/nonexistent-instance")
+
+            def binding(self, project: str) -> dict[str, Any]:
+                binding: dict[str, Any] = {"repo": str(test.repo)}
+                if test.binding_name is not None:
+                    binding["orca_binding"] = test.binding_name
+                return binding
+
+            def default_branch(self, project: str, override: str | None) -> str:
+                return override or "main"
+
+            def adapter(self, project: str) -> dict[str, Any]:
+                return {}
+
+        return Catalog()
+
+    @staticmethod
+    def selector(command: list[str]) -> str:
+        return command[command.index("--worktree") + 1].removeprefix("path:")
+
+    def orca(self):
+        """Stand in for the Orca CLI, keeping its own registry so `show` answers what `create` did."""
+
+        def call(command: list[str]) -> dict[str, Any]:
+            self.json_calls.append(command)
+            verb = " ".join(command[1:3])
+            if verb == "repo list":
+                return {
+                    "repos": [
+                        {"id": "repo-other", "path": str(self.data_dir / "other"), "displayName": "other"},
+                        {"id": self.REPO_ID, "path": self.orca_repo_path, "displayName": "codegen_orchestrator"},
+                    ]
+                }
+            if verb == "worktree create":
+                Path(self.created_path).mkdir(parents=True, exist_ok=True)
+                self.registered[self.created_path] = dict(self.created_record)
+                return {"worktree": {"path": self.created_path}}
+            if verb == "worktree show":
+                path = self.selector(command)
+                if path not in self.registered:
+                    raise HostError("selector_not_found")
+                return {"worktree": {"path": path, **self.registered[path]}}
+            if verb == "worktree rm":
+                if self.rm_fails:
+                    raise HostError("worktree_busy")
+                self.registered.pop(self.selector(command), None)
+                return {"ok": True}
+            return {"ok": True}
+
+        return mock.patch.object(self.host, "_run_json", call)
+
+    @contextlib.contextmanager
+    def host_calls(self):
+        with self.orca():
+            with mock.patch.object(self.host, "_run", lambda *a, **k: None):
+                yield
+
+    def create(self, worker_id: str = "card-1", expected: str = ""):
+        return self.host._create_workspace(
+            "codegen-orchestrator", worker_id, "main", expected=expected
+        )
+
+    def removed(self) -> list[str]:
+        return [self.selector(call) for call in self.json_calls if call[1:3] == ["worktree", "rm"]]
+
+    # where the checkout lives ------------------------------------------------
+
+    def test_a_project_spelled_the_same_by_both_keeps_todays_path(self) -> None:
+        self.binding_name = "secretary"
+
+        with self.orca():
+            workspace = self.host.restore_workspace({"project": "secretary"}, "card-1")
+
+        self.assertEqual(workspace, str(self.workspaces / "secretary" / "card-1"))
+
+    def test_a_hyphenated_project_takes_its_underscored_orca_namespace(self) -> None:
+        with self.orca():
+            workspace = self.host.restore_workspace({"project": "codegen-orchestrator"}, "card-1")
+
+        self.assertEqual(workspace, str(self.workspaces / "codegen_orchestrator" / "card-1"))
+
+    def test_a_binding_carrying_no_name_is_resolved_from_orca_by_repo_path(self) -> None:
+        self.binding_name = None
+
+        with self.orca():
+            workspace = self.host.restore_workspace({"project": "codegen-orchestrator"}, "card-1")
+
+        self.assertEqual(workspace, str(self.workspaces / "codegen_orchestrator" / "card-1"))
+
+    def test_a_repo_orca_does_not_know_is_a_readable_failure(self) -> None:
+        self.binding_name = None
+        self.repo = self.data_dir / "projects" / "unregistered"
+        self.repo.mkdir()
+
+        with self.orca():
+            with self.assertRaisesRegex(HostError, "not registered with orca"):
+                self.host.restore_workspace({"project": "codegen-orchestrator"}, "card-1")
+
+    # which returned worktree may be adopted ----------------------------------
+
+    def test_the_underscored_worktree_is_accepted_and_the_worker_launches(self) -> None:
+        """The canary shape end to end: the card gets a worker instead of blocking."""
+        task = {"ref": "codegen-orchestrator-1056", "project": "codegen-orchestrator", "description": "d"}
+
+        with self.host_calls():
+            with mock.patch.object(self.host, "_set_worker_branch", lambda *a, **k: None):
+                with mock.patch.object(self.host, "_run_setup", lambda *a, **k: None):
+                    with mock.patch.object(
+                        self.host, "_launch", lambda *a, **k: LaunchedHead("term:1", "codex", {})
+                    ):
+                        prepared = self.host.prepare_worker(task, "card-1", "codex")
+
+        self.assertEqual(prepared["workspace"], self.created_path)
+        self.assertEqual(prepared["handle"], "term:1")
+        self.assertEqual(self.removed(), [])
+
+    def test_a_worktree_of_another_orca_repo_fails_closed_and_is_removed(self) -> None:
+        self.created_record = {"repoId": "repo-other", "displayName": "card-1"}
+
+        with self.host_calls():
+            with self.assertRaisesRegex(HostError, "not this project's repo"):
+                self.create(expected=self.created_path)
+
+        self.assertEqual(self.removed(), [self.created_path])
+        self.assertEqual(self.registered, {})
+
+    def test_a_worktree_registered_for_another_card_fails_closed_and_is_removed(self) -> None:
+        self.created_record = {"repoId": self.REPO_ID, "displayName": "card-2"}
+
+        with self.host_calls():
+            with self.assertRaisesRegex(HostError, "not this card's workspace"):
+                self.create(expected=self.created_path)
+
+        self.assertEqual(self.removed(), [self.created_path])
+
+    def test_a_worktree_orca_never_registered_fails_closed(self) -> None:
+        """`create` answered with a path, `show` does not know it: an arbitrary path is not a
+        workspace, and the answer Orca will not give is not read as consent."""
+        with self.orca():
+            with mock.patch.object(self.host, "_run", lambda *a, **k: None):
+                self.created_path = str(self.data_dir / "elsewhere")
+                self.registered.clear()
+                with mock.patch.object(self.host, "_run_json") as run_json:
+                    run_json.side_effect = self.unregistered_create
+                    with self.assertRaisesRegex(HostError, "will not describe"):
+                        self.create(expected=self.created_path)
+
+    def unregistered_create(self, command: list[str]) -> dict[str, Any]:
+        self.json_calls.append(command)
+        verb = " ".join(command[1:3])
+        if verb == "repo list":
+            return {"repos": [{"id": self.REPO_ID, "path": self.orca_repo_path, "displayName": "x"}]}
+        if verb == "worktree create":
+            return {"worktree": {"path": self.created_path}}
+        if verb == "worktree show":
+            raise HostError("selector_not_found")
+        return {"ok": True}
+
+    def test_a_create_that_then_failed_validation_leaves_no_registered_orphan(self) -> None:
+        """The deterministic case of the issue: the create succeeded, so the path to remove is
+        known, and the rejection removes it before it is raised."""
+        self.created_record = {"repoId": "repo-other", "displayName": "card-1"}
+
+        with self.host_calls():
+            with self.assertRaises(HostError):
+                self.create(expected=self.created_path)
+
+        self.assertNotIn(self.created_path, self.registered)
+
+    def test_a_rejected_worktree_that_cannot_be_removed_says_what_survived(self) -> None:
+        self.created_record = {"repoId": "repo-other", "displayName": "card-1"}
+        self.rm_fails = True
+
+        with self.host_calls():
+            with self.assertRaisesRegex(HostError, "could not be removed either"):
+                self.create(expected=self.created_path)
+
+        self.assertIn(self.created_path, self.registered)
+
+
 class HostLaunchContourTests(unittest.TestCase):
     """The host half of the contour: what a bring-up promises, and what a stop confirms.
 
@@ -1920,8 +2142,16 @@ class HostLaunchContourTests(unittest.TestCase):
         """
         repo = self.data_dir / "repo"
         repo.mkdir()
-        self.host.catalog.binding = lambda project: {"repo": str(repo)}  # type: ignore[assignment]
-        answers = {"worktree create": {"worktree": {"path": str(self.data_dir / "elsewhere")}}}
+        self.host.catalog.binding = lambda project: {  # type: ignore[assignment]
+            "repo": str(repo), "orca_binding": "repo",
+        }
+        answers = {
+            "repo list": {"repos": [{"id": "repo-1", "path": str(repo), "displayName": "repo"}]},
+            "worktree create": {"worktree": {"path": str(self.data_dir / "elsewhere")}},
+            # Registered where Orca says it belongs: the path identity is the only thing left for
+            # this test to refuse.
+            "worktree show": {"worktree": {"repoId": "repo-1", "displayName": "w1"}},
+        }
 
         with mock.patch.object(self.host, "_run", lambda *a, **k: None):
             with self.run_json(answers):
