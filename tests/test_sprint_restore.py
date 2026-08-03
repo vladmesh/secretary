@@ -37,6 +37,15 @@ from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.test_sprints import ProductSprintKanboard, _write_project_registry
 
 
+def _root(name: str) -> str:
+    """A declared repository root as the row stores it: canonical and absolute.
+
+    Admission refuses to resolve a stored root itself, so an export standing in for rows
+    this installation wrote carries the canonical form too.
+    """
+    return str(Path(name).resolve())
+
+
 CARD_EXPORT = {
     "id": 12, "reference": "secretary-12", "title": "Linked card", "description": "card body",
     "column": "Ready", "swimlane": "", "position": 1, "task_type": "code", "project": "secretary",
@@ -149,7 +158,9 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual([json.loads(line)["reference"] for line in lines], [self.ref])
         exported = self._exported_sprint()
         self.assertEqual(exported["status"], "closed")
-        self.assertEqual(exported["repositories"], ["secretary", "secretary-instance"])
+        self.assertEqual(
+            exported["repositories"], [_root("secretary"), _root("secretary-instance")],
+        )
         self.assertEqual(exported["budget"]["by_type"]["red_ci"], 1)
         self.assertEqual(exported["current_task"], "secretary-26")
         self.assertEqual(exported["resume"]["selected_step"], RESUME["selected_step"])
@@ -399,27 +410,27 @@ class SprintRestoreTests(unittest.TestCase):
                 "product",
                 {
                     "product": "secretary", "reservations": ["other"],
-                    "repositories": ["other"], "observer": none_choice(),
+                    "repositories": [_root("other")], "observer": none_choice(),
                 },
                 "needs a different product",
             ),
             (
                 "reservation",
-                {"product": "other", "repositories": ["other"], "reservations": ["secretary"]},
+                {"product": "other", "repositories": [_root("other")], "reservations": ["secretary"]},
                 "already reserved by an open sprint",
             ),
             (
                 "repository",
                 {
                     "product": "other", "reservations": ["other"],
-                    "repositories": ["secretary/nested"], "observer": none_choice(),
+                    "repositories": [_root("secretary/nested")], "observer": none_choice(),
                 },
                 "overlaps",
             ),
             (
                 "observer",
                 {
-                    "product": "other", "reservations": ["other"], "repositories": ["other"],
+                    "product": "other", "reservations": ["other"], "repositories": [_root("other")],
                     "observer": head_choice("codex-observer"),
                 },
                 "one-observer ceiling",
@@ -441,7 +452,7 @@ class SprintRestoreTests(unittest.TestCase):
         self.setUp()
         self._set_open_sprint_limit(2)
         self._two_open_rows(
-            product="other", reservations=["other"], repositories=["other"],
+            product="other", reservations=["other"], repositories=[_root("other")],
             observer=none_choice(),
         )
         client, _ = self._restore()
@@ -451,6 +462,54 @@ class SprintRestoreTests(unittest.TestCase):
             sorted(sprint["ref"] for sprint in reader.list(statuses={"open"})),
             ["sprint:collision", "sprint:entity"],
         )
+
+    def test_restore_refuses_an_open_row_whose_root_is_not_canonical(self) -> None:
+        """An archive is not a way to publish an open row admission could not judge.
+
+        A relative root names a different tree from every process that reads it, so the
+        set check refuses it rather than resolving it against the working directory
+        recovery happens to run in.
+        """
+        self._set_open_sprint_limit(2)
+        self._two_open_rows(
+            product="other", reservations=["other"], repositories=["../elsewhere"],
+            observer=none_choice(),
+        )
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(
+            RestoreError,
+            "repository root '../elsewhere', which is not an absolute path",
+        ):
+            import_normalized_board(
+                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+
+    def test_restore_refuses_a_lone_open_row_whose_root_is_not_canonical(self) -> None:
+        """One open row is the reachable shape: pre-fix creates could only make one.
+
+        An export of an installation that ran before roots were canonicalized carries a
+        single open sprint declaring `.`.  Judging it only against the other open sprints
+        would inspect nothing at all here, and recovery would publish the row.
+        """
+        self._set_open_sprint_limit(2)
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["status"] = "open"
+        payload["sprints"][0]["repositories"] = ["."]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(
+            RestoreError, "repository root '.', which is not an absolute path",
+        ):
+            import_normalized_board(
+                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
 
     def _legacy_open_row_beside_the_seeded_one(self) -> None:
         """The seeded row open, plus an open row from before sprints owned a product.
@@ -497,7 +556,7 @@ class SprintRestoreTests(unittest.TestCase):
         """
         self._set_open_sprint_limit(2)
         self._two_open_rows(
-            product="other", reservations=["other"], repositories=["other"],
+            product="other", reservations=["other"], repositories=[_root("other")],
             observer=none_choice(),
         )
         blocked: list[str] = []
