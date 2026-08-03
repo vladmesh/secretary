@@ -55,7 +55,7 @@ from secretary.routing_journal import (
     head_run_from_profile,
 )
 from secretary.head_health import HeadReadiness
-from secretary.sprints import SPRINT_BOARD_NAME
+from secretary.sprints import SPRINT_BOARD_NAME, instance_open_sprint_limit
 from secretary.dispatcher_watchdog import (
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
@@ -1685,6 +1685,142 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
         self.assertEqual(claimed["skipped_ready"][0]["ref"], "secretary-510-neighbor")
+
+    # A blocked card suppresses claims in its own sprint and its own project, and nowhere else
+    # (secretary-1047). The helpers below build the two-open-sprint installation the pilot setting
+    # admits, and the one card state a tick genuinely ends as `blocked` without a mock.
+
+    def admit_open_sprints(self, *references: str) -> None:
+        """Open these sprints on an installation whose setting admits that many."""
+        (self.data_dir / "instance.yaml").write_text(
+            f"open_sprint_limit: {len(references)}\n", encoding="utf-8",
+        )
+        self.assertEqual(instance_open_sprint_limit(self.data_dir), len(references))
+        for reference in references:
+            self.sprints.rows[reference] = {"ref": reference, "status": "open"}
+
+    def add_ready_card(
+        self, task_id: int, reference: str, *, project: str, sprint: str = "", position: int = 3
+    ) -> None:
+        self.board.tasks.append({
+            "id": task_id,
+            "reference": reference,
+            "title": reference,
+            "description": "spec",
+            "column_id": 2,
+            "position": position,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.board.metadata[task_id] = {"project": project, "task_type": "code", "slug": reference}
+        if sprint:
+            self.board.metadata[task_id]["sprint_ref"] = sprint
+        self.board.comments[task_id] = []
+
+    def blocking_pilot_card(self, *, sprint: str = "") -> None:
+        """Leave the pilot card where the tick blocks it: an active claim no production record owns."""
+        self.commit_cutover()
+        self.board.tasks[0]["column_id"] = 3
+        self.board.metadata[12].update({
+            "claim": "foreign-worker",
+            "resolved_head": "codex",
+            "resolved_review_head": "codex-reviewer",
+        })
+        if sprint:
+            self.board.metadata[12]["sprint_ref"] = sprint
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "secretary-pilot",
+            "records": {
+                "secretary-510-pilot": {
+                    "attempt_id": "production-existing",
+                    "claimed_at": 1720000000,
+                    "comment_baseline": 0,
+                    "handle": "term",
+                    "head": "codex",
+                    "review_baseline": 0,
+                    "review_head": "codex-reviewer",
+                    "state": "claimed",
+                    "worker": "secretary-510-pilot-pilot",
+                    "workspace": str(self.data_dir / "workspaces" / "secretary-510-pilot-pilot"),
+                },
+            },
+        })
+
+    def test_a_blocked_card_suppresses_claims_in_its_own_sprint_only(self) -> None:
+        self.admit_open_sprints("sprint:a", "sprint:b")
+        self.blocking_pilot_card(sprint="sprint:a")
+        self.board.metadata[13]["sprint_ref"] = "sprint:a"
+        self.add_ready_card(14, "other-1", project="other", sprint="sprint:b")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["status"] for action in result["actions"] if action.get("step") == "production-recovery"],
+            ["blocked"],
+        )
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "other-1")
+        self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual(
+            claimed["skipped_ready"],
+            [{
+                "ref": "secretary-510-neighbor",
+                "reason": "this sprint has a card blocked in this cycle",
+            }],
+        )
+
+    def test_a_blocked_card_suppresses_claims_in_its_own_project(self) -> None:
+        """Its sprint is otherwise healthy, and a card sharing only the project still waits."""
+        self.admit_open_sprints("sprint:a", "sprint:b")
+        self.blocking_pilot_card(sprint="sprint:a")
+        # No sprint link: the project is the only thing this card shares with the blocked one.
+        self.board.metadata[13].pop("sprint_ref", None)
+        self.add_ready_card(14, "other-1", project="other", sprint="sprint:b")
+
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "other-1")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual(
+            claimed["skipped_ready"],
+            [{
+                "ref": "secretary-510-neighbor",
+                "reason": "this project has a card blocked in this cycle",
+            }],
+        )
+
+    def test_a_blocked_card_with_no_sprint_still_suppresses_claims_in_its_project(self) -> None:
+        self.admit_open_sprints("sprint:b")
+        self.blocking_pilot_card()
+        self.board.metadata[13].pop("sprint_ref", None)
+        self.add_ready_card(14, "other-1", project="other", sprint="sprint:b")
+
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "other-1")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual(
+            claimed["skipped_ready"][0]["reason"], "this project has a card blocked in this cycle"
+        )
+
+    def test_a_blocked_card_stops_the_single_open_sprint_as_before(self) -> None:
+        self.admit_open_sprints("sprint:a")
+        self.blocking_pilot_card(sprint="sprint:a")
+        self.board.metadata[13]["sprint_ref"] = "sprint:a"
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual([action for action in result["actions"] if action.get("step") == "claim"], [])
+        self.assertNotIn("prepare_worker", self.host.calls)
 
     def test_production_scan_continues_after_unready_resource(self) -> None:
         self.commit_cutover()
