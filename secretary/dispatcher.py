@@ -515,7 +515,7 @@ class CommandHostRuntime:
             self._run_setup(project, workspace)
         # The caller's generation, not a constant: the first round of a claim is as much a report
         # round as a rework, and its number is the one already durable in the dispatcher record.
-        self._clear_body_file("report", task["ref"], generation)
+        self._clear_report_bodies(task["ref"])
         self._write_prompt(
             Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
         )
@@ -549,7 +549,7 @@ class CommandHostRuntime:
         base = self.catalog.default_branch(
             task["project"], task.get("workspace", {}).get("base_branch")
         )
-        self._clear_body_file("report", task["ref"], record.report_generation)
+        self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
             self._worker_task_doc(task, base, record.attempt_id, record.report_generation),
@@ -1783,7 +1783,7 @@ class CommandHostRuntime:
         # sends it there name the same round because they are built from the same value, not
         # because two call sites happen to compute the same number.
         generation = record.report_generation
-        self._clear_body_file("report", task["ref"], generation)
+        self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
             self._worker_task_doc(task, base, record.attempt_id, generation),
@@ -1827,11 +1827,43 @@ class CommandHostRuntime:
         respawned head inherits whatever its half-dead predecessor left there. Nothing downstream
         catches a stale body: `_read_body` only rejects a missing file, and `report done` /
         `verdict green` accept an empty one, so a truncated body would land on the board as a real
-        report. A missing file at least fails loudly."""
+        report. A missing file at least fails loudly.
+
+        This is the reviewer's path. A report goes through `_clear_report_bodies`, which clears the
+        rounds already over as well."""
         try:
             Path(_body_file_path(kind, reference, review_round)).unlink(missing_ok=True)
         except OSError:
             pass
+
+    def _clear_report_bodies(self, reference: str) -> None:
+        """Drop every report body file this card has, the round about to start included.
+
+        The new round's path is cleared for the reason above. The rounds already over are cleared
+        because their file is the last thing that makes a command from an earlier round look like a
+        report of this one: the task protocol answers an identical retry from its committed event,
+        and an unchanged body file left in place is exactly how a retained conversation produces
+        one. With the file gone the stale command fails on a missing body instead of telling a
+        worker that a report the board never received was recorded. A worker that types the round's
+        body again into the old path is still a retry the protocol may answer; only authorising the
+        open generation inside the report protocol closes that, which is a durable protocol change.
+        """
+        sample = _body_file_path("report", reference, 0)
+        directory, name = os.path.split(sample)
+        prefix = name[: -len("0.md")]
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.startswith(prefix) or not entry.endswith(".md"):
+                continue
+            if not entry[len(prefix):-len(".md")].isdigit():
+                continue
+            try:
+                os.unlink(os.path.join(directory, entry))
+            except OSError:
+                pass
 
     def _worker_launch_prompt(self) -> str:
         """Short pointer delivered to the worker head at launch. The full spec lives in TASK.md
@@ -1925,8 +1957,9 @@ class CommandHostRuntime:
             "",
             "Report through the secretary task protocol only:",
             f"This document is report generation {generation}. Every request id below ends in "
-            f"-{generation}; a report command carrying any other number is from an earlier round",
-            "of this conversation and is refused.",
+            f"-{generation}, and the body file below is this round's. A report command carrying any",
+            "other number belongs to a round that is over: its body file has been removed, so the",
+            "call fails and reports nothing. Copy the command from here, not from an earlier turn.",
             *_body_file_instructions(body_file),
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_requests["external_fact"]} --body-file {body_file}',
@@ -3625,8 +3658,13 @@ class DispatcherRuntime:
         """
         ref = task["ref"]
         baseline = len(task.get("comments") or [])
+        # The round this transition opens is reserved here, with the intent and before the move.
+        # Completion is idempotent only if the generation is a value it reads rather than one it
+        # computes: a recovery that re-entered the completion would otherwise advance a second time
+        # and hand one rework round two generations.
         record.worker_continuation.begin_red_transition(
-            phase, baseline, move_reason, verdict_outcome, decision
+            phase, baseline, move_reason, verdict_outcome, decision,
+            reserved_generation=record.report_generation + 1,
         )
         records[ref] = record
         self.save_records(payload, records)
@@ -3674,9 +3712,13 @@ class DispatcherRuntime:
         # Where the next review verdict is scanned from, so the verdict this transition acted on
         # cannot be read again as the new round's.
         record.review_baseline = record.comment_baseline
-        # The rework is a new report round: it gets its own generation here, saved below, before
-        # any TASK.md is written for it and before the worker is woken.
-        record.report_generation += 1
+        # The rework is a new report round, and its generation is the one this transition reserved
+        # before the move. Assigned, not advanced: every tick that finishes this transition writes
+        # the same number. A transition written before the reservation existed carries none, and
+        # falls back to the advance it was written with.
+        record.report_generation = (
+            continuation.reserved_generation or record.report_generation + 1
+        )
         record.gate_state = ""
         record.gate_pending_since = 0.0
         # The round the verdict judged is over here. A park keeps the reviewed commit while the
@@ -4669,9 +4711,9 @@ def _continuation_prompt(phase: str, generation: int = 0, reference: str = "") -
     return (
         f"{cause} This opens report generation {generation}{card}. TASK.md at the workspace root "
         f"has been rewritten for it: read it again, {work}, then report with the command in that "
-        f"file. Its --request-id ends in -{generation}. A report command from an earlier turn of "
-        "this conversation ends in a different number, belongs to a round that is over, and is "
-        "refused."
+        f"file. Its --request-id and its body file both end in {generation}. A report command from "
+        "an earlier turn of this conversation ends in a different number and belongs to a round "
+        "that is over: its body file has been removed, so the call fails and reports nothing."
     )
 
 

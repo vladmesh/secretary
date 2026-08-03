@@ -2156,7 +2156,7 @@ class HostLaunchContourTests(unittest.TestCase):
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
         # The document the worker is sent back to and the prompt that wakes it name one round.
         self.assertIn("report generation 3", prompt_at_delivery[0])
-        self.assertIn("ends in -3", prompt_at_delivery[0])
+        self.assertIn("both end in 3", prompt_at_delivery[0])
         self.assertTrue(any(command[2] == "send" for command in calls))
 
     def test_a_running_retained_claude_replays_delivery_after_a_crash_before_send(self) -> None:

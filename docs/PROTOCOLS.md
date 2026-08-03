@@ -606,16 +606,30 @@ starts at 1 when the card is claimed and advances by one whenever a new report r
 that is a red mechanical gate, a red review or a done report bounced back at an already-rejected
 checkout. It never repeats within an attempt and never goes backwards. A respawn inside a round does
 not advance it: the head that died never reported, and the round is still waiting for that report.
+It advances once for each such round however many ticks the round takes to open: a red transition
+reserves the round's generation with the intent it writes before moving the board, and the tick that
+finishes the transition assigns that reservation rather than computing a new number, so a recovery
+that re-enters the completion does not spend a second generation on one round.
 
 The generation is the round key of the report identity. It is the suffix of the `done` and `blocked`
 request ids in `TASK.md`, and of the report body path those commands name; the two block
 classifications get an id each, because a request id claims its payload and a block restated under
 the other classification is a different report. One value serves all of them: the generation is
 persisted before any document names it, the `TASK.md` a head is given is written from it, and the
-prompt that wakes a retained worker names it and says which suffix the round's commands carry. A
-retained conversation replaying the command from its previous turn is refused with `validation` and
-exit code 2, and the number in the prompt is what makes that visible to the agent and to a human
-reading the pane before the call is made.
+prompt that wakes a retained worker names it and says which suffix the round's commands carry. The
+number is there so a command replayed out of the retained conversation is visibly the wrong one to
+the agent and to a human reading the pane before the call is made.
+
+What such a replay does is worth being exact about, because the id alone does not stop it. A request
+id is an ownership claim over its payload: a stale command carrying a new body is refused with
+`validation` and exit code 2, but an identical retry is a retry, and the protocol answers it from
+its committed event with `replayed: true` while the board gains no marker. So the round's body files
+go when the next round opens, all of them, the round about to start included; the replayed command
+then fails on its first step, reading a body file that is not there, and reports nothing. What
+remains is a worker that types the same bytes into the old path again, which the protocol is
+entitled to answer as the retry it looks like. Refusing that too means authorising the open
+generation inside the report protocol itself, which is a durable protocol change and is not part of
+this contour.
 
 It is dispatcher state, so a dispatcher that lost its record recovers it: the `TASK.md` in the
 checkout names the round its live worker is working from, and the reports already on the card are
@@ -648,10 +662,10 @@ after that same confirmed stop, up to the no-observer ceiling above, which block
 of opening the round. Nothing else moves a card to In progress for rework, and the
 transition always runs the same order, differing only in the phase it records:
 
-1. The red intent, with its phase, the baseline of the report it closes and the reason the card is
-   moving, goes to disk.
+1. The red intent, with its phase, the baseline of the report it closes, the generation it reserves
+   for the round it opens and the reason the card is moving, goes to disk.
 2. The card moves.
-3. The round's report generation advances and is persisted.
+3. The reserved generation becomes the record's, and is persisted.
 4. The delivery decision is made: a confirmed-suspended session takes the continuation, and
    anything else gets a confirmed stop and exactly one replacement. Either way the head is given a
    `TASK.md` written for the new generation before it is woken or launched.

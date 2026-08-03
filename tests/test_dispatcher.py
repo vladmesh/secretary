@@ -26,6 +26,7 @@ from secretary.dispatcher import (
     InstanceCatalog,
     LegacyPauseSnapshot,
     PilotSelector,
+    _body_file_path,
     _continuation_prompt,
     _legacy_worker_branch,
     _render_codex_command,
@@ -67,6 +68,7 @@ from secretary.dispatcher_watchdog import (
     wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
+from secretary.task_commands import _read_body
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 
@@ -689,6 +691,9 @@ class FakeHost:
         worker was actually given reads it out of the checkout, the way the worker does.
         """
         workspace.mkdir(parents=True, exist_ok=True)
+        # Same order as the real host, and the real code: the round's body files go before the
+        # document that names the new one is written.
+        CommandHostRuntime._clear_report_bodies(self, task["ref"])  # type: ignore[arg-type]
         document = CommandHostRuntime._worker_task_doc(
             self,  # type: ignore[arg-type]
             task,
@@ -5463,7 +5468,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             generation = self._pilot_record()["report_generation"]
             self._assert_one_generation(generation)
             self.assertIn(f"report generation {generation}", self.host.resumed_continuations[-1])
-            self.assertIn(f"ends in -{generation}", self.host.resumed_continuations[-1])
+            self.assertIn(f"both end in {generation}", self.host.resumed_continuations[-1])
             generations.append(generation)
 
         self.assertEqual(generations, sorted(set(generations)), f"repeated or backwards: {generations}")
@@ -5527,6 +5532,77 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(recovered["action"], "review-red-reused-worker")
         self._assert_one_generation(2)
         self.assertIn("report generation 2", self.host.resumed_continuations[-1])
+
+    def test_a_crash_between_the_generation_and_the_delivery_reuses_its_reservation(self) -> None:
+        """One rework round, one generation, however many ticks it takes to finish the transition.
+
+        The transition is completed by whichever tick finds it open, so a generation computed at
+        completion time would advance again on recovery and hand the round a second number, leaving
+        the worker with a document nobody is waiting on. The reservation is written with the intent,
+        before the move, and completion assigns it.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red()
+
+        class DispatcherDied(BaseException):
+            pass
+
+        with mock.patch.object(
+            self.runtime, "_deliver_red_continuation", side_effect=DispatcherDied
+        ):
+            with self.assertRaises(DispatcherDied):
+                self._park_and_decide("rework")
+
+        crashed = self._pilot_record()
+        self.assertEqual(crashed["worker_continuation"]["stage"], "red_transition_pending")
+        self.assertEqual(crashed["worker_continuation"]["reserved_generation"], 2)
+        self.assertEqual(crashed["report_generation"], 2)
+        self.assertEqual(self.host.resumed_workers, [], "nothing was woken on this generation yet")
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self._assert_one_generation(2)
+        self.assertIn("report generation 2", self.host.resumed_continuations[-1])
+
+    def test_a_new_round_removes_the_previous_rounds_report_body(self) -> None:
+        """The last thing that could make a command from a round that is over report this one.
+
+        A request id is an ownership claim over its payload, not a lock on the round: an identical
+        retry is answered from the committed event, so a report command replayed out of a retained
+        conversation succeeds as long as the body it reads is byte-identical. The body file left in
+        place by the round that is over is exactly how that happens, so it goes when the next round
+        opens, and the replayed command fails on its first step instead.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        stale_id = self._worker_report_request_id()
+        stale_body = Path(_body_file_path("report", "secretary-510-pilot", 1))
+        stale_body.parent.mkdir(parents=True, exist_ok=True)
+        stale_body.write_text("same body", encoding="utf-8")
+        self._report_done("same body")
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+
+        self.assertEqual(self._pilot_record()["report_generation"], 2)
+        self.assertFalse(stale_body.exists(), "the previous round's body file outlived its round")
+        # The whole reason it has to go: the id alone does not refuse this call.
+        replay = self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="same body", request_id=stale_id,
+        )
+        self.assertTrue(replay["replayed"], "an identical retry is answered from its own event")
+        # What the worker's command actually does now that the file is gone.
+        with self.assertRaises(TaskError) as refused:
+            _read_body(str(stale_body))
+        self.assertEqual(refused.exception.exit_code, 2)
+        self.assertEqual(refused.exception.code, "usage")
 
     def test_an_adopted_card_recovers_the_generation_its_worker_is_holding(self) -> None:
         """The generation is dispatcher state, and this is the path where that state is lost. The
@@ -5629,6 +5705,26 @@ class HeadPromptTests(unittest.TestCase):
             ["external_fact", "wrong_task_definition"],
         )
         self.assertNotIn("--classification", commands[0])
+
+    def test_clearing_report_bodies_takes_every_round_of_one_card_only(self) -> None:
+        """Every round of this card goes, including the one about to start. Another card's bodies
+        and anything that is not a numbered report body stay: the sweep runs in a shared directory
+        (`/tmp` by default), where deleting by prefix alone would reach other cards' rounds."""
+        root = Path(self.tmpdir.name)
+        with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(root)}):
+            mine = [Path(_body_file_path("report", "secretary-510-pilot", n)) for n in (0, 1, 12)]
+            others = [
+                Path(_body_file_path("report", "secretary-510-neighbor", 1)),
+                Path(_body_file_path("verdict", "secretary-510-pilot", 1)),
+                root / "secretary-report-secretary-510-pilot-notes.md",
+            ]
+            for path in mine + others:
+                path.write_text("body", encoding="utf-8")
+
+            self.host._clear_report_bodies("secretary-510-pilot")
+
+            self.assertEqual([path for path in mine if path.exists()], [])
+            self.assertEqual([path for path in others if not path.exists()], [])
 
     def test_worker_prompt_says_which_blocked_classification_to_use(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
