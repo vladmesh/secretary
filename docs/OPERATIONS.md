@@ -89,6 +89,19 @@ writes normalised board, memory, run and transcript exports; without `--copy-tra
 transcript inventory is kept. `raw-kanboard-dump` creates a timestamped raw dump by copying out of the
 container; it writes nothing to the live container and does not use the board API.
 
+A dump is a copy of the whole Kanboard data directory, so its `data/db.sqlite` holds every project on
+the board, including the ones the Pipeline export does not cover. On this installation a dump is
+roughly 8 to 11 MB. Only the newest dump is ever read: the active-task counter walks the
+`kanboard-raw-*` directories newest name first and stops at the first one with a readable database.
+Nothing prunes the others. There is no retention window, no age limit and no size cap, and the
+directories stay in `DATA_DIR/board` until an operator deletes them by hand, so on a small disk they
+are worth watching. Keep the newest dump, and keep any
+older dump that is the only surviving copy of a board outside the Pipeline export; the remaining ones
+can be removed. The dumps stay out of the instance repository: the checkpoint writer ignores
+`kanboard-raw-*`, so deleting one changes nothing that is committed. Every `backup create` run takes a
+fresh dump before it writes its archives, which is how the directory grows without anyone invoking the
+command by hand; a `core` archive leaves the dumps out, a `full` archive copies them in.
+
 ## Checkpoint writer
 
 At the end of every production tick, under the tick lock, the writer regenerates the board and runs
