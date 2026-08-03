@@ -596,6 +596,41 @@ class TaskAudit:
         if existing != event:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
 
+    @staticmethod
+    def require_claim(
+        existing: dict[str, Any],
+        *,
+        kind: str,
+        reference: str | None,
+        identity: dict[str, Any] | None,
+    ) -> None:
+        """Refuse a replay whose caller meant an operation other than the recorded one.
+
+        `_require_same_event` states the invariant but can only see events that are already
+        equal: the replay paths hand the recorded event straight back to `append`. This
+        compares the caller's intent instead, before anything is appended or answered.
+
+        The event kind and the card ref always have to match, and so does the `identity` every
+        write declares: what the caller asked for, which is the whole payload for most writes.
+        The only fields left out are the ones a retry cannot recompute after the write went
+        through, because they describe the state the write itself replaced: `moved` records the
+        column the card left, `edited` records the digests of the text it overwrote, and
+        `restored_comment` drops its body from the payload once the comment is known to be on
+        the card. Comparing those would turn an ordinary retry into a conflict.
+        """
+        if str(existing.get("kind") or "") != kind:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+        if reference is not None and str(existing.get("ref") or "") != reference:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+        if not identity:
+            return
+        payload = existing.get("payload")
+        if not isinstance(payload, dict):
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+        for key, value in identity.items():
+            if payload.get(key) != value:
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+
     def require_pending_layout(self) -> None:
         """Run the released generic-pending upgrade gate before a new mutation starts."""
         self._require_v2_pending_layout()
@@ -734,15 +769,39 @@ class TaskWriter:
         # it, and restore recreates cards that were admitted once already.
         if target == "ready" and not sprint and not restoring and not override_payload:
             raise TaskError("validation", "task creation requires an open sprint", 2)
+        payload: dict[str, Any] = {
+            "project": project,
+            "task_type": task_type,
+            "target": target,
+            "reference": reference or None,
+            "blocked_by": blocked_by or None,
+            "head": head or None,
+            "review_head": review_head or None,
+            "slug": slug or None,
+            "base_branch": base_branch or None,
+            "complexity": complexity,
+            "family_preference": family_preference,
+            "codex_launch_mode": codex_launch_mode or None,
+            "sprint": sprint or None,
+            "budget_event": budget_event or None,
+            **override_payload,
+            "title_sha256": _digest(title),
+            "description_sha256": _digest(description),
+        }
+        # A create claims its request id the same way every other write does. Its ref is not
+        # compared: the backend assigns `PROJECT-N` when the caller passes no reference, so the
+        # card this call means is named by `payload["reference"]` and by nothing else yet.
         committed = self.audit.committed_event(request_id)
         if committed is not None:
+            self.audit.require_claim(committed, kind="created", reference=None, identity=payload)
             try:
                 event_id = self.audit.append(request_id, committed)
             except OSError:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": "created", "task": self.reader.show(str(committed["ref"])), "event_id": event_id}
+            return {"action": "created", "task": self.reader.show(str(committed["ref"])), "event_id": event_id, "replayed": True}
         pending = self.audit.pending_event(request_id)
         if pending is not None:
+            self.audit.require_claim(pending, kind="created", reference=None, identity=payload)
             try:
                 self._finish_pending_cleanup(pending, None)
                 task = self.reader.show(str(pending["ref"]))
@@ -752,7 +811,7 @@ class TaskWriter:
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": "created", "task": self.reader.show(str(pending["ref"])), "event_id": event_id}
+            return {"action": "created", "task": self.reader.show(str(pending["ref"])), "event_id": event_id, "replayed": True}
 
         event = {
             "event_id": "evt_" + uuid.uuid4().hex,
@@ -765,25 +824,7 @@ class TaskWriter:
             "ref": reference,
             "backend": {"kind": "kanboard", "task_id": None, "revision": "pending"},
             "request_id": request_id,
-            "payload": {
-                "project": project,
-                "task_type": task_type,
-                "target": target,
-                "reference": reference or None,
-                "blocked_by": blocked_by or None,
-                "head": head or None,
-                "review_head": review_head or None,
-                "slug": slug or None,
-                "base_branch": base_branch or None,
-                "complexity": complexity,
-                "family_preference": family_preference,
-                "codex_launch_mode": codex_launch_mode or None,
-                "sprint": sprint or None,
-                "budget_event": budget_event or None,
-                **override_payload,
-                "title_sha256": _digest(title),
-                "description_sha256": _digest(description),
-            },
+            "payload": payload,
         }
         self.audit.stage(request_id, event)
         try:
@@ -823,7 +864,7 @@ class TaskWriter:
             event_id = self.audit.append(request_id, event)
         except OSError:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        return {"action": "created", "task": task, "event_id": event_id}
+        return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
     def _create_backend(
         self,
@@ -900,7 +941,8 @@ class TaskWriter:
 
     def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, _COMMENT_ROLES)
-        return self._write("commented", role, actor, reference, request_id, {"marker": role, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"))
+        payload = {"marker": role, "body_sha256": _digest(body)}
+        return self._write("commented", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"), identity=payload)
 
     def _require_committed_workspace(self) -> None:
         """Refuse a done report from a dirty checkout.
@@ -963,14 +1005,19 @@ class TaskWriter:
         if classification:
             payload["classification"] = classification
             content = f"[{marker}]\nclassification: {classification}\n\n{body}"
-        return self._write("reported", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=content))
+        # A done report carries no `classification` key at all, so the identity names it
+        # explicitly as absent: reusing a blocked report's id for a done one is a different
+        # operation even before the marker is compared.
+        identity = {**payload, "classification": classification or None}
+        return self._write("reported", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=content), identity=identity)
 
     def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"reviewer"})
         if kind not in {"green", "red"} or (kind == "red" and not body.strip()):
             raise TaskError("validation", "red verdicts require a non-empty body", 2)
         marker = f"review:{kind}"
-        return self._write("verdict", role, actor, reference, request_id, {"marker": marker, "body_sha256": _digest(body)}, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"))
+        payload = {"marker": marker, "body_sha256": _digest(body)}
+        return self._write("verdict", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"), identity=payload)
 
     def decide(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         """Record what to do with a parked card, apart from the move that does it.
@@ -1019,9 +1066,9 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
             self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
 
+        payload = {"marker": marker, "decision": kind, "body_sha256": _digest(body)}
         return self._write(
-            "decided", role, actor, reference, request_id,
-            {"marker": marker, "decision": kind, "body_sha256": _digest(body)}, mutation,
+            "decided", role, actor, reference, request_id, payload, mutation, identity=payload,
         )
 
     def routing(
@@ -1048,7 +1095,10 @@ class TaskWriter:
         heads = payload.get("heads")
         if not isinstance(heads, list) or not heads:
             raise TaskError("validation", "routing requires at least one head record", 2)
-        return self._write("routing", role, actor, reference, request_id, dict(payload), lambda task: None)
+        return self._write(
+            "routing", role, actor, reference, request_id, dict(payload), lambda task: None,
+            identity=dict(payload),
+        )
 
     def claim(
         self,
@@ -1116,21 +1166,16 @@ class TaskWriter:
             except Exception as exc:
                 raise _CommittedWriteError() from exc
 
+        payload = {
+            "worker": worker,
+            "resolved_head": resolved_head or None,
+            "resolved_review_head": resolved_review_head or None,
+            "slug": slug or None,
+            "base_branch": base_branch or None,
+            "cap": cap,
+        }
         return self._write(
-            "claimed",
-            role,
-            actor,
-            reference,
-            request_id,
-            {
-                "worker": worker,
-                "resolved_head": resolved_head or None,
-                "resolved_review_head": resolved_review_head or None,
-                "slug": slug or None,
-                "base_branch": base_branch or None,
-                "cap": cap,
-            },
-            mutation,
+            "claimed", role, actor, reference, request_id, payload, mutation, identity=payload,
         )
 
     def move(
@@ -1182,6 +1227,14 @@ class TaskWriter:
                 **override_payload,
             },
             mutation,
+            # `from` is the column the move already left, so it is the one field a retry cannot
+            # recompute. Everything the caller asked for is compared.
+            identity={
+                "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+                "decision": decision or None,
+                "sprint_override_reason": override_payload.get("sprint_override_reason"),
+            },
         )
 
     def _check_decision(
@@ -1317,7 +1370,11 @@ class TaskWriter:
                         raise _CommittedWriteError() from exc
                     raise
 
-        return self._write("edited", role, actor, reference, request_id, payload, mutation)
+        # The `_was` digests describe the text this edit replaced, which a retry after the write
+        # can no longer read off the card. The new spec, the heads and the override reason are
+        # what the caller asked for, and they are compared.
+        identity = {key: value for key, value in payload.items() if not key.endswith("_was")}
+        return self._write("edited", role, actor, reference, request_id, payload, mutation, identity=identity)
 
     def _sprint_holds_project(self, project: str) -> bool:
         """Whether an open sprint reserves this card's project.
@@ -1463,6 +1520,7 @@ class TaskWriter:
             {"reason_sha256": _digest(reason)},
             mutation,
             retry_payload={"reason": reason},
+            identity={"reason_sha256": _digest(reason)},
         )
 
     def restore_card(
@@ -1521,18 +1579,23 @@ class TaskWriter:
         payload: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
         mutation: Any,
         *,
+        identity: dict[str, Any],
         retry_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # `identity` has no default: what a request id claims is part of declaring an operation,
+        # and a write that never says it would replay another caller's payload as its own.
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
         if committed is not None:
+            self.audit.require_claim(committed, kind=kind, reference=reference, identity=identity)
             try:
                 event_id = self.audit.append(request_id, committed)
             except OSError:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
+            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id, "replayed": True}
         pending = self.audit.pending_event(request_id)
         if pending is not None:
+            self.audit.require_claim(pending, kind=kind, reference=reference, identity=identity)
             try:
                 self._finish_pending_cleanup(pending, retry_payload)
                 task = self.reader.show(str(pending["ref"]))
@@ -1542,7 +1605,7 @@ class TaskWriter:
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id}
+            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id, "replayed": True}
         task = self.reader.show(reference)
         event_payload = payload(task) if callable(payload) else payload
         event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": event_payload}
@@ -1564,7 +1627,7 @@ class TaskWriter:
             event_id = self.audit.append(request_id, event)
         except OSError:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        return {"action": kind, "task": task, "event_id": event_id}
+        return {"action": kind, "task": task, "event_id": event_id, "replayed": False}
 
     def reconcile(self) -> tuple[int, int]:
         repaired = 0
