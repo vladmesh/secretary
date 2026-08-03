@@ -660,10 +660,12 @@ others reads as exactly that. The prompt that wakes a retained worker names the 
 authoritative instruction rather than only pointing at the file, because a conversation that is only
 sent back to a document ranks its sections itself.
 
-The assignment is unconditional, so nothing inherits: a round opened by a red mechanical gate
-carries no decision and its document reads as it did before this existed, and a gate-red round after
-a decided one does not get the earlier adjudication of a review its own code has already answered.
-A round opened with no decision behaves throughout as it always did.
+Nothing inherits: every round that opens carries the decision that opened it and no other, so the
+value is written wherever a round is opened. The red transition assigns it unconditionally, and the
+stale-done bounce clears it in the same mutation that advances the generation. A round opened by a
+red mechanical gate or by a bounced done report therefore carries no decision, its document reads as
+it did before this existed, and it never inherits the adjudication of a review it has nothing to do
+with. A round opened with no decision behaves throughout as it always did.
 
 Like the generation, this is dispatcher state that a lost record recovers from the checkout, so an
 adopted card reads back what its live worker was told to follow instead of consulting the card's

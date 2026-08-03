@@ -3197,6 +3197,10 @@ class DispatcherRuntime:
         # stale one just rejected. The attempt's routing round does not move here, because the card
         # never left the worker, which is why this generation cannot be `attempt_round`.
         record.report_generation += 1
+        # Nobody adjudicated this round: it was opened by the bounce, not by an observer. The
+        # decision that opened the previous one goes with it, or the document would hand a worker
+        # an instruction about a review this bounce has nothing to do with (secretary-1064).
+        record.report_decision = ""
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)

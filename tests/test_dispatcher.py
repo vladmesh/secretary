@@ -6049,6 +6049,27 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._pilot_record()["report_decision"], "")
         self.assertEqual(self._document_decision(), "")
 
+    def test_a_stale_done_bounce_does_not_inherit_the_previous_decision(self) -> None:
+        """The other path that opens a round without an observer: a done report at the SHA a red
+        review already rejected. That round is opened by the bounce, so it carries no decision, and
+        the one that opened the round before it must not be handed to its worker as authoritative.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+        self.assertEqual(self._document_decision(), "add a live check")
+
+        # The rework worker commits nothing and reports the reviewed SHA again.
+        self._report_done("nothing changed")
+        bounced = self.runtime.tick(self.selector)
+
+        self.assertEqual(bounced["action"], "stale-done-rework")
+        self.assertEqual(self._pilot_record()["report_generation"], 3, "the bounce opens a round")
+        self.assertEqual(self._pilot_record()["report_decision"], "")
+        self.assertEqual(self._document_decision(), "")
+        self.assertNotIn("Observer rework decision", self._task_document())
+
     def test_the_report_marker_baseline_is_not_the_report_generation(self) -> None:
         """`comment_baseline` keeps scanning for new markers on its own count. A generation that
         skips or lags the card's comments must not blind the dispatcher to a fresh report."""
