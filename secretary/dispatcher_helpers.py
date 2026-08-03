@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from secretary.dispatcher_state import request_token
+
 _ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
 _BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
@@ -104,6 +106,51 @@ def _gate_red_repeat_count(task: dict[str, Any], fingerprint: str) -> int:
     )
 
 
+WORKER_REPORT_MARKERS = {"report:done", "report:blocked"}
+# The actions the dispatcher issues a report request id for. One per command in `TASK.md`: the done
+# report and one per block classification, since a request id claims its payload.
+_REPORT_ACTIONS = (
+    "worker-report-done",
+    "worker-report-blocked-external_fact",
+    "worker-report-blocked-wrong_task_definition",
+)
+
+
+def _round_report_marker(audit: Any, reference: str, generation: int) -> str | None:
+    """The marker of a report that belongs to this round, or None if the round has none yet.
+
+    A round ends only on a marker for the generation that is open, and the marker on the board
+    cannot answer that on its own: the comment is `[report:done]` whoever wrote it and for whichever
+    round. What names the round is the request id the dispatcher issued for it, and the audit keeps
+    that beside the marker, so the round is read from there rather than from the card's comments. A
+    report filed under any other id records nothing of this round: not a command from a round that
+    is over, and not an id a head invented for itself.
+
+    Only the action, the card and the generation are compared, never the attempt. A dispatcher that
+    lost its record re-adopts the card and recovers the generation from the document its live worker
+    is holding, and the ids in that document still name the attempt that handed them out.
+
+    A staged event counts as much as a committed one. The board comment is written before the audit
+    event is appended, so a report whose call died in between is a report that happened; reading
+    only committed events would leave the card waiting for a marker already on the card.
+    """
+    suffixes = tuple(
+        f"-{action}-{request_token(reference)}-{generation}" for action in _REPORT_ACTIONS
+    )
+    pending = [
+        event for event in audit.pending_events()
+        if event.get("kind") == "reported" and event.get("ref") == reference
+    ]
+    marker = None
+    for event in [*audit.events(reference, kind="reported"), *pending]:
+        if not str(event.get("request_id") or "").endswith(suffixes):
+            continue
+        candidate = (event.get("payload") or {}).get("marker")
+        if candidate in WORKER_REPORT_MARKERS:
+            marker = candidate
+    return marker
+
+
 def _last_marker_body(task: dict[str, Any], marker: str) -> str | None:
     """Text of the most recent comment carrying this marker, with the marker line stripped."""
     body = None
@@ -161,14 +208,20 @@ def _task_doc_report_generation(workspace: str) -> int:
 def _spent_report_generations(task: dict[str, Any]) -> int:
     """A floor under the generations this card has already spent, from its report markers.
 
-    Only for recovery, and only as a floor: every report on the board closed a round, so the round
-    running now is past all of them. Overshooting is harmless, because an unused generation costs
-    nothing; undershooting would hand a new round an id an earlier one already committed.
+    Only for recovery, and only as a floor: a round whose report the dispatcher has consumed is
+    over, so the round running now is past all of them. Undershooting would hand a new round an id
+    an earlier one already committed.
+
+    Only consumed reports count, which is the same boundary `_report_adoption_baseline` reads. A
+    report that is still waiting to be read belongs to the round that is running: stepping over it
+    would leave the adopted record holding a generation no report on the board names, and a report
+    is attributed to its round by the id its command carried (`_round_report_marker`). The document
+    in the checkout usually answers this on its own; this is the floor for when it cannot.
     """
     return sum(
         1
-        for comment in task.get("comments") or []
-        if comment.get("marker") in {"report:done", "report:blocked"}
+        for comment in (task.get("comments") or [])[:_report_adoption_baseline(task)]
+        if comment.get("marker") in WORKER_REPORT_MARKERS
     )
 
 

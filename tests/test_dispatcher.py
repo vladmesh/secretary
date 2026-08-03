@@ -1737,7 +1737,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="ready for review",
-            request_id="production-worker-done",
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "validate")
         self.assertEqual(self.runtime.production_tick()["actions"][0]["action"], "review-started")
@@ -1796,7 +1796,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="ready for validation",
-            request_id="production-worker-done-before-gate-red",
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "validate")
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
@@ -1846,7 +1846,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="ready for validation",
-            request_id="pilot-worker-done-before-merge-gate-red",
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         self.host.gate_results = [GateResult("green", "pre-review green"), GateResult("red", "merge red")]
@@ -2419,7 +2419,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done",
-            request_id="worker-done-before-cutover",
+            request_id=self._worker_report_request_id(),
         )
         self.runtime.tick(self.selector)
         review_started = self.runtime.tick(self.selector)
@@ -2445,7 +2445,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done",
-            request_id="production-worker-done",
+            request_id=self._worker_report_request_id(),
         )
         self.runtime.production_tick()
         review_started = self.runtime.production_tick()
@@ -2471,7 +2471,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done",
-            request_id="production-review-error-report",
+            request_id=self._worker_report_request_id(),
         )
         self.runtime.production_tick()
         self.host.fail_review_error = OSError(
@@ -2657,7 +2657,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="PR: https://github.com/example-org/secretary/pull/1",
-            request_id="worker-done",
+            request_id=self._worker_report_request_id(),
         )
         advanced = self.runtime.tick(self.selector)
         self.assertEqual(advanced["to"], "validate")
@@ -2689,8 +2689,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("stop_head:worker", self.host.calls)
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
-    def _run_worker_to_validate(self, request_id: str = "worker-done") -> None:
-        """Claim, drive the worker to report:done, and advance the card into validate."""
+    def _run_worker_to_validate(self) -> None:
+        """Claim, drive the worker to report:done, and advance the card into validate.
+
+        The report goes through the command the worker was actually handed, because that id is
+        what attributes the report to the round the dispatcher is waiting for (secretary-1063).
+        """
         self.runtime.tick(self.selector)
         self.writer.report(
             role="worker",
@@ -2698,7 +2702,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done",
-            request_id=request_id,
+            request_id=self._worker_report_request_id(),
         )
         advanced = self.runtime.tick(self.selector)
         self.assertEqual(advanced["to"], "validate")
@@ -2948,9 +2952,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "waiting-worker-report")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
-    def test_pid_confirmed_reviewer_silent_past_the_long_ceiling_is_not_blocked(self) -> None:
-        """A pid-confirmed live reviewer must survive even the long inactivity ceiling: the pid
-        heartbeat is the stronger signal, so the timing fallback never applies to it."""
+    def test_a_working_pid_confirmed_reviewer_survives_the_long_ceiling(self) -> None:
+        """A live reviewer that is working must survive even the long inactivity ceiling: silence
+        from a head the runtime says is mid-turn proves nothing, so no clock applies to it."""
         self.start_pilot()
         self._run_worker_to_validate()
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
@@ -2958,13 +2962,34 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._rewind_wait("review", seconds=stall_seconds("review") + 60)
         self.host.review_status_result = {
             "known": True, "live": True, "reason": "live", "last_activity": None,
-            "pid_confirmed": True,
+            "pid_confirmed": True, "idle": False,
         }
 
         result = self.runtime.tick(self.selector)
 
         self.assertEqual(result["action"], "waiting-review-verdict")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def test_a_pid_confirmed_head_nothing_can_read_still_hits_the_long_ceiling(self) -> None:
+        """secretary-1063 changed this. A heartbeat says the process is alive; it does not say the
+        head is doing anything, and when nothing can say — an adopted head with no pane identity,
+        a pane binding the runtime has lost — the wait was unbounded. The long ceiling is the
+        fallback for exactly that, as it is for a runtime with no signals at all."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.review_status_result = {
+            "known": True, "live": True, "reason": "pid", "last_activity": None,
+            "pid_confirmed": True,
+        }
+
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "review-respawned")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
 
     def test_runtime_inventory_failure_is_degraded_not_a_head_death(self) -> None:
         self.start_pilot()
@@ -3125,7 +3150,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done",
-            request_id="worker-done-before-adoption",
+            request_id=self._worker_report_request_id(),
         )
         payload = self.runtime.state.load()
         payload["records"] = {}
@@ -3170,7 +3195,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="reworked",
-            request_id="worker-done-round-2",
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
@@ -3242,7 +3267,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done",
-            request_id="worker-done-after-wait",
+            request_id=self._worker_report_request_id(),
         )
 
         advanced = self.runtime.tick(self.selector)
@@ -3276,7 +3301,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="done", request_id="worker-done-reused-session",
+            body="done", request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         retained = self.runtime.state.load()["records"]["secretary-510-pilot"]
@@ -3361,7 +3386,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.commit = "review-rework-accepted-c0ffee"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="rework report", request_id="worker-done-after-red-review",
+            body="rework report", request_id=self._worker_report_request_id(),
         )
 
         advanced = self.runtime.tick(self.selector)
@@ -3938,7 +3963,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="done", request_id="worker-done-unconfirmed-retention",
+            body="done", request_id=self._worker_report_request_id(),
         )
 
         outcome = self.runtime.tick(self.selector)
@@ -4056,7 +4081,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="nothing changed", request_id="worker-done-stale",
+            body="nothing changed", request_id=self._worker_report_request_id(),
         )
 
         result = self.runtime.tick(self.selector)
@@ -4102,12 +4127,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="nothing changed", request_id="worker-done-stale-one",
+            body="nothing changed", request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["action"], "stale-done-rework")
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="still nothing changed", request_id="worker-done-stale-two",
+            body="still nothing changed", request_id=self._worker_report_request_id(),
         )
 
         result = self.runtime.tick(self.selector)
@@ -4367,7 +4392,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
-            kind="done", body="first", request_id="worker-done-attempt-1",
+            kind="done", body="first", request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
@@ -4383,7 +4408,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.commit = "attempt-two-c0ffee"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
-            kind="done", body="reworked", request_id="worker-done-attempt-2",
+            kind="done", body="reworked", request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
@@ -4422,7 +4447,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
-            kind="done", body="done", request_id="worker-done-adopted",
+            kind="done", body="done", request_id=self._worker_report_request_id(),
         )
         self._drop_records_and_restart_attempt()
         self.catalog.role_defaults = {"new_card": "claude-opus", "reviewer": "claude-opus"}
@@ -4464,7 +4489,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
-            kind="done", body="done", request_id="worker-done-legacy",
+            kind="done", body="done", request_id=self._worker_report_request_id(),
         )
         self._drop_records_and_restart_attempt()
         self.board.metadata[12].update({"resolved_head": "", "resolved_review_head": ""})
@@ -4486,7 +4511,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.tick(self.selector)
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
-            kind="done", body="done", request_id="worker-done-lost-profile",
+            kind="done", body="done", request_id=self._worker_report_request_id(),
         )
         self._drop_records_and_restart_attempt()
         before = self.routing_history()
@@ -4563,7 +4588,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot",
             kind="blocked", body="stuck", classification="external_fact",
-            request_id="worker-blocked-attempt-1",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
         self.writer.move(
@@ -4719,7 +4744,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="fixed",
-            request_id="worker-done-after-gate-red",
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         advanced = self.runtime.tick(self.selector)
@@ -4740,7 +4765,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="first report",
-            request_id="worker-done-first",
+            request_id=self._worker_report_request_id(),
         )
         self.runtime.tick(self.selector)
         self.runtime.tick(self.selector)
@@ -4778,7 +4803,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="rework report",
-            request_id="worker-done-rework",
+            request_id=self._worker_report_request_id(),
         )
         advanced = self.runtime.tick(self.selector)
 
@@ -4981,9 +5006,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
     def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
         """The report request-id the worker in the checkout is actually holding, read out of its
         TASK.md rather than recomputed here: a test that recomputes it cannot catch the document
-        and the dispatcher's own state naming different report rounds."""
-        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
-        document = (Path(record["workspace"]) / "TASK.md").read_text(encoding="utf-8")
+        and the dispatcher's own state naming different report rounds.
+
+        The record may be gone (a dispatcher restart), which changes nothing about what the live
+        worker is holding: the document is in the checkout either way.
+        """
+        record = self.runtime.state.load()["records"].get("secretary-510-pilot") or {}
+        workspace = record.get("workspace") or (
+            self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
+        )
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
         wanted = f"--kind {kind}"
         if classification:
             wanted = f"{wanted} --classification {classification}"
@@ -5034,7 +5066,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="rework report",
-            request_id="worker-done-rework",
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
@@ -5085,7 +5117,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="tests pass",
-            request_id="worker-done-dirty",
+            request_id=self._worker_report_request_id(),
         )
 
         result = self.runtime.tick(self.selector)
@@ -5196,7 +5228,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reference="secretary-510-pilot",
             kind="done",
             body="done body",
-            request_id="worker-report",
+            request_id=self._worker_report_request_id(),
         )
         self.runtime.tick(self.selector)
 
@@ -5228,7 +5260,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.commit = f"round{index}-c0ffee1234"
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="done", request_id=f"worker-done-{index}",
+            body="done", request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
@@ -5326,7 +5358,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.gate_results = [GateResult("red", "pytest failed", "E   assert False")]
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body="done", request_id="worker-done-gate-red",
+            body="done", request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
         gated = self.runtime.tick(self.selector)
@@ -5350,7 +5382,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.host.commit = f"round{index}-c0ffee1234"
             self.writer.report(
                 role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-                body="done", request_id=f"worker-done-{index}",
+                body="done", request_id=self._worker_report_request_id(),
             )
             self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
             self.runtime.tick(self.selector)
@@ -5705,6 +5737,73 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
 
+    def test_a_report_under_an_id_that_names_no_round_does_not_end_one(self) -> None:
+        """The marker on the card says `[report:done]` whoever wrote it and for whichever round.
+        What attributes it to a round is the request id its command carried, so a report filed
+        under an id this round never issued closes nothing (secretary-1063)."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="an-id-the-head-made-up",
+        )
+
+        self.assertIn("report:done", [
+            comment.get("marker") for comment in self.reader.show("secretary-510-pilot")["comments"]
+        ])
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_an_unattributable_report_leaves_a_wait_that_is_still_bounded(self) -> None:
+        """It is not a hang: the head that filed it has nothing left to do, so it is pointed at the
+        command of the open round once and the card blocks after that."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id="an-id-the-head-made-up",
+        )
+
+        self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
+        self.runtime.tick(self.selector)
+        self._rewind_idle()
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
+
+    def test_a_report_whose_audit_event_only_staged_still_ends_its_round(self) -> None:
+        """The comment is written before the event is appended, so a report whose call died in
+        between is a report that happened. Reading only committed events would leave the card
+        waiting for a marker that is already on it."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        request_id = self._worker_report_request_id()
+        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("audit is down")):
+            with self.assertRaises(TaskError) as pending:
+                self.writer.report(
+                    role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+                    body="done", request_id=request_id,
+                )
+        self.assertEqual(pending.exception.code, "audit_pending")
+        self.assertIsNone(self.writer.audit.committed_event(request_id))
+        self.assertIsNotNone(self.writer.audit.pending_event(request_id))
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+    def test_an_adopted_card_keeps_the_generation_of_a_report_it_has_not_read(self) -> None:
+        """The floor the recovery uses counts rounds that are over, and a report nobody has read
+        yet is not one of them: stepping over it would leave the adopted record holding a
+        generation that no report on the board names, and the round could never end."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._report_done()
+        self.assertEqual(self._pilot_record()["report_generation"], 1)
+
+        self._drop_records_and_restart_attempt()
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self._pilot_record()["report_generation"], 1)
+
     # the bounded wait for a worker report (secretary-1063) --------------------
 
     def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
@@ -5758,6 +5857,39 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self._rewind_idle()
         return self.runtime.tick(self.selector)
+
+    def test_a_head_held_in_a_dialog_is_bounded_like_an_idle_one(self) -> None:
+        """A pane waiting on a dialog is not working either, and nothing in the pipeline answers a
+        dialog, so it is the same stopped head under a different word."""
+        self._open_the_second_round()
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "live", "last_activity": time.time(),
+            "pid_confirmed": True, "idle": True, "idle_reason": "dialog",
+        }
+        self.runtime.tick(self.selector)
+        self._rewind_idle()
+
+        bounced = self.runtime.tick(self.selector)
+
+        self.assertEqual(bounced["action"], "worker-respawned")
+        self.assertIn("held in a dialog", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+
+    def test_a_live_head_nothing_can_read_falls_back_to_the_ceiling(self) -> None:
+        """secretary-820's adopted head has no pane identity, so nothing can say whether it is
+        working. A live pid is not on its own a reason to wait forever: the ordinary ceiling is the
+        fallback, exactly as for a runtime that exposes no signal at all."""
+        self._open_the_second_round()
+        self.host.worker_status_result = {
+            "known": True, "live": True, "reason": "pid", "pid_confirmed": True,
+        }
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "worker-respawned")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
 
     def test_a_working_head_is_never_bounced_for_idleness(self) -> None:
         """Liveness for a head that is genuinely working is unchanged: a pane Orca reports as busy
@@ -8574,6 +8706,50 @@ class ReviewLivenessTests(unittest.TestCase):
             host.calls,
         )
 
+    def test_an_adopted_head_with_no_pane_identity_answers_no_work_state(self) -> None:
+        """Nothing to probe, so the status says so instead of guessing: the caller falls back to
+        its ceilings rather than treating an unprobed head as one that is working."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([{"handle": "term-other", "leafId": "leaf-other", "connected": True}])
+
+        status = host.worker_status(self.task, self._record(handle="", worker_leaf=""))
+
+        self.assertTrue(status["pid_confirmed"])
+        self.assertNotIn("idle", status)
+
+    def test_a_refused_readiness_probe_answers_no_work_state(self) -> None:
+        """A live pane whose binding the runtime has lost: `terminal list` still names it, and the
+        readiness probe fails with `terminal_handle_stale`. That is not a busy head and not an idle
+        one, so no work state is reported for it."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+        host.fail_ops = {"wait"}
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertTrue(status["pid_confirmed"])
+        self.assertNotIn("idle", status)
+
+    def test_a_pane_held_in_a_dialog_is_not_working(self) -> None:
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+        host.wait_answer = {"wait": {"satisfied": False, "blockedReason": "trust dialog"}}
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertTrue(status["idle"])
+        self.assertEqual(status["idle_reason"], "dialog")
+
     def test_a_working_pane_is_not_idle(self) -> None:
         Path(pid_file_path("worker", self.task["ref"])).write_text(
             str(self._live_pid()), encoding="utf-8"
@@ -8661,14 +8837,17 @@ class ProductionPauseTests(unittest.TestCase):
             mode=mode, actor="operator", reason="host maintenance", **kwargs
         )
 
-    def report_done(self, request_id: str = "worker-done") -> None:
+    def report_done(self) -> None:
+        """Report through the command in the checkout: that id is what names the round."""
+        document = (Path(self.record().workspace) / "TASK.md").read_text(encoding="utf-8")
+        line = next(line for line in document.splitlines() if "--kind done" in line)
         self.writer.report(
             role="worker",
             actor="worker",
             reference=self.ref,
             kind="done",
             body="ready for review",
-            request_id=request_id,
+            request_id=line.split("--request-id ", 1)[1].split()[0],
         )
 
     def drive_into_review(self) -> None:

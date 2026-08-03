@@ -36,6 +36,7 @@ from secretary.dispatcher_helpers import (
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
+    _round_report_marker,
     _last_marker_body,
     _last_review_red_body,
     _legacy_worker_branch,
@@ -2950,7 +2951,10 @@ class DispatcherRuntime:
             return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
-        marker = _last_marker(task, record.comment_baseline, {"report:done", "report:blocked"})
+        # The round the dispatcher is holding, not merely the last report marker on the card: a
+        # marker is attributed to a round through the request id its command carried, which is what
+        # the audit keeps (secretary-1063).
+        marker = _round_report_marker(self.audit, ref, record.report_generation)
         continuation = record.worker_continuation
         if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:
@@ -3368,12 +3372,13 @@ class DispatcherRuntime:
                 setattr(record, f"{kind}_progress_at", progress_at)
                 self.save_records(payload, records)
         now = time.time()
-        if status.get("pid_confirmed"):
-            # The pid heartbeat proves this exact head process is still running. Silence is not
-            # evidence of anything for a runtime that can prove liveness this way, so none of the
-            # timing ceilings below apply; only an actual exit (handled above) or a head that has
-            # stopped working without delivering (below) ends this wait. The long inactivity
-            # ceiling stays live only for runtimes that cannot expose this signal.
+        pid_confirmed = bool(status.get("pid_confirmed"))
+        if pid_confirmed and "idle" in status:
+            # The pid heartbeat proves this exact head process is still running, and the pane says
+            # whether it is doing anything. Between them they answer better than any clock, so the
+            # timing ceilings below do not apply here: a head that is working waits as long as it
+            # needs, and one that has stopped without delivering ends the wait now rather than at a
+            # ceiling.
             idle_trigger = self._idle_wait_trigger(
                 record, records, payload, status, kind=kind, now=now
             )
@@ -3383,10 +3388,16 @@ class DispatcherRuntime:
                     trigger=idle_trigger, stall=_idle_stall_seconds(),
                 )
             return unavailable() if runtime_reason else None
+        # Either no heartbeat, or a heartbeat with nothing that can say what the head is doing: an
+        # adopted head whose pane identity was never persisted, a pane binding Orca has lost, a
+        # probe it refuses. A live pid is not on its own a reason to wait forever, so those fall
+        # back to the ordinary ceilings, the same fallback a runtime with no signals at all gets.
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
-        if activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
+        # Except the short first-output window, which stays off for a confirmed pid: silence right
+        # after launch is exactly what that heartbeat exists to answer (secretary-751).
+        if not pid_confirmed and activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
             return self._trigger_wait_watchdog(
                 task, record, records, payload, attempt_id, kind=kind,
                 trigger=f"no terminal output since launch for {int(now - started_at)}s",
@@ -3441,7 +3452,8 @@ class DispatcherRuntime:
         Readiness is sampled per tick and only counts once it has held for the idle window, so a
         head between turns — a prompt delivered whose turn has not started, a conversation just
         resumed — is not mistaken for one that has stopped. A working head is never ready, so this
-        never fires on it.
+        never fires on it. A head held in a dialog is not working either and nothing in the
+        pipeline answers a dialog, so it ends the wait the same way and says so.
         """
         idle_since = float(getattr(record, f"{kind}_idle_since") or 0.0)
         if not status.get("idle"):
@@ -3459,7 +3471,8 @@ class DispatcherRuntime:
         expectation = _wait_expectation(kind)
         if kind == "worker":
             expectation = f"{expectation} for generation {record.report_generation}"
-        return f"the head has been idle for {idle_for}s with no {expectation}"
+        state = "held in a dialog" if status.get("idle_reason") == "dialog" else "idle"
+        return f"the head has been {state} for {idle_for}s with no {expectation}"
 
     def _trigger_wait_watchdog(
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
