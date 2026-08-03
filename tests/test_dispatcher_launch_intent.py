@@ -25,16 +25,15 @@ from unittest import mock
 from secretary import dispatcher as secretary_dispatcher
 from secretary.dispatcher import (
     CommandHostRuntime,
-    CutoverState,
     DispatcherRuntime,
     LaunchedHead,
-    PilotSelector,
 )
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_tui import TuiDeliveryError
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launch import launch_intent_liveness
-from secretary.dispatcher_state import DispatcherRecord
+from secretary._fsutil import file_lock
+from secretary.dispatcher_state import DispatcherRecord, ensure_attempt
 from secretary.dispatcher_types import HeadLaunchAborted, HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
@@ -46,7 +45,6 @@ from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
     FakeKanboard,
-    FakeLegacyPause,
     FakeSprints,
 )
 
@@ -100,24 +98,35 @@ class LaunchIntentTests(unittest.TestCase):
             self.reader,
             self.writer,
             TaskAudit(self.data_dir),
-            CutoverState(self.data_dir),
+            self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
-            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
             sprints=self.sprints,
         )
-        self.selector = PilotSelector.exact(REF)
-        self.runtime.pause_old(self.selector, actor="operator", evidence="legacy hard pause")
-        self.runtime.start_new_pilot(self.selector, actor="operator")
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": self.runtime.owner,
+            "records": {},
+        })
 
     # fixtures ---------------------------------------------------------------
 
     def tick(self) -> dict:
-        return self.runtime.tick(self.selector)
+        """One card through the tick's per-card decision, the way `production_tick` reaches it."""
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            records = self.runtime.production_state.records(payload)
+            attempt_id = ensure_attempt(payload, REF, self.runtime.owner, self.runtime.owner)
+            outcome = self.runtime._tick_task(self.reader.show(REF), records, payload, attempt_id)
+            self.runtime.production_state.put_records(payload, records)
+            self.runtime.production_state.save(payload)
+        return outcome
 
     def record(self) -> DispatcherRecord | None:
-        return self.runtime.state.records(self.runtime.state.load()).get(REF)
+        return self.runtime.production_state.records(self.runtime.production_state.load()).get(REF)
 
     def workspace_of_record(self) -> str:
         record = self.record()
@@ -125,7 +134,7 @@ class LaunchIntentTests(unittest.TestCase):
 
     def stored_intent(self) -> dict:
         """The intent as it is on disk, which is the only copy a next tick can read."""
-        record = self.runtime.state.load().get("records", {}).get(REF) or {}
+        record = self.runtime.production_state.load().get("records", {}).get(REF) or {}
         return dict(record.get("launch_intent") or {})
 
     def fail_launch_intent_save(self):
@@ -134,7 +143,7 @@ class LaunchIntentTests(unittest.TestCase):
         Failing every save instead would prove far less: the tick would die on some earlier write
         and never reach the launch at all.
         """
-        real = self.runtime.state.save
+        real = self.runtime.production_state.save
 
         def save(payload: dict) -> None:
             records = payload.get("records") or {}
@@ -146,7 +155,7 @@ class LaunchIntentTests(unittest.TestCase):
                 raise OSError("dispatcher state is not writable")
             real(payload)
 
-        return mock.patch.object(self.runtime.state, "save", save)
+        return mock.patch.object(self.runtime.production_state, "save", save)
 
     @contextlib.contextmanager
     def state_dies_after(self, host_method: str):
@@ -155,7 +164,7 @@ class LaunchIntentTests(unittest.TestCase):
         Every state write after `host_method` returns refuses, which is what a process killed or a
         data plane lost mid-launch looks like from the record's side.
         """
-        real_save = self.runtime.state.save
+        real_save = self.runtime.production_state.save
         real_call = getattr(self.host, host_method)
         launched = {"yet": False}
 
@@ -169,7 +178,7 @@ class LaunchIntentTests(unittest.TestCase):
             launched["yet"] = True
             return result
 
-        with mock.patch.object(self.runtime.state, "save", save):
+        with mock.patch.object(self.runtime.production_state, "save", save):
             with mock.patch.object(self.host, host_method, call):
                 yield
 
@@ -245,9 +254,9 @@ class LaunchIntentTests(unittest.TestCase):
 
     def age_intent(self, seconds: float) -> None:
         """Push a stored intent back in time, so its grace window has run out."""
-        payload = self.runtime.state.load()
+        payload = self.runtime.production_state.load()
         payload["records"][REF]["launch_intent"]["at"] -= seconds
-        self.runtime.state.save(payload)
+        self.runtime.production_state.save(payload)
 
     # worker: before the host call -------------------------------------------
 
@@ -600,9 +609,9 @@ class LaunchIntentTests(unittest.TestCase):
         record.worker_continuation.begin_retention(time.time())
         record.worker_continuation.confirm_validation_move()
         record.worker_continuation.begin_delivery("merge-gate", time.time())
-        payload = self.runtime.state.load()
+        payload = self.runtime.production_state.load()
         payload["records"][REF] = record.to_json()
-        self.runtime.state.save(payload)
+        self.runtime.production_state.save(payload)
         recovered = self.tick()
 
         self.assertEqual(recovered["action"], "merge-gate-red-reused-worker")
@@ -618,9 +627,9 @@ class LaunchIntentTests(unittest.TestCase):
         record.worker_continuation.begin_retention(time.time())
         record.worker_continuation.confirm_validation_move()
         record.worker_continuation.begin_delivery("review", time.time())
-        payload = self.runtime.state.load()
+        payload = self.runtime.production_state.load()
         payload["records"][REF] = record.to_json()
-        self.runtime.state.save(payload)
+        self.runtime.production_state.save(payload)
 
         recovered = self.tick()
 
@@ -659,7 +668,7 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_crash_after_validate_move_keeps_the_worker_frozen_for_review(self) -> None:
         self.tick()
         self.report_done()
-        real_save = self.runtime.state.save
+        real_save = self.runtime.production_state.save
 
         def die_after_move(payload: dict) -> None:
             record = payload.get("records", {}).get(REF, {})
@@ -667,7 +676,7 @@ class LaunchIntentTests(unittest.TestCase):
                 raise OSError("dispatcher died after board move")
             real_save(payload)
 
-        with mock.patch.object(self.runtime.state, "save", die_after_move):
+        with mock.patch.object(self.runtime.production_state, "save", die_after_move):
             with self.assertRaises(OSError):
                 self.tick()
 
@@ -814,14 +823,14 @@ class LaunchIntentTests(unittest.TestCase):
         The red intent is written before the move, so the only saves this refuses are the delivery
         boundary and everything after it.
         """
-        real_save = self.runtime.state.save
+        real_save = self.runtime.production_state.save
 
         def save(payload: dict) -> None:
             if self.reader.show(REF)["state"] == "in_progress":
                 raise OSError("dispatcher died after red board move")
             real_save(payload)
 
-        return mock.patch.object(self.runtime.state, "save", save)
+        return mock.patch.object(self.runtime.production_state, "save", save)
 
     def test_a_crash_after_the_red_gate_move_delivers_the_continuation_it_intended(self) -> None:
         """The Validate handoff of the closed round is never replayed by its own done report."""
@@ -2662,20 +2671,12 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             self.reader,
             self.writer,
             TaskAudit(self.data_dir),
-            CutoverState(self.data_dir),
+            self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
-            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
             sprints=self.sprints,
         )
-        self.runtime.state.save({
-            "version": 1,
-            "phase": "cutover_committed",
-            "pilot_ref": REF,
-            "old_owner_paused": True,
-            "records": {},
-        })
 
     # fixtures ---------------------------------------------------------------
 

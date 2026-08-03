@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher import CutoverState, DispatcherRuntime
+from secretary.dispatcher import DispatcherRuntime
 from secretary.dispatcher_observer import (
     ObserverRecord,
     load_observers,
@@ -72,7 +72,6 @@ from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
     FakeKanboard,
-    FakeLegacyPause,
     TwoOpenSprintAdmission,
 )
 from tests.test_dispatcher_observer import DEAD_PID, install_skill_registry
@@ -1220,16 +1219,11 @@ class ObserverFenceFixture(unittest.TestCase):
             TaskReader(self.board),  # type: ignore[arg-type]
             TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir),  # type: ignore[arg-type]
             TaskAudit(self.data_dir),
-            CutoverState(self.data_dir),
+            self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
-            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
         )
-        self.runtime.state.save({
-            "version": 1, "phase": "cutover_committed", "pilot_ref": "secretary-510-pilot",
-            "old_owner_paused": True, "records": {},
-        })
 
     def go_strict(self) -> None:
         activate_strict_reader(

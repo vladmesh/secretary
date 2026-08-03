@@ -1258,14 +1258,14 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertNotIn("host inventory", output)
 
-    def test_doctor_reports_pilot_only_without_production_findings(self):
+    def test_doctor_reds_without_the_production_service(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance, data = self._dispatcher_instance(root)
-            (data / "dispatcher" / "pilot-state.json").write_text(
-                json.dumps({"version": 1, "phase": "new_pilot", "pilot_ref": "secretary-1"}),
+            (data / "dispatcher" / "production-state.json").write_text(
+                json.dumps({"version": 1, "mode": "production", "phase": "production", "owner": "secretary-dispatcher"}),
                 encoding="utf-8",
             )
             fixture = root / "host"
@@ -1276,64 +1276,15 @@ class DoctorHostCliTests(unittest.TestCase):
             ])
 
         self.assertEqual(code, 1, output)
-        self.assertIn("state: pilot-only", output)
-        self.assertNotIn("dispatcher findings", output)
-
-    def test_offline_doctor_reports_dispatcher_state_without_live_probe(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            instance, data = self._dispatcher_instance(root)
-            (data / "dispatcher" / "pilot-state.json").write_text(
-                json.dumps({"version": 1, "phase": "cutover_committed"}),
-                encoding="utf-8",
-            )
-            with unittest.mock.patch.object(cli, "FileLegacyPauseProbe", side_effect=AssertionError("live probe")):
-                code, output = run_cli(["doctor", "--offline", "--instance", str(instance)])
-
-        self.assertEqual(code, 0, output)
-        self.assertIn("legacy freeze: not inspected", output)
-
-    def test_doctor_reds_after_cutover_without_production_service(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            instance, data = self._dispatcher_instance(root)
-            (data / "dispatcher" / "pilot-state.json").write_text(
-                json.dumps({"version": 1, "phase": "cutover_committed"}),
-                encoding="utf-8",
-            )
-            (data / "dispatcher" / "production-state.json").write_text(
-                json.dumps({"version": 1, "mode": "production", "phase": "production", "owner": "secretary-dispatcher"}),
-                encoding="utf-8",
-            )
-            pause = root / "pause.json"
-            pause.write_text(json.dumps({"mode": "soft", "actor": "operator"}), encoding="utf-8")
-            fixture = root / "host"
-            fixture.mkdir()
-
-            with unittest.mock.patch.dict("os.environ", {"SECRETARY_LEGACY_PAUSE_FILE": str(pause)}, clear=False):
-                code, output = run_cli([
-                    "doctor", "--dry-run", "--instance", str(instance), "--host-fixture", str(fixture),
-                ])
-
-        self.assertEqual(code, 1, output)
         self.assertIn("state: production-owner", output)
-        self.assertIn("double owner", output)
         self.assertIn("create secretary-dispatcher-production.service", output)
 
-    def test_doctor_accepts_managed_production_owner_after_cutover(self):
+    def test_doctor_accepts_a_managed_production_owner(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance, data = self._dispatcher_instance(root)
-            (data / "dispatcher" / "pilot-state.json").write_text(
-                json.dumps({"version": 1, "phase": "cutover_committed"}),
-                encoding="utf-8",
-            )
             (data / "dispatcher" / "production-state.json").write_text(
                 json.dumps({"version": 1, "mode": "production", "phase": "production", "owner": "secretary-dispatcher"}),
                 encoding="utf-8",
@@ -1370,8 +1321,6 @@ class DoctorHostCliTests(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
-            pause = root / "pause.json"
-            pause.write_text(json.dumps({"mode": "hard", "actor": "operator"}), encoding="utf-8")
             fixture = root / "host"
             fixture.mkdir()
             (fixture / "units.txt").write_text(
@@ -1381,7 +1330,7 @@ class DoctorHostCliTests(unittest.TestCase):
             )
 
             account = SimpleNamespace(pw_name="operator", pw_dir=str(root / "operator"))
-            with unittest.mock.patch.dict("os.environ", {"SECRETARY_LEGACY_PAUSE_FILE": str(pause)}, clear=False), unittest.mock.patch(
+            with unittest.mock.patch(
                 "secretary.host_apply.pwd.getpwuid", return_value=account
             ), unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
                 code, output = run_cli([
@@ -1390,7 +1339,6 @@ class DoctorHostCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0, output)
         self.assertIn("state: production-owner", output)
-        self.assertIn("legacy freeze: confirmed", output)
         self.assertNotIn("dispatcher findings", output)
 
     def test_host_inventory_reports_three_sections(self):

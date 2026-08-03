@@ -336,11 +336,6 @@ def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list
     return [root / name for name in names]
 
 
-def role_worktrees(product_root: Path, home: Path | None = None) -> list[Path]:
-    """Compatibility view of the role worktrees which already exist."""
-    return [path for path in desired_role_worktrees(product_root, home) if (path / ".git").exists()]
-
-
 def step_worktrees(context: UpgradeContext) -> StepResult:
     worktrees = desired_role_worktrees(context.product_root, context.runtime_home)
     if not worktrees:

@@ -70,18 +70,3 @@ def legacy_review_pane_label(reference: str) -> str:
     """Pre-651 reviewer title. Still matched when re-finding an orphaned pane so a card that was
     already in review when the dispatcher upgraded does not get a second reviewer."""
     return f"{reference} review"
-
-
-@dataclass(frozen=True)
-class PilotSelector:
-    reference: str
-
-    @classmethod
-    def exact(cls, reference: str | None) -> "PilotSelector":
-        value = (reference or "").strip()
-        if not value:
-            raise DispatcherError("pilot_selector_required", "dispatcher requires an exact pilot ref")
-        return cls(value)
-
-    def accepts(self, task: dict[str, Any]) -> bool:
-        return task.get("ref") == self.reference

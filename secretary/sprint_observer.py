@@ -38,9 +38,6 @@ SOURCE_MIGRATION_UNKNOWN = "migration_unknown"
 # be a head profile is reserved here rather than guessed at the CLI boundary.
 NONE_SPELLING = "none"
 
-# The audit kind the migration writes once per backfilled row: the record of the writes.
-BACKFILL_EVENT_KIND = "observer_backfilled"
-
 # The audit kind written once, after the strict rescan proved every row migrated. Its presence in
 # the committed log is what makes this installation a migrated one.
 #
@@ -190,13 +187,6 @@ def observer_choice(spelling: str) -> dict[str, Any] | None:
     if text == NONE_SPELLING:
         return none_choice()
     return head_choice(text)
-
-
-def declared_observer(sprint: dict[str, Any]) -> dict[str, Any] | None:
-    """The value on a sprint record, or None when it declares none this module can read."""
-    if "observer" not in sprint:
-        return None
-    return parse_observer(sprint.get("observer"))
 
 
 def executable_observer(sprint: dict[str, Any]) -> dict[str, Any]:

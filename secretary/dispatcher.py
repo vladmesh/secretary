@@ -1,4 +1,4 @@
-"""Pilot dispatcher runtime for the Phase 7 cutover."""
+"""Production dispatcher runtime."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import yaml
 
-from secretary._fsutil import file_lock, write_text_atomic
+from secretary._fsutil import write_text_atomic
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import validate_instance
 from secretary import state_repo
@@ -83,7 +83,7 @@ from secretary.dispatcher_launch import (
     resolve_launch_intent as _resolve_launch_intent,
     write_launch_intent as _write_launch_intent,
 )
-from secretary.dispatcher_pause import FileLegacyPauseProbe, LegacyPauseSnapshot, ProductionPause
+from secretary.dispatcher_pause import ProductionPause
 from secretary.dispatcher_pause_ops import (
     pause as _pause_pipeline,
     pause_status as _pause_status,
@@ -114,13 +114,10 @@ from secretary.dispatcher_watchdog import (
     wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_state import (
-    CutoverState,
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
     claim_actual as _claim_actual,
     claim_mismatch as _claim_mismatch,
-    ensure_attempt as _ensure_attempt,
-    mark_attempt_rolled_back as _mark_attempt_rolled_back,
     new_attempt_id as _new_attempt_id,
     now_rfc3339,
     record_attempt as _record_attempt,
@@ -144,7 +141,6 @@ from secretary.dispatcher_types import (
     DispatcherError,
     HeadLaunchAborted,
     HostError,
-    PilotSelector,
     ReviewLaunch,
     review_pane_label,
 )
@@ -2212,12 +2208,11 @@ class DispatcherRuntime:
         reader: TaskReader,
         writer: TaskWriter,
         audit: TaskAudit,
-        state: CutoverState,
+        data_dir: Path,
         catalog: InstanceCatalog,
         host: CommandHostRuntime,
         *,
         owner: str = "secretary-dispatcher",
-        legacy_pause: FileLegacyPauseProbe | None = None,
         production_state: ProductionState | None = None,
         pause: ProductionPause | None = None,
         checkpoint: CheckpointWriter | None = None,
@@ -2227,16 +2222,14 @@ class DispatcherRuntime:
         self.reader = reader
         self.writer = writer
         self.audit = audit
-        self.state = state
-        self.production_state = production_state or ProductionState(state.root.parent)
-        self.pause = pause or ProductionPause(state.root.parent)
+        self.production_state = production_state or ProductionState(data_dir)
+        self.pause = pause or ProductionPause(data_dir)
         self.catalog = catalog
         self.host = host
         self.owner = owner
-        self.legacy_pause = legacy_pause or FileLegacyPauseProbe()
         self.checkpoint = checkpoint
         self.checkpoint_push = checkpoint_push
-        self.head_health = HeadHealth(catalog, state.root.parent)
+        self.head_health = HeadHealth(catalog, data_dir)
         # Sprint entities live on their own board, so the observer pass reads them through their
         # own reader rather than the card reader.
         instance = getattr(catalog, "instance", {})
@@ -2252,151 +2245,6 @@ class DispatcherRuntime:
         readiness = self.head_readiness(head)
         if not readiness.launch_allowed:
             raise HostError(f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}")
-
-    def preflight(self, selector: PilotSelector) -> dict[str, Any]:
-        audit = self.audit.status()
-        payload = self.state.load()
-        legacy_pause = self.legacy_pause.snapshot()
-        status = "ok"
-        reasons: list[str] = []
-        if not audit["ok"]:
-            status = "blocked"
-            reasons.append("task audit has unresolved pending events")
-        if payload.get("pilot_ref") not in (None, selector.reference):
-            status = "blocked"
-            reasons.append("dispatcher state is bound to another pilot ref")
-        if not payload.get("old_owner_paused"):
-            status = "blocked"
-            reasons.append("old dispatcher pause evidence is missing")
-        if not legacy_pause.sufficient:
-            status = "blocked"
-            reasons.append(legacy_pause.reason)
-        return {
-            "status": status,
-            "step": "preflight",
-            "pilot_ref": selector.reference,
-            "attempt_id": payload.get("attempt_id"),
-            "audit": audit,
-            "reasons": reasons,
-            "phase": payload.get("phase", "new"),
-            "legacy_pause": legacy_pause.to_json(),
-        }
-
-    def pause_old(self, selector: PilotSelector, *, actor: str, evidence: str) -> dict[str, Any]:
-        with file_lock(self.state.tick_lock):
-            legacy_pause = self.legacy_pause.snapshot()
-            if not legacy_pause.sufficient:
-                return {
-                    "status": "blocked",
-                    "step": "pause-old",
-                    "reason": legacy_pause.reason,
-                    "pilot_ref": selector.reference,
-                    "legacy_pause": legacy_pause.to_json(),
-                }
-            payload = self.state.load()
-            if payload.get("phase") == "new_pilot" and payload.get("pilot_ref") != selector.reference:
-                raise DispatcherError("pilot_conflict", "another pilot is already active", 3)
-            payload.update({
-                "version": 1,
-                "phase": "old_paused",
-                "pilot_ref": selector.reference,
-                "old_owner_paused": True,
-                "old_owner_evidence": evidence,
-                "old_owner_pause_snapshot": legacy_pause.to_json(),
-                "old_owner_paused_at": now_rfc3339(),
-                "old_owner_paused_by": actor,
-            })
-            payload.setdefault("records", {})
-            self.state.save(payload)
-        return {"status": "ok", "step": "pause-old", "pilot_ref": selector.reference, "phase": "old_paused"}
-
-    def start_new_pilot(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
-        with file_lock(self.state.tick_lock):
-            payload = self.state.load()
-            if payload.get("pilot_ref") not in (None, selector.reference):
-                raise DispatcherError("pilot_conflict", "dispatcher state is bound to another pilot ref", 3)
-            if not payload.get("old_owner_paused"):
-                return {"status": "blocked", "step": "start-new-pilot", "reason": "old dispatcher pause evidence is missing", "pilot_ref": selector.reference}
-            legacy_pause = self.legacy_pause.snapshot()
-            if not legacy_pause.sufficient:
-                return {
-                    "status": "blocked",
-                    "step": "start-new-pilot",
-                    "reason": legacy_pause.reason,
-                    "pilot_ref": selector.reference,
-                    "legacy_pause": legacy_pause.to_json(),
-                }
-            active_attempt = (
-                str(payload.get("attempt_id") or "")
-                if payload.get("phase") == "new_pilot" and payload.get("pilot_ref") == selector.reference
-                else ""
-            )
-            attempt_id = active_attempt or _new_attempt_id()
-            if not active_attempt:
-                _record_attempt(payload, attempt_id, selector.reference, actor, self.owner)
-                if payload.get("phase") != "new_pilot":
-                    payload["records"] = {}
-            payload.update({
-                "version": 1,
-                "phase": "new_pilot",
-                "pilot_ref": selector.reference,
-                "attempt_id": attempt_id,
-                "new_owner": self.owner,
-                "new_owner_started_at": now_rfc3339(),
-                "new_owner_started_by": actor,
-                "new_owner_legacy_pause_snapshot": legacy_pause.to_json(),
-            })
-            payload.setdefault("records", {})
-            self.state.save(payload)
-        return {
-            "status": "ok",
-            "step": "start-new-pilot",
-            "pilot_ref": selector.reference,
-            "attempt_id": attempt_id,
-            "phase": "new_pilot",
-        }
-
-    def tick(self, selector: PilotSelector) -> dict[str, Any]:
-        with file_lock(self.state.tick_lock):
-            payload = self.state.load()
-            guard = self._mutation_guard(payload, selector)
-            if guard is not None:
-                return guard
-            attempt_id = _ensure_attempt(payload, selector.reference, self.owner, self.owner)
-            records = self.state.records(payload)
-            task = self.reader.show(selector.reference)
-            if not selector.accepts(task):
-                return {"status": "skipped", "step": "tick", "reason": "pilot selector rejected task"}
-            outcome = self._tick_task(task, records, payload, attempt_id)
-            self.state.put_records(payload, records)
-            payload["last_tick_at"] = now_rfc3339()
-            self.state.save(payload)
-            return outcome
-
-    def observe(self, selector: PilotSelector) -> dict[str, Any]:
-        payload = self.state.load()
-        task: dict[str, Any] | None
-        try:
-            task = self.reader.show(selector.reference)
-        except TaskError:
-            task = None
-        return {
-            "status": "ok",
-            "step": "observe",
-            "pilot_ref": selector.reference,
-            "attempt_id": payload.get("attempt_id"),
-            "phase": payload.get("phase", "new"),
-            "new_owner": payload.get("new_owner"),
-            "old_owner_paused": bool(payload.get("old_owner_paused")),
-            "legacy_decommissioned": bool(payload.get("legacy_decommissioned")),
-            "task": None if task is None else {
-                "state": task["state"],
-                "claim": task["claim"],
-                "comments": len(task.get("comments") or []),
-            },
-            "records": list((payload.get("records") or {}).keys()),
-            "divergences": list((payload.get("controlled_divergences") or [])),
-        }
 
     def pause_pipeline(
         self,
@@ -2438,95 +2286,6 @@ class DispatcherRuntime:
             max_interval_seconds=max_interval_seconds,
             max_ticks=max_ticks,
         )
-
-    def commit_cutover(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
-        with file_lock(self.state.tick_lock):
-            payload = self.state.load()
-            guard = self._pilot_guard(payload, selector)
-            if guard is not None:
-                return guard
-            legacy_guard = self._legacy_pause_guard("commit-cutover")
-            if legacy_guard is not None:
-                return legacy_guard
-            payload["phase"] = "cutover_committed"
-            payload["cutover_committed_at"] = now_rfc3339()
-            payload["cutover_committed_by"] = actor
-            self.state.save(payload)
-        return {"status": "ok", "step": "commit-cutover", "pilot_ref": selector.reference, "phase": "cutover_committed"}
-
-    def decommission_old(self, selector: PilotSelector, *, actor: str) -> dict[str, Any]:
-        with file_lock(self.state.tick_lock):
-            payload = self.state.load()
-            guard = self._pilot_guard(payload, selector)
-            if guard is not None:
-                return guard
-            if payload.get("phase") != "cutover_committed":
-                return {"status": "blocked", "step": "decommission-old", "reason": "cutover is not committed"}
-            production = self.production_state.load()
-            if production.get("phase") != "production" or not production.get("owner"):
-                return {"status": "blocked", "step": "decommission-old", "reason": "production owner is not active"}
-            payload["legacy_decommissioned"] = True
-            payload["legacy_decommissioned_at"] = now_rfc3339()
-            payload["legacy_decommissioned_by"] = actor
-            self.state.save(payload)
-        return {
-            "status": "ok",
-            "step": "decommission-old",
-            "pilot_ref": selector.reference,
-            "phase": "cutover_committed",
-            "legacy_decommissioned": True,
-        }
-
-    def rollback(self, selector: PilotSelector, *, actor: str, reason: str) -> dict[str, Any]:
-        with file_lock(self.state.tick_lock):
-            payload = self.state.load()
-            guard = self._pilot_guard(payload, selector)
-            if guard is not None:
-                return guard
-            records = self.state.records(payload)
-            stopped = []
-            for record in records.values():
-                self.host.stop(record)
-                stopped.append(record.worker)
-            payload["phase"] = "rolled_back"
-            payload["new_owner"] = ""
-            payload["old_owner_paused"] = False
-            payload["rollback"] = {
-                "actor": actor,
-                "at": now_rfc3339(),
-                "reason": reason,
-                "stopped_workers": stopped,
-            }
-            _mark_attempt_rolled_back(payload, actor, reason)
-            payload["records"] = {}
-            self.state.save(payload)
-        return {"status": "ok", "step": "rollback", "pilot_ref": selector.reference, "phase": "rolled_back", "stopped_workers": stopped}
-
-    def _mutation_guard(self, payload: dict[str, Any], selector: PilotSelector) -> dict[str, Any] | None:
-        if payload.get("phase") != "new_pilot":
-            return {"status": "blocked", "step": "tick", "reason": "new pilot is not started"}
-        if not payload.get("old_owner_paused"):
-            return {"status": "blocked", "step": "tick", "reason": "old dispatcher is not paused"}
-        legacy_guard = self._legacy_pause_guard("tick")
-        if legacy_guard is not None:
-            return legacy_guard
-        return self._pilot_guard(payload, selector)
-
-    def _pilot_guard(self, payload: dict[str, Any], selector: PilotSelector) -> dict[str, Any] | None:
-        if payload.get("pilot_ref") != selector.reference:
-            return {"status": "blocked", "step": "guard", "reason": "pilot selector does not match active state"}
-        return None
-
-    def _legacy_pause_guard(self, step: str) -> dict[str, Any] | None:
-        legacy_pause = self.legacy_pause.snapshot()
-        if legacy_pause.sufficient:
-            return None
-        return {
-            "status": "blocked",
-            "step": step,
-            "reason": legacy_pause.reason,
-            "legacy_pause": legacy_pause.to_json(),
-        }
 
     def _tick_task(
         self,
@@ -2593,8 +2352,8 @@ class DispatcherRuntime:
             }
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run: an operator-approved retry after
-        # Blocked, or a plain preempt/requeue out of in_progress or validate. The pilot dispatcher
-        # otherwise keeps one attempt id for its whole run, so the claim would replay idempotently,
+        # Blocked, or a plain preempt/requeue out of in_progress or validate. An attempt id
+        # otherwise lives as long as the record does, so the claim would replay idempotently,
         # return the old event and leave the card Ready. Give every re-run a fresh identity before
         # claiming, so it claims the card for real, its worker report command cannot collide with
         # the old report, and the journal gets a second attempt instead of nothing. A committed
@@ -2846,7 +2605,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             body=(
-                f"{_dispatcher_label(payload)} claimed {ref}, attempt {record.attempt_id}, "
+                f"Production dispatcher claimed {ref}, attempt {record.attempt_id}, "
                 f"worker {record.worker}, workspace {prepared['workspace']}."
             ),
             request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
@@ -3737,7 +3496,7 @@ class DispatcherRuntime:
             record.worker_started_at = record.worker_progress_at = now
         if kind == "review":
             record.review_started_at = record.review_progress_at = now
-        # Persist the restart before commenting. The pilot tick has no try/except around this, so
+        # Persist the restart before commenting. The tick has no try/except around this, so
         # a writer.comment that raises would otherwise escape with the head already respawned and
         # respawns still 0: the next tick respawns again and the escalation never arrives.
         setattr(record, f"{kind}_waiting_since", now)
@@ -4883,15 +4642,14 @@ class DispatcherRuntime:
         )
 
     def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        """Flush the dispatcher records into whichever state plane this payload belongs to.
+        """Flush the dispatcher records into the production state.
 
         Public because the launch-intent contour (`dispatcher_launch`) persists through it: an
         intent that is not on disk before the host call is not an intent at all.
         """
-        state = self.production_state if payload.get("mode") == "production" else self.state
-        state.put_records(payload, records)
+        self.production_state.put_records(payload, records)
         payload["last_tick_at"] = now_rfc3339()
-        state.save(payload)
+        self.production_state.save(payload)
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
@@ -4957,17 +4715,13 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
         TaskReader(client),
         TaskWriter(client, data_dir=data),
         TaskAudit(data),
-        CutoverState(data),
+        data,
         catalog,
         CommandHostRuntime(catalog, data, mode=host_mode),
         owner=owner,
         checkpoint=CheckpointWriter(data, catalog.instance_dir),
         checkpoint_push=CheckpointPusher(catalog.instance_dir),
     )
-
-
-def _dispatcher_label(payload: dict[str, Any]) -> str:
-    return "Production dispatcher" if payload.get("mode") == "production" else "Pilot dispatcher"
 
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:

@@ -302,17 +302,12 @@ class ProductionState:
 
 
 def production_observe(runtime: Any) -> dict[str, Any]:
-    pilot = runtime.state.load()
     payload = runtime.production_state.load()
-    legacy_pause = runtime.legacy_pause.snapshot()
     return {
         "status": "ok",
         "step": "production-observe",
         "phase": payload.get("phase", "new"),
         "owner": payload.get("owner", ""),
-        "cutover_phase": pilot.get("phase", "new"),
-        "cutover_committed": pilot.get("phase") == "cutover_committed",
-        "legacy_pause": legacy_pause.to_json(),
         "pause": runtime.pause.summary(),
         "records": list((payload.get("records") or {}).keys()),
         "observers": observer_snapshot(payload),
@@ -1120,28 +1115,13 @@ def _current_card(runtime: Any, ref: str) -> dict[str, Any] | None:
         return None
 
 
-def _current_card_state(runtime: Any, ref: str) -> str | None:
-    """The card's live state, or None when the board could not be asked right now."""
-    task = _current_card(runtime, ref)
-    return None if task is None else str(task.get("state") or "unknown")
-
-
 def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
-    cutover = runtime.state.load()
-    if cutover.get("phase") != "cutover_committed":
-        return {
-            "status": "blocked",
-            "step": "production-guard",
-            "reason": "production cutover is not committed",
-            "cutover_phase": cutover.get("phase", "new"),
-        }
-    if not cutover.get("legacy_decommissioned"):
-        legacy_guard = runtime._legacy_pause_guard("production-guard")
-        if legacy_guard is not None:
-            legacy_guard["reason"] = "old dispatcher hard freeze is not confirmed: " + str(
-                legacy_guard.get("reason") or ""
-            )
-            return legacy_guard
+    """Whether this tick may write the production state at all.
+
+    Two fences, both read off the production state itself: another owner holds the pipeline, or the
+    state is in a phase this dispatcher does not write. An installation with no production state yet
+    reads as phase `new` and passes, which is how the first tick takes ownership.
+    """
     owner = str(payload.get("owner") or "")
     if owner and owner != runtime.owner:
         return {
