@@ -919,8 +919,8 @@ class SprintOwnershipTests(SprintFixture):
         self._assert_nothing_was_written()
 
 
-class TwoOpenSprintAdmissionTests(SprintFixture):
-    """The opt-in limit of two open sprints, and the disjointness that makes it safe.
+class TwoOpenSprintFixture(SprintFixture):
+    """Three pairwise disjoint sprint candidates, of which the setting admits two.
 
     The fixture gains a third product, issue and project, because the count refusal is
     only reachable once three sprints can be pairwise disjoint on everything else.
@@ -989,6 +989,10 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
         self.assertEqual(self._transactions(), transactions)
         self.assertEqual([event["event_id"] for event in self._events()], events)
         self.assertEqual([event["event_id"] for event in audit.pending_events()], pending)
+
+
+class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
+    """The opt-in limit of two open sprints, and the disjointness that makes it safe."""
 
     def test_the_setting_reader_never_widens_the_limit(self) -> None:
         self.assertEqual(open_sprint_limit(None), 1)
@@ -1366,6 +1370,186 @@ class TwoOpenSprintAdmissionTests(SprintFixture):
             "open sprint sprint:legacy declares no product",
         )
         self.assertEqual(self._open_refs(), ["sprint:legacy"])
+
+
+class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
+    """What the entity itself keeps apart once two sprints are open at the same time.
+
+    The pair is opened through admission under the pilot setting, not written onto the
+    board, so every fact below is one a real installation could reach.  The budget, the
+    hard stop, the close and the reserved-project index are each read for both sprints
+    after a write that names one of them.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._limit(2)
+
+    def _pair(self) -> tuple[str, str]:
+        first = self._first()
+        second = self._second()["sprint"]["ref"]
+        self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
+        return first, second
+
+    def _writer(self, **thresholds: int) -> SprintWriter:
+        return SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds=thresholds or None,
+        )
+
+    def _budget_of(self, reference: str, writer: SprintWriter | None = None) -> dict:
+        reader = (writer or self.writer).reader
+        return reader.show(reference, include_cards=False)["budget"]
+
+    def _status_of(self, reference: str) -> str:
+        return self.writer.reader.show(reference, include_cards=False)["status"]
+
+    def _charge(self, writer: SprintWriter, reference: str, event_type: str, request_id: str) -> None:
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=reference,
+            event_type=event_type, request_id=request_id, source_event_id="evt-" + request_id,
+        )
+
+    def test_a_charge_moves_the_counters_of_the_sprint_it_names_only(self) -> None:
+        first, second = self._pair()
+
+        self._charge(self.writer, first, "red_ci", "charge-first")
+
+        self.assertEqual(self._budget_of(first)["total"], 1)
+        self.assertEqual(self._budget_of(first)["by_type"]["red_ci"], 1)
+        self.assertEqual(self._budget_of(second)["total"], 0)
+        self.assertEqual(
+            self._budget_of(second)["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES},
+        )
+        # The charge is an event of its own sprint, and the other sprint has none.
+        self.assertEqual(
+            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=first)],
+            ["created", "budget_recorded"],
+        )
+        self.assertEqual(
+            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=second)],
+            ["created"],
+        )
+
+    def test_each_sprint_reaches_its_signal_threshold_on_its_own_counters(self) -> None:
+        """Two charges to one sprint are not two charges to the installation."""
+        writer = self._writer(signal=2, hard=4)
+        first, second = self._pair()
+
+        self._charge(writer, first, "red_ci", "signal-first-1")
+        self.assertFalse(self._budget_of(first, writer)["signal_reached"])
+
+        self._charge(writer, first, "blocked", "signal-first-2")
+
+        self.assertTrue(self._budget_of(first, writer)["signal_reached"])
+        self.assertFalse(self._budget_of(second, writer)["signal_reached"])
+        self.assertEqual(self._budget_of(second, writer)["total"], 0)
+
+        # And the second sprint's own signal is reached by its own two charges, no sooner.
+        self._charge(writer, second, "red_ci", "signal-second-1")
+        self.assertFalse(self._budget_of(second, writer)["signal_reached"])
+        self._charge(writer, second, "red_ci", "signal-second-2")
+        self.assertTrue(self._budget_of(second, writer)["signal_reached"])
+        self.assertEqual(self._status_of(first), "open")
+        self.assertEqual(self._status_of(second), "open")
+
+    def test_a_hard_stop_stops_the_sprint_that_reached_it_and_not_the_other(self) -> None:
+        writer = self._writer(signal=1, hard=2)
+        first, second = self._pair()
+
+        self._charge(writer, first, "blocked", "hard-first-1")
+        self._charge(writer, first, "blocked", "hard-first-2")
+
+        self.assertEqual(self._status_of(first), "stopped")
+        self.assertEqual(self._status_of(second), "open")
+        self.assertEqual(self._budget_of(second, writer)["total"], 0)
+        self.assertFalse(self._budget_of(second, writer)["hard_reached"])
+        self.assertEqual(
+            [
+                event["ref"] for event in TaskAudit(self.tmp.name).events()
+                if event["kind"] == "budget_hard_stopped"
+            ],
+            [first],
+        )
+
+        # The other sprint still charges, and stops on its own second event, not on the first.
+        self._charge(writer, second, "red_ci", "hard-second-1")
+        self.assertEqual(self._status_of(second), "open")
+        self._charge(writer, second, "red_ci", "hard-second-2")
+
+        self.assertEqual(self._status_of(second), "stopped")
+        self.assertEqual(
+            sorted(
+                event["ref"] for event in TaskAudit(self.tmp.name).events()
+                if event["kind"] == "budget_hard_stopped"
+            ),
+            sorted([first, second]),
+        )
+
+    def test_closing_either_sprint_leaves_the_other_open(self) -> None:
+        """Both orders, because closing the older one is not the only close that happens."""
+        for closed_first in (True, False):
+            with self.subTest(closes="first" if closed_first else "second"):
+                self.setUp()
+                first, second = self._pair()
+                closing, remaining = (first, second) if closed_first else (second, first)
+
+                self.writer.close(role="po", actor="operator", reference=closing)
+
+                self.assertEqual(self._status_of(closing), "closed")
+                self.assertEqual(self._status_of(remaining), "open")
+                self.assertEqual(self._open_refs(), [remaining])
+                # The sprint left open is still a sprint that writes: its budget still moves.
+                self._charge(self.writer, remaining, "red_ci", "after-close")
+                self.assertEqual(self._budget_of(remaining)["total"], 1)
+
+    def test_closing_one_sprint_releases_its_reservations_and_holds_the_others(self) -> None:
+        for closed_first in (True, False):
+            with self.subTest(closes="first" if closed_first else "second"):
+                self.setUp()
+                first, second = self._pair()
+                self.assertEqual(
+                    active_sprint_projects(self.tmp.name),
+                    {"secretary": [first], "other": [second]},
+                )
+                closing, remaining = (first, second) if closed_first else (second, first)
+                released = "secretary" if closed_first else "other"
+                held = "other" if closed_first else "secretary"
+
+                self.writer.close(role="po", actor="operator", reference=closing)
+
+                self.assertEqual(active_sprint_projects(self.tmp.name), {held: [remaining]})
+                # The released project is free for a new sprint; the held one is still refused.
+                self._assert_refusal_left_nothing(
+                    lambda: self._third(projects=[held]),
+                    "resource_conflict", f"{held} held by {remaining}",
+                )
+                third = self._third(projects=[released])["sprint"]["ref"]
+                self.assertEqual(
+                    active_sprint_projects(self.tmp.name),
+                    {held: [remaining], released: [third]},
+                )
+
+    def test_a_card_of_the_remaining_sprints_project_is_still_guarded_after_the_close(self) -> None:
+        """The index is what the card guard reads, so the release is checked through it."""
+        first, second = self._pair()
+        tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+        self.writer.close(role="po", actor="operator", reference=first)
+
+        # `secretary` was released with its sprint, so an unrelated role may write there again.
+        created = tasks.create(
+            role="retro", actor="retro", project="secretary", task_type="research",
+            title="finding", target="issues", request_id="released-project",
+        )
+        self.assertEqual(created["task"]["project"], "secretary")
+
+        with self.assertRaisesRegex(TaskError, second) as denied:
+            tasks.create(
+                role="retro", actor="retro", project="other", task_type="research",
+                title="finding", target="issues", request_id="held-project",
+            )
+        self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
 
 class SprintTests(SprintFixture):

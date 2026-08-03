@@ -145,8 +145,11 @@ def _blind_fence(
     projects = {project for projects in snapshot.values() for project in projects}
     refs = _fenced_card_refs(runtime, sprints, projects)
     linked = _sprint_linked_cards(runtime)
+    # Keys are card refs and values are the sprints they name: the fenced sets are keyed by
+    # sprint, so the sprint each card belongs to is what joins them, not the card's own ref.
+    fenced_sprints = sprints | set(linked.values())
     return {
-        "sprints": sprints | set(linked),
+        "sprints": fenced_sprints,
         "projects": projects,
         "refs": refs | set(linked),
         # Not a fence the durable log carries a reason for: it is one tick's read failure, it
@@ -160,7 +163,7 @@ def _blind_fence(
                 "the sprint board could not be read, so no declared observer could be checked; "
                 f"every sprint-held project is fenced this tick: {reason}"
             ),
-            "sprints": sorted(sprints | set(linked)),
+            "sprints": sorted(fenced_sprints),
             "projects": sorted(projects),
         }],
     }

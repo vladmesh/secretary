@@ -32,6 +32,7 @@ from secretary.dispatcher_observer import (
     ObserverLaunchAborted,
     ObserverRecord,
     load_observers,
+    observer_alive,
     observer_pid_file,
     put_observers,
     observer_request_id,
@@ -40,6 +41,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.sprints import SprintReader, SprintWriter
 from secretary.dispatcher_types import HostError
+from secretary.sprint_observer import head_choice
 from secretary.dispatcher_production import _budget_event_type, _production_claim_ready, _reconcile_sprint_budget
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.head_health import HeadReadiness
@@ -48,7 +50,13 @@ from secretary.role_env import ROLE_ALLOWLIST, ROLE_REQUIRED, runtime_env
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 
-from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
+from tests.test_dispatcher import (
+    FakeCatalog,
+    FakeHost,
+    FakeKanboard,
+    FakeLegacyPause,
+    TwoOpenSprintAdmission,
+)
 
 
 # A pid that is real but not this process: `kill(pid, 0)` raises, so the watchdog reads the head as
@@ -111,7 +119,7 @@ def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
     return skill
 
 
-class ObserverLifecycleTests(unittest.TestCase):
+class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -2500,6 +2508,193 @@ class ObserverLifecycleTests(unittest.TestCase):
         self.assertEqual(status[0]["state"], "deferred")
         self.assertFalse(status[0]["alive"])
         self.assertIn("unavailable", status[0]["deferred_reason"])
+
+    # two open sprints --------------------------------------------------------
+
+    def open_disjoint_pair(self) -> None:
+        """The admitted pair, with one card in each of the four reserved projects."""
+        self.sprint_writer = self.admit_two_open_sprints(
+            observer=head_choice("codex-observer")
+        )
+        self.link_pair_cards()
+
+    def budget_of(self, reference: str) -> dict:
+        return self.runtime.sprints.show(reference, include_cards=False)["budget"]
+
+    def charge(self, reference: str, request_id: str) -> None:
+        """Put one budget-shaped card event on the board card of `reference`'s sprint."""
+        self.writer.move(
+            role="po", actor="operator", reference=reference, target="blocked",
+            reason="operator stop", sprint_override=True,
+            sprint_override_reason="operator stop", request_id=request_id,
+        )
+
+    def claimed(self, result: dict) -> list[dict]:
+        return [action for action in result["actions"] if action.get("step") == "claim"]
+
+    def skipped(self, result: dict) -> list[dict]:
+        for action in result["actions"]:
+            if action.get("step") in {"claim", "production-claim"}:
+                return list(action.get("skipped_ready") or [])
+        return []
+
+    def advanced(self, result: dict) -> list[str]:
+        return [
+            action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"
+        ]
+
+    def with_thresholds(self, signal: int, hard: int) -> None:
+        self.catalog.instance = {"sprint_budget": {"signal": signal, "hard": hard}}
+        self.runtime.sprints = SprintReader(  # type: ignore[arg-type]
+            self.board, data_dir=self.data_dir, thresholds={"signal": signal, "hard": hard},
+        )
+
+    def settled_pair(self) -> None:
+        """Two ticks: the declared head is up, and one card of each sprint is in flight.
+
+        The first tick fences `sprint:1` because its head has not been launched yet, so the
+        card claimed there is the other sprint's; the second claims `sprint:1`'s own.
+        """
+        self.open_disjoint_pair()
+        self.assertEqual(
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
+        )
+        self.assertEqual(
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-pilot",
+        )
+
+    def test_a_card_event_charges_the_sprint_it_is_linked_to_and_no_other(self) -> None:
+        self.with_thresholds(1, 3)
+        self.settled_pair()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
+            body="fix it", request_id="red-review-first-sprint",
+        )
+
+        result = self.runtime.production_tick()
+
+        charged = [action for action in result["actions"] if action.get("step") == "sprint-budget"]
+        self.assertEqual([action["sprint"] for action in charged], ["sprint:1"])
+        self.assertEqual(self.budget_of("sprint:1")["total"], 1)
+        self.assertTrue(self.budget_of("sprint:1")["signal_reached"])
+        self.assertEqual(self.budget_of("sprint:2")["total"], 0)
+        self.assertFalse(self.budget_of("sprint:2")["signal_reached"])
+        self.assertEqual(self.runtime.sprints.show("sprint:2")["status"], "open")
+
+    def test_a_red_review_that_restarts_a_worker_charges_only_its_own_sprint(self) -> None:
+        """The operational restart, not a synthesised event: review red, worker restarted.
+
+        The card driven here belongs to the sprint that declares no observer, so the verdict
+        acts at once rather than parking for a decision.
+        """
+        self.with_thresholds(1, 6)
+        self.open_disjoint_pair()
+        self.assertEqual(
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
+        )
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-neighbor", kind="done",
+            body="ready for validation", request_id="rework-worker-done",
+        )
+        self.assertEqual(self.runtime.production_tick()["status"], "ok")  # moved to validate
+        self.assertIn("review-started", [action["action"] for action in self.runtime.production_tick()["actions"] if action["step"] == "review"])
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-neighbor", kind="red",
+            body="needs work", request_id="rework-red-verdict",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertIn(
+            "rework-started",
+            [action["action"] for action in result["actions"] if action["step"] == "review"],
+        )
+        self.assertIn("restart_worker", self.host.calls)
+        charged = [action for action in result["actions"] if action.get("step") == "sprint-budget"]
+        self.assertEqual(
+            [(action["sprint"], action["event_type"]) for action in charged],
+            [("sprint:2", "red_review")],
+        )
+        self.assertEqual(self.budget_of("sprint:2")["total"], 1)
+        self.assertTrue(self.budget_of("sprint:2")["signal_reached"])
+        self.assertEqual(self.budget_of("sprint:1")["total"], 0)
+        self.assertFalse(self.budget_of("sprint:1")["signal_reached"])
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["status"], "open")
+
+    def test_a_hard_stop_stops_one_sprint_while_the_other_keeps_claiming(self) -> None:
+        self.with_thresholds(1, 2)
+        self.settled_pair()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
+            body="fix it", request_id="red-first-sprint",
+        )
+        self.charge("secretary-510-pilot", "blocked-first-sprint")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["status"], "stopped")
+        self.assertEqual(self.runtime.sprints.show("sprint:2")["status"], "open")
+        self.assertEqual(self.budget_of("sprint:1")["total"], 2)
+        self.assertEqual(self.budget_of("sprint:2")["total"], 0)
+        self.assertEqual(
+            [
+                event["ref"] for event in self.audit.events()
+                if event["kind"] == "budget_hard_stopped"
+            ],
+            ["sprint:1"],
+        )
+        # The stopped sprint's head is stopped and its remaining Ready card is left alone; the
+        # other sprint claims its own in the same tick.
+        self.assertIn("observer-stopped", [action["action"] for action in self.actions(result)])
+        self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
+        self.assertEqual(
+            self.skipped(result),
+            [{"ref": "fourth-1", "reason": "linked sprint is stopped or closed"}],
+        )
+        self.assertEqual(self.reader.show("third-1")["state"], "in_progress")
+        self.assertEqual(self.reader.show("fourth-1")["state"], "ready")
+
+    def test_closing_the_observed_sprint_leaves_the_other_live_and_claiming(self) -> None:
+        self.settled_pair()
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+        self.sprint_writer.close(role="po", actor="operator", reference=self.FIRST)
+        result = self.runtime.production_tick()
+
+        self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "closed")
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(self.observers(), {})
+        self.assertEqual(self.runtime.sprints.show(self.SECOND)["status"], "open")
+        self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
+        self.assertEqual(
+            self.skipped(result),
+            [{"ref": "fourth-1", "reason": "linked sprint is stopped or closed"}],
+        )
+        # The open sprint's card in flight keeps riding its cycle.
+        self.assertIn("secretary-510-neighbor", self.advanced(result))
+
+    def test_closing_the_second_sprint_leaves_the_first_live_and_claiming(self) -> None:
+        """The other way round: the sprint closed here is not the first one opened."""
+        self.settled_pair()
+
+        self.sprint_writer.close(role="po", actor="operator", reference=self.SECOND)
+        result = self.runtime.production_tick()
+
+        self.assertEqual(self.runtime.sprints.show(self.SECOND)["status"], "closed")
+        self.assertEqual(self.host.stopped_observers, [])
+        # The head of the sprint that stayed open is untouched and still alive.
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertTrue(observer_alive(self.observers()[self.FIRST])["alive"])
+        self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "open")
+        self.assertEqual(self.claimed(result)[0]["pilot_ref"], "fourth-1")
+        self.assertIn("secretary-510-pilot", self.advanced(result))
+        # The closed sprint's own Ready card is the one left alone, on the next pass that
+        # reaches it.
+        self.assertEqual(
+            self.skipped(self.runtime.production_tick()),
+            [{"ref": "third-1", "reason": "linked sprint is stopped or closed"}],
+        )
+        self.assertEqual(self.reader.show("third-1")["state"], "ready")
 
 
 class ObserverConfigurationTests(unittest.TestCase):
