@@ -1032,13 +1032,12 @@ class TaskWriter:
         card with `--sprint-override` and a reason, which reads in the audit as the override it
         is rather than as an unmarked decision.
 
-        The same sprint reservation guard `move` carries applies here: a decision is refused on a
-        card whose project no open sprint holds. That guard is positional, not an identity. It
-        binds the card to a sprint and says nothing about the caller: every observer process runs
-        as `--role observer --actor observer`, so nothing here distinguishes one sprint's observer
-        from another's, and an observer that reaches this command can decide on any card whose
-        project is held. Authenticating a caller to a sprint is deliberately not built here, and
-        until it is, no rule elsewhere may treat an observer-authored event as self-authored.
+        The same sprint reservation guard `move` carries applies here, and it answers about the
+        caller as well as the card: a decision is refused on a card whose project no open sprint
+        holds, and refused before that if the caller is not the observer of the sprint the card is
+        linked to. The caller's sprint is the one the dispatcher launched its head for, carried in
+        the head's environment; every observer process still runs as `--actor observer`, so the
+        binding, not the actor id, is what distinguishes one sprint's observer from another's.
         """
         self._role(role, {"observer"})
         if kind not in _DECISIONS:
@@ -1399,7 +1398,21 @@ class TaskWriter:
         request_id: str,
         reference: str,
     ) -> dict[str, str]:
-        """Authorize one create/move/edit against the open-sprint reservation index."""
+        """Authorize one create/move/edit against the caller and the open-sprint reservation index.
+
+        Two questions, in this order. Who is writing: a caller of role `observer` names the sprint
+        it was launched for, and a write about any other sprint's card is refused as the identity
+        failure it is. Then what is being written: which open sprint reserves the card's project,
+        which is what the rest of this guard answers.
+
+        The identity half is fail-closed. A head that carries no binding cannot prove which sprint
+        it is the observer of, and an unprovable caller is refused rather than admitted as one
+        that happens to have nothing to check.
+        """
+        self._guard_observer_identity(
+            role=role, actor=actor, project=project, card_sprint=card_sprint,
+            request_id=request_id, reference=reference,
+        )
         from secretary.sprints import (
             SprintReader,
             active_sprint_projects,
@@ -1447,6 +1460,8 @@ class TaskWriter:
                     request_id=request_id, reference=reference, exit_code=2,
                 )
             return {"sprint_override_reason": sprint_override_reason}
+        # The caller was already proven to be this card's sprint's observer above; what is left is
+        # that the sprint holding the project is the one the card is linked to.
         if role == "observer" and card_sprint in held:
             return {}
         if role == "dispatcher":
@@ -1457,6 +1472,48 @@ class TaskWriter:
             role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
         )
         raise AssertionError("unreachable")
+
+    def _guard_observer_identity(
+        self, *, role: str, actor: str, project: str, card_sprint: str,
+        request_id: str, reference: str,
+    ) -> None:
+        """Refuse a write of role `observer` that is not about the caller's own sprint.
+
+        The binding is the launcher's, carried in the head's own environment, and it answers the
+        question the reservation index cannot: the index says which sprint holds the card, and
+        this says which sprint the caller is. Two open sprints therefore no longer read each
+        other's cards as their own.
+
+        The two refusals are separate codes because they are separate failures. A missing binding
+        is a head nobody bound; a mismatch is a bound head reaching outside its sprint. Neither is
+        `role_forbidden`: the role is permitted, the caller is not this sprint's observer.
+
+        A card that names no sprint is left to the reservation guard below. There is no sprint to
+        compare the caller to, and the write is not a reach into another sprint's work: the guard
+        refuses it wherever an open sprint holds its project, and where none does the card belongs
+        to nobody's sprint.
+        """
+        if role != "observer":
+            return
+        from secretary.role_env import declared_observer_sprint
+
+        declared = declared_observer_sprint()
+        if not declared:
+            self._deny_sprint_write(
+                code="observer_identity_unbound",
+                message="this observer names no sprint, so its writes cannot be authenticated; "
+                        "it has to be launched by the dispatcher for one sprint",
+                role=role, actor=actor, project=project, sprint="", request_id=request_id,
+                reference=reference,
+            )
+        if card_sprint and card_sprint != declared:
+            self._deny_sprint_write(
+                code="observer_sprint_mismatch",
+                message=f"this observer belongs to sprint {declared} and the card is linked to "
+                        f"{card_sprint}; write it as that sprint's observer",
+                role=role, actor=actor, project=project, sprint=declared,
+                request_id=request_id, reference=reference,
+            )
 
     def _deny_sprint_write(
         self, *, code: str, message: str, role: str, actor: str, project: str,

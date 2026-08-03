@@ -41,6 +41,7 @@ from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerCont
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
+from tests.observer_identity import bind_observer
 from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -92,6 +93,7 @@ class LaunchIntentTests(unittest.TestCase):
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        bind_observer(self, "sprint:1031")
         # And that sprint reserves the card's project, which is what lets its observer decide.
         self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
@@ -2653,6 +2655,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        bind_observer(self, "sprint:1031")
         # And that sprint reserves the card's project, which is what lets its observer decide.
         self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(

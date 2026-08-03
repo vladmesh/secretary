@@ -1279,6 +1279,14 @@ class SprintWriter:
             )
         if (delivery_id or through_event) and role != "observer":
             raise TaskError("role_forbidden", "only an observer resume can acknowledge delivery", 3)
+        # Role alone answered this before, and role alone is not enough: an acknowledgement moves
+        # the event cursor of the sprint it names, so an observer of another sprint could drop
+        # events its head was the only reader of. The whole resume is guarded, not only the
+        # acknowledgement, because the entry is the sprint's own recovery state.
+        request_id = request_id or str(uuid.uuid4())
+        self._guard_observer_identity(
+            role=role, actor=actor, reference=reference, request_id=request_id,
+        )
         def mutation(sprint: dict[str, Any]) -> None:
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))})
             self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content="[sprint:resume]\n" + normalized["selected_step"])
@@ -1663,6 +1671,52 @@ class SprintWriter:
                 "createComment", task_id=_sprint_number(sprint), user_id=0, content=body
             ),
         )
+
+    def _guard_observer_identity(self, *, role: str, actor: str, reference: str, request_id: str) -> None:
+        """Refuse a sprint write of role `observer` that is not about the caller's own sprint.
+
+        The card guard's counterpart on the entity side, with the same two codes and the same
+        fail-closed rule: an observer names the sprint its head was launched for, and a head that
+        names none cannot be authenticated at all. The refusal is audited under its own request id
+        so it neither consumes the operation's retry key nor is recorded twice on a retry.
+        """
+        if role != "observer":
+            return
+        from secretary.role_env import declared_observer_sprint
+        from secretary.tasks import _sprint_guard_denial_request_id
+
+        declared = declared_observer_sprint()
+        if declared == reference:
+            return
+        code, message = (
+            ("observer_identity_unbound",
+             "this observer names no sprint, so its writes cannot be authenticated; "
+             "it has to be launched by the dispatcher for one sprint")
+            if not declared else
+            ("observer_sprint_mismatch",
+             f"this observer belongs to sprint {declared}, not to {reference}")
+        )
+        denial_request_id = _sprint_guard_denial_request_id(request_id)
+        event = self.audit.committed_event(denial_request_id)
+        if event is None:
+            event = self._event(
+                "sprint_guard_denied", role, actor, reference, denial_request_id,
+                {
+                    "code": code, "message": message, "project": "", "sprint": declared,
+                    "operation_request_id": request_id,
+                },
+            )
+            event["outcome"] = "denied"
+            event["backend"]["revision"] = "not_written"
+            self.audit.stage(denial_request_id, event)
+            try:
+                self.audit.append(denial_request_id, event)
+            except OSError:
+                raise TaskError(
+                    "audit_pending", "sprint write was denied but audit repair is required", 4,
+                ) from None
+        payload = event.get("payload") if isinstance(event, dict) else {}
+        raise TaskError(str(payload.get("code") or code), str(payload.get("message") or message), 3)
 
     def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())

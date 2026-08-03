@@ -29,6 +29,7 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
 
 class SprintKanboard:
@@ -241,7 +242,11 @@ class SprintFixture(unittest.TestCase):
             ("observer", head_choice("codex-observer")),
         ):
             kwargs.setdefault(field, value)
-        return self.writer.create(**kwargs)
+        created = self.writer.create(**kwargs)
+        # The calls that follow act as this sprint's observer head, which is bound to it the way
+        # the dispatcher binds a head it launches.
+        bind_observer(self, str(created["sprint"]["ref"]))
+        return created
 
     def _events(self) -> list[dict]:
         return TaskAudit(self.tmp.name).events()
@@ -1551,6 +1556,127 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
+    def _second_sprint_card(self, second: str) -> dict:
+        """One Ready card of the second sprint, written by that sprint's own head."""
+        with as_observer(second):
+            return TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+                role="observer", actor="observer", project="other", task_type="code",
+                title="the other sprint's work", target="ready", sprint=second,
+                request_id="second-sprint-card",
+            )["task"]
+
+    def _denials(self) -> list[dict]:
+        return [event for event in self._events() if event["kind"] == "sprint_guard_denied"]
+
+    def test_an_observer_of_one_sprint_writes_nothing_of_the_other(self) -> None:
+        """The identity half of the guard, across two sprints that share nothing.
+
+        Product, reservations and repository roots are disjoint, so nothing but the caller's own
+        binding stands between the first sprint's head and the second sprint's work. Card and
+        entity are both refused, and each refusal is in the audit as an identity failure rather
+        than as a role that is not permitted.
+        """
+        first, second = self._pair()
+        card = self._second_sprint_card(second)
+        tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        before = len(self._denials())
+        entry = {
+            "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+            "current_task": card["ref"], "dod_state": "open", "next_safe_step": "run tests",
+        }
+
+        with as_observer(first):
+            calls = (
+                ("decide", lambda: tasks.decide(
+                    role="observer", actor="observer", reference=card["ref"], kind="release",
+                    body="releasing a card of a sprint I do not observe",
+                    request_id="cross-sprint-decision",
+                )),
+                ("move", lambda: tasks.move(
+                    role="observer", actor="observer", reference=card["ref"], target="blocked",
+                    reason="blocking a card of a sprint I do not observe",
+                    request_id="cross-sprint-move",
+                )),
+                ("resume", lambda: self.writer.resume(
+                    role="observer", actor="observer", reference=second, entry=entry,
+                    request_id="cross-sprint-resume",
+                )),
+            )
+            for name, call in calls:
+                with self.subTest(call=name), self.assertRaises(TaskError) as refused:
+                    call()
+                self.assertEqual(refused.exception.code, "observer_sprint_mismatch")
+
+        denials = self._denials()[before:]
+        self.assertEqual(
+            [event["payload"]["code"] for event in denials],
+            ["observer_sprint_mismatch"] * 3,
+        )
+        self.assertEqual({event["payload"]["sprint"] for event in denials}, {first})
+        self.assertEqual([event["outcome"] for event in denials], ["denied"] * 3)
+        self.assertEqual(
+            [event["ref"] for event in denials], [card["ref"], card["ref"], second],
+        )
+        # Nothing moved: the card is where its own sprint left it and the entity has no resume.
+        self.assertEqual(TaskReader(self.client).show(card["ref"])["state"], "ready")  # type: ignore[arg-type]
+        self.assertIsNone(self.writer.reader.show(second, include_cards=False)["resume"])
+
+    def test_a_head_nobody_bound_writes_nothing_at_all(self) -> None:
+        """Fail-closed: an unbound caller cannot prove which sprint it is, so it is not one."""
+        first, second = self._pair()
+        card = self._second_sprint_card(second)
+        tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        before = len(self._denials())
+
+        with unbound_observer():
+            with self.assertRaises(TaskError) as moved:
+                tasks.move(
+                    role="observer", actor="observer", reference=card["ref"], target="blocked",
+                    reason="from a head nobody bound", request_id="unbound-move",
+                )
+            with self.assertRaises(TaskError) as resumed:
+                self.writer.resume(
+                    role="observer", actor="observer", reference=first,
+                    entry={
+                        "selected_step": "implement", "selected_why": "needed",
+                        "rejected_alternatives": "wait", "current_task": card["ref"],
+                        "dod_state": "open", "next_safe_step": "run tests",
+                    },
+                    request_id="unbound-resume",
+                )
+
+        self.assertEqual(moved.exception.code, "observer_identity_unbound")
+        self.assertEqual(resumed.exception.code, "observer_identity_unbound")
+        self.assertEqual(
+            [event["payload"]["code"] for event in self._denials()[before:]],
+            ["observer_identity_unbound"] * 2,
+        )
+
+    def test_a_bound_head_still_writes_its_own_sprint(self) -> None:
+        """The other side of the same guard: nothing changes for the sprint's own observer."""
+        first, second = self._pair()
+        card = self._second_sprint_card(second)
+
+        with as_observer(second):
+            blocked = TaskWriter(self.client, data_dir=self.tmp.name).move(  # type: ignore[arg-type]
+                role="observer", actor="observer", reference=card["ref"], target="blocked",
+                reason="its own head blocking its own card", request_id="own-sprint-move",
+            )
+            recorded = self.writer.resume(
+                role="observer", actor="observer", reference=second,
+                entry={
+                    "selected_step": "implement", "selected_why": "needed",
+                    "rejected_alternatives": "wait", "current_task": card["ref"],
+                    "dod_state": "open", "next_safe_step": "run tests",
+                },
+                request_id="own-sprint-resume",
+            )
+
+        self.assertEqual(blocked["task"]["state"], "blocked")
+        self.assertEqual(recorded["sprint"]["resume"]["selected_step"], "implement")
+        self.assertEqual(self._denials(), [])
+        self.assertEqual(first, "sprint:first")
+
 
 class SprintTests(SprintFixture):
     def test_board_creation_is_idempotent(self) -> None:
@@ -2011,6 +2137,7 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         # The reservations landed on the board behind the writer's back, so the index is
         # re-seeded from it the way a live installation seeds it.
         refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
+        bind_observer(self, self.ref)
 
     def test_observer_must_link_to_its_open_sprint_and_other_roles_are_denied(self) -> None:
         card = self.tasks.create(
@@ -2240,10 +2367,13 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         )["sprint"]["ref"]
         other = next(task for task in self.client.tasks if task["reference"] == other_ref)
         self.client.metadata[int(other["id"])]["sprint_reservations"] = json.dumps(["secretary"])
-        card = self.tasks.create(
-            role="observer", actor="second-observer", project="secretary", task_type="code",
-            title="second sprint", sprint=other_ref,
-        )["task"]
+        # The second sprint's own head, bound to it: the write is about its card, not about the
+        # sprint this fixture opened.
+        with as_observer(other_ref):
+            card = self.tasks.create(
+                role="observer", actor="second-observer", project="secretary", task_type="code",
+                title="second sprint", sprint=other_ref,
+            )["task"]
 
         self.assertEqual(card["sprint"], other_ref)
 
@@ -2268,6 +2398,7 @@ class SprintReservedProjectGuardTests(unittest.TestCase):
         sprint = next(task for task in self.client.tasks if task["reference"] == self.ref)
         self.client.metadata[int(sprint["id"])]["sprint_reservations"] = json.dumps(["secretary"])
         refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
+        bind_observer(self, self.ref)
 
     def _card(self, title: str = "owned") -> dict:
         return self.tasks.create(

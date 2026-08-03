@@ -12,6 +12,7 @@ from secretary.cli import main
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from tests.test_tasks import WriteKanboard
+from tests.observer_identity import as_observer
 
 
 class ProductBoard(WriteKanboard):
@@ -343,11 +344,14 @@ class ProductIssueStoreTests(unittest.TestCase):
             product="secretary", issue_kind="question", priority="P3", title="Question", description="", actor="po",
         )
         writer = TaskWriter(self.client, data_dir=self.root / "data")
-        for role in ("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"):
-            for target in ("ready", "in_progress", "validate", "blocked", "done"):
-                with self.subTest(role=role, target=target), self.assertRaises(TaskError) as raised:
-                    writer.move(role=role, actor=role, reference=issue["ref"], target=target, reason="")
-                self.assertEqual(raised.exception.code, "transition_forbidden")
+        # The observer is a bound head here: what is being tested is the column guard, and an
+        # observer nobody bound never reaches it.
+        with as_observer("sprint:issues"):
+            for role in ("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"):
+                for target in ("ready", "in_progress", "validate", "blocked", "done"):
+                    with self.subTest(role=role, target=target), self.assertRaises(TaskError) as raised:
+                        writer.move(role=role, actor=role, reference=issue["ref"], target=target, reason="")
+                    self.assertEqual(raised.exception.code, "transition_forbidden")
         with self.assertRaises(TaskError) as raised:
             writer.create(
                 role="steward", actor="steward", project="secretary", task_type="research",

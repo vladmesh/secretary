@@ -80,6 +80,7 @@ from secretary.dispatcher_watchdog import (
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from tests.observer_identity import bind_observer
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
@@ -657,6 +658,8 @@ class FakeHost:
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
         # reads as alive; point it at a free pid to model a head that died.
         self.observers: list[str] = []
+        # The sprint binding each bring-up handed the head, in launch order.
+        self.observer_identities: list[dict[str, str]] = []
         self.observer_nudges: list[str] = []
         # The delivery criterion each wake was handed, so a test can prove the lifecycle passes one.
         self.observer_wake_confirms: list = []
@@ -773,8 +776,11 @@ class FakeHost:
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
 
-    def prepare_observer(self, sprint: dict, head: str, *, prompt: str) -> dict:
+    def prepare_observer(
+        self, sprint: dict, head: str, *, prompt: str, identity: dict[str, str] | None = None,
+    ) -> dict:
         self.calls.append("prepare_observer")
+        self.observer_identities.append(dict(identity or {}))
         if self.fail_observer_error is not None:
             raise self.fail_observer_error
         if self.fail_observer_reason:
@@ -1165,6 +1171,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         whose project its own open sprint holds.
         """
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        # The decisions these tests make are this sprint's head deciding about its own card, so
+        # the caller carries the binding the dispatcher gives a head it launches.
+        bind_observer(self, "sprint:1031")
         self.sprints.rows["sprint:1031"] = {
             "ref": "sprint:1031", "status": status,
             "observer": {"kind": "head", "profile": profile},
@@ -8791,6 +8800,7 @@ class ReviewCatalog(FakeCatalog):
         role: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
+        identity: dict[str, str] | None = None,
     ):
         from secretary.dispatcher_launcher import HeadLaunch
 

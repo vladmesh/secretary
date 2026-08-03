@@ -344,6 +344,7 @@ class TuiCatalog:
         role: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
+        identity: dict[str, str] | None = None,
     ) -> HeadLaunch:
         self.modes.append(codex_mode)
         return HeadLaunch(

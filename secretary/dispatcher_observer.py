@@ -70,6 +70,7 @@ from secretary.dispatcher_watchdog import (
     pid_file_path,
 )
 from secretary.dispatcher_types import HostError
+from secretary.role_env import observer_binding
 from secretary.role_skills import skill_delivery
 from secretary.sprint_observer import (
     KIND_HEAD,
@@ -1664,6 +1665,11 @@ def _launch_observer(
             prompt=render_observer_prompt(
                 sprint, skill_path=_first_path(delivery), delivery=record.delivery,
             ),
+            # The identity of the head being launched, read off its record: the sprint it is the
+            # observer of and the generation that tells this lifecycle of that reference from the
+            # previous one. Not `ref` and not the sprint document, so nothing between the record
+            # and the head can hand it another sprint's name.
+            identity=observer_binding(record.sprint or ref, record.generation),
         )
     except ObserverLaunchAborted as exc:
         # The bring-up failed with its terminal still up. The staged event is dropped, because no

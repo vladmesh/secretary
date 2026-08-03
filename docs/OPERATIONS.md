@@ -529,7 +529,9 @@ that are already linked. If an operator needs to intervene, the PO passes `--spr
 `--sprint-override-reason-file` to `secretary task create`, `move` or `edit`; the reason stays in the durable
 audit. A `sprint_write_forbidden` refusal names the sprint and suggests recording the change on its entity.
 `sprint_guard_unavailable` means the live sprints board could not be checked, so the write was deliberately
-refused.
+refused. `observer_sprint_mismatch` means the observer that wrote belongs to another sprint, and
+`observer_identity_unbound` means the head carries no sprint binding at all: it was not launched by
+the dispatcher, or it predates the binding and has to be relaunched before it can write again.
 
 Before launching, the production tick checks the budget audit of the linked cards. At the signal threshold the
 observer's prompt carries a note that the threshold was reached, and the role skill tells it to reconsider the

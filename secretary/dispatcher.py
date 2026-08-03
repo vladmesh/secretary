@@ -428,6 +428,7 @@ class InstanceCatalog:
         role: str,
         codex_mode: str | None = None,
         launch_prompt: str | None = None,
+        identity: dict[str, str] | None = None,
     ) -> HeadLaunch:
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
@@ -441,10 +442,11 @@ class InstanceCatalog:
                 )
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
-        return HeadLaunch(
-            _wrap_role_shell_command(role, launch.command),
-            prompt_after_start=launch.prompt_after_start,
-        )
+        try:
+            wrapped = _wrap_role_shell_command(role, launch.command, identity=identity)
+        except HeadLaunchError as exc:
+            raise HostError(str(exc)) from None
+        return HeadLaunch(wrapped, prompt_after_start=launch.prompt_after_start)
 
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
@@ -683,12 +685,24 @@ class CommandHostRuntime:
         """
         return _observer_pid_file(reference)
 
-    def prepare_observer(self, sprint: dict[str, Any], head: str, *, prompt: str) -> dict[str, Any]:
+    def prepare_observer(
+        self,
+        sprint: dict[str, Any],
+        head: str,
+        *,
+        prompt: str,
+        identity: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Bring one observer head up on its own workspace and terminal.
 
         Same rendering and role environment as any other dispatcher-launched head: the command
         comes from the catalog launcher, the process runs through `role_env exec --role observer`,
         and the pid heartbeat wrapper writes the head's own pid where the tick reads it back.
+
+        `identity` is the sprint binding of the record this bring-up is for, rendered into the
+        head's command line. It comes from the lifecycle rather than from the sprint document
+        passed here, because the record is what the launch is about; a head that reaches the board
+        without it can prove nothing about which sprint it observes and is refused there.
 
         The workspace is registered with Orca first, the way the worker path registers its own:
         `terminal create` takes a worktree selector, and a plain directory is not one.
@@ -717,6 +731,7 @@ class CommandHostRuntime:
             workspace=str(workspace),
             role=OBSERVER_ROLE,
             launch_prompt=_observer_launch_prompt(),
+            identity=identity,
         )
         handle = self._create_terminal(
             str(workspace), f"{reference} observer", _with_pid_heartbeat(launch.command, pid_file)
