@@ -279,6 +279,9 @@ after the row was created takes that row back, so no unreferenced row is left be
 backend also refuses that does the row stay for the repair to pick up. Before it publishes, a resumed
 create or reopen re-checks both conflict rules; if another sprint took the slot or the project meanwhile, the
 repeat is refused as `sprint_conflict` or `resource_conflict` naming that sprint and publishes nothing.
+That refusal is only the answer once the request holds nothing: if the row cannot be taken back, or a
+refused `reopen` cannot write its observer preimage back, the caller is told `audit_pending` instead and
+retries under the same request id until the cleanup goes through.
 The losing request is then filed again as a fresh one. Like a staged Product or Issue write, an
 unfinished sprint create blocks the checkpoint until it is retried or dropped.
 

@@ -875,14 +875,15 @@ class SprintWriter:
             answer = exc.code in _ADMISSION_REFUSALS or (
                 exc.code in {"validation", "role_forbidden"} and not document.get("progress")
             )
+            # A refusal answered to the caller is the end of this request: it holds no row,
+            # and leaving its staged intent behind would leave a repair nobody is going to
+            # run.  That answer is only available once compensation proves the request holds
+            # nothing; when it cannot, a row and a staged intent of a refused create are both
+            # still on disk, and calling the request over would strand them, so the caller is
+            # told it is repairable under the same request id instead.
             clean = self._compensate_create(document)
-            if answer:
-                # A refusal answered to the caller is the end of this request: it holds no
-                # row, and leaving its staged intent behind would leave a repair nobody is
-                # going to run.  The intent is only kept when the backend would not take
-                # the row back, because then something of this request does still exist.
-                if clean:
-                    self.transactions.discard(document)
+            if answer and clean:
+                self.transactions.discard(document)
                 raise
             raise TaskError(
                 "audit_pending", "sprint create is pending repair; retry with the same request id", 4,
@@ -1531,10 +1532,14 @@ class SprintWriter:
             update_active_sprint_projects(self.data_dir, sprint)
             return {"action": SPRINT_REOPENED, "sprint": sprint, "event_id": str(event["event_id"])}
         except TaskError as exc:
-            if exc.code in _ADMISSION_REFUSALS or (
+            answer = exc.code in _ADMISSION_REFUSALS or (
                 exc.code in {"validation", "role_forbidden"} and not document.get("progress")
-            ):
-                self._compensate_reopen(document, reference)
+            )
+            # The refusal is only this request's answer once the row is back the way it was
+            # found and nothing is left staged.  A rollback that could not be written back
+            # leaves the observer this attempt wrote on the row, so the caller is told the
+            # request is repairable under the same request id rather than refused.
+            if answer and self._compensate_reopen(document, reference):
                 raise
             raise TaskError(
                 "audit_pending", "sprint reopen is pending repair; retry with the same request id", 4,
@@ -1562,7 +1567,7 @@ class SprintWriter:
             progress["observer_preimage"] = None
         self.transactions.save(document)
 
-    def _compensate_reopen(self, document: dict[str, Any], reference: str) -> None:
+    def _compensate_reopen(self, document: dict[str, Any], reference: str) -> bool:
         """Undo a refused reopen's observer write and drop its intent.
 
         The refusal is answered to the caller, so this request is over: it must leave the
@@ -1570,32 +1575,36 @@ class SprintWriter:
         Anything this cannot undo — a status already touched, a preimage never recorded,
         a backend that refuses the write back — leaves the intent in place, because then
         something of this request does still exist.
+
+        Returns whether the row and the journal are now back the way this reopen found
+        them, which is what makes answering the refusal safe.
         """
         progress = document.get("progress") or {}
         if progress.get("opened_done"):
-            return
+            return False
         try:
             sprint = self.reader.show(reference, include_cards=False)
             # The status is read rather than taken from the staged steps: a step recorded as
             # started proves an attempt, not a write, and only a row still not open is one
             # this refusal may put back.
             if str(sprint.get("status") or "") == "open":
-                return
+                return False
             if progress.get("observer_started") or progress.get("observer_done"):
                 preimage = progress.get("observer_preimage")
                 if not isinstance(preimage, str):
-                    return
+                    return False
                 if self.client.call(
                     "saveTaskMetadata",
                     task_id=_sprint_number(sprint),
                     values={OBSERVER_FIELD: preimage},
                 ) is not True:
-                    return
+                    return False
         except (TaskError, OSError, KeyError, TypeError):
-            return
+            return False
         document["progress"] = {}
         self.transactions.save(document)
         self.transactions.discard(document)
+        return True
 
     def restore(self, *, reference: str, values: dict[str, str], request_id: str | None = None) -> dict[str, Any]:
         """Rewrite one sprint entity's fields verbatim from a checkpoint export.
