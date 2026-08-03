@@ -417,7 +417,7 @@ def _production_tick_body(
     # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
     # on the strength of a field that predates the reconciliation pass itself.
     payload["last_reconciled_at"] = now_rfc3339()
-    outcomes, errors, active_blocked = _advance_active(runtime, records, payload, active_tasks)
+    outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = fence_outcomes + reconcile_outcomes + outcomes
     try:
         outcomes += _reconcile_sprint_budget(runtime)
@@ -434,9 +434,11 @@ def _production_tick_body(
     errors = observer_errors + errors
     # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
     claims_allowed = pause.get("mode") != "drain"
-    if claims_allowed and not active_blocked:
+    if claims_allowed:
         try:
-            ready_outcome = _production_claim_ready(runtime, records, payload, fence=fence)
+            ready_outcome = _production_claim_ready(
+                runtime, records, payload, fence=fence, blocked_scopes=blocked_scopes
+            )
         except Exception as exc:
             errors.append(_unexpected_error("", exc))
         else:
@@ -867,10 +869,17 @@ def _advance_active(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     active_tasks: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, str]], bool]:
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, set[str]]]:
+    """Advance every active card, and report which scopes a blocked card closed for claims.
+
+    The scopes are the blocked card's sprint and its project. A blocked card says nothing about
+    the work of another sprint in another project, so the claim suppression it causes is keyed by
+    those two rather than installation-wide. A card with no linked sprint still closes its own
+    project.
+    """
     outcomes: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    active_blocked = False
+    blocked_scopes: dict[str, set[str]] = {"sprints": set(), "projects": set()}
     for task in active_tasks:
         if is_steward_report(task):
             continue
@@ -883,9 +892,14 @@ def _advance_active(
             errors.append(_unexpected_error(str(task.get("ref") or ""), exc))
             continue
         if outcome.get("status") == "blocked":
-            active_blocked = True
+            sprint_ref = str(task.get("sprint") or "")
+            project = str(task.get("project") or "")
+            if sprint_ref:
+                blocked_scopes["sprints"].add(sprint_ref)
+            if project:
+                blocked_scopes["projects"].add(project)
         outcomes.append(outcome)
-    return outcomes, errors, active_blocked
+    return outcomes, errors, blocked_scopes
 
 
 def _fence_failed_tick(
@@ -1223,8 +1237,11 @@ def _production_claim_ready(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     fence: dict[str, Any] | None = None,
+    blocked_scopes: dict[str, set[str]] | None = None,
 ) -> dict[str, Any] | None:
     fence = fence or {"sprints": set(), "projects": set(), "refs": set()}
+    blocked_sprints = set((blocked_scopes or {}).get("sprints") or ())
+    blocked_projects = set((blocked_scopes or {}).get("projects") or ())
     active_code_projects = {
         str(task.get("project") or "")
         for task in _production_tasks(runtime, set(ACTIVE_STATES))
@@ -1244,6 +1261,21 @@ def _production_claim_ready(
             })
             continue
         sprint_ref = str(task.get("sprint") or "")
+        project = str(task.get("project") or "")
+        # A card that went blocked this cycle closes its own sprint and its own project to new
+        # claims, and nothing beyond them: another sprint working on other projects keeps moving.
+        if sprint_ref and sprint_ref in blocked_sprints:
+            skipped.append({
+                "ref": task["ref"],
+                "reason": "this sprint has a card blocked in this cycle",
+            })
+            continue
+        if project and project in blocked_projects:
+            skipped.append({
+                "ref": task["ref"],
+                "reason": "this project has a card blocked in this cycle",
+            })
+            continue
         if sprint_ref:
             sprint = sprint_cache.get(sprint_ref)
             if sprint is None and sprint_ref not in sprint_errors:
