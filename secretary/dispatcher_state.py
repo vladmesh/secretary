@@ -37,8 +37,9 @@ class DispatcherRecord:
     # The report round the worker currently in this checkout was handed (secretary-1061). It keys
     # the report request ids and the report body path in TASK.md, and nothing else: it is durable
     # here before any TASK.md is written, it advances by one whenever a new report round opens
-    # (claim, red gate, red review, stale-done bounce) and never on a respawn inside a round, so a
-    # worker replaying the previous round's command is refused instead of deduped into silence.
+    # (claim, red gate, red review, stale-done bounce) and never on a respawn inside a round. A
+    # command from a round that is over therefore names that round and never records a report of
+    # this one, instead of deduping this round's report into silence the way one shared id did.
     # `review_baseline` used to carry this as well as its own job of indexing review markers; the
     # two are separate values now because a comment count is not a round.
     report_generation: int = 0
