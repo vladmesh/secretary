@@ -25,7 +25,7 @@ from unittest import mock
 
 from secretary import host
 from secretary.cli import build_parser
-from secretary.dispatcher import CutoverState, DispatcherRuntime, runtime_from_args
+from secretary.dispatcher import DispatcherRuntime, runtime_from_args
 from secretary.dispatcher_production import (
     TICK_TELEMETRY_DEGRADATIONS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
@@ -41,7 +41,7 @@ from secretary.dispatcher_watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
+from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
 
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
@@ -120,19 +120,11 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             self.reader,
             self.writer,
             TaskAudit(self.data_dir),
-            CutoverState(self.data_dir),
+            self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
-            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
         )
-        self.runtime.state.save({
-            "version": 1,
-            "phase": "cutover_committed",
-            "pilot_ref": "secretary-510-pilot",
-            "old_owner_paused": True,
-            "records": {},
-        })
 
     def read_through_the_agent_reader(self) -> production_telemetry.TickTelemetry:
         """The record as the health line and the steward actually see it.
@@ -175,10 +167,6 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         # The state file is replaced: a restore, a rebuilt installation. Its counters start again,
         # and may well land on numbers a reader's watermark already holds.
         self.runtime.production_state.path.unlink()
-        self.runtime.state.save({
-            "version": 1, "phase": "cutover_committed", "pilot_ref": "secretary-510-pilot",
-            "old_owner_paused": True, "records": {},
-        })
         self.runtime.production_tick()
 
         self.assertNotEqual(self.read_through_the_agent_reader().generation, first)
@@ -598,7 +586,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         The evidence of a blocked dispatcher is that it stops producing healthy ticks; writing
         across the ownership fence to say so would be worse than the silence.
         """
-        self.runtime.state.save({"version": 1, "phase": "new"})
+        self.runtime.production_state.save({
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": "another-dispatcher",
+            "records": {},
+        })
 
         result = self.runtime.production_tick()
 

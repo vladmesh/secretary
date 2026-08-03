@@ -1,5 +1,5 @@
-"""Mechanical validation gate (secretary-633): the cheap-to-expensive layer 1 the pilot
-dispatcher runs between worker-done and the LLM reviewer, and again right before a merge.
+"""Mechanical validation gate (secretary-633): the cheap-to-expensive layer 1 the dispatcher runs
+between worker-done and the LLM reviewer, and again right before a merge.
 
 A project declares where its gate runs through its adapter's `validation.ci`:
 
@@ -46,7 +46,6 @@ GATE_PENDING_STALL_SECONDS = int(os.environ.get("SECRETARY_GATE_PENDING_STALL_SE
 # there is one place to widen or narrow the excerpt instead of a magic number per call site.
 GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES", "40"))
 
-_GH_TIMEOUT_S = 120
 _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
 # `gh run view --log[-failed]` emits one line per log entry as `<job>\t<step>\t<content>`.

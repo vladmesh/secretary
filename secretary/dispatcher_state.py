@@ -1,25 +1,14 @@
-"""State helpers for the pilot dispatcher."""
+"""State helpers for the production dispatcher."""
 
 from __future__ import annotations
 
-import json
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
-from secretary._fsutil import write_json
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation
-
-
-class DispatcherStateError(Exception):
-    def __init__(self, code: str, message: str, exit_code: int = 2) -> None:
-        self.code = code
-        self.message = message
-        self.exit_code = exit_code
-        super().__init__(message)
 
 
 @dataclass
@@ -245,40 +234,6 @@ def _run_snapshot(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-class CutoverState:
-    def __init__(self, data_dir: Path) -> None:
-        self.root = data_dir / "dispatcher"
-        self.path = self.root / "pilot-state.json"
-        self.tick_lock = self.root / "pilot-tick.lock"
-
-    def load(self) -> dict[str, Any]:
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {"version": 1, "phase": "new"}
-        except (OSError, ValueError, UnicodeError):
-            raise DispatcherStateError("state_unavailable", "dispatcher state is unreadable", 2) from None
-        if not isinstance(payload, dict):
-            raise DispatcherStateError("state_unavailable", "dispatcher state has an unsupported shape", 2)
-        return payload
-
-    def save(self, payload: dict[str, Any]) -> None:
-        write_json(self.path, payload)
-
-    def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
-        raw = payload.get("records") or {}
-        if not isinstance(raw, dict):
-            return {}
-        return {
-            str(ref): DispatcherRecord.from_json(record)
-            for ref, record in raw.items()
-            if isinstance(record, dict)
-        }
-
-    def put_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        payload["records"] = {ref: record.to_json() for ref, record in sorted(records.items())}
-
-
 def now_rfc3339() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -317,19 +272,6 @@ def record_attempt(
         "started_at": now_rfc3339(),
         "started_by": actor,
     })
-
-
-def mark_attempt_rolled_back(payload: dict[str, Any], actor: str, reason: str) -> None:
-    attempt_id = str(payload.get("attempt_id") or "")
-    attempts = payload.get("attempts")
-    if not attempt_id or not isinstance(attempts, list):
-        return
-    for attempt in reversed(attempts):
-        if isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id:
-            attempt["rolled_back_at"] = now_rfc3339()
-            attempt["rolled_back_by"] = actor
-            attempt["rollback_reason"] = reason
-            return
 
 
 def attempt_request_id(attempt_id: str, action: str, reference: str, suffix: str = "") -> str:

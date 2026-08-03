@@ -9,7 +9,6 @@ from secretary.data import DataExport
 
 ARCHIVE_ROOT = "secretary-backup"
 BACKUP_VERSION = 1
-BACKUPS_MAX_BYTES = 512 * 1024 * 1024
 
 BackupKind = Literal["core", "full"]
 RestoreAction = Literal["restore", "exclude"]

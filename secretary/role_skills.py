@@ -40,7 +40,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # the registry a host is audited or synced against belongs to the configured product checkout, which
 # is a different path exactly when an alternate checkout is running the command.
 MANIFEST = ROOT / "skills" / "manifest.toml"
-ROLES_ROOT = ROOT / "skills" / "roles"
 # Where an installation keeps its own manifest, relative to the instance directory.
 INSTANCE_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
 # Where a product checkout keeps its manifest, relative to the checkout root. The same spelling as

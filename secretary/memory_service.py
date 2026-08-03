@@ -22,7 +22,6 @@ import yaml
 from fastembed import TextEmbedding
 from mcp.server.fastmcp import FastMCP
 
-HERE = Path(__file__).parent
 DEFAULT_MEMORY_DIR = Path.home() / "secretary-data" / "memory"
 # Canon lives in the private instance repo (docs/RECOVERY.md, "Layout"); the
 # export and the vector index stay derived under the data dir.
@@ -87,13 +86,6 @@ def db(path: str | Path | None = None) -> sqlite3.Connection:
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     return conn
-
-
-def init_db(path: str | Path = DB_PATH) -> None:
-    conn = db(path)
-    create_schema(conn)
-    conn.commit()
-    conn.close()
 
 
 def create_schema(conn: sqlite3.Connection, dim: int | None = None) -> None:
@@ -720,12 +712,6 @@ def update_index() -> dict:
     return incremental_update(
         CANON, CANON_EXPORT, DB_PATH, MODEL, DIM, document_embed=embed_doc, allow_empty=True
     )
-
-
-def parity_gate() -> dict:
-    expected = len(load_canon())
-    indexed = indexed_fact_count(DB_PATH)
-    return {"ok": expected == indexed, "expected": expected, "indexed": indexed}
 
 
 def bootstrap_index() -> int | None:

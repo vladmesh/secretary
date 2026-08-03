@@ -1898,26 +1898,23 @@ class TaskWriter:
             raise TaskError("live_work", "archive refuses a card with an active claim", 3)
 
     def _check_dispatcher_archivable(self, reference: str) -> None:
-        for state_path in (
-            self.data_dir / "dispatcher" / "pilot-state.json",
-            self.data_dir / "dispatcher" / "production-state.json",
-        ):
-            try:
-                payload = json.loads(state_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                continue
-            except (OSError, ValueError, UnicodeError):
-                raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3) from None
-            if not isinstance(payload, dict):
-                raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3)
-            records = payload.get("records") or {}
-            if not isinstance(records, dict):
-                raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3)
-            record = records.get(reference)
-            if not isinstance(record, dict):
-                continue
-            if _dispatcher_record_has_live_work(record):
-                raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
+        state_path = self.data_dir / "dispatcher" / "production-state.json"
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, UnicodeError):
+            raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3) from None
+        if not isinstance(payload, dict):
+            raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3)
+        records = payload.get("records") or {}
+        if not isinstance(records, dict):
+            raise TaskError("live_work", "archive cannot prove dispatcher state is clear", 3)
+        record = records.get(reference)
+        if not isinstance(record, dict):
+            return
+        if _dispatcher_record_has_live_work(record):
+            raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
 
 
 def _text(value: Any) -> str:

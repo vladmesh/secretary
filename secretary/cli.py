@@ -27,7 +27,7 @@ from secretary.data import (
     raw_kanboard_dump,
 )
 from secretary.dispatcher_commands import add_dispatcher_subcommands, add_pause_commands
-from secretary.dispatcher_pause import FileLegacyPauseProbe, ProductionPause
+from secretary.dispatcher_pause import ProductionPause
 from secretary.host import (
     CollectResult,
     FixtureHostSource,
@@ -689,28 +689,19 @@ def print_dispatcher_status(
     if not isinstance(data_dir_value, str) or not data_dir_value:
         return False
     data_dir = Path(data_dir_value).expanduser()
-    pilot = _load_dispatcher_state(data_dir / "dispatcher" / "pilot-state.json")
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
-    pilot_phase = str(pilot.get("phase") or "new")
     production_phase = str(production.get("phase") or "new")
     production_owner = str(production.get("owner") or "")
-    cutover_committed = pilot_phase == "cutover_committed"
 
-    if not (pilot or production or cutover_committed):
+    if not production:
         return False
 
-    if cutover_committed and production_owner:
-        owner_state = "production-owner"
-    elif pilot_phase == "new_pilot":
-        owner_state = "pilot-only"
-    else:
-        owner_state = "legacy-owner"
+    owner_state = "production-owner" if production_owner else "unowned"
 
     findings = dispatcher_findings(report, collected_host, inspect_live=inspect_live) if findings is None else findings
     print("")
     print("dispatcher ownership: read-only")
     print(f"  state: {owner_state}")
-    print(f"  pilot phase: {pilot_phase}")
     print(f"  production phase: {production_phase}")
     print(f"  production owner: {production_owner or '(none)'}")
     pause = ProductionPause(data_dir).summary()
@@ -718,16 +709,6 @@ def print_dispatcher_status(
         print(f"  pause: {pause['mode']} since {pause.get('since') or '(unknown)'} by {pause.get('actor') or '(unknown)'}")
     else:
         print("  pause: none")
-
-    if cutover_committed and inspect_live:
-        legacy_decommissioned = bool(pilot.get("legacy_decommissioned"))
-        if legacy_decommissioned:
-            print("  legacy dispatcher: decommissioned")
-        else:
-            legacy_pause = FileLegacyPauseProbe().snapshot()
-            print(f"  legacy freeze: {'confirmed' if legacy_pause.sufficient else 'not confirmed'}")
-    elif cutover_committed:
-        print("  legacy freeze: not inspected")
 
     if findings:
         print("dispatcher findings:")
@@ -741,20 +722,16 @@ def dispatcher_findings(report, collected_host: CollectResult | None, *, inspect
     if not isinstance(data_dir_value, str) or not data_dir_value:
         return []
     data_dir = Path(data_dir_value).expanduser()
-    pilot = _load_dispatcher_state(data_dir / "dispatcher" / "pilot-state.json")
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
-    if str(pilot.get("phase") or "new") != "cutover_committed":
+    if not production:
         return []
     # Unresolved divergences are read from the state snapshot itself, not the live host, so they
     # surface under --offline too: an operator diagnosing a broken host still needs to see them.
     findings: list[str] = _divergence_findings(production)
     if not inspect_live:
         return findings
-    production_owner = str(production.get("owner") or "")
-    if not bool(pilot.get("legacy_decommissioned")) and production_owner and not FileLegacyPauseProbe().snapshot().sufficient:
-        findings.append("double owner: production owner exists while old dispatcher hard freeze is not confirmed")
-    if not production_owner:
-        findings.append("production owner fence is missing after cutover")
+    if not str(production.get("owner") or ""):
+        findings.append("production owner fence is missing")
     findings.extend(_production_host_findings(report, data_dir, collected_host))
     return findings
 

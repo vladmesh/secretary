@@ -163,34 +163,29 @@ class OpenRouterKeyTests(unittest.TestCase):
             self.assertIsNone(health._read_openrouter_key())
 
 
-class PauseCandidateTests(unittest.TestCase):
-    def test_legacy_pause_candidates_drop_removed_checkout(self):
-        home_dead = Path.home() / "triggered-agents" / "state" / "pipeline" / "pause.json"
-        abs_dead = Path("/home/dev/triggered-agents/state/pipeline/pause.json")
-        clear = ("SECRETARY_LEGACY_PAUSE_FILE", "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
-                 "TA_PIPELINE_STATE_DIR", "TA_STATE")
-        with mock.patch.dict(os.environ, {}, clear=False):
-            for name in clear:
-                os.environ.pop(name, None)
-            candidates = dispatcher_pause._legacy_pause_candidates()
-        self.assertNotIn(home_dead, candidates)
-        self.assertNotIn(abs_dead, candidates)
-        self.assertFalse(any(str(p).endswith("triggered-agents/state/pipeline/pause.json")
-                             for p in candidates))
+class LegacyMirrorPathTests(unittest.TestCase):
+    """Where a pause mirrors its legacy flag. The removed `triggered-agents` checkout is not it:
+    a mirror written there is a file none of the background roles read."""
 
-    def test_legacy_pause_candidates_point_at_secretary(self):
+    ENV = ("SECRETARY_LEGACY_PAUSE_FILE", "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
+           "TA_PIPELINE_STATE_DIR", "TA_STATE")
+
+    def test_legacy_mirror_path_is_not_the_removed_checkout(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in self.ENV:
+                os.environ.pop(name, None)
+            path = dispatcher_pause.legacy_mirror_path()
+        self.assertFalse(str(path).endswith("triggered-agents/state/pipeline/pause.json"))
+        self.assertNotIn(Path.home() / "triggered-agents", path.parents)
+
+    def test_legacy_mirror_path_points_at_secretary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            dead_root = root / "triggered-agents"
-            clear = ("SECRETARY_LEGACY_PAUSE_FILE", "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
-                     "TA_PIPELINE_STATE_DIR", "TA_STATE")
             with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root)}, clear=False):
-                for name in clear:
+                for name in self.ENV:
                     os.environ.pop(name, None)
-                candidates = dispatcher_pause._legacy_pause_candidates()
-        expected = root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
-        self.assertIn(expected, candidates)
-        self.assertFalse(any(dead_root in p.parents for p in candidates))
+                path = dispatcher_pause.legacy_mirror_path()
+        self.assertEqual(path, root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json")
 
 
 if __name__ == "__main__":

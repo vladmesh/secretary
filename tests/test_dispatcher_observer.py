@@ -15,7 +15,6 @@ from unittest import mock
 from secretary import dispatcher as dispatcher_module
 from secretary.dispatcher import (
     CommandHostRuntime,
-    CutoverState,
     DispatcherRuntime,
     InstanceCatalog,
 )
@@ -63,7 +62,6 @@ from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
     FakeKanboard,
-    FakeLegacyPause,
     TwoOpenSprintAdmission,
 )
 
@@ -159,19 +157,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.reader,
             self.writer,
             self.audit,
-            CutoverState(self.data_dir),
+            self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
-            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
         )
-        self.runtime.state.save({
-            "version": 1,
-            "phase": "cutover_committed",
-            "pilot_ref": "secretary-510-pilot",
-            "old_owner_paused": True,
-            "records": {},
-        })
 
     # helpers -----------------------------------------------------------------
 
@@ -3736,19 +3726,11 @@ class RealHostObserverTeardownTests(unittest.TestCase):
             TaskReader(self.board),  # type: ignore[arg-type]
             TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir),  # type: ignore[arg-type]
             self.audit,
-            CutoverState(self.data_dir),
+            self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
-            legacy_pause=FakeLegacyPause(),  # type: ignore[arg-type]
         )
-        self.runtime.state.save({
-            "version": 1,
-            "phase": "cutover_committed",
-            "pilot_ref": "secretary-510-pilot",
-            "old_owner_paused": True,
-            "records": {},
-        })
         self.calls: list[list[str]] = []
         self.registered = False
         self.terminal_create_fails = False

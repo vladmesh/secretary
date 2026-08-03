@@ -686,40 +686,6 @@ def _pipeline_json(
         raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
 
 
-def _replace_dir_from_tree(source: Path, destination: Path) -> None:
-    try:
-        staging = Path(
-            tempfile.mkdtemp(prefix=f".{destination.name}-", suffix=".tmp", dir=destination.parent)
-        )
-    except OSError as exc:
-        raise RuntimeError(f"could not mirror {source}: {exc}") from None
-    try:
-        _copy_tree(source, staging)
-        _replace_dir(staging, destination)
-    except RuntimeError:
-        _cleanup_staging_dir(staging)
-        raise
-    except OSError as exc:
-        _cleanup_staging_dir(staging)
-        raise RuntimeError(f"could not mirror {source}: {exc}") from None
-
-
-def _replace_dir(staging: Path, destination: Path) -> None:
-    backup = destination.with_name(f".{destination.name}.old")
-    try:
-        if backup.exists():
-            shutil.rmtree(backup)
-        if destination.exists():
-            os.replace(destination, backup)
-        os.replace(staging, destination)
-        if backup.exists():
-            shutil.rmtree(backup)
-    except OSError:
-        if not destination.exists() and backup.exists():
-            os.replace(backup, destination)
-        raise
-
-
 def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | None:
     dumps = sorted(board_dir.glob("kanboard-raw-*"), key=lambda path: path.name, reverse=True)
     for dump in dumps:
