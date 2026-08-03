@@ -665,9 +665,14 @@ carries no decision and its document reads as it did before this existed, and a 
 a decided one does not get the earlier adjudication of a review its own code has already answered.
 A round opened with no decision behaves throughout as it always did.
 
-Like the generation, this is dispatcher state that a lost record recovers from the checkout: the
-decision is fenced in `TASK.md` by `<!-- observer-decision -->`, so an adopted card reads back what
-its live worker was told to follow instead of consulting the card's newer comments.
+Like the generation, this is dispatcher state that a lost record recovers from the checkout, so an
+adopted card reads back what its live worker was told to follow instead of consulting the card's
+newer comments. Every worker `TASK.md` ends with a hidden
+`<!-- observer-decision generation=N body=... -->` line carrying the round's decision base64-encoded,
+empty body included when the round has none, and the recovery reads the last such line in the file.
+Descriptions and decisions are both arbitrary Markdown, so neither the delimiters nor the field can
+be anything either of them may contain: an encoded field has no character that ends it, and the
+dispatcher's own line comes after every section they are rendered into.
 
 ### Worker retention through validation and review
 

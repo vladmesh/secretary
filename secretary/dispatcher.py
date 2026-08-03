@@ -32,9 +32,8 @@ from secretary.dispatcher_launcher import (
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
-    DECISION_CLOSE_MARKER,
-    DECISION_OPEN_MARKER,
     RED_REVIEW_CEILING,
+    _decision_record_line,
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
@@ -1922,9 +1921,7 @@ class CommandHostRuntime:
                 "argue the findings it accepts. If it asks for something no reviewer raised, that",
                 "is part of this round too.",
                 "",
-                DECISION_OPEN_MARKER,
                 decision,
-                DECISION_CLOSE_MARKER,
                 "",
             ]
         review_red = _last_review_red_body(task)
@@ -2011,6 +2008,12 @@ class CommandHostRuntime:
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
+            "",
+            # Last, after everything the card description or the decision itself can write into, so
+            # the recovery in `_task_doc_decision` reads the dispatcher's own record and not a
+            # decision-shaped string that arrived in somebody's prose. Written on every document,
+            # empty body included: a round with no decision has to read back as none.
+            _decision_record_line(generation, decision),
             "",
         ]
         return "\n".join(sections)
