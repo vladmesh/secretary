@@ -65,7 +65,12 @@ from secretary.sprint_observer import (
     strict_reader_active,
 )
 from secretary.dispatcher_production import _reconcile_production
-from secretary.sprints import SprintReader, SprintWriter
+from secretary.sprints import (
+    SprintReader,
+    SprintWriter,
+    instance_open_sprint_limit,
+    open_sprint_admission_error,
+)
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeLegacyPause
@@ -1691,6 +1696,234 @@ class ObserverRecordFenceStateTests(ObserverFenceFixture):
         fence = observer_fence(self.runtime, self.runtime.production_state.load())
 
         self.assertEqual(fence["outcomes"][0]["observer_reason"], "observer_head_mismatch")
+
+
+class TwoOpenSprintFenceTests(ObserverFenceFixture):
+    """The fence with two sprints open at once: it holds one sprint's work, not the tick's.
+
+    The pair is the one the pilot setting admits — disjoint on product, reservation and
+    repository, and only one of them declaring a head, which is the one-observer ceiling.
+    `_admissible` checks that against admission itself rather than asserting it in prose,
+    so a fixture that drifted into a pair no installation could open would fail here.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.instance_dir = self.data_dir / "registry" / "instance"
+        self.instance_dir.mkdir(parents=True, exist_ok=True)
+        (self.instance_dir / "instance.yaml").write_text(
+            "open_sprint_limit: 2\n", encoding="utf-8",
+        )
+        self.roots = self.data_dir / "repos"
+
+    def open_pair(self, observer: str | None) -> None:
+        """Two open sprints: `sprint:1` declaring `observer`, `sprint:2` declaring none.
+
+        Their cards are the fixture's two, one in each sprint's own reserved project.
+        """
+        self.declare(
+            observer, reference="sprint:1", sprint_product="secretary",
+            sprint_repositories=json.dumps([str(self.roots / "secretary")]),
+        )
+        self.declare(
+            encode_observer(none_choice()), reference="sprint:2",
+            sprint_reservations='["other"]', sprint_product="other",
+            sprint_repositories=json.dumps([str(self.roots / "other")]),
+        )
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.metadata[13]["project"] = "other"
+        self.board.metadata[13]["sprint_ref"] = "sprint:2"
+        self._admissible()
+
+    def _admissible(self) -> None:
+        limit = instance_open_sprint_limit(self.instance_dir)
+        self.assertEqual(limit, 2)
+        rows = self.runtime.sprints.list(statuses={"open"})
+        self.assertEqual(len(rows), 2)
+        self.assertIsNone(open_sprint_admission_error(rows, limit=limit))
+
+    def _fence_steps(self, result: dict) -> list[dict]:
+        return [action for action in result["actions"] if action["step"] == "observer-fence"]
+
+    def test_a_dead_declared_head_fences_its_own_sprint_and_leaves_the_other_running(self) -> None:
+        self.go_strict()
+        self.open_pair(encode_observer(head_choice("claude-observer")))
+        self.runtime.production_tick()
+        self.runtime.production_tick()
+        record = load_observers(self.runtime.production_state.load())["sprint:1"]
+        Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
+
+        fence = self.fence()
+
+        self.assertEqual(fence["sprints"], {"sprint:1"})
+        self.assertEqual(fence["projects"], {"secretary"})
+        self.assertEqual(fence["refs"], {"secretary-510-pilot"})
+        self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_DEAD)
+        self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "sprint": "sprint:1", "project": "secretary"}))
+        self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "sprint": "sprint:2", "project": "other"}))
+
+    def test_an_unresolvable_profile_fences_its_own_sprint_only(self) -> None:
+        """The third way a declaration fails: a head no registry on this host resolves."""
+        self.go_strict()
+        self.open_pair(encode_observer(head_choice("retired-observer")))
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [(action["sprint"], action["observer_reason"]) for action in self._fence_steps(result)],
+            [("sprint:1", REASON_UNKNOWN_PROFILE)],
+        )
+        self.assertEqual(self.fence()["sprints"], {"sprint:1"})
+        self.assertEqual(self.host.observers, [])
+
+    def test_a_corrupt_declaration_stops_its_own_sprints_cards_only(self) -> None:
+        """One sprint's card is held before it advances; the other's is claimed the same tick."""
+        self.go_strict()
+        self.open_pair("{not json")
+        self.board.tasks[0]["column_id"] = 3  # the fenced sprint's card is in flight
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["observer_reason"] for action in self._fence_steps(result)], [REASON_MALFORMED],
+        )
+        self.assertEqual([action["sprint"] for action in self._fence_steps(result)], ["sprint:1"])
+        self.assertEqual([action for action in result["actions"] if action["step"] == "advance"], [])
+        claim = [action for action in result["actions"] if action["step"] == "claim"][0]
+        self.assertEqual(claim["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(self.runtime.reader.show("secretary-510-neighbor")["state"], "in_progress")
+        self.assertEqual(self.runtime.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_ready_card_of_the_fenced_sprint_is_the_only_claim_that_is_skipped(self) -> None:
+        self.go_strict()
+        self.open_pair("{not json")
+
+        result = self.runtime.production_tick()
+
+        claim = [action for action in result["actions"] if action["step"] == "claim"][0]
+        self.assertEqual(claim["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(
+            claim["skipped_ready"],
+            [{
+                "ref": "secretary-510-pilot",
+                "reason": "the sprint holding this project has no working declared observer",
+            }],
+        )
+
+    def test_the_fence_state_and_its_durable_events_name_the_fenced_sprint_only(self) -> None:
+        self.go_strict()
+        self.open_pair("{not json")
+
+        self.runtime.production_tick()
+
+        payload = self.runtime.production_state.load()
+        self.assertEqual(set(payload["observer_fence"]), {"sprint:1"})
+        self.assertEqual(payload["observer_fence"]["sprint:1"]["reason"], REASON_MALFORMED)
+        self.assertEqual(
+            [
+                event["ref"] for event in self.runtime.audit.events()
+                if event["kind"] == "observer_fence_raised"
+            ],
+            ["sprint:1"],
+        )
+
+    def test_the_snapshot_holds_each_open_sprints_own_reservations(self) -> None:
+        """Keyed by sprint, so a blind pass fences each sprint on what that sprint holds.
+
+        Every open sprint is in it, fenced or not: the snapshot is what a pass that cannot
+        read the sprint board falls back on, and a pass that could not check any declaration
+        fences all of them. What names the fenced sprint alone is the fence state above.
+        """
+        self.go_strict()
+        self.open_pair("{not json")
+
+        self.runtime.production_tick()
+
+        self.assertEqual(
+            self.runtime.production_state.load()["observer_fence_snapshot"],
+            {"sprint:1": ["secretary"], "sprint:2": ["other"]},
+        )
+
+    def test_an_unreadable_sprint_board_fences_both_sprints_by_their_own_reservations(self) -> None:
+        """The blind path is installation-wide by design, and still project-local per sprint."""
+        self.go_strict()
+        self.open_pair(encode_observer(none_choice()))
+        payload = self.runtime.production_state.load()
+        observer_fence(self.runtime, payload)  # one sighted pass, to take the snapshot
+        self.runtime.production_state.save(payload)
+
+        with mock.patch.object(
+            self.runtime.sprints, "list", side_effect=TaskError("backend_error", "down", 1)
+        ):
+            fence = self.fence()
+
+        self.assertEqual(fence["sprints"], {"sprint:1", "sprint:2"})
+        self.assertEqual(fence["projects"], {"secretary", "other"})
+        self.assertEqual(fence["outcomes"][0]["action"], "sprint_board_unavailable")
+        # The blind outcome names the sprints, which is what an operator has to act on. It
+        # used to name the fenced cards there, because the linked-card index is keyed by card.
+        self.assertEqual(fence["outcomes"][0]["sprints"], ["sprint:1", "sprint:2"])
+        self.assertFalse(fenced_task(fence, {"ref": "third-1", "sprint": "", "project": "third"}))
+
+    def test_reconciliation_settles_the_unfenced_sprints_record_and_holds_the_fenced_one(self) -> None:
+        """Both records are orphaned by the same tick; only the fenced sprint's survives it."""
+        self.go_strict()
+        self.open_pair("{not json")
+        # Both cards have left the active cycle with a live record behind them.
+        self.board.tasks[0]["column_id"] = 5
+        self.board.tasks[1]["column_id"] = 5
+        payload = self.runtime.production_state.load()
+        payload["records"] = {
+            reference: {
+                "worker": "w", "workspace": "/tmp/w", "handle": "term_" + reference, "head": "codex",
+                "review_head": "codex-reviewer", "attempt_id": "att-" + reference,
+                "comment_baseline": 0, "review_baseline": 0, "state": "adopted",
+                "claimed_at": time.time(),
+            }
+            for reference in ("secretary-510-pilot", "secretary-510-neighbor")
+        }
+        self.runtime.production_state.save(payload)
+
+        result = self.runtime.production_tick()
+
+        reconciled = [
+            action for action in result["actions"] if action["step"] == "production-reconcile"
+        ]
+        self.assertEqual(
+            [(action["ref"], action["action"]) for action in reconciled],
+            [("secretary-510-neighbor", "record-removed")],
+        )
+        records = self.runtime.production_state.load()["records"]
+        self.assertEqual(set(records), {"secretary-510-pilot"})
+
+    def test_the_same_pair_with_no_fence_settles_both_records(self) -> None:
+        """The control: without the fence the pass above would have removed both."""
+        self.go_strict()
+        self.open_pair(encode_observer(none_choice()))
+        self.board.tasks[0]["column_id"] = 5
+        self.board.tasks[1]["column_id"] = 5
+        payload = self.runtime.production_state.load()
+        payload["records"] = {
+            reference: {
+                "worker": "w", "workspace": "/tmp/w", "handle": "term_" + reference, "head": "codex",
+                "review_head": "codex-reviewer", "attempt_id": "att-" + reference,
+                "comment_baseline": 0, "review_baseline": 0, "state": "adopted",
+                "claimed_at": time.time(),
+            }
+            for reference in ("secretary-510-pilot", "secretary-510-neighbor")
+        }
+        self.runtime.production_state.save(payload)
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            sorted(
+                action["ref"] for action in result["actions"]
+                if action["step"] == "production-reconcile"
+            ),
+            ["secretary-510-neighbor", "secretary-510-pilot"],
+        )
+        self.assertEqual(self.runtime.production_state.load()["records"], {})
 
 
 if __name__ == "__main__":
