@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 from typing import Mapping
 
-INSTANCE_ENV = "SECRETARY_INSTANCE"
 PRODUCT_ENV = "TA_SECRETARY_REPO"
 INSTANCE_DIRNAME = "secretary-instance"
 PRODUCT_DIRNAME = "secretary"
@@ -31,13 +30,6 @@ def default_instance_path() -> Path:
 def default_product_root() -> Path:
     """The product checkout of a host that never configured one."""
     return Path.home() / PRODUCT_DIRNAME
-
-
-def configured_instance_path(environ: Mapping[str, str] | None = None) -> Path:
-    """The instance this process was pointed at, or the home default."""
-    env = os.environ if environ is None else environ
-    configured = env.get(INSTANCE_ENV)
-    return Path(configured).expanduser() if configured else default_instance_path()
 
 
 def configured_product_root(environ: Mapping[str, str] | None = None) -> Path:

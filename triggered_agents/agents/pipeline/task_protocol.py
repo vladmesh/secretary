@@ -39,8 +39,3 @@ def pythonpath_prefix(environ: dict[str, str] | None = None) -> str:
         f"PYTHONPATH={shlex.quote(str(secretary_repo(environ)))}"
         '"${PYTHONPATH:+:$PYTHONPATH}"'
     )
-
-
-def command_prefix() -> str:
-    """Shell prefix that makes the provisioned secretary source importable to a worker."""
-    return f"{pythonpath_prefix()} python3 -m secretary"

@@ -422,12 +422,8 @@ BUILTIN_PROBE_RESULTS = {
 
 
 def run_builtin_probe_result(resource_id: str) -> ProbeResult:
-    return BUILTIN_PROBE_RESULTS[resource_id]()
-
-
-def run_builtin_probe(resource_id: str) -> bool:
     """Dispatch to the real check for `resource_id` — the thing heads.toml's `probe = "python3 -m
     triggered_agents pipeline probe --resource <id>"` command actually runs. Raises KeyError for
     an id with no builtin (a resource that only ever needs "true"/"false" has no reason to go
     through this CLI at all)."""
-    return run_builtin_probe_result(resource_id).ok
+    return BUILTIN_PROBE_RESULTS[resource_id]()

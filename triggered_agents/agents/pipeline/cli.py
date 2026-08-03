@@ -22,7 +22,7 @@ pausing here reported success while it kept claiming cards. Both commands now re
 `secretary pause` / `secretary resume`, which write the production flag and mirror it back to
 `state/pipeline/pause.json` for runtime/dispatch.py, still the flag steward/curator/retro read.
 
-`probe --resource <id>` exits 0/1 for green/red (see health.run_builtin_probe), not the generic
+`probe --resource <id>` exits 0/1 for green/red (see health.run_builtin_probe_result), not the generic
 KanboardError/GuardError table below — it is heads.toml's own probe command, run by
 health.refresh, never touching the board at all.
 

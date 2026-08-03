@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.agents.pipeline import health, pause, task_protocol
+from triggered_agents.agents.pipeline import health
 from triggered_agents.runtime import paths, role_env as runtime_role_env
 from secretary import dispatcher_pause, role_env as secretary_role_env
 
@@ -34,11 +34,6 @@ class PortableDefaultTests(unittest.TestCase):
             self.assertEqual(paths.default_instance_path(), Path(tmp) / "secretary-instance")
             self.assertEqual(paths.default_product_root(), Path(tmp) / "secretary")
 
-    def test_a_configured_instance_keeps_precedence_over_the_home_default(self):
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.dict(os.environ, {"HOME": tmp, "SECRETARY_INSTANCE": "/srv/other"}):
-            self.assertEqual(paths.configured_instance_path(), Path("/srv/other"))
-
     def test_an_instance_is_named_by_its_directory_or_its_config_file(self):
         self.assertEqual(paths.instance_dir("/srv/inst/instance.yaml"), Path("/srv/inst"))
         self.assertEqual(paths.instance_dir("/srv/inst"), Path("/srv/inst"))
@@ -48,13 +43,6 @@ class PortableDefaultTests(unittest.TestCase):
 
         self.assertEqual(runtime_role_env.RUNTIME_ENV_DEFAULT, expected)
         self.assertEqual(secretary_role_env.RUNTIME_ENV_DEFAULT, expected)
-
-    def test_the_rendered_worker_prefix_resolves_in_the_head_s_own_shell(self):
-        """The prefix is run by a head in its own shell, so the home has to be that shell's."""
-        prefix = task_protocol.command_prefix()
-
-        self.assertIn("${TA_SECRETARY_REPO:-$HOME/secretary}", prefix)
-        self.assertNotIn("/home/", prefix)
 
     def test_no_shipped_entry_point_pins_a_particular_home(self):
         for script in sorted(self.SCRIPTS.glob("*.sh")):
@@ -176,20 +164,6 @@ class OpenRouterKeyTests(unittest.TestCase):
 
 
 class PauseCandidateTests(unittest.TestCase):
-    def test_live_pause_candidates_drop_removed_checkout(self):
-        dead = Path.home() / "triggered-agents" / "state" / "pipeline" / "pause.json"
-        # Pin the checkout root to a neutral path: the real worktree can itself sit under a
-        # directory whose name contains "triggered-agents" (a task branch), which would otherwise
-        # false-match the substring guard below without any dead path actually being scanned.
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.object(pause, "_checkout_root", return_value=Path(tmp)), \
-             mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("TA_STATE", None)
-            candidates = pause._candidate_pause_files()
-        self.assertNotIn(dead, candidates)
-        self.assertFalse(any("triggered-agents/state/pipeline/pause.json" in str(p)
-                             for p in candidates))
-
     def test_legacy_pause_candidates_drop_removed_checkout(self):
         home_dead = Path.home() / "triggered-agents" / "state" / "pipeline" / "pause.json"
         abs_dead = Path("/home/dev/triggered-agents/state/pipeline/pause.json")
@@ -203,19 +177,6 @@ class PauseCandidateTests(unittest.TestCase):
         self.assertNotIn(abs_dead, candidates)
         self.assertFalse(any(str(p).endswith("triggered-agents/state/pipeline/pause.json")
                              for p in candidates))
-
-    def test_live_pause_candidates_scan_secretary_agent_worktrees(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            live = root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
-            live.parent.mkdir(parents=True)
-            live.write_text("{}", encoding="utf-8")
-            dead_root = root / "triggered-agents"
-            with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root)}, clear=False):
-                os.environ.pop("TA_STATE", None)
-                candidates = pause._candidate_pause_files()
-        self.assertIn(live, candidates)
-        self.assertFalse(any(dead_root in p.parents for p in candidates))
 
     def test_legacy_pause_candidates_point_at_secretary(self):
         with tempfile.TemporaryDirectory() as tmp:

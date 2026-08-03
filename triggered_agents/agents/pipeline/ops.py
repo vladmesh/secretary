@@ -376,9 +376,8 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
     meaningful) for that Ready path.
 
-    `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); when
-    omitted, claim falls back to a transliterated slug of the title (naming.fallback_slug) so an
-    old/manual card without one still claims fine. `head`, when given, must name a profile in
+    `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); a card
+    created without one carries no slug metadata. `head`, when given, must name a profile in
     heads.toml (checked before anything is written); omitted, the card gets heads.DEFAULT_PROFILE
     at bring-up. `review_head`, when given, must name a profile, except the reserved PO-only
     value `none`, which disables Validate layer 3 for this card. Omitted means Validate uses

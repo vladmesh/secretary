@@ -2,7 +2,8 @@
 
 Codex TUI paints in an alternate screen, so Orca's terminal lastOutputAt can stay stale
 while the head is reasoning and writing rollout JSONL. These helpers map session files
-back to a workspace and give worker.terminal_status a supplemental activity signal.
+back to a workspace and give the dispatcher's terminal-status check a supplemental activity
+signal (secretary/dispatcher.py, through latest_activity_for).
 
 Two hard rules, both from review 373:
 
@@ -19,7 +20,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 
 from . import heads
@@ -50,23 +50,6 @@ def session_cwd(path: Path) -> str | None:
     except OSError:
         return None
     return None
-
-
-def _record_timestamp(rec: dict) -> float | None:
-    raw = rec.get("timestamp")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-def _is_user_turn(rec: dict) -> bool:
-    payload = rec.get("payload")
-    if not isinstance(payload, dict):
-        return False
-    return rec.get("type") == "event_msg" and payload.get("type") == "user_message"
 
 
 def _recent_day_dirs(root: Path, limit: int = SCAN_DAY_DIRS) -> list[Path]:

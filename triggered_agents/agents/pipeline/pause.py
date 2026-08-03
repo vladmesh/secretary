@@ -14,34 +14,12 @@ than importing more of this package.
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 
 from .state import STATE
 
 PAUSE_FILE = STATE.dir / "pause.json"
 MODES = ("soft", "hard")
 PUBLIC_MODES = ("drain", "freeze")
-
-
-def _checkout_root() -> Path:
-    return Path(__file__).resolve().parents[3]
-
-
-def _candidate_pause_files() -> list[Path]:
-    """Likely legacy pause locations. This stays narrow so a read-only status call never turns
-    into a host-wide filesystem walk."""
-    paths: set[Path] = set()
-    ta_state = os.environ.get("TA_STATE")
-    if ta_state:
-        paths.add(Path(ta_state) / "pipeline" / "pause.json")
-    paths.add(_checkout_root() / "state" / "pipeline" / "pause.json")
-
-    workspaces_root = Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
-    agents_root = workspaces_root / "secretary"
-    if agents_root.is_dir():
-        paths.update(agents_root.glob("*/state/pipeline/pause.json"))
-    return sorted(paths, key=lambda p: str(p))
 
 
 def load() -> dict:
