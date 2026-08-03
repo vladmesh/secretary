@@ -35,6 +35,14 @@ class WorkerContinuation:
     retained_at: float = 0.0
     sent_at: float = 0.0
     report_baseline: int = 0
+    reserved_generation: int = 0
+    """The report generation this transition opens, reserved before the board is moved.
+
+    The transition is finished by whichever tick finds it, first attempt or recovery, so the round
+    it opens cannot be a number computed at completion time: a completion that ran twice would hand
+    one rework round two generations and leave a worker holding a document nobody is waiting on.
+    Reserving it with the intent makes the retry idempotent, the same way the move is.
+    """
     move_reason: str = ""
     """The comment the red move carries, kept so recovery finishes the move it opened.
 
@@ -144,7 +152,7 @@ class WorkerContinuation:
 
     def begin_red_transition(
         self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str,
-        decision: str = "",
+        decision: str = "", reserved_generation: int = 0,
     ) -> None:
         """Record the red verdict before the board is moved.
 
@@ -174,6 +182,7 @@ class WorkerContinuation:
         self.move_reason = move_reason
         self.verdict_outcome = verdict_outcome
         self.decision = decision
+        self.reserved_generation = int(reserved_generation)
 
     def begin_delivery(self, phase: str, now: float) -> None:
         # `DELIVERY_PENDING` is allowed back in: a tick that died between the send and its
@@ -220,6 +229,7 @@ class WorkerContinuation:
         self.retained_at = 0.0
         self.sent_at = 0.0
         self.report_baseline = 0
+        self.reserved_generation = 0
         self.move_reason = ""
         self.verdict_outcome = ""
         self.decision = ""
@@ -234,6 +244,7 @@ class WorkerContinuation:
             "retained_at": self.retained_at,
             "sent_at": self.sent_at,
             "report_baseline": self.report_baseline,
+            "reserved_generation": self.reserved_generation,
             "move_reason": self.move_reason,
             "verdict_outcome": self.verdict_outcome,
             "decision": self.decision,
@@ -251,6 +262,9 @@ class WorkerContinuation:
             retained_at=float(value.get("retained_at") or 0.0),
             sent_at=float(value.get("sent_at") or 0.0),
             report_baseline=int(value.get("report_baseline") or 0),
+            # 0 for a transition written before the reservation existed. Its completion falls back
+            # to advancing the record's own generation, which is what it did when it was written.
+            reserved_generation=int(value.get("reserved_generation") or 0),
             move_reason=str(value.get("move_reason") or ""),
             verdict_outcome=str(value.get("verdict_outcome") or ""),
             decision=str(value.get("decision") or ""),

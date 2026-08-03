@@ -599,6 +599,50 @@ a new attempt id at that moment, otherwise a repeat claim would land on an alrea
 id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
 new round enters the same workspace.
 
+### The report generation
+
+A worker round is identified by a report generation: a counter in the dispatcher's own record that
+starts at 1 when the card is claimed and advances by one whenever a new report round opens, whether
+that is a red mechanical gate, a red review or a done report bounced back at an already-rejected
+checkout. It never repeats within an attempt and never goes backwards. A respawn inside a round does
+not advance it: the head that died never reported, and the round is still waiting for that report.
+It advances once for each such round however many ticks the round takes to open: a red transition
+reserves the round's generation with the intent it writes before moving the board, and the tick that
+finishes the transition assigns that reservation rather than computing a new number, so a recovery
+that re-enters the completion does not spend a second generation on one round.
+
+The generation is the round key of the report identity. It is the suffix of the `done` and `blocked`
+request ids in `TASK.md`, and of the report body path those commands name; the two block
+classifications get an id each, because a request id claims its payload and a block restated under
+the other classification is a different report. One value serves all of them: the generation is
+persisted before any document names it, the `TASK.md` a head is given is written from it, and the
+prompt that wakes a retained worker names it and says which suffix the round's commands carry. The
+number is there so a command replayed out of the retained conversation is visibly the wrong one to
+the agent and to a human reading the pane before the call is made.
+
+What such a replay does is worth being exact about, because the id alone does not stop it. A request
+id is an ownership claim over its payload: a stale command carrying a new body is refused with
+`validation` and exit code 2, but an identical retry is a retry, and the protocol answers it from
+its committed event with `replayed: true` while the board gains no marker. So the round's body files
+go when the next round opens, all of them, the round about to start included; a replayed command
+that reads one of them fails on its first step. What it cannot do is refuse a worker that writes the
+old path again with the same contents, which the protocol answers as the retry it looks like. So the
+guarantee here is exactly this and no more: a command from a round that is over never records a
+report of the current round, and it can still answer its caller with a success that belongs to the
+round it came from. Refusing that call outright means authorising the attempt's open generation
+inside the report protocol, which is a durable protocol change with its own compatibility promise
+for stale retries, and it is not part of this contour.
+
+It is dispatcher state, so a dispatcher that lost its record recovers it: the `TASK.md` in the
+checkout names the round its live worker is working from, and the reports already on the card are
+the floor when no document can be read. Both are lower bounds and the larger one wins, so a
+recovered generation may skip a number but cannot reuse one.
+
+The comment index a new report marker is scanned against is a separate value and stays a comment
+count. A generation that skips or lags the card's comments does not blind the dispatcher to a fresh
+report, and `review_baseline` is likewise only the comment index the next review verdict is read
+from and the round key of the reviewer's own verdict identity.
+
 ### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable worker session before
@@ -620,13 +664,15 @@ after that same confirmed stop, up to the no-observer ceiling above, which block
 of opening the round. Nothing else moves a card to In progress for rework, and the
 transition always runs the same order, differing only in the phase it records:
 
-1. The red intent, with its phase, the baseline of the report it closes and the reason the card is
-   moving, goes to disk.
+1. The red intent, with its phase, the baseline of the report it closes, the generation it reserves
+   for the round it opens and the reason the card is moving, goes to disk.
 2. The card moves.
-3. The delivery decision is made: a confirmed-suspended session takes the continuation, and
-   anything else gets a confirmed stop and exactly one replacement.
+3. The reserved generation becomes the record's, and is persisted.
+4. The delivery decision is made: a confirmed-suspended session takes the continuation, and
+   anything else gets a confirmed stop and exactly one replacement. Either way the head is given a
+   `TASK.md` written for the new generation before it is woken or launched.
 
-Whether a session is held changes only the third step. A round with nothing to reuse opens the same
+Whether a session is held changes only the last step. A round with nothing to reuse opens the same
 durable intent, because it is the round whose replacement a crash would otherwise lose: the record
 would still name the report that closed the round, and the next tick would replay that report as a
 new completion while the card sat In progress with no worker. A tick that dies anywhere after step 1
@@ -639,7 +685,7 @@ moves once however many ticks it takes to finish the transition. The suspension 
 immediately before the delivery boundary opens, on recovery as well as on the first attempt, rather
 than trusting the confirmation the reviewer launch made earlier; a session that is no longer
 confirmably suspended is stopped with a confirmed stop and replaced exactly once. The dispatcher then
-updates `TASK.md` with the failure and the next report identity, persists a pending-delivery
+updates `TASK.md` with the failure and the round's report identity, persists a pending-delivery
 boundary before SIGCONT, then checkpoints confirmation only after the provider durably records the
 continuation user turn. Terminal activity is a recovery hint for records without that boundary, not
 the delivery proof. Recovery after a crash cannot mistake the previous `done` report for a new

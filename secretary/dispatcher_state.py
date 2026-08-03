@@ -34,6 +34,15 @@ class DispatcherRecord:
     review_baseline: int
     state: str
     claimed_at: float
+    # The report round the worker currently in this checkout was handed (secretary-1061). It keys
+    # the report request ids and the report body path in TASK.md, and nothing else: it is durable
+    # here before any TASK.md is written, it advances by one whenever a new report round opens
+    # (claim, red gate, red review, stale-done bounce) and never on a respawn inside a round. A
+    # command from a round that is over therefore names that round and never records a report of
+    # this one, instead of deduping this round's report into silence the way one shared id did.
+    # `review_baseline` used to carry this as well as its own job of indexing review markers; the
+    # two are separate values now because a comment count is not a round.
+    report_generation: int = 0
     # Mechanical validation gate (secretary-633): "" until the gate is green for the current code
     # state, then "green". Reset to "" on every fresh entry to validate so a reworked card re-runs
     # the gate instead of coasting on a stale pass. gate_pending_since stamps when a github CI
@@ -130,6 +139,7 @@ class DispatcherRecord:
             "attempt_round": self.attempt_round,
             "paused_reviewer_at": self.paused_reviewer_at,
             "paused_worker_at": self.paused_worker_at,
+            "report_generation": self.report_generation,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "review_handle": self.review_handle,
@@ -173,6 +183,13 @@ class DispatcherRecord:
             launch_intent=_run_snapshot(payload.get("launch_intent")),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
+            # A record written before the generation existed carries its round key in
+            # `review_baseline`, which is the number the worker in that checkout was handed. Taking
+            # it over is what keeps the first generation this dispatcher opens above every id the
+            # previous one issued for the round still running.
+            report_generation=int(
+                payload.get("report_generation") or payload.get("review_baseline") or 0
+            ),
             state=str(payload.get("state") or "claimed"),
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
