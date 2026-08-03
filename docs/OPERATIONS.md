@@ -435,13 +435,28 @@ the price of the pilot, and they change what an operator running two sprints sho
 - **One production tick writes for both sprints.** The tick is a singleton per installation and both
   sprints advance inside it. A tick that ends badly, or a dispatcher stopped for repair, is an outage of
   both sprints at once, and the per-tick health line and unit exit code do not say which sprint caused it.
-- **A tick that cannot read the sprint board fences every sprint-held project — both sprints.** This is
-  the one most likely to show up during an incident. The sprint board and the Pipeline board are separate
+- **A tick that cannot read the sprint board fences the sprint-held work of both sprints.** This is the
+  one most likely to show up during an incident. The sprint board and the Pipeline board are separate
   Kanboard projects that fail separately, so the tick can read a sprint's cards perfectly well while it
   cannot read the declaration saying who is watching them. It fences rather than guesses: no declaration
-  could be checked, so no sprint's cards move. The tick reports `sprint_board_unavailable` as a critical
-  outcome naming the fenced sprints and projects, and it clears by itself as soon as the board answers.
-  The repair is the Kanboard outage, not the sprints. Cards belonging to no sprint keep running.
+  could be checked, so nothing it can identify as a sprint's work moves, in either sprint. It identifies
+  that work two ways, because the board that would answer it is the one that is down: every project the
+  last pass that *could* read the sprint board recorded as reserved, kept as a snapshot in the production
+  state, plus every card whose own Pipeline metadata names a sprint. The tick reports
+  `sprint_board_unavailable` as a critical outcome naming the fenced sprints and projects, and it clears
+  by itself as soon as the board answers. The repair is the Kanboard outage, not the sprints. Cards
+  belonging to no sprint keep running.
+
+  The gap in that, which is worth knowing before an incident rather than during one: a sprint admitted
+  after the last successful pass is not in the snapshot, so its reservations are not either. Its own
+  linked cards are still fenced, by their metadata, but a card that was already sitting in a project it
+  newly reserved and is not itself linked to it is fenced by neither source, and can be advanced or
+  claimed while the board is down. The window is from the sprint's admission to the next pass that reads
+  the sprint board, so it is one tick wide in normal running and only opens if the outage starts inside
+  it. Opening a sprint and immediately losing the sprint board is the shape to watch for; if that
+  happens, `pause freeze` covers it: a frozen tick advances nothing and claims nothing, whatever the
+  fence could work out from a stale snapshot. A `drain` covers only the claim half, since cards already
+  in flight keep riding their cycle under it.
 - **At most one of the two sprints has an observer.** The other runs with `--observer none`, which is not
   a degraded observer but no observer at all: nobody writes resume entries for it, nobody parks its
   cards for a decision, and its cards are bounded instead by the

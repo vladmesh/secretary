@@ -335,20 +335,21 @@ an `open_sprint_limit` finding, because failing closed is otherwise silent to th
 The limit is read from the installation config at the moment admission asks for it, so changing it needs
 no restart and an installation whose config cannot be read answers 1.
 
-At limit 1 the disjointness requirements below are not checked at all, and admission reads exactly as it
-did before the pilot: a project another open sprint reserves is refused first, and anything else is
-refused on the count.
+Admission reads the same at both limits in one respect: a project another open sprint already reserves is
+refused first, whatever the limit is. At limit 1 that is the only disjointness rule there is, and
+anything else is refused on the count, exactly as before the pilot existed.
 
 At limit 2 a second sprint is admitted only when it can be proven disjoint from the one already open.
 Three requirements, all of them checked against live state before the first board write:
 
-- **a different product.** Two open sprints may not share the owning Product. A sprint that declares no
-  product at all, a row from before sprints owned one, cannot be proven disjoint and is refused,
-  whichever of the two it is: the candidate is judged on its own value first, so the answer does not
-  depend on which row was looked at first.
-- **disjoint project reservations.** This refusal predates the limit and reads the same at either limit.
-- **non-overlapping canonical repository roots.** Roots are compared as absolute resolved paths, and
-  overlap includes nesting: two spellings of one working tree are one working tree, and a root that
+- **disjoint project reservations.** The one rule of the three that is also checked at limit 1: it
+  predates the limit and reads the same at either.
+- **a different product.** Checked only at limit 2. Two open sprints may not share the owning Product. A
+  sprint that declares no product at all, a row from before sprints owned one, cannot be proven disjoint
+  and is refused, whichever of the two it is: the candidate is judged on its own value first, so the
+  answer does not depend on which row was looked at first.
+- **non-overlapping canonical repository roots**, also checked only at limit 2. Roots are compared as
+  absolute resolved paths, and overlap includes nesting: two spellings of one working tree are one working tree, and a root that
   contains another's is the same tree twice. A stored root that is not already absolute is refused on
   either side rather than resolved at check time, because resolving it would answer against the working
   directory of whichever process happens to run admission. The candidate's own roots are judged before
@@ -445,7 +446,13 @@ board are separate Kanboard projects and fail separately, so the tick can read a
 while its declaration is unreadable, and advancing them would be moving cards whose observer nobody
 could check. Each successful pass records every open sprint's reservations in the production state;
 a pass that cannot read the board fences from that snapshot, plus every card whose own metadata
-names a sprint. Cards belonging to no sprint keep running. The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
+names a sprint. Cards belonging to no sprint keep running. A sprint admitted since that last
+successful pass is in neither source's reach: the snapshot predates its reservations, so a card
+sitting in a project it reserves without naming the sprint itself is fenced by neither and can
+advance or be claimed while the board is down. That window runs from the admission to the next pass
+that reads the sprint board.
+
+The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
 clears with `observer_fence_cleared` once adoption is confirmed: a record for that sprint naming
 exactly the declared profile, with a pid on disk that is alive. A pid that has not been written yet
 does not clear it. The lifecycle grace window that reads an unwritten pid as alive exists to decide

@@ -77,7 +77,9 @@ Raising the limit past two, or lifting the one-observer ceiling, needs work that
 - pause and drain scoped to a sprint rather than to the installation, so one sprint can be stopped for
   repair without stopping the other.
 - a way for a tick that cannot read the sprint board to fence less than everything, which needs a
-  declaration it can check without that board.
+  declaration it can check without that board. The same declaration would close the blind fence's
+  current gap, where a sprint admitted since the last readable pass leaves an unlinked card in a project
+  it reserves unfenced.
 - evidence from running the pair, plus the exact-string round trip of repository roots through the live
   Kanboard metadata calls, which is currently covered by in-memory fixtures only.
 
