@@ -43,6 +43,14 @@ class DispatcherRecord:
     # `review_baseline` used to carry this as well as its own job of indexing review markers; the
     # two are separate values now because a comment count is not a round.
     report_generation: int = 0
+    # The observer decision that opened the round `report_generation` names, empty when no decision
+    # opened it (secretary-1064). Frozen here with the generation, in the same write, because the
+    # worker of the round must be handed the adjudication its round was opened on: reading "the
+    # latest decision comment" at document-build time answers a different question, and a decision
+    # recorded while the round runs would silently replace the instruction. Assigned, like the
+    # generation, whenever a red transition opens a round, so a gate-red round carries no stale
+    # decision from the review round before it.
+    report_decision: str = ""
     # Mechanical validation gate (secretary-633): "" until the gate is green for the current code
     # state, then "green". Reset to "" on every fresh entry to validate so a reworked card re-runs
     # the gate instead of coasting on a stale pass. gate_pending_since stamps when a github CI
@@ -140,6 +148,7 @@ class DispatcherRecord:
             "paused_reviewer_at": self.paused_reviewer_at,
             "paused_worker_at": self.paused_worker_at,
             "report_generation": self.report_generation,
+            "report_decision": self.report_decision,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "review_handle": self.review_handle,
@@ -190,6 +199,7 @@ class DispatcherRecord:
             report_generation=int(
                 payload.get("report_generation") or payload.get("review_baseline") or 0
             ),
+            report_decision=str(payload.get("report_decision") or ""),
             state=str(payload.get("state") or "claimed"),
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),

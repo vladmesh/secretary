@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,28 @@ def red_review_count(task: dict[str, Any]) -> int:
         1 for comment in (task.get("comments") or []) if comment.get("marker") == "review:red"
     )
 
+
+# The observer decision reaches the worker as prose in its TASK.md, and is recorded once more on a
+# single hidden line so a dispatcher record lost mid-round can read back the instruction the live
+# worker was actually given.
+#
+# The recorded copy is base64 of the UTF-8 text, not the text between fences. A card description
+# and a decision body are both arbitrary Markdown, so either may contain whatever a fence is made
+# of: a description carrying an opening fence would be read as the decision, and a decision
+# carrying a closing one would be read truncated. Base64 contains no character that can end the
+# field, and the line is written on every worker document, last, after every section either of
+# those two can write into. So the final record in the file is always the dispatcher's own, and a
+# round with no decision reads back as none rather than as whatever the description happens to
+# contain.
+_DECISION_RECORD_RE = re.compile(
+    r"^<!-- observer-decision generation=(\d+) body=([A-Za-z0-9+/]*={0,2}) -->$", re.MULTILINE
+)
+
+
+def _decision_record_line(generation: int, decision: str) -> str:
+    """The hidden line the recovery in `_task_doc_decision` reads back."""
+    encoded = base64.b64encode((decision or "").strip().encode("utf-8")).decode("ascii")
+    return f"<!-- observer-decision generation={int(generation)} body={encoded} -->"
 
 _GATE_RED_PREFIX = "The mechanical validation gate is red"
 # Hidden marker line carrying the SHA-independent failure fingerprint (secretary-766): a visible
@@ -156,6 +179,30 @@ def _task_doc_report_generation(workspace: str) -> int:
         if suffix.isdigit():
             generation = max(generation, int(suffix))
     return generation
+
+
+def _task_doc_decision(workspace: str) -> str:
+    """The observer decision the worker in this checkout was actually handed, or "".
+
+    The same recovery as `_task_doc_report_generation`, for the same reason and from the same file:
+    the decision is frozen in dispatcher state, that state can be lost, and the document the live
+    worker is following is what still names the adjudication its round was opened on. Re-reading
+    the card's newest decision comment instead would be the defect this record exists to close.
+    """
+    if not workspace:
+        return ""
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+    records = _DECISION_RECORD_RE.findall(document)
+    if not records:
+        return ""
+    try:
+        decoded = base64.b64decode(records[-1][1].encode("ascii"), validate=True)
+        return decoded.decode("utf-8").strip()
+    except (ValueError, UnicodeError):
+        return ""
 
 
 def _spent_report_generations(task: dict[str, Any]) -> int:

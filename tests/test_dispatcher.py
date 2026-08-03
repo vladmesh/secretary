@@ -34,7 +34,12 @@ from secretary.dispatcher import (
     default_data_dir,
 )
 from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_helpers import RED_REVIEW_CEILING, red_review_count
+from secretary.dispatcher_helpers import (
+    RED_REVIEW_CEILING,
+    _decision_record_line,
+    _task_doc_decision,
+    red_review_count,
+)
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     ObserverRecord,
@@ -63,6 +68,7 @@ from secretary.dispatcher_watchdog import (
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
     head_process_status,
+    initial_output_stall_seconds,
     pid_file_path,
     stall_seconds,
     wait_outcome,
@@ -683,8 +689,15 @@ class FakeHost:
         # A retained session the heartbeat can no longer confirm as suspended: set False to model
         # the head dying while the reviewer judged its checkout.
         self.retained_worker_alive = True
+        # A dispatcher death in the gap between the round's document reaching disk and the head
+        # being woken or launched. Both bring-ups write the document and then, separately, wake or
+        # launch, so both can be interrupted there. Fires once and clears itself, so the tick that
+        # recovers runs the same path for real.
+        self.crash_after_task_doc: BaseException | None = None
 
-    def _write_task_doc(self, task: dict, workspace: Path, attempt_id: str, generation: int) -> None:
+    def _write_task_doc(
+        self, task: dict, workspace: Path, attempt_id: str, generation: int, decision: str = ""
+    ) -> None:
         """Write the TASK.md this bring-up would hand the worker, from the real builder.
 
         The fake owns no copy of the document: a test that wants to know which report round the
@@ -700,8 +713,12 @@ class FakeHost:
             task.get("workspace", {}).get("base_branch") or "main",
             attempt_id,
             generation,
+            decision,
         )
         (workspace / "TASK.md").write_text(document, encoding="utf-8")
+        if self.crash_after_task_doc is not None:
+            crash, self.crash_after_task_doc = self.crash_after_task_doc, None
+            raise crash
 
     def _write_head_pid(self, kind: str, reference: str) -> None:
         path = Path(pid_file_path(kind, reference))
@@ -842,7 +859,8 @@ class FakeHost:
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
         self._write_task_doc(
-            task, Path(record.workspace), record.attempt_id, record.report_generation
+            task, Path(record.workspace), record.attempt_id, record.report_generation,
+            record.report_decision,
         )
         self.prepared.append(task["ref"])
         self._write_head_pid("worker", task["ref"])
@@ -968,11 +986,13 @@ class FakeHost:
         # Same order as the real host: the round's document is on disk before the suspended
         # conversation is woken, and the prompt that wakes it names that same round.
         self._write_task_doc(
-            task, Path(record.workspace), record.attempt_id, record.report_generation
+            task, Path(record.workspace), record.attempt_id, record.report_generation,
+            record.report_decision,
         )
         self.resumed_continuations.append(
             _continuation_prompt(
-                record.worker_continuation.phase, record.report_generation, task["ref"]
+                record.worker_continuation.phase, record.report_generation, task["ref"],
+                record.report_decision,
             )
         )
         self.resumed_workers.append(record.handle)
@@ -2707,12 +2727,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
             kind=kind, body=reason, request_id=request_id or f"decision-{kind}",
         )
 
-    def _park_and_decide(self, kind: str, *, request_id: str = "") -> dict:
+    def _park_and_decide(
+        self, kind: str, *, request_id: str = "", reason: str = "the observer looked and decided",
+    ) -> dict:
         """Tick the parked verdict through the seam and hand back the tick that acted on it."""
         parked = self.runtime.tick(self.selector)
         self.assertEqual(parked["to"], "assessment")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
-        self._decide(kind, request_id=request_id)
+        self._decide(kind, reason, request_id=request_id)
         return self.runtime.tick(self.selector)
 
     def _drop_records_and_restart_attempt(self) -> None:
@@ -2721,6 +2743,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.state.load()
         self.runtime.state.put_records(payload, {})
         payload["attempt_id"] = "attempt-after-restart"
+        self.runtime.state.save(payload)
+
+    def _age_launch_intent(self, seconds: float) -> None:
+        """Push a stored launch intent back in time, so its grace window has run out."""
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["launch_intent"]["at"] -= seconds
         self.runtime.state.save(payload)
 
     def _rewind_wait(self, kind: str, seconds: float = 100_000.0) -> None:
@@ -3309,10 +3337,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
         self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
-    def _review_red(self, request_id: str = "review-red") -> None:
+    def _review_red(self, request_id: str = "review-red", body: str = "fix the hermetic test") -> None:
         self.writer.verdict(
             role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
-            body="fix the hermetic test", request_id=request_id,
+            body=body, request_id=request_id,
         )
 
     def test_red_review_reuses_the_retained_worker_conversation(self) -> None:
@@ -5672,6 +5700,376 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertGreaterEqual(self._pilot_record()["report_generation"], 2)
 
+    # the observer decision in the task document (secretary-1064) ------------
+
+    def _document_decision(self) -> str:
+        """What the worker in the checkout was told to follow, read out of its own TASK.md."""
+        return _task_doc_decision(self._pilot_record()["workspace"])
+
+    def _post_raw_comment(self, marker: str, body: str) -> None:
+        """A comment the writer's own guards would not allow, straight onto the board.
+
+        `decide` refuses a decision on a card that is not in Assessment, so a newer decision
+        comment on a running round cannot be written through the protocol. It is exactly what a
+        document built from "the most recent decision comment" would pick up, which is the defect
+        this record exists to close, so the board is given one directly.
+        """
+        self.board.call("createComment", task_id=12, content=f"[{marker}]\n{body}")
+
+    def _drive_red_round(self, index: int, findings: str, decision: str) -> dict:
+        """One full round: worker reports, review goes red, the observer decides rework."""
+        self.host.commit = f"round{index}-c0ffee1234"
+        self._report_done(f"round {index}")
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.runtime.tick(self.selector)
+        self._review_red(f"review-red-{index}", findings)
+        return self._park_and_decide(
+            "rework", reason=decision, request_id=f"decision-rework-{index}"
+        )
+
+    def test_the_decision_that_opened_the_round_is_the_documents_instruction(self) -> None:
+        """The retained worker's round is opened by an adjudication, so the document it reads
+        back names that adjudication as the thing to follow and keeps the findings under it."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        self._drive_red_round(1, "the fixture proves nothing", "keep the fixture, add a live check")
+
+        document = self._task_document()
+        self.assertEqual(self._document_decision(), "keep the fixture, add a live check")
+        self.assertIn("## Observer rework decision to follow", document)
+        self.assertIn("the decision wins", document)
+        self.assertIn("## Reviewer findings, as supporting context", document)
+        self.assertIn("the fixture proves nothing", document)
+        self.assertLess(
+            document.index("## Observer rework decision to follow"),
+            document.index("## Reviewer findings, as supporting context"),
+            "the findings are context under the decision, not above it",
+        )
+        self.assertNotIn("## Reviewer verdict to address", document)
+
+    def test_the_continuation_prompt_names_the_decision_as_authoritative(self) -> None:
+        """The retained conversation is told what outranks what before it re-reads the file: a
+        prompt that only points at a document leaves the ranking to the worker."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        self._drive_red_round(1, "three blockers", "accept the first, reject the rest")
+
+        prompt = self.host.resumed_continuations[-1]
+        self.assertIn("Observer rework decision to follow", prompt)
+        self.assertIn("authoritative instruction for this round", prompt)
+        self.assertIn("outranks the reviewer findings", prompt)
+
+    def test_the_replacement_worker_is_handed_the_same_decision(self) -> None:
+        """The retained session is not the only path: a round whose conversation could not take
+        the continuation gets a fresh head, and it reads the same document."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        reworked = self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+
+        self.assertEqual(reworked["action"], "rework-started")
+        self.assertIn("restart_worker", self.host.calls)
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertIn("## Observer rework decision to follow", self._task_document())
+
+    def test_a_partial_accept_decision_reaches_the_worker_with_every_blocker(self) -> None:
+        """The live generation-2 failure on secretary-1063: the observer accepted one of three
+        reviewer blockers and rejected the other two, the document carried all three blockers and
+        no decision, and the round changed all three."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        findings = (
+            "1. the round marker is unattributed\n"
+            "2. the helper should be inlined\n"
+            "3. the test name is misleading"
+        )
+        decision = (
+            "Accepted: blocker 1, fix the attribution. Rejected: blockers 2 and 3, the helper "
+            "stays where it is and the test name is correct. Do not change them."
+        )
+
+        self._drive_red_round(1, findings, decision)
+
+        document = self._task_document()
+        self.assertEqual(self._document_decision(), decision)
+        for blocker in ("the round marker is unattributed", "the helper should be inlined",
+                        "the test name is misleading"):
+            self.assertIn(blocker, document)
+        self.assertLess(
+            document.index(decision), document.index("the helper should be inlined"),
+            "the rejected blockers must read as context under the decision",
+        )
+
+    def test_a_decision_requiring_a_structural_change_outlives_newer_blockers(self) -> None:
+        """The live generation-3 failure: the observer required a structural change, the document
+        carried only the reviewer's two newest blockers, and the round hardened what the decision
+        had told it to remove."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._drive_red_round(1, "the attribution is weak", "tighten it")
+
+        self._drive_red_round(
+            2,
+            "1. the marker is still unattributed\n2. the comment scan is unused",
+            "Remove _round_report_marker and restore the board-comment scan. Do not harden the "
+            "attribution instead.",
+        )
+
+        document = self._task_document()
+        self.assertIn("Remove _round_report_marker", self._document_decision())
+        self.assertIn("the comment scan is unused", document, "the newest findings stay as context")
+        self.assertNotIn("tighten it", document, "the previous round's decision is over")
+
+    def test_a_decision_recorded_after_the_round_opened_does_not_displace_it(self) -> None:
+        """"The most recent decision comment" is a different question from "the decision this
+        round was opened on", and only the second one may reach a running worker."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+        self._post_raw_comment("dispatcher", "an unrelated dispatcher note")
+
+        # Any rebuild of the document inside the round reads the frozen decision, not the board.
+        self.runtime.tick(self.selector)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "worker-respawned")
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertNotIn("revert the whole thing", self._task_document())
+
+    def test_a_crash_before_the_wake_leaves_the_decision_durable(self) -> None:
+        """The decision is on disk with the generation, before anything wakes the worker, and the
+        recovery that finishes the wake hands over that same decision."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(body="the fixture proves nothing")
+
+        class DispatcherDied(BaseException):
+            pass
+
+        def die(task: dict, record) -> None:
+            self.host.calls.append("resume_worker")
+            raise DispatcherDied()
+
+        with mock.patch.object(self.host, "resume_worker", die):
+            with self.assertRaises(DispatcherDied):
+                self._park_and_decide("rework", reason="add a live check")
+
+        crashed = self._pilot_record()
+        self.assertEqual(crashed["report_decision"], "add a live check")
+        self.assertEqual(self.host.resumed_workers, [], "nothing was woken on this round yet")
+        # The board moves on underneath the crash, the way a second decision comment would.
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertIn("Observer rework decision to follow", self.host.resumed_continuations[-1])
+
+    def test_a_crash_before_the_move_reuses_the_frozen_decision(self) -> None:
+        """The other order: the transition is on disk and the board has not moved yet. Whichever
+        tick finishes it renders the decision the transition was opened with."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(body="the fixture proves nothing")
+
+        class DispatcherDied(BaseException):
+            pass
+
+        with mock.patch.object(
+            self.runtime, "_deliver_red_continuation", side_effect=DispatcherDied
+        ):
+            with self.assertRaises(DispatcherDied):
+                self._park_and_decide("rework", reason="add a live check")
+
+        crashed = self._pilot_record()
+        self.assertEqual(crashed["worker_continuation"]["stage"], "red_transition_pending")
+        self.assertEqual(crashed["worker_continuation"]["decision_body"], "add a live check")
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self._document_decision(), "add a live check")
+
+    def test_a_crash_between_the_document_and_the_wake_keeps_the_decision(self) -> None:
+        """The third order, inside the bring-up: the round's TASK.md is on disk and the retained
+        conversation has not been woken. The document already carries the decision, and the tick
+        that finishes the wake delivers that same one rather than what the board says by then."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(body="the fixture proves nothing")
+
+        class DispatcherDied(BaseException):
+            pass
+
+        self.host.crash_after_task_doc = DispatcherDied()
+        with self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework", reason="add a live check")
+
+        self.assertEqual(self._document_decision(), "add a live check", "the document is written")
+        self.assertEqual(self.host.resumed_workers, [], "nothing was woken on this round yet")
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.resumed_workers, ["term:secretary-510-pilot-pilot"])
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertIn("Observer rework decision to follow", self.host.resumed_continuations[-1])
+        self.assertNotIn("revert the whole thing", self._task_document())
+
+    def test_a_crash_between_the_document_and_the_launch_keeps_the_decision(self) -> None:
+        """The same boundary on the replacement path, where the wake is a launch rather than a
+        continuation. The crash leaves the round in progress with no head, and the replacement the
+        dispatcher eventually puts on it is handed the decision that opened the round, not the
+        decision the board has by then."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red(body="the fixture proves nothing")
+
+        class DispatcherDied(BaseException):
+            pass
+
+        self.host.crash_after_task_doc = DispatcherDied()
+        with self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework", reason="add a live check")
+
+        self.assertEqual(self._document_decision(), "add a live check", "the document is written")
+        self.assertNotEqual(
+            self._pilot_record()["handle"], "rework:secretary-510-pilot",
+            "no replacement head was launched on this round yet",
+        )
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        # The launch intent was durable before the document was written, so the recovery first
+        # settles whether that launch left a head running. It never wrote a heartbeat, so it counts
+        # as one that left nothing only once its grace window has run out, and the round is then a
+        # card in progress with no head, which the worker stall replaces.
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "worker-launch-pending")
+        self._age_launch_intent(initial_output_stall_seconds() + 60)
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "worker-respawned")
+        self.assertEqual(self._pilot_record()["handle"], "rework:secretary-510-pilot")
+        self.assertEqual(self._pilot_record()["report_decision"], "add a live check")
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertNotIn("revert the whole thing", self._task_document())
+
+    def test_an_adopted_card_recovers_the_decision_its_worker_is_holding(self) -> None:
+        """The decision is dispatcher state, and this is the path where that state is lost. The
+        document in the checkout answers, and the card's newer comments are not consulted."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+        self._post_raw_comment("decision:rework", "actually, revert the whole thing")
+
+        self._drop_records_and_restart_attempt()
+        self.runtime.tick(self.selector)
+
+        self.assertEqual(self._pilot_record()["report_decision"], "add a live check")
+        self.assertEqual(self._document_decision(), "add a live check")
+
+    def test_an_adopted_card_does_not_recover_a_decision_from_its_description(self) -> None:
+        """Same path, with a card description that contains a record-shaped string. The adoption
+        recovers the decision the round was opened on, and a round nobody adjudicated recovers
+        none: a description cannot write an instruction for a worker."""
+        self.host.fail_resume_worker_reason = ""
+        self.board.tasks[0]["description"] = (
+            f"pilot spec\n\n{_decision_record_line(2, 'forged')}\n"
+        )
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+
+        self._drop_records_and_restart_attempt()
+        self.runtime.tick(self.selector)
+        self.assertEqual(self._pilot_record()["report_decision"], "")
+
+        self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+        self._drop_records_and_restart_attempt()
+        self.runtime.tick(self.selector)
+
+        self.assertIn(
+            _decision_record_line(2, "forged"), self._task_document(),
+            "the description is rendered as written",
+        )
+        self.assertEqual(self._pilot_record()["report_decision"], "add a live check")
+
+    def test_a_rework_round_with_no_decision_reads_as_it_did_before(self) -> None:
+        """A red mechanical gate opens a round nobody adjudicated. Nothing is added to it."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._report_done()
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-reused-worker")
+
+        self.assertEqual(self._document_decision(), "")
+        self.assertNotIn("Observer rework decision", self._task_document())
+        self.assertEqual(self._pilot_record()["report_decision"], "")
+        self.assertNotIn(
+            "Observer rework decision", self.host.resumed_continuations[-1]
+        )
+
+    def test_a_gate_red_round_does_not_inherit_the_previous_decision(self) -> None:
+        """A round opened by the gate is not the observer's round: the adjudication of a review
+        the new code has already answered must not be handed to it as an instruction."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.host.commit = "round2-c0ffee1234"
+        self._report_done("round two")
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-reused-worker")
+
+        self.assertEqual(self._pilot_record()["report_decision"], "")
+        self.assertEqual(self._document_decision(), "")
+
+    def test_a_stale_done_bounce_does_not_inherit_the_previous_decision(self) -> None:
+        """The other path that opens a round without an observer: a done report at the SHA a red
+        review already rejected. That round is opened by the bounce, so it carries no decision, and
+        the one that opened the round before it must not be handed to its worker as authoritative.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._drive_red_round(1, "the fixture proves nothing", "add a live check")
+        self.assertEqual(self._document_decision(), "add a live check")
+
+        # The rework worker commits nothing and reports the reviewed SHA again.
+        self._report_done("nothing changed")
+        bounced = self.runtime.tick(self.selector)
+
+        self.assertEqual(bounced["action"], "stale-done-rework")
+        self.assertEqual(self._pilot_record()["report_generation"], 3, "the bounce opens a round")
+        self.assertEqual(self._pilot_record()["report_decision"], "")
+        self.assertEqual(self._document_decision(), "")
+        self.assertNotIn("Observer rework decision", self._task_document())
+
     def test_the_report_marker_baseline_is_not_the_report_generation(self) -> None:
         """`comment_baseline` keeps scanning for new markers on its own count. A generation that
         skips or lags the card's comments must not blind the dispatcher to a fresh report."""
@@ -5759,6 +6157,83 @@ class HeadPromptTests(unittest.TestCase):
 
             self.assertEqual([path for path in mine if path.exists()], [])
             self.assertEqual([path for path in others if not path.exists()], [])
+
+    def _reviewed_red(self, body: str) -> dict:
+        task = dict(self.task)
+        task["comments"] = [{"marker": "review:red", "body": f"[review:red]\n{body}"}]
+        return task
+
+    def test_the_decision_outranks_the_findings_in_the_document(self) -> None:
+        """A decision that accepts part of a review and rejects the rest has to be readable as
+        that: the findings stay, and the document says which of the two the worker follows."""
+        doc = self.host._worker_task_doc(
+            self._reviewed_red("1. inline the helper\n2. rename the test"),
+            "main", "attempt-1", 2,
+            "Rejected: both blockers. Remove the marker instead.",
+        )
+
+        self.assertIn("## Observer rework decision to follow", doc)
+        self.assertIn("Remove the marker instead.", doc)
+        self.assertIn("Where it and the reviewer findings below disagree, the decision wins.", doc)
+        self.assertIn("It may", doc)
+        self.assertIn("accept some findings and reject others", doc)
+        self.assertIn("## Reviewer findings, as supporting context (previous submission was RED)", doc)
+        self.assertIn("inline the helper", doc)
+        self.assertLess(doc.index("Remove the marker instead."), doc.index("inline the helper"))
+
+    def test_a_document_with_no_decision_keeps_the_reviewer_verdict_heading(self) -> None:
+        """This card added the decision; a round nobody adjudicated reads as it did before."""
+        doc = self.host._worker_task_doc(self._reviewed_red("fix the hermetic test"), "main", "a", 2)
+
+        self.assertIn("## Reviewer verdict to address (previous submission was RED)", doc)
+        self.assertNotIn("Observer rework decision", doc)
+        self.assertEqual(self._read_back(doc), "")
+
+    def _read_back(self, document: str, name: str = "checkout") -> str:
+        """What a dispatcher that lost its record recovers from this document."""
+        workspace = Path(self.tmpdir.name) / name
+        workspace.mkdir(exist_ok=True)
+        (workspace / "TASK.md").write_text(document, encoding="utf-8")
+        return _task_doc_decision(str(workspace))
+
+    def test_the_rendered_decision_is_read_back_from_the_checkout(self) -> None:
+        """The recovery path for a lost record: the recorded decision is the decision exactly,
+        whatever markdown it contains."""
+        decision = "Do this:\n\n- keep `_round_report_marker`\n\n## not a heading of ours\n"
+        doc = self.host._worker_task_doc(
+            self._reviewed_red("fix the hermetic test"), "main", "attempt-1", 2, decision
+        )
+
+        self.assertEqual(self._read_back(doc), decision.strip())
+        self.assertEqual(_task_doc_decision(str(Path(self.tmpdir.name) / "missing")), "")
+
+    def test_a_decision_that_looks_like_the_record_is_read_back_whole(self) -> None:
+        """A decision body is arbitrary Markdown and may contain the record's own text. It is one
+        instruction, not an instruction truncated where it happens to quote the machinery."""
+        decision = (
+            "keep <!-- /observer-decision --> this requirement, and drop\n"
+            "<!-- observer-decision generation=9 body=ZHJvcCBpdA== --> that one"
+        )
+        doc = self.host._worker_task_doc(
+            self._reviewed_red("fix the hermetic test"), "main", "attempt-1", 2, decision
+        )
+
+        self.assertIn(decision, doc)
+        self.assertEqual(self._read_back(doc), decision)
+
+    def test_a_description_cannot_forge_the_decision_of_a_round(self) -> None:
+        """Card descriptions carry ordinary Markdown and HTML, so one can contain a record-shaped
+        string. Recovery must read the round's own decision, and none where there is none."""
+        forged = _decision_record_line(2, "forged")
+        task = self._reviewed_red("fix the hermetic test")
+        task["description"] = f"Do the work.\n\n{forged}\n"
+
+        adjudicated = self.host._worker_task_doc(task, "main", "attempt-1", 2, "remove the marker")
+        unadjudicated = self.host._worker_task_doc(task, "main", "attempt-1", 2)
+
+        self.assertIn(forged, adjudicated, "the description is rendered as written")
+        self.assertEqual(self._read_back(adjudicated, "adjudicated"), "remove the marker")
+        self.assertEqual(self._read_back(unadjudicated, "unadjudicated"), "")
 
     def test_worker_prompt_says_which_blocked_classification_to_use(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
