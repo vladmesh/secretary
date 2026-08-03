@@ -1601,6 +1601,12 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
                     role="observer", actor="observer", reference=second, entry=entry,
                     request_id="cross-sprint-resume",
                 )),
+                # The card this points at is linked to the target sprint, which is what its own
+                # head would pass: the link is a constraint on the value, not on the caller.
+                ("current-task", lambda: self.writer.set_current_task(
+                    role="observer", actor="observer", reference=second,
+                    task_reference=card["ref"], request_id="cross-sprint-current-task",
+                )),
             )
             for name, call in calls:
                 with self.subTest(call=name), self.assertRaises(TaskError) as refused:
@@ -1610,16 +1616,19 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
         denials = self._denials()[before:]
         self.assertEqual(
             [event["payload"]["code"] for event in denials],
-            ["observer_sprint_mismatch"] * 3,
+            ["observer_sprint_mismatch"] * 4,
         )
         self.assertEqual({event["payload"]["sprint"] for event in denials}, {first})
-        self.assertEqual([event["outcome"] for event in denials], ["denied"] * 3)
+        self.assertEqual([event["outcome"] for event in denials], ["denied"] * 4)
         self.assertEqual(
-            [event["ref"] for event in denials], [card["ref"], card["ref"], second],
+            [event["ref"] for event in denials], [card["ref"], card["ref"], second, second],
         )
-        # Nothing moved: the card is where its own sprint left it and the entity has no resume.
+        # Nothing moved: the card is where its own sprint left it, and the entity has neither a
+        # resume entry nor a current task somebody else chose.
         self.assertEqual(TaskReader(self.client).show(card["ref"])["state"], "ready")  # type: ignore[arg-type]
-        self.assertIsNone(self.writer.reader.show(second, include_cards=False)["resume"])
+        other = self.writer.reader.show(second, include_cards=False)
+        self.assertIsNone(other["resume"])
+        self.assertIsNone(other["current_task"])
 
     def test_a_head_nobody_bound_writes_nothing_at_all(self) -> None:
         """Fail-closed: an unbound caller cannot prove which sprint it is, so it is not one."""
@@ -1644,12 +1653,18 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
                     },
                     request_id="unbound-resume",
                 )
+            with self.assertRaises(TaskError) as pointed:
+                self.writer.set_current_task(
+                    role="observer", actor="observer", reference=second,
+                    task_reference=card["ref"], request_id="unbound-current-task",
+                )
 
         self.assertEqual(moved.exception.code, "observer_identity_unbound")
         self.assertEqual(resumed.exception.code, "observer_identity_unbound")
+        self.assertEqual(pointed.exception.code, "observer_identity_unbound")
         self.assertEqual(
             [event["payload"]["code"] for event in self._denials()[before:]],
-            ["observer_identity_unbound"] * 2,
+            ["observer_identity_unbound"] * 3,
         )
 
     def test_a_bound_head_still_writes_its_own_sprint(self) -> None:
@@ -1671,9 +1686,14 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
                 },
                 request_id="own-sprint-resume",
             )
+            pointed = self.writer.set_current_task(
+                role="observer", actor="observer", reference=second,
+                task_reference=card["ref"], request_id="own-sprint-current-task",
+            )
 
         self.assertEqual(blocked["task"]["state"], "blocked")
         self.assertEqual(recorded["sprint"]["resume"]["selected_step"], "implement")
+        self.assertEqual(pointed["sprint"]["current_task"], card["ref"])
         self.assertEqual(self._denials(), [])
         self.assertEqual(first, "sprint:first")
 

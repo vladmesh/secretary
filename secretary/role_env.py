@@ -179,8 +179,9 @@ def runtime_env(
 def observer_binding(sprint: str, generation: str) -> dict[str, str]:
     """The identity a launcher renders into one observer head's command line.
 
-    Both names or neither: a head carrying a sprint without the generation of the record it was
-    launched for cannot be told from a head of that sprint's previous lifecycle.
+    Both names or neither. The generation is the record's own token, carried so the head's
+    environment says which lifecycle of that reference launched it; the write path reads it as a
+    presence flag only, and does not compare it to the record a sprint currently has.
     """
     sprint = str(sprint or "").strip()
     generation = str(generation or "").strip()

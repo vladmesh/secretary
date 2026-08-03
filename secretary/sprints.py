@@ -1192,6 +1192,14 @@ class SprintWriter:
         task_reference = task_reference.strip()
         if not task_reference:
             raise TaskError("validation", "current task requires a task reference", 2)
+        # The pointer is the other half of the resume entry, and it is guarded the same way. The
+        # link check below is a constraint on the value, not on the caller: any Ready card of the
+        # target sprint satisfies it, so without this a head of another sprint could move where
+        # that sprint's head resumes from.
+        request_id = request_id or str(uuid.uuid4())
+        self._guard_observer_identity(
+            role=role, actor=actor, reference=reference, request_id=request_id,
+        )
         def mutation(sprint: dict[str, Any]) -> None:
             task = TaskReader(self.client).show(task_reference)
             if task.get("sprint") != reference:
