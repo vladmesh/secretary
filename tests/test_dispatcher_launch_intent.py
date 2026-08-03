@@ -2124,6 +2124,7 @@ class HostLaunchContourTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            report_generation=3,
             state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
             worker_continuation=WorkerContinuation(
@@ -2137,11 +2138,13 @@ class HostLaunchContourTests(unittest.TestCase):
         time.sleep(0.05)
         calls: list[list[str]] = []
         task_at_delivery: list[str] = []
+        prompt_at_delivery: list[str] = []
 
         def run_json(command: list[str]) -> dict:
             calls.append(command)
             if command[2] == "send":
                 task_at_delivery.append((self.data_dir / "TASK.md").read_text())
+                prompt_at_delivery.append(command[command.index("--text") + 1])
             if command[2] == "read":
                 return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"]}}
             return {}
@@ -2151,6 +2154,9 @@ class HostLaunchContourTests(unittest.TestCase):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
+        # The document the worker is sent back to and the prompt that wakes it name one round.
+        self.assertIn("report generation 3", prompt_at_delivery[0])
+        self.assertIn("ends in -3", prompt_at_delivery[0])
         self.assertTrue(any(command[2] == "send" for command in calls))
 
     def test_a_running_retained_claude_replays_delivery_after_a_crash_before_send(self) -> None:

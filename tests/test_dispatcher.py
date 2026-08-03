@@ -26,6 +26,7 @@ from secretary.dispatcher import (
     InstanceCatalog,
     LegacyPauseSnapshot,
     PilotSelector,
+    _continuation_prompt,
     _legacy_worker_branch,
     _render_codex_command,
     _wrap_role_shell_command,
@@ -675,9 +676,27 @@ class FakeHost:
         self.fail_resume_worker_reason = "retained worker session cannot accept a continuation"
         self.retained_workers: list[str] = []
         self.resumed_workers: list[str] = []
+        # The prompt each wake carried, built the way the real host builds it.
+        self.resumed_continuations: list[str] = []
         # A retained session the heartbeat can no longer confirm as suspended: set False to model
         # the head dying while the reviewer judged its checkout.
         self.retained_worker_alive = True
+
+    def _write_task_doc(self, task: dict, workspace: Path, attempt_id: str, generation: int) -> None:
+        """Write the TASK.md this bring-up would hand the worker, from the real builder.
+
+        The fake owns no copy of the document: a test that wants to know which report round the
+        worker was actually given reads it out of the checkout, the way the worker does.
+        """
+        workspace.mkdir(parents=True, exist_ok=True)
+        document = CommandHostRuntime._worker_task_doc(
+            self,  # type: ignore[arg-type]
+            task,
+            task.get("workspace", {}).get("base_branch") or "main",
+            attempt_id,
+            generation,
+        )
+        (workspace / "TASK.md").write_text(document, encoding="utf-8")
 
     def _write_head_pid(self, kind: str, reference: str) -> None:
         path = Path(pid_file_path(kind, reference))
@@ -695,6 +714,7 @@ class FakeHost:
         *,
         attempt_id: str = "",
         require_existing_workspace: bool = False,
+        generation: int = 0,
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
@@ -708,6 +728,7 @@ class FakeHost:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
         workspace.mkdir(parents=True, exist_ok=True)
+        self._write_task_doc(task, workspace, attempt_id, generation)
         self.prepared.append(task["ref"])
         self._write_head_pid("worker", task["ref"])
         launched = self._launched(f"term:{worker_id}", head, task, "worker")
@@ -815,6 +836,9 @@ class FakeHost:
         self.calls.append("restart_worker")
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
+        self._write_task_doc(
+            task, Path(record.workspace), record.attempt_id, record.report_generation
+        )
         self.prepared.append(task["ref"])
         self._write_head_pid("worker", task["ref"])
         return self._launched(f"rework:{task['ref']}", record.head, task, "worker")
@@ -936,6 +960,16 @@ class FakeHost:
             raise HostError(self.fail_resume_worker_reason)
         if not record.handle and not record.worker_pid_file:
             raise HostError("retained worker session exited")
+        # Same order as the real host: the round's document is on disk before the suspended
+        # conversation is woken, and the prompt that wakes it names that same round.
+        self._write_task_doc(
+            task, Path(record.workspace), record.attempt_id, record.report_generation
+        )
+        self.resumed_continuations.append(
+            _continuation_prompt(
+                record.worker_continuation.phase, record.report_generation, task["ref"]
+            )
+        )
         self.resumed_workers.append(record.handle)
 
     def _kill_head(self, kind: str, record) -> None:
@@ -3185,8 +3219,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.prepare_requires_existing, [False, True])
         self.assertNotEqual(restarted["attempt_id"], original_attempt)
         self.assertNotEqual(
-            _attempt_request_id(original_attempt, "worker-report-done", "secretary-510-pilot", "0"),
-            _attempt_request_id(restarted["attempt_id"], "worker-report-done", "secretary-510-pilot", "0"),
+            _attempt_request_id(original_attempt, "worker-report-done", "secretary-510-pilot", "1"),
+            _attempt_request_id(restarted["attempt_id"], "worker-report-done", "secretary-510-pilot", "1"),
         )
 
     def test_worker_report_clears_the_worker_wait_watchdog(self) -> None:
@@ -3938,9 +3972,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
             body="fixed",
-            request_id=_attempt_request_id(
-                record["attempt_id"], "worker-report-done", "secretary-510-pilot", str(record["review_baseline"]),
-            ),
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
 
@@ -3974,9 +4006,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
             body="fixed",
-            request_id=_attempt_request_id(
-                record["attempt_id"], "worker-report-done", "secretary-510-pilot", str(record["review_baseline"]),
-            ),
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
 
@@ -4002,9 +4032,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
             body="fixed",
-            request_id=_attempt_request_id(
-                record["attempt_id"], "worker-report-done", "secretary-510-pilot", str(record["review_baseline"]),
-            ),
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
 
@@ -4041,12 +4069,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
             body="nothing changed",
-            request_id=_attempt_request_id(
-                record["attempt_id"],
-                "worker-report-done",
-                "secretary-510-pilot",
-                str(record["review_baseline"]),
-            ),
+            request_id=self._worker_report_request_id(),
         )
         self.assertEqual(self.runtime.tick(self.selector)["action"], "stale-done-rework")
 
@@ -4055,12 +4078,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.writer.report(
             role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
             body="fixed",
-            request_id=_attempt_request_id(
-                record["attempt_id"],
-                "worker-report-done",
-                "secretary-510-pilot",
-                str(record["review_baseline"]),
-            ),
+            request_id=self._worker_report_request_id(),
         )
 
         result = self.runtime.tick(self.selector)
@@ -4952,6 +4970,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("secretary-510-pilot", self.runtime.state.load()["records"])
         self.assertEqual(self.host.torn_down, [], "a failed reviewer must not remove the checkout")
 
+    def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
+        """The report request-id the worker in the checkout is actually holding, read out of its
+        TASK.md rather than recomputed here: a test that recomputes it cannot catch the document
+        and the dispatcher's own state naming different report rounds."""
+        record = self.runtime.state.load()["records"]["secretary-510-pilot"]
+        document = (Path(record["workspace"]) / "TASK.md").read_text(encoding="utf-8")
+        wanted = f"--kind {kind}"
+        if classification:
+            wanted = f"{wanted} --classification {classification}"
+        line = next(line for line in document.splitlines() if wanted in line)
+        return line.split("--request-id ", 1)[1].split()[0]
+
     def _reviewer_red_request_id(self) -> str:
         """The red request-id the dispatcher actually hands the reviewer, taken from the prompt
         it renders rather than recomputed here."""
@@ -5323,6 +5353,233 @@ class DispatcherRuntimeTests(unittest.TestCase):
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(red_review_count(task), 3)
         self.assertEqual(task["state"], "in_progress", "the observer decides, not the counter")
+
+    # the report generation (secretary-1061) ----------------------------------
+
+    def _pilot_record(self) -> dict:
+        return self.runtime.state.load()["records"]["secretary-510-pilot"]
+
+    def _task_document(self) -> str:
+        return (Path(self._pilot_record()["workspace"]) / "TASK.md").read_text(encoding="utf-8")
+
+    def _assert_one_generation(self, expected: int) -> None:
+        """Dispatcher state and the worker's own TASK.md name one round, not two numbers that
+        happen to match: every report command in the document is read back and compared."""
+        self.assertEqual(self._pilot_record()["report_generation"], expected)
+        document = self._task_document()
+        request_ids = [
+            line.split("--request-id ", 1)[1].split()[0]
+            for line in document.splitlines()
+            if "--request-id" in line
+        ]
+        self.assertEqual(len(request_ids), 3, "one done and one blocked id per classification")
+        self.assertEqual(len(set(request_ids)), 3, "the two classifications share an id")
+        for request_id in request_ids:
+            self.assertTrue(request_id.endswith(f"-{expected}"), request_id)
+        self.assertIn(f"secretary-report-secretary-510-pilot-{expected}.md", document)
+
+    def _report_done(self, body: str = "done") -> None:
+        """Report through the command the worker actually holds in its TASK.md."""
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body=body, request_id=self._worker_report_request_id(),
+        )
+
+    def test_a_fresh_worker_is_handed_the_attempts_first_generation(self) -> None:
+        self.start_pilot()
+
+        self.runtime.tick(self.selector)
+
+        self._assert_one_generation(1)
+
+    def test_each_block_classification_gets_its_own_report_request_id(self) -> None:
+        """secretary-1060 made a request id an ownership claim on its payload, so one id shared by
+        both classifications answers a block restated under the other one with `validation`."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        external = self._worker_report_request_id("blocked", "external_fact")
+        wrong = self._worker_report_request_id("blocked", "wrong_task_definition")
+
+        self.assertNotEqual(external, wrong)
+        for classification, request_id in (("external_fact", external), ("wrong_task_definition", wrong)):
+            self.writer.report(
+                role="worker", actor="worker", reference="secretary-510-pilot", kind="blocked",
+                classification=classification, body="blocked", request_id=request_id,
+            )
+        with self.assertRaises(TaskError) as refused:
+            self.writer.report(
+                role="worker", actor="worker", reference="secretary-510-pilot", kind="blocked",
+                classification="wrong_task_definition", body="blocked", request_id=external,
+            )
+        self.assertEqual(refused.exception.code, "validation")
+
+    def test_a_replacement_worker_opens_the_next_generation(self) -> None:
+        """A red round whose session cannot take the continuation is still a new report round."""
+        self.start_pilot()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+
+        gated = self.runtime.tick(self.selector)
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        self.assertIn("restart_worker", self.host.calls)
+        self._assert_one_generation(2)
+
+    def test_a_worker_respawn_stays_inside_its_report_round(self) -> None:
+        """A head that died without reporting is replaced, not given a new round: the generation
+        it was launched on is still the one the card is waiting for a report on."""
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "gate-red-rework")
+        self._assert_one_generation(2)
+        record = self._pilot_record()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "worker-respawned")
+        self._assert_one_generation(2)
+        self.assertEqual(self._pilot_record()["attempt_round"], record["attempt_round"])
+
+    def test_three_retained_red_rounds_each_get_their_own_generation(self) -> None:
+        """The incident shape: one attempt, one conversation, several rework rounds. Every round
+        has to be a different report identity, in the state, in the document and in the wake."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._assert_one_generation(1)
+        generations = [1]
+
+        for index in (1, 2, 3):
+            self.host.commit = f"round{index}-c0ffee1234"
+            self._report_done()
+            self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+            self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+            self._review_red(f"review-red-{index}")
+            reworked = self._park_and_decide("rework", request_id=f"decision-rework-{index}")
+
+            self.assertEqual(reworked["action"], "review-red-reused-worker")
+            generation = self._pilot_record()["report_generation"]
+            self._assert_one_generation(generation)
+            self.assertIn(f"report generation {generation}", self.host.resumed_continuations[-1])
+            self.assertIn(f"ends in -{generation}", self.host.resumed_continuations[-1])
+            generations.append(generation)
+
+        self.assertEqual(generations, sorted(set(generations)), f"repeated or backwards: {generations}")
+        self.assertEqual(len(generations), 4)
+        self.assertEqual(self.host.resumed_workers.count(self._pilot_record()["handle"]), 3)
+
+    def test_a_previous_generations_report_id_is_refused_in_the_next_round(self) -> None:
+        """The live incident, from the worker's side: a retained head that replays the command
+        from its previous turn is refused, and the round it is actually in is a different id."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        stale = self._worker_report_request_id()
+        self._report_done("round one")
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+        self.host.commit = "round2-c0ffee1234"
+
+        self.assertNotEqual(self._worker_report_request_id(), stale)
+        with self.assertRaises(TaskError) as refused:
+            self.writer.report(
+                role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+                body="round two", request_id=stale,
+            )
+
+        self.assertEqual(refused.exception.code, "validation")
+        self.assertEqual(refused.exception.exit_code, 2)
+        # The round's own id records the report the stale one could not.
+        self._report_done("round two")
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+    def test_a_crash_before_the_wake_leaves_the_generation_durable(self) -> None:
+        """Ordering: the new generation is on disk before anything wakes the worker, and the
+        recovery that finishes the wake stays on that same generation."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._review_red()
+
+        class DispatcherDied(BaseException):
+            pass
+
+        def die(task: dict, record) -> None:
+            self.host.calls.append("resume_worker")
+            raise DispatcherDied()
+
+        with mock.patch.object(self.host, "resume_worker", die):
+            with self.assertRaises(DispatcherDied):
+                self._park_and_decide("rework")
+
+        crashed = self._pilot_record()
+        self.assertEqual(crashed["report_generation"], 2)
+        self.assertEqual(crashed["worker_continuation"]["stage"], "delivery_pending")
+        self.assertEqual(self.host.resumed_workers, [], "nothing was woken on this generation yet")
+
+        recovered = self.runtime.tick(self.selector)
+
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self._assert_one_generation(2)
+        self.assertIn("report generation 2", self.host.resumed_continuations[-1])
+
+    def test_an_adopted_card_recovers_the_generation_its_worker_is_holding(self) -> None:
+        """The generation is dispatcher state, and this is the path where that state is lost. The
+        document in the checkout is what the live worker is working from, so it answers."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+        self.assertEqual(self._pilot_record()["report_generation"], 2)
+        document = self._task_document()
+
+        self._drop_records_and_restart_attempt()
+        self.runtime.tick(self.selector)
+
+        self.assertEqual(self._pilot_record()["report_generation"], 2)
+        self.assertEqual(self._task_document(), document, "the adopted round rewrote its own doc")
+
+    def test_a_lost_record_with_no_readable_document_never_reuses_a_generation(self) -> None:
+        """No TASK.md to read: the reports already on the board are the floor. A generation may
+        skip, because an unused id costs nothing; repeating one loses a round's report."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+        (Path(self._pilot_record()["workspace"]) / "TASK.md").unlink()
+
+        self._drop_records_and_restart_attempt()
+        self.runtime.tick(self.selector)
+
+        self.assertGreaterEqual(self._pilot_record()["report_generation"], 2)
+
+    def test_the_report_marker_baseline_is_not_the_report_generation(self) -> None:
+        """`comment_baseline` keeps scanning for new markers on its own count. A generation that
+        skips or lags the card's comments must not blind the dispatcher to a fresh report."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        self._report_done()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+        record = self._pilot_record()
+
+        self.assertNotEqual(record["comment_baseline"], record["report_generation"])
+        self.host.commit = "round2-c0ffee1234"
+        self._report_done("round two")
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
 
 
 class HeadPromptTests(unittest.TestCase):
@@ -6180,7 +6437,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("--kind done", task_doc)
         self.assertIn("--request-id ", task_doc)
 
-    def test_report_request_id_is_distinct_per_review_round(self) -> None:
+    def test_report_request_id_is_distinct_per_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             host = GitBranchHost(Path(tmp))
             task = {
@@ -6196,7 +6453,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             start = text.index("--request-id ") + len("--request-id ")
             return text[start:].split()[0]
 
-        # Same attempt, different review round: the report request-id must differ, or the
+        # Same attempt, different report generation: the report request-id must differ, or the
         # rework done-report is idempotently deduped against the pre-review one and the
         # dispatcher waits for a report that never lands.
         self.assertNotEqual(rid(first), rid(rework))

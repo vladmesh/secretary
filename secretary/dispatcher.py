@@ -41,6 +41,8 @@ from secretary.dispatcher_helpers import (
     _legacy_worker_branch,
     _report_adoption_baseline,
     _review_adoption_baseline,
+    _spent_report_generations,
+    _task_doc_report_generation,
     _tail,
     _worker_id,
     red_review_count as _red_review_count,
@@ -497,6 +499,7 @@ class CommandHostRuntime:
         *,
         attempt_id: str = "",
         require_existing_workspace: bool = False,
+        generation: int = 0,
     ) -> dict[str, Any]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
@@ -510,8 +513,12 @@ class CommandHostRuntime:
             workspace = self._create_workspace(project, worker_id, base, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
-        self._clear_body_file("report", task["ref"], 0)
-        self._write_prompt(Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id))
+        # The caller's generation, not a constant: the first round of a claim is as much a report
+        # round as a rework, and its number is the one already durable in the dispatcher record.
+        self._clear_body_file("report", task["ref"], generation)
+        self._write_prompt(
+            Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
+        )
         launched = self._launch(
             workspace,
             f"{task['ref']} worker",
@@ -542,8 +549,11 @@ class CommandHostRuntime:
         base = self.catalog.default_branch(
             task["project"], task.get("workspace", {}).get("base_branch")
         )
-        self._clear_body_file("report", task["ref"], record.review_baseline)
-        self._write_prompt(workspace / "TASK.md", self._worker_task_doc(task, base, record.attempt_id, record.review_baseline))
+        self._clear_body_file("report", task["ref"], record.report_generation)
+        self._write_prompt(
+            workspace / "TASK.md",
+            self._worker_task_doc(task, base, record.attempt_id, record.report_generation),
+        )
         return self._launch(
             str(workspace),
             f"{task['ref']} worker rework",
@@ -1769,15 +1779,19 @@ class CommandHostRuntime:
             # touching a TASK.md or report body the resumed worker may already be using.
             return
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
-        self._clear_body_file("report", task["ref"], record.review_baseline)
+        # One generation, read once: the document the worker is sent back to and the prompt that
+        # sends it there name the same round because they are built from the same value, not
+        # because two call sites happen to compute the same number.
+        generation = record.report_generation
+        self._clear_body_file("report", task["ref"], generation)
         self._write_prompt(
             workspace / "TASK.md",
-            self._worker_task_doc(task, base, record.attempt_id, record.review_baseline),
+            self._worker_task_doc(task, base, record.attempt_id, generation),
         )
         try:
             if status.get("stopped"):
                 self._signal_head(record.worker_pid_file, signal.SIGCONT)
-            prompt = _continuation_prompt(continuation.phase)
+            prompt = _continuation_prompt(continuation.phase, generation, task["ref"])
             if adapter == "codex":
                 _deliver_tui_prompt(
                     record.handle, str(workspace), "TASK.md", run_json=self._run_json,
@@ -1828,16 +1842,23 @@ class CommandHostRuntime:
             "Report done or blocked with the command given in TASK.md. Do not commit TASK.md."
         )
 
-    def _worker_task_doc(self, task: dict[str, Any], base: str, attempt_id: str, review_round: int = 0) -> str:
+    def _worker_task_doc(self, task: dict[str, Any], base: str, attempt_id: str, generation: int = 0) -> str:
         branch = _legacy_worker_branch(task["ref"])
-        # review_round keeps the report request-id distinct per rework round: a rework
-        # reuses the same attempt_id, so without it the second done-report collides with
-        # the first and is idempotently deduped, leaving the dispatcher waiting forever.
-        request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(review_round))
-        blocked_request = _attempt_request_id(
-            attempt_id, "worker-report-blocked", task["ref"], str(review_round)
-        )
-        body_file = _body_file_path("report", task["ref"], review_round)
+        # The generation keeps the report request-id distinct per report round: a rework reuses the
+        # same attempt_id, so without it the second done-report collides with the first and is
+        # idempotently deduped, leaving the dispatcher waiting forever.
+        request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(generation))
+        # One id per classification. A worker that restates a block under the other classification
+        # is filing a different report, and since secretary-1060 a request id claims its payload:
+        # one shared id would answer the second call with `validation` / exit 2 instead of
+        # recording it.
+        blocked_requests = {
+            classification: _attempt_request_id(
+                attempt_id, f"worker-report-blocked-{classification}", task["ref"], str(generation)
+            )
+            for classification in ("external_fact", "wrong_task_definition")
+        }
+        body_file = _body_file_path("report", task["ref"], generation)
         sections = [
             f"# Task {task['ref']}",
             "",
@@ -1903,10 +1924,13 @@ class CommandHostRuntime:
             "so a partial `git add` that misses your fix files will bounce the card.",
             "",
             "Report through the secretary task protocol only:",
+            f"This document is report generation {generation}. Every request id below ends in "
+            f"-{generation}; a report command carrying any other number is from an earlier round",
+            "of this conversation and is refused.",
             *_body_file_instructions(body_file),
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_request} --body-file {body_file}',
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_request} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_requests["external_fact"]} --body-file {body_file}',
+            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests["wrong_task_definition"]} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -2453,6 +2477,9 @@ class DispatcherRuntime:
             attempt_id=attempt_id,
             comment_baseline=len(claimed.get("comments") or []),
             review_baseline=0,
+            # The claim opens the attempt's first report round. It is durable in the record below
+            # before `prepare_worker` writes the TASK.md that names it.
+            report_generation=1,
             state="claim_verified",
             claimed_at=time.time(),
         )
@@ -2563,6 +2590,7 @@ class DispatcherRuntime:
                 record.head,
                 attempt_id=record.attempt_id,
                 require_existing_workspace=require_existing_workspace,
+                generation=record.report_generation,
             )
         except (HeadLaunchAborted, HostError) as exc:
             aborted = self._worker_launch_failure(
@@ -2927,7 +2955,7 @@ class DispatcherRuntime:
                         record.attempt_id or attempt_id,
                         "worker-done",
                         ref,
-                        str(record.review_baseline),
+                        str(record.report_generation),
                     ),
                 )
                 record.state = "validate"
@@ -2985,7 +3013,12 @@ class DispatcherRuntime:
                 reference=ref,
                 target="validate",
                 reason="worker report:done",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-done", ref, str(record.review_baseline)),
+                # Keyed on the generation the report closes, so this move and its replay after a
+                # crash between retention and the move carry one id, whatever the card's comment
+                # count has done since.
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "worker-done", ref, str(record.report_generation)
+                ),
             )
             if continuation.validation_move_pending:
                 continuation.confirm_validation_move()
@@ -3078,10 +3111,12 @@ class DispatcherRuntime:
             ),
         )
         record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
-        # `review_baseline` is also the round key for the report request-id in TASK.md. Advance
-        # it before restarting this same attempt, or the next legitimate done report is deduped
-        # against the stale one we just rejected.
         record.review_baseline = record.comment_baseline
+        # The bounce restarts this same attempt with a new TASK.md, so it is a new report round.
+        # Without a new generation the next legitimate done report would be deduped against the
+        # stale one just rejected. The attempt's routing round does not move here, because the card
+        # never left the worker, which is why this generation cannot be `attempt_round`.
+        record.report_generation += 1
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
@@ -3636,9 +3671,12 @@ class DispatcherRuntime:
         # The report that closed the previous round is behind this baseline, so no later tick can
         # read it as a completion of the round this transition opens.
         record.comment_baseline = max(len(moved.get("comments") or []), baseline)
-        # `review_baseline` is part of the worker report identity. The rework round gets a new
-        # TASK.md, so its report must not dedupe against the round the verdict closed.
+        # Where the next review verdict is scanned from, so the verdict this transition acted on
+        # cannot be read again as the new round's.
         record.review_baseline = record.comment_baseline
+        # The rework is a new report round: it gets its own generation here, saved below, before
+        # any TASK.md is written for it and before the worker is woken.
+        record.report_generation += 1
         record.gate_state = ""
         record.gate_pending_since = 0.0
         # The round the verdict judged is over here. A park keeps the reviewed commit while the
@@ -4554,15 +4592,24 @@ class DispatcherRuntime:
         # one on its next bring-up rather than inventing history for the round already running.
         resumed = _routing_attempts(self.audit.events(task["ref"], kind="routing"))
         round_record = resumed[-1] if resumed else None
+        workspace = self.host.restore_workspace(task, worker)
+        # The report generation is dispatcher state, and this is the path where that state was
+        # lost. The TASK.md in the checkout names the round the live worker is actually in; the
+        # reports already on the board are the floor when there is no readable document. Both are
+        # lower bounds, so the larger one is taken: a generation may skip, never repeat.
+        report_generation = max(
+            _task_doc_report_generation(workspace), _spent_report_generations(task) + 1
+        )
         return DispatcherRecord(
             worker=worker,
-            workspace=self.host.restore_workspace(task, worker),
+            workspace=workspace,
             handle="",
             head=self.catalog.claimed_worker_head(task),
             review_head=self.catalog.claimed_review_head(task),
             attempt_id=attempt_id,
             comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,
+            report_generation=report_generation,
             state=state,
             claimed_at=time.time(),
             # A reviewer only launches once the gate is green, so an adopted card already in review
@@ -4605,17 +4652,26 @@ def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
 
 
-def _continuation_prompt(phase: str) -> str:
-    """What the resumed conversation is told. The updated TASK.md carries the detail; this only
-    names which of the two red verdicts sent the card back."""
+def _continuation_prompt(phase: str, generation: int = 0, reference: str = "") -> str:
+    """What the resumed conversation is told. The updated TASK.md carries the detail; this names
+    which of the two red verdicts sent the card back, and which report round it opens.
+
+    The generation is spelled out because the retained conversation still has the previous round's
+    report command in its own scrollback. "Read the updated TASK.md" is exactly the instruction the
+    incident worker did not follow; a number both the agent and a human reading the pane can
+    compare makes a replayed command visibly the wrong one.
+    """
     if phase == "review":
-        return (
-            "The review verdict is red. Read the updated TASK.md, address the findings, "
-            "then report through its command."
-        )
+        cause, work = "The review verdict is red.", "address the findings"
+    else:
+        cause, work = "The mechanical validation gate returned red.", "fix the failure"
+    card = f" for {reference}" if reference else ""
     return (
-        "The mechanical validation gate returned red. Read the updated TASK.md, "
-        "fix the failure, then report through its command."
+        f"{cause} This opens report generation {generation}{card}. TASK.md at the workspace root "
+        f"has been rewritten for it: read it again, {work}, then report with the command in that "
+        f"file. Its --request-id ends in -{generation}. A report command from an earlier turn of "
+        "this conversation ends in a different number, belongs to a round that is over, and is "
+        "refused."
     )
 
 

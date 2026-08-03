@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 _ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
@@ -132,6 +133,43 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
         if comment.get("marker") == "report:done":
             baseline = index + 1
     return baseline
+
+
+def _task_doc_report_generation(workspace: str) -> int:
+    """The report generation the worker in this checkout was actually handed, or 0.
+
+    A dispatcher record can be lost at any point, and the generation is dispatcher state. What is
+    not lost is the document the live worker is working from: its report commands carry the round
+    they belong to, so the checkout answers the question the state file no longer can.
+    """
+    if not workspace:
+        return 0
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return 0
+    generation = 0
+    for request_id in re.findall(r"--request-id\s+(\S+)", document):
+        if "-worker-report-" not in request_id:
+            continue
+        suffix = request_id.rsplit("-", 1)[-1]
+        if suffix.isdigit():
+            generation = max(generation, int(suffix))
+    return generation
+
+
+def _spent_report_generations(task: dict[str, Any]) -> int:
+    """A floor under the generations this card has already spent, from its report markers.
+
+    Only for recovery, and only as a floor: every report on the board closed a round, so the round
+    running now is past all of them. Overshooting is harmless, because an unused generation costs
+    nothing; undershooting would hand a new round an id an earlier one already committed.
+    """
+    return sum(
+        1
+        for comment in task.get("comments") or []
+        if comment.get("marker") in {"report:done", "report:blocked"}
+    )
 
 
 def _report_adoption_baseline(task: dict[str, Any]) -> int:
