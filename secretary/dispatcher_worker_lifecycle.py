@@ -59,6 +59,15 @@ class WorkerContinuation:
     parked card opens the same transition and must carry the decision into the board move, which
     refuses to take a card out of Assessment without one.
     """
+    decision_body: str = ""
+    """What the observer actually instructed, frozen here with the generation this round opens.
+
+    The worker of the round has to follow the decision that opened it, so the text cannot be
+    re-read at document-build time: "the most recent decision comment" is a different question, and
+    a decision recorded while the round is already running would answer it and silently replace the
+    instruction the round was opened on. Reserved with `reserved_generation`, in the same immutable
+    transition, so the document and the round always name the same adjudication.
+    """
     session_held: bool = False
     """Whether a suspended session of this round is still there to be resumed.
 
@@ -152,7 +161,7 @@ class WorkerContinuation:
 
     def begin_red_transition(
         self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str,
-        decision: str = "", reserved_generation: int = 0,
+        decision: str = "", reserved_generation: int = 0, decision_body: str = "",
     ) -> None:
         """Record the red verdict before the board is moved.
 
@@ -183,6 +192,7 @@ class WorkerContinuation:
         self.verdict_outcome = verdict_outcome
         self.decision = decision
         self.reserved_generation = int(reserved_generation)
+        self.decision_body = decision_body
 
     def begin_delivery(self, phase: str, now: float) -> None:
         # `DELIVERY_PENDING` is allowed back in: a tick that died between the send and its
@@ -233,6 +243,7 @@ class WorkerContinuation:
         self.move_reason = ""
         self.verdict_outcome = ""
         self.decision = ""
+        self.decision_body = ""
         self.session_held = False
 
     def to_json(self) -> dict[str, Any]:
@@ -248,6 +259,7 @@ class WorkerContinuation:
             "move_reason": self.move_reason,
             "verdict_outcome": self.verdict_outcome,
             "decision": self.decision,
+            "decision_body": self.decision_body,
             "session_held": self.session_held,
         }
 
@@ -268,6 +280,9 @@ class WorkerContinuation:
             move_reason=str(value.get("move_reason") or ""),
             verdict_outcome=str(value.get("verdict_outcome") or ""),
             decision=str(value.get("decision") or ""),
+            # A transition written before the decision text was frozen carries none. Its round then
+            # renders the way it did when it was written: reviewer findings only.
+            decision_body=str(value.get("decision_body") or ""),
             # Records written before the session flag existed only ever reached a stage by
             # retaining one.
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),

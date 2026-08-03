@@ -643,6 +643,32 @@ count. A generation that skips or lags the card's comments does not blind the di
 report, and `review_baseline` is likewise only the comment index the next review verdict is read
 from and the round key of the reviewer's own verdict identity.
 
+### The observer decision a rework round is opened on
+
+A round opened by a `rework` decision is opened on that decision, and the worker of the round is
+handed it. The decision text is frozen where and when the round's generation is: written into the
+red transition's intent before the board moves, assigned to the record when the transition
+completes, and rendered into every `TASK.md` that round produces, the replacement head's and the
+retained head's alike. It is never looked up again at document-build time. "The most recent
+`decision:rework` comment on the card" is a different question, and a decision recorded after the
+round opened would answer it and silently replace the instruction the round is running under.
+
+In the document the decision comes first, under a heading that names it as the instruction to
+follow, and the reviewer's red body is kept below it as the context it was decided on. Where the two
+disagree the document says the decision wins, so a decision that accepts some findings and rejects
+others reads as exactly that. The prompt that wakes a retained worker names the decision as the
+authoritative instruction rather than only pointing at the file, because a conversation that is only
+sent back to a document ranks its sections itself.
+
+The assignment is unconditional, so nothing inherits: a round opened by a red mechanical gate
+carries no decision and its document reads as it did before this existed, and a gate-red round after
+a decided one does not get the earlier adjudication of a review its own code has already answered.
+A round opened with no decision behaves throughout as it always did.
+
+Like the generation, this is dispatcher state that a lost record recovers from the checkout: the
+decision is fenced in `TASK.md` by `<!-- observer-decision -->`, so an adopted card reads back what
+its live worker was told to follow instead of consulting the card's newer comments.
+
 ### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable worker session before
@@ -665,9 +691,10 @@ of opening the round. Nothing else moves a card to In progress for rework, and t
 transition always runs the same order, differing only in the phase it records:
 
 1. The red intent, with its phase, the baseline of the report it closes, the generation it reserves
-   for the round it opens and the reason the card is moving, goes to disk.
+   for the round it opens, the observer decision opening it if there is one, and the reason the card
+   is moving, goes to disk.
 2. The card moves.
-3. The reserved generation becomes the record's, and is persisted.
+3. The reserved generation and that decision become the record's, and are persisted.
 4. The delivery decision is made: a confirmed-suspended session takes the continuation, and
    anything else gets a confirmed stop and exactly one replacement. Either way the head is given a
    `TASK.md` written for the new generation before it is woken or launched.

@@ -32,6 +32,8 @@ from secretary.dispatcher_launcher import (
     wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
+    DECISION_CLOSE_MARKER,
+    DECISION_OPEN_MARKER,
     RED_REVIEW_CEILING,
     _gate_red_repeat_count,
     _last_gate_red_body,
@@ -42,6 +44,7 @@ from secretary.dispatcher_helpers import (
     _report_adoption_baseline,
     _review_adoption_baseline,
     _spent_report_generations,
+    _task_doc_decision,
     _task_doc_report_generation,
     _tail,
     _worker_id,
@@ -552,7 +555,9 @@ class CommandHostRuntime:
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
-            self._worker_task_doc(task, base, record.attempt_id, record.report_generation),
+            self._worker_task_doc(
+                task, base, record.attempt_id, record.report_generation, record.report_decision
+            ),
         )
         return self._launch(
             str(workspace),
@@ -1779,19 +1784,20 @@ class CommandHostRuntime:
             # touching a TASK.md or report body the resumed worker may already be using.
             return
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
-        # One generation, read once: the document the worker is sent back to and the prompt that
-        # sends it there name the same round because they are built from the same value, not
-        # because two call sites happen to compute the same number.
+        # One generation and one decision, read once: the document the worker is sent back to and
+        # the prompt that sends it there name the same round and the same adjudication because they
+        # are built from the same values, not because two call sites happen to agree.
         generation = record.report_generation
+        decision = record.report_decision
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
-            self._worker_task_doc(task, base, record.attempt_id, generation),
+            self._worker_task_doc(task, base, record.attempt_id, generation, decision),
         )
         try:
             if status.get("stopped"):
                 self._signal_head(record.worker_pid_file, signal.SIGCONT)
-            prompt = _continuation_prompt(continuation.phase, generation, task["ref"])
+            prompt = _continuation_prompt(continuation.phase, generation, task["ref"], decision)
             if adapter == "codex":
                 _deliver_tui_prompt(
                     record.handle, str(workspace), "TASK.md", run_json=self._run_json,
@@ -1874,7 +1880,10 @@ class CommandHostRuntime:
             "Report done or blocked with the command given in TASK.md. Do not commit TASK.md."
         )
 
-    def _worker_task_doc(self, task: dict[str, Any], base: str, attempt_id: str, generation: int = 0) -> str:
+    def _worker_task_doc(
+        self, task: dict[str, Any], base: str, attempt_id: str, generation: int = 0,
+        decision: str = "",
+    ) -> str:
         branch = _legacy_worker_branch(task["ref"])
         # The generation keeps the report request-id distinct per report round: a rework reuses the
         # same attempt_id, so without it the second done-report collides with the first and is
@@ -1897,8 +1906,40 @@ class CommandHostRuntime:
             task.get("description") or "(empty task description)",
             "",
         ]
+        decision = (decision or "").strip()
+        if decision:
+            # The decision is rendered above the findings it was made on, and named as the thing to
+            # follow. A round opened by an observer decision that only carried the reviewer's
+            # findings had workers repairing findings the observer had rejected and skipping the
+            # change it asked for (secretary-1064).
+            sections += [
+                "## Observer rework decision to follow",
+                "",
+                "The observer read the review that sent this card back and decided what this round",
+                "owes. That decision is the authoritative instruction for this round: follow it.",
+                "Where it and the reviewer findings below disagree, the decision wins. It may",
+                "accept some findings and reject others: do not change what it rejects, and do not",
+                "argue the findings it accepts. If it asks for something no reviewer raised, that",
+                "is part of this round too.",
+                "",
+                DECISION_OPEN_MARKER,
+                decision,
+                DECISION_CLOSE_MARKER,
+                "",
+            ]
         review_red = _last_review_red_body(task)
-        if review_red:
+        if review_red and decision:
+            sections += [
+                "## Reviewer findings, as supporting context (previous submission was RED)",
+                "",
+                "These are the findings the decision above was made on. They are context for it,",
+                "not the instruction: a finding the decision rejects or narrows is settled by the",
+                "decision, not by the wording here. Do NOT re-report the same commit unchanged:",
+                "",
+                review_red,
+                "",
+            ]
+        elif review_red:
             sections += [
                 "## Reviewer verdict to address (previous submission was RED)",
                 "",
@@ -3645,7 +3686,7 @@ class DispatcherRuntime:
     def _begin_red_transition(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
         payload: dict[str, Any], attempt_id: str, *, phase: str, move_reason: str,
-        verdict_outcome: str, decision: str = "",
+        verdict_outcome: str, decision: str = "", decision_body: str = "",
     ) -> dict[str, Any]:
         """The only way a card goes back to In progress for rework.
 
@@ -3664,10 +3705,13 @@ class DispatcherRuntime:
         # The round this transition opens is reserved here, with the intent and before the move.
         # Completion is idempotent only if the generation is a value it reads rather than one it
         # computes: a recovery that re-entered the completion would otherwise advance a second time
-        # and hand one rework round two generations.
+        # and hand one rework round two generations. The observer's instruction is frozen in the
+        # same write, for the same reason and against a second one: what the round is for cannot be
+        # re-read later from a card whose newest decision comment may have moved on.
         record.worker_continuation.begin_red_transition(
             phase, baseline, move_reason, verdict_outcome, decision,
             reserved_generation=record.report_generation + 1,
+            decision_body=decision_body,
         )
         records[ref] = record
         self.save_records(payload, records)
@@ -3722,6 +3766,11 @@ class DispatcherRuntime:
         record.report_generation = (
             continuation.reserved_generation or record.report_generation + 1
         )
+        # And the instruction that round is being opened on, taken from the same transition. Always
+        # assigned, never merged: a round opened by a red gate carries no decision, and inheriting
+        # the one that opened the round before it would hand a worker an adjudication of a review
+        # its own code has already answered.
+        record.report_decision = continuation.decision_body
         record.gate_state = ""
         record.gate_pending_since = 0.0
         # The round the verdict judged is over here. A park keeps the reviewed commit while the
@@ -4268,11 +4317,13 @@ class DispatcherRuntime:
             if unconfirmed is not None:
                 return unconfirmed
         # The findings themselves are not repeated here: the rework prompt reads the card's last
-        # red verdict directly, and a second copy on the move would drift from it.
+        # red verdict directly, and a second copy on the move would drift from it. The decision is
+        # different: it is what the round is for, so it is frozen with the round rather than looked
+        # up again when the document is built.
         return self._begin_red_transition(
             task, record, records, payload, attempt_id, phase="review",
             move_reason=f"Observer decision: rework. {reason}".strip(),
-            verdict_outcome="red", decision="rework",
+            verdict_outcome="red", decision="rework", decision_body=reason,
         )
 
     def _reslice_parked(
@@ -4645,6 +4696,10 @@ class DispatcherRuntime:
         report_generation = max(
             _task_doc_report_generation(workspace), _spent_report_generations(task) + 1
         )
+        # And the decision that round was opened on, from the same document. The card's newest
+        # decision comment is deliberately not consulted here: it answers "what has been decided
+        # since", which is the question that must not reach a running round.
+        report_decision = _task_doc_decision(workspace)
         return DispatcherRecord(
             worker=worker,
             workspace=workspace,
@@ -4655,6 +4710,7 @@ class DispatcherRuntime:
             comment_baseline=_report_adoption_baseline(task),
             review_baseline=review_baseline,
             report_generation=report_generation,
+            report_decision=report_decision,
             state=state,
             claimed_at=time.time(),
             # A reviewer only launches once the gate is green, so an adopted card already in review
@@ -4697,19 +4753,33 @@ def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
 
 
-def _continuation_prompt(phase: str, generation: int = 0, reference: str = "") -> str:
+def _continuation_prompt(
+    phase: str, generation: int = 0, reference: str = "", decision: str = ""
+) -> str:
     """What the resumed conversation is told. The updated TASK.md carries the detail; this names
-    which of the two red verdicts sent the card back, and which report round it opens.
+    which of the two red verdicts sent the card back, which report round it opens, and, when an
+    observer decision opened the round, that the decision outranks the findings.
 
     The generation is spelled out because the retained conversation still has the previous round's
     report command in its own scrollback. "Read the updated TASK.md" is exactly the instruction the
     incident worker did not follow; a number both the agent and a human reading the pane can
     compare makes a replayed command visibly the wrong one.
+
+    The decision is named for the same reason: a prompt that only points at a document leaves the
+    retained conversation to rank the document's sections itself, and a worker that read the
+    reviewer's findings as the instruction reworked findings the observer had rejected
+    (secretary-1064).
     """
     if phase == "review":
         cause, work = "The review verdict is red.", "address the findings"
     else:
         cause, work = "The mechanical validation gate returned red.", "fix the failure"
+    if decision.strip():
+        work = (
+            "follow the observer decision under \"Observer rework decision to follow\", which is "
+            "the authoritative instruction for this round and outranks the reviewer findings kept "
+            "below it as context"
+        )
     card = f" for {reference}" if reference else ""
     return (
         f"{cause} This opens report generation {generation}{card}. TASK.md at the workspace root "

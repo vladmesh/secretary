@@ -57,6 +57,12 @@ def red_review_count(task: dict[str, Any]) -> int:
     )
 
 
+# Fences around the observer decision in the worker's TASK.md. They delimit the decision text
+# exactly, so a record lost mid-round can read back what the live worker was told to follow rather
+# than guessing at a heading.
+DECISION_OPEN_MARKER = "<!-- observer-decision -->"
+DECISION_CLOSE_MARKER = "<!-- /observer-decision -->"
+
 _GATE_RED_PREFIX = "The mechanical validation gate is red"
 # Hidden marker line carrying the SHA-independent failure fingerprint (secretary-766): a visible
 # GitHub `detail` always contains the head SHA, which changes on every rework commit, so repeat
@@ -156,6 +162,29 @@ def _task_doc_report_generation(workspace: str) -> int:
         if suffix.isdigit():
             generation = max(generation, int(suffix))
     return generation
+
+
+def _task_doc_decision(workspace: str) -> str:
+    """The observer decision the worker in this checkout was actually handed, or "".
+
+    The same recovery as `_task_doc_report_generation`, for the same reason and from the same file:
+    the decision is frozen in dispatcher state, that state can be lost, and the document the live
+    worker is following is what still names the adjudication its round was opened on. Re-reading
+    the card's newest decision comment instead would be the defect this fence exists to close.
+    """
+    if not workspace:
+        return ""
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+    start = document.find(DECISION_OPEN_MARKER)
+    if start < 0:
+        return ""
+    end = document.find(DECISION_CLOSE_MARKER, start)
+    if end < 0:
+        return ""
+    return document[start + len(DECISION_OPEN_MARKER):end].strip()
 
 
 def _spent_report_generations(task: dict[str, Any]) -> int:
