@@ -221,6 +221,28 @@ class FakeKanboard:
         self.comments.setdefault(task_id, [])
         return sprint
 
+    def add_record(
+        self, task_id: int, reference: str, title: str, metadata: dict, *, closed: bool = False,
+    ) -> None:
+        """A Product or Issue row in the Pipeline's Issues column, as the real board carries it."""
+        self.tasks.append({
+            "id": task_id,
+            "reference": reference,
+            "title": title,
+            "description": "",
+            "column_id": 1,
+            "position": task_id,
+            "swimlane_id": 4,
+            "is_active": 0 if closed else 1,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        })
+        self.metadata[task_id] = dict(metadata)
+        self.comments[task_id] = []
+
+    def _pool(self, project_id: object) -> list[dict]:
+        return self.sprints if int(project_id or 0) == 8 else self.tasks
+
     def call(self, method: str, **params: object) -> object:
         self.calls.append((method, params))
         if method == "getProjectByName":
@@ -260,7 +282,173 @@ class FakeKanboard:
             return len(self.comments[int(params["task_id"])])
         if method == "getAllComments":
             return self.comments[int(params["task_id"])]
+        if method == "createTask":
+            # Sprint rows are written this way by `SprintWriter.create`: a row first, its
+            # reference last, which is the order the create's recovery depends on.
+            pool = self._pool(params.get("project_id"))
+            task_id = max(
+                [int(task["id"]) for task in self.tasks + self.sprints] + [11]
+            ) + 1
+            pool.append({
+                "id": task_id,
+                "reference": "",
+                "title": params.get("title", ""),
+                "description": params.get("description", ""),
+                "column_id": params.get("column_id", 1),
+                "position": len(pool) + 1,
+                "swimlane_id": params.get("swimlane_id", 0),
+                "date_creation": self.now,
+                "date_modification": self.now,
+            })
+            self.metadata[task_id] = {}
+            self.comments[task_id] = []
+            return task_id
+        if method == "updateTask":
+            task = next(
+                task for task in self.tasks + self.sprints
+                if int(task["id"]) == int(params["id"])
+            )
+            for field in ("reference", "title", "description"):
+                if field in params:
+                    task[field] = params[field]
+            self.now += 1
+            task["date_modification"] = self.now
+            return True
         raise AssertionError(method)
+
+
+# The head snapshot the sprint entity resolves a declared observer against. It is the
+# installation's own registry, not the dispatcher's catalog, and a sprint may not be opened on a
+# profile that is missing from it.
+SPRINT_HEAD_SNAPSHOT = "\n".join([
+    "resources:",
+    "  openai-sub:",
+    "    account: openai-subscription",
+    "  claude-sub:",
+    "    account: claude-subscription",
+    "profiles:",
+    "  codex-observer:",
+    "    adapter: codex",
+    "    resource: openai-sub",
+    "  claude-observer:",
+    "    adapter: claude",
+    "    resource: claude-sub",
+    "role_defaults:",
+    "  new_card: codex-observer",
+    "  reviewer: codex-observer",
+    "  observer: codex-observer",
+    "",
+])
+
+
+class TwoOpenSprintAdmission:
+    """Open the two sprints the pilot setting admits, through `SprintWriter.create` itself.
+
+    A dispatcher fixture reads sprint rows the way production does, so the rows it reads have to
+    be rows admission produced: the setting is written before either create, the products, issues
+    and project registry the create validates against are seeded, and the pair is disjoint on
+    product, reservation and repository with only one declared head, which is the one-observer
+    ceiling.  A scenario that needs a broken declaration corrupts the persisted value afterwards,
+    which is the only way a live installation reaches one.
+
+    Mixed into a fixture that owns `self.board` (a `FakeKanboard`) and `self.data_dir`.
+    """
+
+    FIRST = "sprint:1"
+    SECOND = "sprint:2"
+    # Two reserved projects each, so either sprint still has a card to claim once its first one
+    # is in flight.
+    RESERVATIONS = {FIRST: ["secretary", "fourth"], SECOND: ["other", "third"]}
+
+    def sprint_instance(self) -> Path:
+        """The installation directory the sprint entity validates and reads its limit from."""
+        return self.data_dir / "registry" / "instance"
+
+    def admit_two_open_sprints(self, *, observer: dict, second_observer: dict | None = None):
+        from secretary.sprint_observer import none_choice
+        from secretary.sprints import SprintReader, SprintWriter, instance_open_sprint_limit
+
+        instance = self.sprint_instance()
+        (instance / "projects").mkdir(parents=True, exist_ok=True)
+        for project in ("secretary", "other", "third", "fourth"):
+            (instance / "projects" / f"{project}.yaml").write_text(
+                f"id: {project}\n", encoding="utf-8",
+            )
+        (instance / "heads").mkdir(parents=True, exist_ok=True)
+        (instance / "heads" / "heads.yaml").write_text(SPRINT_HEAD_SNAPSHOT, encoding="utf-8")
+        # The setting is in force before either create runs: it is what the second one is
+        # admitted by, and admission reads it live.
+        (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")
+        self.assertEqual(instance_open_sprint_limit(instance), 2)
+        self.board.add_record(20, "product:secretary", "Secretary", {
+            "record_type": "product", "product_id": "secretary",
+            "product_projects": json.dumps(["secretary", "fourth"]),
+        })
+        self.board.add_record(21, "product:other", "Other", {
+            "record_type": "product", "product_id": "other",
+            "product_projects": json.dumps(["other", "third"]),
+        })
+        self.board.add_record(22, "issue:secretary", "Secretary issue", {
+            "record_type": "issue", "issue_product": "secretary", "issue_kind": "feature",
+            "issue_priority": "P1",
+        })
+        self.board.add_record(23, "issue:other", "Other issue", {
+            "record_type": "issue", "issue_product": "other", "issue_kind": "feature",
+            "issue_priority": "P1",
+        })
+        writer = SprintWriter(self.board, data_dir=self.data_dir, instance=instance)
+        roots = self.data_dir / "repos"
+        for reference, product, issue, request in (
+            (self.FIRST, "secretary", "issue:secretary", "admit-first-sprint"),
+            (self.SECOND, "other", "issue:other", "admit-second-sprint"),
+        ):
+            writer.create(
+                role="po", actor="operator", goal=f"goal of {reference}",
+                definition_of_done="done when the pair is proven",
+                reference=reference, product=product, issues=[issue],
+                projects=self.RESERVATIONS[reference],
+                repositories=[str(roots / product)],
+                observer=observer if reference == self.FIRST else (
+                    second_observer if second_observer is not None else none_choice()
+                ),
+                request_id=request,
+            )
+        self.assertEqual(
+            sorted(
+                sprint["ref"]
+                for sprint in SprintReader(self.board).list(statuses={"open"}, create=False)
+            ),
+            [self.FIRST, self.SECOND],
+        )
+        return writer
+
+    def sprint_row_id(self, reference: str) -> int:
+        return int(next(row for row in self.board.sprints if row["reference"] == reference)["id"])
+
+    def rewrite_observer(self, reference: str, value: str) -> None:
+        """Break the persisted declaration of an already-open sprint, as decay does."""
+        self.board.metadata[self.sprint_row_id(reference)]["sprint_observer"] = value
+
+    def link_pair_cards(self) -> None:
+        """One card of each sprint's two reserved projects, all Ready."""
+        self.board.metadata[12]["sprint_ref"] = self.FIRST
+        self.board.metadata[13]["project"] = "other"
+        self.board.metadata[13]["sprint_ref"] = self.SECOND
+        # `fourth-1` sits ahead of `third-1` in the claim order, so a tick that holds the first
+        # sprint back records the skip and the other sprint's claim in the same pass.
+        self.add_pair_card(14, "fourth-1", project="fourth", sprint=self.FIRST)
+        self.add_pair_card(15, "third-1", project="third", sprint=self.SECOND)
+
+    def add_pair_card(self, task_id: int, reference: str, *, project: str, sprint: str) -> None:
+        self.board.tasks.append({
+            "id": task_id, "reference": reference, "title": reference, "description": "spec",
+            "column_id": 2, "position": task_id, "swimlane_id": 4,
+            "date_creation": 1720000000, "date_modification": 1720000000,
+        })
+        self.board.metadata[task_id] = {
+            "project": project, "task_type": "code", "slug": reference, "sprint_ref": sprint,
+        }
+        self.board.comments[task_id] = []
 
 
 class FakeCatalog:
