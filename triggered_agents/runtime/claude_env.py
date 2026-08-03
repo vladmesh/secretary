@@ -5,8 +5,7 @@ folder trust ("do you trust this folder") and the onboarding theme picker ("choo
 style"). Both live as flags in `~/.claude.json`. A head stuck on either never reaches its skill
 and never renames its terminal tab away from the shell default, so title-based agent detection
 (`_agent_terminals` in runtime/dispatch.py) never recognizes it — it becomes a silent orphan,
-un-reused and un-reaped forever. Shared by runtime/dispatch.py (singleton driver) and
-agents/pipeline/worker.py (per-card worker heads) so both launch paths get the same prep.
+un-reused and un-reaped forever. Used by runtime/dispatch.py, the singleton terminal driver.
 """
 from __future__ import annotations
 

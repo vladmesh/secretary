@@ -30,8 +30,16 @@ def main(argv=None) -> int:
         print(f"triggered_agents: unknown agent {agent!r} (known: {', '.join(AGENTS)})", file=sys.stderr)
         return 2
     if rest and rest[0] == "dispatch":
-        # pipeline is the deterministic task dispatcher (no LLM head); everyone else uses the
-        # generic singleton terminal driver that keeps one warm claude terminal per agent.
+        # Every dispatchable agent here is an LLM head driven by the generic singleton terminal
+        # driver, which keeps one warm claude terminal per agent. Task dispatch itself is not one
+        # of them: it lives in `secretary/dispatcher_production.py`, on its own timer.
+        if agent == "pipeline":
+            # `pipeline` is a board CLI, not a head: its automation.toml ships no skill, so there
+            # is nothing to dispatch. Refuse instead of falling through into the terminal driver,
+            # which would fail on the missing skill.
+            print("triggered_agents: pipeline has no dispatch — it is the board CLI only "
+                  "(task dispatch lives in secretary/dispatcher_production.py)", file=sys.stderr)
+            return 2
         dispatch_args = rest[1:]
         cleanup_only = "--cleanup-only" in dispatch_args
         finalize = "--finalize" in dispatch_args
@@ -44,19 +52,6 @@ def main(argv=None) -> int:
                     generation = int(dispatch_args[gi + 1])
                 except ValueError:
                     generation = None
-        if agent == "pipeline":
-            # ta-gate.sh (triggered-agents-445) now sends `--cleanup-only` to EVERY agent on a
-            # precheck skip, pipeline included. The dispatcher has no terminal/PTY lifecycle at
-            # all -- `--cleanup-only` here must be the exact no-op a plain skip always was, NOT a
-            # full reconcile/advance/validate/claim tick (PR #95 review B1: this special case
-            # ignored the flag entirely and ran dispatcher.tick() regardless). `--finalize` is
-            # never appended to a pipeline launch command (dispatch.py only does that for an
-            # ephemeral singleton-terminal agent, which pipeline isn't), but treat it the same
-            # defensive way if it somehow arrives.
-            if cleanup_only or finalize or spawn_finalizer:
-                return 0
-            from .agents.pipeline import dispatcher
-            return dispatcher.tick()
         from .runtime import dispatch
         if spawn_finalizer:
             return dispatch.spawn_finalizer(agent, generation=generation)

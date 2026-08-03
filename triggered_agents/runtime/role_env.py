@@ -17,7 +17,6 @@ from .paths import PRODUCT_ENV, default_instance_path
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
-RUNTIME_ENV = Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
 
 
 def runtime_env_path() -> Path:
@@ -178,12 +177,6 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
                 f"runtime env for role {role!r} missing {names}; check provisioning/launcher"
             )
     return env
-
-
-def apply_runtime_env(role: str, *, env_file: Path | str | None = None, require: bool = True) -> None:
-    env = runtime_env(role, env_file=env_file, require=require)
-    os.environ.clear()
-    os.environ.update(env)
 
 
 def launch_binding() -> list[str]:

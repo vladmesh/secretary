@@ -1,26 +1,14 @@
-# Portable automation spec for the pipeline dispatcher.
+# Portable automation spec for the pipeline board CLI.
 #
-# Unlike the other agents, the dispatcher is deterministic — no LLM head. `dispatch` routes to
-# runtime code (agents/pipeline/dispatcher.tick), not the singleton claude terminal driver, so
-# there is no `skill`/`provider`: `secretary upgrade` installs only the systemd timer (the real
-# clock) and skips the vestigial Orca automation for a skill-less agent.
+# `pipeline` is not a scheduled agent: it has no LLM head and no tick of its own. The spec exists
+# so the role gets its own worktree and shows up in the agent inventory alongside the heads. Task
+# dispatch is secretary/dispatcher_production.py, on secretary-dispatcher-production.timer.
 
 name = "pipeline"
-dispatcher = true          # deterministic tick; no claude head, no Orca automation
-# Skip the tick when nothing is Ready and nothing is in flight. Gated in the systemd unit.
-precheck = "python3 -m triggered_agents pipeline precheck"
-
-[systemd]
-# The real scheduler on this headless box is secretary-dispatcher-production.timer. The dispatcher
-# tick is cheap after precheck, so a tight cadence (every 3 min) keeps latency low.
-calendar = "*:0/3:00 *:1/3:30"
-randomized_delay_sec = 20
-# The board credentials for the precheck and the tick are loaded by the agent gate through the
-# role-scoped runtime environment.
+dispatcher = true          # no skill, no head: `secretary upgrade` provisions no Orca automation
 
 [health]
-# Freshness budget for health.py's runs.jsonl check: named cadences ("hourly"/"daily") get a
-# built-in default there, but this agent's calendar is a raw 3-min OnCalendar expression, not one
-# of those names. 900s is 5x the tick period — enough slack for jitter/an occasional slow tick
-# without hiding a dead precheck for long.
+# Freshness budget for health.py's runs.jsonl check. Board writes come from whoever drives the
+# CLI (the production dispatcher, the steward, a head), not from a clock of this agent's own, so
+# the budget is deliberately loose.
 max_age_s = 900

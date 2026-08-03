@@ -31,9 +31,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import signals
-from ..pipeline import worker as pipeline_worker
+from ...runtime.redact import scrub_secrets
 from ...runtime.state import PRECHECK_SKIP
+from . import signals
 
 STATE = signals.STATE
 ROLE_SKILLS = Path(__file__).resolve().parents[3] / "scripts" / "role_skills.py"
@@ -89,7 +89,7 @@ def cmd_precheck() -> int:
     try:
         batch = signals.scan()
     except Exception as e:  # noqa: BLE001 — any precheck failure must be logged, not just KanboardError
-        scrubbed = pipeline_worker.scrub_secrets(str(e))
+        scrubbed = scrub_secrets(str(e))
         STATE.log_run("precheck", result="error", error_class=type(e).__name__, error=scrubbed)
         print(f"steward: precheck failed ({type(e).__name__}): {scrubbed}", file=sys.stderr)
         return 2

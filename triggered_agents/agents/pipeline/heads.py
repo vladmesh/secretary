@@ -3,9 +3,9 @@
 A worker/reviewer head is data (`[resources.*]` the accounts/limits heads draw from,
 `[profiles.*]` the runtime+model+resource+fallback-chain combos, `[role_defaults]` which head each
 role runs on), not a hardcoded `claude` invocation. `render_command` picks a profile's adapter
-(ADAPTERS below) and builds the shell command worker.py hands to `orca terminal create`. A new head
-is a new `[profiles.<id>]` entry plus, only if its launch shape is genuinely new, one more
-`_render_*` function here — dispatcher.py and worker.py never change.
+(ADAPTERS below) and builds the shell command the dispatcher hands to `orca terminal create`. A
+new head is a new `[profiles.<id>]` entry plus, only if its launch shape is genuinely new, one
+more `_render_*` function here — no caller changes.
 
 Which heads exist is installation configuration, not product code: the accounts, models and
 fallback chains one host pays for are not the ones another host has. So an installation that has
@@ -24,7 +24,6 @@ import json
 import os
 import shlex
 import tomllib
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -102,15 +101,6 @@ CODEX_EFFORTS = {
 }
 
 CODEX_LAUNCH_MODES = {"exec", "tui"}
-
-
-@dataclass(frozen=True)
-class LaunchSpec:
-    """A terminal create command plus an optional prompt delivered after the TUI is ready."""
-
-    command: str
-    initial_prompt: str | None = None
-    terminal_kind: str | None = None
 
 
 class HeadRegistryError(RuntimeError):
@@ -251,27 +241,6 @@ def _render_codex_tui(profile: dict, *, workspace: str | None = None) -> str:
     trust_flags = "".join(_codex_trust_flag(path) for path in _codex_tui_trust_paths(workspace))
     return (f"CODEX_HOME={home} codex --dangerously-bypass-approvals-and-sandbox"
             f"{model_flag}{effort_flag}{trust_flags}")
-
-
-def _env_codex_mode() -> str | None:
-    mode = os.environ.get("TA_CODEX_MODE")
-    if mode:
-        mode = mode.strip().lower()
-        if mode not in CODEX_LAUNCH_MODES:
-            known = ", ".join(sorted(CODEX_LAUNCH_MODES))
-            raise HeadRegistryError(f"unknown TA_CODEX_MODE {mode!r} (known: {known})")
-        return mode
-    flag = os.environ.get("TA_CODEX_TUI")
-    if flag is None:
-        return None
-    flag = flag.strip().lower()
-    if flag in {"", "0", "false", "no", "off"}:
-        return "exec"
-    return "tui"
-
-
-def _codex_launch_mode(profile: dict) -> str:
-    return _env_codex_mode() or profile.get("codex_mode", "exec")
 
 
 ADAPTERS = {
@@ -501,31 +470,3 @@ def render_command(profile_id: str, *, role: str, prompt: str, registry: Registr
     profile = reg.profile(profile_id)
     render = ADAPTERS[profile["adapter"]]
     return role_env.wrap_shell_command(role, render(profile, prompt=prompt))
-
-
-def render_launch(profile_id: str, *, role: str, prompt: str, workspace: str | None = None,
-                  registry: Registry | None = None) -> LaunchSpec:
-    """Launch contract for worker/reviewer terminals.
-
-    Most adapters are single-command batch launches. Codex can opt into TUI mode through
-    `codex_mode = "tui"` or `TA_CODEX_MODE=tui`: the terminal starts plain `codex`, waits for
-    `tui-idle`, then receives `prompt` through `orca terminal send`.
-    """
-    reg = registry or load_registry()
-    profile = reg.profile(profile_id)
-    if profile["adapter"] == "codex" and _codex_launch_mode(profile) == "tui":
-        return LaunchSpec(
-            command=role_env.wrap_shell_command(role, _render_codex_tui(profile, workspace=workspace)),
-            initial_prompt=prompt,
-            terminal_kind="codex-tui",
-        )
-    return LaunchSpec(command=render_command(profile_id, role=role, prompt=prompt, registry=reg))
-
-
-def terminal_kind(profile_id: str, *, registry: Registry | None = None) -> str | None:
-    """The tracked Orca terminal kind this profile expects, or None for legacy batch sessions."""
-    reg = registry or load_registry()
-    profile = reg.profile(profile_id)
-    if profile["adapter"] == "codex" and _codex_launch_mode(profile) == "tui":
-        return "codex-tui"
-    return None

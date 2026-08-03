@@ -70,10 +70,6 @@ More invariants, all from PR #95 review rounds (triggered-agents-445):
     precheck-skip stays the exact zero-side-effect no-op it always was, and a shared gate calling
     `--cleanup-only` on every skip can never turn their quiet tick into a lock-contention
     `SystemExit` (round 2 review B2, hardened round 5 review B1).
-    `triggered_agents/__main__.py`'s `pipeline` special case (a deterministic dispatcher with no
-    terminal at all) treats `--cleanup-only` the same way, never calling `dispatcher.tick()`
-    (round 2 review B1) — a shared gate script means every agent it dispatches to, including a
-    skill-less deterministic one, must understand the flag as "there is nothing to do here".
   * Every "stop, then create" path (watchdog-restart, ephemeral-restart, red-fallback) verifies
     the stop actually worked via `_stop_and_confirm` — re-listing terminals rather than trusting
     `terminal stop`'s exit code — before spawning the replacement, and bails without creating if

@@ -20,7 +20,8 @@ import os
 import time
 
 from ...runtime.kanboard import KanboardError, call, call_batch
-from . import heads, model, naming, worker
+from ...runtime.redact import scrub_secrets
+from . import heads, model, naming
 from .state import STATE
 
 
@@ -375,15 +376,14 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
     meaningful) for that Ready path.
 
-    `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); when
-    omitted, claim falls back to a transliterated slug of the title (naming.fallback_slug) so an
-    old/manual card without one still claims fine. `head`, when given, must name a profile in
+    `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); a card
+    created without one carries no slug metadata. `head`, when given, must name a profile in
     heads.toml (checked before anything is written); omitted, the card gets heads.DEFAULT_PROFILE
     at bring-up. `review_head`, when given, must name a profile, except the reserved PO-only
     value `none`, which disables Validate layer 3 for this card. Omitted means Validate uses
     heads.reviewer_head(). `base_branch`, when given, overrides the project's manifest base_branch
-    for this card only (worker.resolve_base_branch); omitted, bring-up falls back to the manifest
-    lookup exactly as before this field existed.
+    for this card only; omitted, bring-up falls back to the manifest lookup exactly as before
+    this field existed.
 
     `role="steward"` scrubs title/description the same way add_comment does for steward — the
     escalation/idea path SKILL.md sends steward through (create in Ready, or file an Idea then move to
@@ -438,8 +438,8 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     if role == "worker":
         _check_worker_continuation(project, column, blocked_by, own_ref)
     if role == "steward":
-        title = worker.scrub_secrets(title)
-        description = worker.scrub_secrets(description)
+        title = scrub_secrets(title)
+        description = scrub_secrets(description)
     pid = board_id()
     col_id = _column_id(pid, column)
     sw_id = _ensure_swimlane(pid, project)
@@ -482,8 +482,8 @@ def create_report_card(project: str, title: str, slug: str, description: str = "
     """
     if not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
-    title = worker.scrub_secrets(title)
-    description = worker.scrub_secrets(description)
+    title = scrub_secrets(title)
+    description = scrub_secrets(description)
     pid = board_id()
     col_id = _column_id(pid, model.IN_PROGRESS)
     sw_id = _ensure_swimlane(pid, project)
@@ -565,12 +565,12 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
 
     The claim persists across In progress<->Validate rework (the worker session still owns
     the card) and resets on arrival in Ready — from Blocked (a human's manual recovery) or from
-    In progress (the dispatcher's own watchdog auto-retry requeue, model TRANSITIONS["dispatcher"])
-    — to the unclaimed/fresh-retry-budget defaults (empty string; every guard that reads these
-    checks truthiness, so empty means "unset"). A human recovering a Blocked card this way gets a
-    full watchdog retry budget again, same as a brand new card; a watchdog requeue's own caller
-    (dispatcher._watchdog_retry) restates the real counters (and, on a head switch, the new head)
-    right after via set_retry_state, so this reset is never the last write for that path.
+    In progress (a watchdog auto-retry requeue, model TRANSITIONS["dispatcher"]) — to the
+    unclaimed/fresh-retry-budget defaults (empty string; every guard that reads these checks
+    truthiness, so empty means "unset"). A human recovering a Blocked card this way gets a full
+    watchdog retry budget again, same as a brand new card; a watchdog requeue's own caller is
+    expected to restate the real counters right after, so the reset is never the last write for
+    that path.
 
     A non-empty `reason` is posted as a comment after any successful move. The Blocked->Done
     override keeps its [steward:blocked-done] marker and still requires a reason. Steward's manual
@@ -632,48 +632,6 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     elif reason_text:
         add_comment(role, reference, reason)
     return {"action": "moved", "reference": reference, "from": cur, "to": to_column}
-
-
-def get_metadata(reference: str) -> dict:
-    """Raw metadata dict for `reference` — used by the watchdog retry path (dispatcher.
-    _watchdog_retry) to read retry_same/retry_switch/retry_heads without show_card's extra
-    getAllComments fetch."""
-    task = _get_by_ref(reference)
-    return call("getTaskMetadata", task_id=int(task["id"])) or {}
-
-
-def set_retry_state(reference: str, *, retry_same: int, retry_switch: int, retry_heads: str,
-                    head: str | None = None) -> dict:
-    """Dispatcher-only: stamp the watchdog retry counters (model.META_RETRY_*) on a card, and its
-    head too when a switch just picked a new one. Always called right after move_card(..., 'Ready')
-    during a watchdog retry — that move already reset these fields to defaults; this restates the
-    real values on top, in the same tick, so the reset is never the last write."""
-    task = _get_by_ref(reference)
-    values = {
-        model.META_RESOLVED_HEAD: "",
-        model.META_RETRY_SAME: str(retry_same),
-        model.META_RETRY_SWITCH: str(retry_switch),
-        model.META_RETRY_HEADS: retry_heads,
-    }
-    if head is not None:
-        values[model.META_HEAD] = head
-    call("saveTaskMetadata", task_id=int(task["id"]), values=values)
-    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
-    _sync_head_tags(board_id(), int(task["id"]), meta)
-    return {"action": "retry-state", "reference": reference, **values}
-
-
-def set_resolved_review_head(reference: str, review_head: str) -> dict:
-    """Dispatcher-only: stamp the reviewer profile actually spawned after health fallback."""
-    if review_head != model.NO_REVIEW_HEAD:
-        _check_review_head(review_head)
-    pid = board_id()
-    task = _get_by_ref(reference)
-    values = {model.META_RESOLVED_REVIEW_HEAD: review_head}
-    call("saveTaskMetadata", task_id=int(task["id"]), values=values)
-    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
-    _sync_head_tags(pid, int(task["id"]), meta)
-    return {"action": "resolved-review-head", "reference": reference, **values}
 
 
 def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | None = None) -> dict:
@@ -772,13 +730,13 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
 
 def add_comment(role: str, reference: str, body: str, marker: str | None = None) -> dict:
     """Post a comment as `[marker or role]\\n<body>`; user_id=0 (app-token author). Scrubbed for
-    steward specifically (worker.scrub_secrets), same as the reviewer's verdict/reviewer_idea:
+    steward specifically (runtime.redact.scrub_secrets), same as the reviewer's verdict/reviewer_idea:
     steward reads more raw system surface than any other role (transcripts, journalctl, env
     files) and could quote a secret by accident (2026-07-04 review, triggered-agents-244 remark
     Z1). Every other role keeps its body verbatim, unchanged from before."""
     task = _get_by_ref(reference)
     tag = marker or role
-    text = worker.scrub_secrets(body) if role == "steward" else body
+    text = scrub_secrets(body) if role == "steward" else body
     call("createComment", task_id=int(task["id"]), user_id=0, content=f"[{tag}]\n{text}")
     return {"action": "commented", "reference": reference, "marker": tag}
 
@@ -816,7 +774,7 @@ def verdict(reference: str, kind: str, body: str = "") -> dict:
     if kind == "red" and not body.strip():
         raise model.GuardError("a red verdict requires a non-empty body (the blocker findings)")
     marker = model.MARKER_REVIEW_GREEN if kind == "green" else model.MARKER_REVIEW_RED
-    out = add_comment("reviewer", reference, worker.scrub_secrets(body), marker=marker)
+    out = add_comment("reviewer", reference, scrub_secrets(body), marker=marker)
     out["action"] = "verdict"
     out["kind"] = kind
     return out
@@ -829,8 +787,8 @@ def reviewer_idea(project: str, title: str, description: str = "", task_type: st
     code-creation exception). Title and description are scrubbed for the same reason as a verdict.
     The card goes to the board's first column; _proposal_column resolves it."""
     return _create_proposal_card(project=project, task_type=task_type,
-                                 title=worker.scrub_secrets(title),
-                                 description=worker.scrub_secrets(description),
+                                 title=scrub_secrets(title),
+                                 description=scrub_secrets(description),
                                  ref=ref, head=head, slug=slug)
 
 
@@ -842,8 +800,8 @@ def retro_idea(project: str, title: str, description: str = "", task_type: str =
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
     return _create_proposal_card(project=project, task_type=task_type,
-                                 title=worker.scrub_secrets(title),
-                                 description=worker.scrub_secrets(description),
+                                 title=scrub_secrets(title),
+                                 description=scrub_secrets(description),
                                  ref=ref, head=head, slug=slug)
 
 
@@ -857,8 +815,8 @@ def steward_idea(project: str, title: str, description: str = "", task_type: str
     steward move it on to Blocked or Ready afterwards.
     """
     return _create_proposal_card(project=project, task_type=task_type,
-                                 title=worker.scrub_secrets(title),
-                                 description=worker.scrub_secrets(description),
+                                 title=scrub_secrets(title),
+                                 description=scrub_secrets(description),
                                  ref=ref, head=head, slug=slug)
 
 

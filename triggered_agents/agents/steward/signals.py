@@ -330,8 +330,8 @@ def _active_card_id_prefixes(project: str) -> set[str]:
     matching against cards.json would flag every one of those as a false-positive orphan
     (2026-07-04 review, triggered-agents-244 blocker B1). The board itself, not the dispatcher's
     local cache, is the source of truth for "does an active card still own this workspace" — a
-    dedup suffix (naming.dedupe: `<id>-<slug>-2`) still starts with the plain `<id>-` prefix, so
-    prefix match survives that without needing the exact slug/dedupe count."""
+    dedup suffix on a re-claim (`<id>-<slug>-2`) still starts with the plain `<id>-` prefix, so
+    prefix match survives that without needing the exact slug or dedup count."""
     prefixes = set()
     for card in pipeline_ops.list_cards(project=project):
         cid = pipeline_naming.card_id(card["reference"])
@@ -340,8 +340,8 @@ def _active_card_id_prefixes(project: str) -> set[str]:
     return prefixes
 
 
-# Only names the pipeline itself would have produced (naming.worker_workspace_base /
-# reviewer_workspace_base, `<id>-<slug>` / `review-<id>-<slug>`) are orphan candidates. A human
+# Only names the pipeline itself would have produced (`<id>-<slug>` for a worker workspace,
+# `review-<id>-<slug>` for a reviewer one) are orphan candidates. A human
 # freely creates worktrees under the same project directory by hand (2026-07-04:
 # dnd-simulator/hook-path-filter etc., live sessions with uncommitted work) — those carry no
 # card-id prefix by construction, so flagging every non-matching name woke the steward on each

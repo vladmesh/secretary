@@ -6,15 +6,13 @@ from — red is a property of the resource, not of any one profile, so a card wh
 profile sits on a red resource can still claim onto a fallback profile that draws from a
 *different*, green resource (`resolve_head`), and a worker already running on a red-resource
 profile has its watchdog clock frozen rather than mistaken for a dead head (`resource_of`, used
-by dispatcher._advance).
+by the dispatcher when it advances a card).
 
-`refresh` is the only thing that ever runs a probe. It is meant to be called once per tick (from
-precheck, which runs unconditionally every timer fire, and again from tick() for the rare case a
-resource's TTL lapsed between the two) — probes cost real tokens/quota, so the TTL cache
-(`PROBE_TTL_S`, ~5 min) is what keeps that cost to "once per window", not "once per 3-min tick".
-Cache lives in a JSON file (state/pipeline/resource_health.json), not in memory: precheck and
-tick are two separate `python3 -m triggered_agents` processes per timer fire (via
-deploy/ta-gate.sh), so nothing survives in-process between them.
+`refresh` is the only thing that ever runs a probe, and it is meant to be called once per tick —
+probes cost real tokens/quota, so the TTL cache (`PROBE_TTL_S`, ~5 min) is what keeps that cost
+to "once per window", not "once per tick". Cache lives in a JSON file
+(state/pipeline/resource_health.json), not in memory: the callers are separate short-lived
+processes, so nothing survives in-process between them.
 
 A resource's red<->green flip is logged to runs.jsonl (`head-health`) exactly once per flip, not
 on every re-probe of an unchanged status — a resource pinned red for hours must not spam the log
@@ -287,46 +285,6 @@ def resolve_head(preferred: str, statuses: dict[str, str],
     return None
 
 
-def next_retry_head(current: str, tried: set[str], statuses: dict[str, str],
-                    registry: heads_mod.Registry | None = None) -> tuple[str | None, bool]:
-    """The next profile for a watchdog retry-switch to land `current` on: breadth-first over
-    `current`'s own fallback chain (same walk as resolve_head), skipping anything already in
-    `tried` (every head this card's watchdog has already used this life, `current` included) and
-    any red resource. Returns (head, False) on a hit.
-
-    A miss carries a second flag distinguishing why, so dispatcher._watchdog_retry can tell "spend
-    the switch budget's one shot on nothing" from "there's a real target, just not up right now":
-      (None, True)  nothing untried left to try at all (empty/exhausted chain, or `current` itself
-                    unknown to the registry) — stop retrying, nothing here will ever turn green.
-      (None, False) untried candidates exist but every one sits on a red resource right now —
-                    requeue without spending the budget; the next claim's own red-skip
-                    (_claim_next/resolve_head) picks the card up once a resource recovers."""
-    reg = registry or heads_mod.load_registry()
-    try:
-        queue = list(reg.profile(current).get("fallback") or [])
-    except heads_mod.HeadRegistryError:
-        return None, True
-    visited = {current}   # cycle guard only — a tried-but-not-visited node's OWN fallback is still
-                          # worth walking, it may lead to something genuinely untried further out
-    found_untried = False
-    while queue:
-        pid = queue.pop(0)
-        if pid in visited:
-            continue
-        visited.add(pid)
-        try:
-            prof = reg.profile(pid)
-        except heads_mod.HeadRegistryError:
-            continue
-        queue.extend(prof.get("fallback") or [])
-        if pid in tried:
-            continue
-        found_untried = True
-        if statuses.get(prof["resource"], GREEN) == GREEN:
-            return pid, False
-    return None, not found_untried
-
-
 # Real, cheap probes for the builtin resources this repo names in heads.toml. Deliberately
 # not resource-id-dispatched inside `refresh`/`_run_probe_cmd` above (those stay pure "run this
 # shell command" — heads.toml's `probe` field is the single source of what each resource runs);
@@ -464,12 +422,8 @@ BUILTIN_PROBE_RESULTS = {
 
 
 def run_builtin_probe_result(resource_id: str) -> ProbeResult:
-    return BUILTIN_PROBE_RESULTS[resource_id]()
-
-
-def run_builtin_probe(resource_id: str) -> bool:
     """Dispatch to the real check for `resource_id` — the thing heads.toml's `probe = "python3 -m
     triggered_agents pipeline probe --resource <id>"` command actually runs. Raises KeyError for
     an id with no builtin (a resource that only ever needs "true"/"false" has no reason to go
     through this CLI at all)."""
-    return run_builtin_probe_result(resource_id).ok
+    return BUILTIN_PROBE_RESULTS[resource_id]()

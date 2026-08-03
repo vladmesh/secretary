@@ -1,8 +1,7 @@
 """Mechanical validation gate (secretary-633): the cheap-to-expensive layer 1 the pilot
 dispatcher runs between worker-done and the LLM reviewer, and again right before a merge.
 
-Ported from triggered_agents/agents/pipeline/validate.py (layer 1). A project declares where its
-gate runs through its adapter's `validation.ci`:
+A project declares where its gate runs through its adapter's `validation.ci`:
 
   local  — run `validation.command` in the worker workspace; exit 0 is green, non-zero is red.
   github — publish the worker branch, ensure an open PR into the project's base branch (so the

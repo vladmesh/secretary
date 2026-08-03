@@ -79,11 +79,11 @@ TASK_TYPES = ("code", "research")
 #   resolved_review_head reviewer profile id actually selected when Validate layer 3 spawns after
 #                health fallback. Empty means no active/current reviewer profile.
 #   claim        worker/workspace id, set by the claim command
-#   slug         short [a-z0-9-]{1,30} tag naming the card's worker/reviewer workspace; a card
-#                without one (old/manual) falls back to a transliterated slug of its title
-#   base_branch  overrides the project's manifest base_branch for this card only (worker.
-#                resolve_base_branch): worktree bring-up and PR/merge target both use it instead
-#                of the manifest default. Empty -> manifest base_branch (default main), unchanged
+#   slug         short [a-z0-9-]{1,30} tag naming the card's worker/reviewer workspace; an old
+#                or hand-made card can carry none
+#   base_branch  overrides the project's manifest base_branch for this card only: worktree
+#                bring-up and PR/merge target both use it instead of the manifest default.
+#                Empty -> manifest base_branch (default main), unchanged
 #                from before this field existed. For sprint shim projects (dnd-simulator): cards
 #                of one sprint all carry base_branch=sprint/NNN-slug so main stays closed until
 #                the sprint's own closing PR.
@@ -177,76 +177,22 @@ STEWARD_OVERRIDE = ("Blocked", "Done")
 # META_STEWARD_REPORT (ops.move_card checks metadata before allowing it) — see module docstring.
 STEWARD_REPORT_DONE = ("In progress", "Done")
 
-# Comment markers, single source of truth for ops (and, later, the dispatcher reading back):
-#   [report:done] / [report:blocked]  worker report
+# Comment markers, single source of truth for ops:
+#   [report:done]                     worker report
 #   [feedback]                        worker's feedback on the spec/process, harvested by retro
 #   [review:green] / [review:red]     the layer-3 reviewer's verdict
 #   [<role>]                          plain comment
 MARKER_REPORT_DONE = "report:done"
-MARKER_REPORT_BLOCKED = "report:blocked"
 MARKER_FEEDBACK = "feedback"
-# Dispatcher verdicts on a Validate card's CI (layer 1). ci-green marks "layer 1 passed, running
-# the review" — posted once per code state (the dispatcher checks the comments after the card's
-# current baseline before posting, so a rework that re-enters Validate gets a fresh note).
-MARKER_VALIDATE_GREEN = "validate:ci-green"
-MARKER_VALIDATE_RED = "validate:ci-red"
-# Dispatcher verdicts on the stand run (Validate layer 2: deploy the PR branch to the project's
-# persistent stand and run e2e). Only for projects with a [stand] manifest section. stand-green
-# marks "layer 2 passed", posted once per code state; layer 3 (the reviewer) runs after it.
-# stand-red is posted per failed run; two consecutive stand failures send the card to Blocked
-# (one auto-retry).
-MARKER_STAND_GREEN = "validate:stand-green"
-MARKER_STAND_RED = "validate:stand-red"
-# The layer-3 reviewer's verdict (Validate layer 3: an independent LLM head, not the worker, reads
-# the whole repo + PR and posts one verdict). green = all layers clear, the card waits for a human
-# merge. red = at least one blocker in any lens; the dispatcher returns the card to In progress
-# with a nudge, up to a cap of returns (then Blocked for a human).
+# The layer-3 reviewer's verdict: an independent LLM head, not the worker, reads the whole repo +
+# PR and posts one verdict. green = the card waits for a human merge. red = at least one blocker
+# in any lens, and the card goes back for rework.
 MARKER_REVIEW_GREEN = "review:green"
 MARKER_REVIEW_RED = "review:red"
-# Posted once when a stand-project card's green review triggers the dispatcher's own squash merge
-# (all three gates — CI, stand-green, review:green — cleared, on the decision that a live-stand
-# end-to-end run is enough assurance to drop the human from the merge for those projects).
-MARKER_AUTOMERGE = "validate:automerge"
-# The dispatcher's own note when a red verdict sends a card back for rework. Deliberately NOT a
-# review:* marker: the invariant "only the reviewer posts a verdict" must not hinge on baseline
-# arithmetic — if this carried [review:red] and any baseline shift re-read it, the card would loop.
-MARKER_REVIEW_RETURN = "validate:review-return"
-# Dispatcher audit note when a PO set review_head=none and Validate skips only layer 3.
-MARKER_REVIEW_SKIPPED = "validate:review-skipped"
-# Posted once after a successful claim/bring-up, when the worker workspace and head are live.
-MARKER_CLAIM_STARTED = "claim:started"
-# Posted once when validating a single card blows up unexpectedly (e.g. a base workspace.toml that
-# won't parse). The failure is localized to that card — the tick keeps going for the others.
-MARKER_VALIDATE_ERROR = "validate:error"
-# A watchdog auto-retry requeue (same head or a head switch) on an In-progress card — see
-# dispatcher._watchdog_retry. Never posted on the terminal Blocked (budget exhausted): that one
-# stays a plain [dispatcher] comment, same as before this marker existed.
-MARKER_WATCHDOG_RETRY = "watchdog:retry"
 # The steward's justification for a Blocked->Done override (STEWARD_OVERRIDE), posted by
 # ops.move_card in the same call as the move itself — never a bare [steward] comment, so the
 # reason a card skipped review is always attached to the transition that needed it.
 MARKER_STEWARD_OVERRIDE = "steward:blocked-done"
-
-
-def merge_status(mergeable: str | None, merge_state: str | None) -> str:
-    """Normalize GitHub's two mergeability axes into one base-freshness signal, kept apart from the
-    CI rollup (triggered-agents-442). `mergeable` (MERGEABLE/CONFLICTING/UNKNOWN) answers "is there
-    a textual conflict"; `mergeStateStatus` (CLEAN/BEHIND/DIRTY/BLOCKED/UNSTABLE/UNKNOWN) answers
-    "how does the head sit against the base". Only two states drive recovery: CONFLICTING (a real
-    text conflict, DIRTY is its mergeStateStatus twin) and BEHIND (base moved ahead, no conflict —
-    a clean auto-update). CLEAN and a still-computing UNKNOWN both fall through to the ordinary CI
-    path: a transient UNKNOWN (GitHub hasn't finished recomputing mergeability right after a push)
-    is never treated as a conflict nor as a green state. Pure domain logic, so it lives here rather
-    than in worker.py's host boundary and both poll_pr and merge_recovery read it."""
-    mergeable = (mergeable or "").upper()
-    merge_state = (merge_state or "").upper()
-    if mergeable == "CONFLICTING" or merge_state == "DIRTY":
-        return "CONFLICTING"
-    if not mergeable or mergeable == "UNKNOWN" or merge_state == "UNKNOWN":
-        return "UNKNOWN"
-    if merge_state == "BEHIND":
-        return "BEHIND"
-    return "CLEAN"
 
 
 class GuardError(RuntimeError):
