@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_state import request_token
+from secretary.dispatcher_state import attempt_request_id, request_token
 
 _ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
 _BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
@@ -116,34 +116,52 @@ _REPORT_ACTIONS = (
 )
 
 
-def _round_report_marker(audit: Any, reference: str, generation: int) -> str | None:
+def _round_report_ids(workspace: str, attempt_id: str, reference: str, generation: int) -> set[str]:
+    """The report request ids this round issued: the exact commands its worker was handed.
+
+    Every one of them is unique to the round. The attempt is in there, so a later attempt on the
+    same card never inherits an earlier one's reports, and so is the generation, so a later round of
+    one attempt never inherits an earlier round's.
+
+    The checkout answers first, because the document is what the live worker is holding and the
+    dispatcher's own attempt id may have moved under it: a record that was lost and re-adopted gets
+    a fresh attempt id while the worker keeps reporting through the commands it was given. Only ids
+    that name the open generation are taken from it, so a document that is a round behind, a
+    generation persisted and the tick that rewrites the document lost, cannot hand back the previous
+    round's ids. What the dispatcher would issue itself is the fallback for a checkout it cannot
+    read.
+    """
+    from_document = {
+        request_id for request_id in _task_doc_report_request_ids(workspace)
+        if request_id.endswith(f"-{request_token(reference)}-{generation}")
+    }
+    if from_document:
+        return from_document
+    return {
+        attempt_request_id(attempt_id, action, reference, str(generation))
+        for action in _REPORT_ACTIONS
+    }
+
+
+def _round_report_marker(audit: Any, reference: str, round_ids: set[str]) -> str | None:
     """The marker of a report that belongs to this round, or None if the round has none yet.
 
-    A round ends only on a marker for the generation that is open, and the marker on the board
-    cannot answer that on its own: the comment is `[report:done]` whoever wrote it and for whichever
-    round. What names the round is the request id the dispatcher issued for it, and the audit keeps
-    that beside the marker, so the round is read from there rather than from the card's comments. A
+    A round ends only on a marker for the round that is open, and the marker on the board cannot
+    answer which round that is: the comment is `[report:done]` whoever wrote it and for whichever
+    round. What names the round is the request id its command carried, and the audit keeps that
+    beside the marker, so the round is read from there rather than from the card's comments. A
     report filed under any other id records nothing of this round: not a command from a round that
-    is over, and not an id a head invented for itself.
+    is over, not one from an earlier attempt on this card, and not an id a head invented for itself.
 
-    Only the action, the card and the generation are compared, never the attempt. A dispatcher that
-    lost its record re-adopts the card and recovers the generation from the document its live worker
-    is holding, and the ids in that document still name the attempt that handed them out.
-
-    A staged event counts as much as a committed one. The board comment is written before the audit
-    event is appended, so a report whose call died in between is a report that happened; reading
-    only committed events would leave the card waiting for a marker already on the card.
+    Committed events only. `TaskWriter` stages its event before it writes the comment, so a staged
+    event is a report that may not be on the board at all yet; consuming one would end the round on
+    a call that had not happened. A report whose audit append failed after its comment landed is
+    repaired by retrying the same command or by `reconcile`, and until then the round is unreported,
+    which is a state the wait watchdog already bounds.
     """
-    suffixes = tuple(
-        f"-{action}-{request_token(reference)}-{generation}" for action in _REPORT_ACTIONS
-    )
-    pending = [
-        event for event in audit.pending_events()
-        if event.get("kind") == "reported" and event.get("ref") == reference
-    ]
     marker = None
-    for event in [*audit.events(reference, kind="reported"), *pending]:
-        if not str(event.get("request_id") or "").endswith(suffixes):
+    for event in audit.events(reference, kind="reported"):
+        if str(event.get("request_id") or "") not in round_ids:
             continue
         candidate = (event.get("payload") or {}).get("marker")
         if candidate in WORKER_REPORT_MARKERS:
@@ -182,6 +200,25 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
     return baseline
 
 
+def _task_doc_report_request_ids(workspace: str) -> list[str]:
+    """The report request ids in this checkout's `TASK.md`, in document order.
+
+    This is what the live worker is holding, which is the only durable record of a round's identity
+    outside the dispatcher's own state: the ids name the attempt that handed them out and the round
+    they belong to, and the document survives everything the state file does not.
+    """
+    if not workspace:
+        return []
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return []
+    return [
+        request_id for request_id in re.findall(r"--request-id\s+(\S+)", document)
+        if "-worker-report-" in request_id
+    ]
+
+
 def _task_doc_report_generation(workspace: str) -> int:
     """The report generation the worker in this checkout was actually handed, or 0.
 
@@ -189,16 +226,8 @@ def _task_doc_report_generation(workspace: str) -> int:
     not lost is the document the live worker is working from: its report commands carry the round
     they belong to, so the checkout answers the question the state file no longer can.
     """
-    if not workspace:
-        return 0
-    try:
-        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return 0
     generation = 0
-    for request_id in re.findall(r"--request-id\s+(\S+)", document):
-        if "-worker-report-" not in request_id:
-            continue
+    for request_id in _task_doc_report_request_ids(workspace):
         suffix = request_id.rsplit("-", 1)[-1]
         if suffix.isdigit():
             generation = max(generation, int(suffix))

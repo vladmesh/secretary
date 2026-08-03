@@ -36,6 +36,7 @@ from secretary.dispatcher_helpers import (
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
+    _round_report_ids,
     _round_report_marker,
     _last_marker_body,
     _last_review_red_body,
@@ -2954,7 +2955,11 @@ class DispatcherRuntime:
         # The round the dispatcher is holding, not merely the last report marker on the card: a
         # marker is attributed to a round through the request id its command carried, which is what
         # the audit keeps (secretary-1063).
-        marker = _round_report_marker(self.audit, ref, record.report_generation)
+        marker = _round_report_marker(
+            self.audit,
+            ref,
+            _round_report_ids(record.workspace, record.attempt_id or attempt_id, ref, record.report_generation),
+        )
         continuation = record.worker_continuation
         if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:

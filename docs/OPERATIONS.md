@@ -1210,7 +1210,15 @@ whoever filed it and for whichever round, so the dispatcher matches the report a
 through the request id the audit recorded with it. A report filed under some other id is written to the card and
 answered normally by `secretary task report`, and it moves nothing: the round it was meant for is still open, the
 head is bounced once and the card blocks if the round stays unreported. Reporting on behalf of a worker by hand
-therefore means copying the command out of that worker's `TASK.md`, ids included, not writing one of your own.
+therefore means copying the command out of that worker's `TASK.md`, ids included, not writing one of your own. The
+id names the attempt as well as the round, so a card retried through Ready starts with a clean slate: the reports of
+the attempt that was blocked stay in the audit and cannot end a round of the new one.
+
+A report the audit could not record is not a report yet. `secretary task report` answers `audit_pending` when the
+comment reached the card and the audit write did not, and the card stays where it is until that is repaired: run the
+same command again, ids and body unchanged, and it commits the pending event and answers `replayed`. `secretary task
+reconcile-audit` repairs it too. An unrepaired one shows up as an ordinary unreported round, so the head is bounced
+and the card eventually blocks with the report visible on the card, which reads as the audit failure it is.
 
 ## Background-role telemetry
 

@@ -5771,10 +5771,34 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
 
-    def test_a_report_whose_audit_event_only_staged_still_ends_its_round(self) -> None:
-        """The comment is written before the event is appended, so a report whose call died in
-        between is a report that happened. Reading only committed events would leave the card
-        waiting for a marker that is already on it."""
+    def test_a_staged_report_event_with_no_comment_ends_nothing(self) -> None:
+        """The writer stages its event before it writes the comment, so a tick inside that window
+        sees a report that may never reach the board. Ending the round on it would advance the card
+        on a call that had not happened."""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        request_id = self._worker_report_request_id()
+        self.writer.audit.stage(request_id, {
+            "event_id": "evt_staged", "schema_version": 1, "occurred_at": "2026-08-03T00:00:00Z",
+            "actor": {"role": "worker", "id": "worker"}, "kind": "reported", "outcome": "success",
+            "task_id": "task_kanboard_12", "ref": "secretary-510-pilot",
+            "backend": {"kind": "kanboard", "task_id": 12, "revision": "1"},
+            "request_id": request_id,
+            "payload": {"marker": "report:done", "body_sha256": "0" * 64},
+        })
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertNotIn("report:done", [
+            comment.get("marker") for comment in self.reader.show("secretary-510-pilot")["comments"]
+        ])
+
+    def test_a_report_whose_audit_append_failed_ends_its_round_once_repaired(self) -> None:
+        """The other side of the same window: the comment is on the card and the append failed, so
+        the round is unreported until the audit is repaired. The worker's own retry of that command
+        is the repair, and it is what the report protocol already promises."""
         self.start_pilot()
         self.runtime.tick(self.selector)
         request_id = self._worker_report_request_id()
@@ -5785,10 +5809,52 @@ class DispatcherRuntimeTests(unittest.TestCase):
                     body="done", request_id=request_id,
                 )
         self.assertEqual(pending.exception.code, "audit_pending")
-        self.assertIsNone(self.writer.audit.committed_event(request_id))
-        self.assertIsNotNone(self.writer.audit.pending_event(request_id))
+        self.assertIn("report:done", [
+            comment.get("marker") for comment in self.reader.show("secretary-510-pilot")["comments"]
+        ])
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-worker-report")
 
+        repaired = self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id=request_id,
+        )
+
+        self.assertTrue(repaired["replayed"])
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+    def test_an_earlier_attempts_report_never_ends_a_later_attempts_round(self) -> None:
+        """A card returned to Ready is retried as a new attempt, and its first round is generation 1
+        again. The report of the previous attempt's generation 1 is still in the audit, and it names
+        that attempt: attempt identity is in the request id, so it can never be read as this one's.
+        """
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        first_round_ids = [
+            line.split("--request-id ", 1)[1].split()[0]
+            for line in self._task_document().splitlines() if "--request-id" in line
+        ]
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="blocked",
+            classification="external_fact", body="stuck",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot", sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
+            target="ready", reason="retry the card", request_id="requeue-after-block",
+        )
+
+        self.runtime.tick(self.selector)  # the second attempt claims and launches
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self._pilot_record()["report_generation"], 1)
+        self.assertNotIn(
+            self._worker_report_request_id(), first_round_ids,
+            "the new attempt reissued the previous attempt's ids",
+        )
 
     def test_an_adopted_card_keeps_the_generation_of_a_report_it_has_not_read(self) -> None:
         """The floor the recovery uses counts rounds that are over, and a report nobody has read
