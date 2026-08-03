@@ -87,6 +87,11 @@ class DispatcherRecord:
     # from an unrelated shell in the same worktree must not keep a broken head alive.
     worker_started_at: float = 0.0
     worker_progress_at: float = 0.0
+    # Since when the head has been ready for input with nothing delivered for the round being
+    # waited on (secretary-1063), 0.0 when it is working or its readiness cannot be read. A head
+    # that finished its turn and went back to its prompt holds a live pid, so this is the only
+    # signal that separates it from one that is still thinking.
+    worker_idle_since: float = 0.0
     # Durable worker ownership while validation has the checkout. This is deliberately one typed
     # state value rather than four optional fields whose combinations callers would have to infer.
     worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
@@ -94,6 +99,7 @@ class DispatcherRecord:
     review_respawns: int = 0
     review_started_at: float = 0.0
     review_progress_at: float = 0.0
+    review_idle_since: float = 0.0
     # Pause (secretary-731): when a freeze stopped this card's worker / reviewer head, 0.0 when it
     # did not. A head with an empty handle is otherwise indistinguishable from one that died, so
     # these are what let the tick log and pause-status say "stopped on purpose". Cleared on resume,
@@ -145,6 +151,7 @@ class DispatcherRecord:
             "review_handle": self.review_handle,
             "review_head": self.review_head,
             "review_leaf": self.review_leaf,
+            "review_idle_since": self.review_idle_since,
             "review_progress_at": self.review_progress_at,
             "review_respawns": self.review_respawns,
             "review_started_at": self.review_started_at,
@@ -156,6 +163,7 @@ class DispatcherRecord:
             "worker_leaf": self.worker_leaf,
             "worker_pid_file": self.worker_pid_file,
             "review_pid_file": self.review_pid_file,
+            "worker_idle_since": self.worker_idle_since,
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_respawns": self.worker_respawns,
@@ -206,6 +214,7 @@ class DispatcherRecord:
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
+            worker_idle_since=float(payload.get("worker_idle_since") or 0.0),
             worker_continuation=(
                 WorkerContinuation.from_json(payload.get("worker_continuation"))
                 if "worker_continuation" in payload
@@ -215,6 +224,7 @@ class DispatcherRecord:
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),
             review_progress_at=float(payload.get("review_progress_at") or 0.0),
+            review_idle_since=float(payload.get("review_idle_since") or 0.0),
             paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
             workspace_settled=bool(payload.get("workspace_settled", False)),

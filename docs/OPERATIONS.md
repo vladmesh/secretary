@@ -1139,7 +1139,8 @@ respawn deletes it before a new launch so a dead predecessor's pid is not read b
 If the pid probe confirms the head's process is alive, that is a positive liveness signal rather than merely an
 absence of proof of death, and the tick skips both timeouts — the short first-output window and the long idle
 ceiling — regardless of whether the last-output timestamp moved. Silence from a live head with a confirmed pid
-proves nothing, so only a real process exit triggers respawn or Blocked for it. While the file does not exist yet —
+proves nothing, so only a real process exit or the readiness rule below triggers respawn or Blocked for it. While
+the file does not exist yet —
 a fresh launch has not run its write, or the runner does not provide this signal at all — that is read as neither
 death nor confirmed life, and the tick keeps using the ordinary last-output checks. The only runner without the
 signal is the raw command override, which substitutes a command bypassing the head registry and therefore gets no
@@ -1157,14 +1158,32 @@ compromise for the alternate screen: it inspects file metadata only and never re
 is one respawn of the same head in the same workspace; the second moves the card to Blocked with a signal to the
 operator.
 
+A confirmed pid says the process is running; it does not say the head is doing anything. A head that finished its
+turn and went back to its prompt holds the same live pid as one that is thinking, which is how a card could sit in
+`waiting-worker-report` forever with the work already done: the report call was never made, or it was made with the
+command of a round that is over, which the task protocol answers as that round's retry and which therefore leaves
+nothing on the card and no error the dispatcher can see. So on a pid-confirmed head the dispatcher also asks the
+session manager whether the pane is ready for input, the same readiness the prompt delivery waits on. A pane that is
+working is never ready, so this never touches a head that is thinking; a probe the runtime cannot answer counts as
+not-ready and changes nothing. Readiness that holds for the idle window (5 minutes by default) while nothing has
+landed for the round being waited on takes the ordinary path: one respawn, then Blocked.
+
+For a worker that means the round does not move. The same TASK.md is written back into the checkout with the same
+report commands and the same generation, and the head is pointed at them again; the report the dispatcher is waiting
+for is still the one the operator will see land. The respawn comment names the generation, and the Blocked reason
+names it too along with the fact that a respawn was already tried. A card blocked this way has the worker's work in
+its workspace: the operator's question is why the report never arrived, not what the head was doing.
+
 A respawn writes a comment on the board, so the operator can tell a first stall from a card whose head has already
 been restarted, without waiting for the final Blocked.
 
 - `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — the short first-output window, default 180 seconds.
 - `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — the ceiling for a verdict after first output, default 5400 seconds.
 - `SECRETARY_WORKER_REPORT_STALL_SECONDS` — the ceiling for a report after first output, default 21600 seconds.
+- `SECRETARY_HEAD_IDLE_STALL_SECONDS` — how long a head ready for input with nothing delivered is left alone,
+  default 300 seconds.
 
-All three are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
+All four are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
 not stop the dispatcher from starting.
 
 A head writes report and verdict bodies to a file outside the workspace

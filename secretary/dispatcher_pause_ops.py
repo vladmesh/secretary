@@ -499,16 +499,19 @@ def _refresh_watchdog_windows(records: dict[str, DispatcherRecord]) -> None:
 
     A freeze advances nothing, so the ceilings kept running against a pipeline that was stopped on
     purpose. Without this the first tick after a long freeze reads the pause as silence and starts
-    respawning and blocking cards whose heads were fine.
+    respawning and blocking cards whose heads were fine. A head seen idle before the freeze is
+    forgotten for the same reason: it is given its window again from the resume.
     """
     now = time.time()
     for record in records.values():
         if record.worker_waiting_since:
             record.worker_waiting_since = now
             record.worker_progress_at = now
+            record.worker_idle_since = 0.0
         if record.review_waiting_since:
             record.review_waiting_since = now
             record.review_progress_at = now
+            record.review_idle_since = 0.0
         if record.gate_pending_since:
             record.gate_pending_since = now
 

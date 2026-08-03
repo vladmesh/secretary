@@ -7,6 +7,11 @@ tick via `head_process_status`. When Orca supplies `lastOutputAt`, a head must a
 first output shortly after launch; later output renews the ordinary, generous silence ceiling. A
 runtime that cannot supply activity timestamps, or cannot expose the pid heartbeat (a raw
 `SECRETARY_DISPATCHER_*_COMMAND` override), uses that ceiling as its fallback.
+
+A confirmed pid answers whether the process runs, not whether it is doing anything. A head that is
+ready for input has stopped working, and if nothing lands for the round being waited on while it
+stays that way, that ends the wait too (`secretary-1063`): otherwise a finished head sitting at its
+prompt holds a card in `waiting-worker-report` for as long as the process lives.
 """
 
 from __future__ import annotations
@@ -25,6 +30,12 @@ WORKER_REPORT_STALL_DEFAULT = 6 * 60 * 60
 # A live head prints a prompt or launch output within a few dispatcher ticks. This only applies
 # when an activity timestamp exists and has not advanced beyond the launch timestamp.
 INITIAL_OUTPUT_STALL_DEFAULT = 3 * 60
+# How long a head that is ready for input, with nothing delivered for the round the dispatcher is
+# waiting on, is left alone before the watchdog acts (secretary-1063). A head between turns reads
+# as ready for a moment — a delivered prompt whose turn has not started, a retained conversation
+# just resumed — so this is a window rather than a single reading. It is short next to the silence
+# ceilings above because it is not measuring silence: readiness says the head is not working.
+IDLE_STALL_DEFAULT = 5 * 60
 
 
 def stall_seconds(kind: str) -> int:
@@ -48,6 +59,15 @@ def initial_output_stall_seconds() -> int:
     except ValueError:
         return INITIAL_OUTPUT_STALL_DEFAULT
     return value if value > 0 else INITIAL_OUTPUT_STALL_DEFAULT
+
+
+def idle_stall_seconds() -> int:
+    """How long an idle head with nothing delivered is given before the watchdog acts."""
+    try:
+        value = int(os.environ.get("SECRETARY_HEAD_IDLE_STALL_SECONDS", "") or IDLE_STALL_DEFAULT)
+    except ValueError:
+        return IDLE_STALL_DEFAULT
+    return value if value > 0 else IDLE_STALL_DEFAULT
 
 
 def pid_file_path(kind: str, reference: str) -> str:
@@ -138,6 +158,7 @@ def reset_wait(record, kind: str) -> None:
     setattr(record, f"{kind}_waiting_since", 0.0)
     setattr(record, f"{kind}_respawns", 0)
     setattr(record, f"{kind}_progress_at", 0.0)
+    setattr(record, f"{kind}_idle_since", 0.0)
 
 
 def wait_cycle_token(record) -> str:

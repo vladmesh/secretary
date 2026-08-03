@@ -633,6 +633,13 @@ round it came from. Refusing that call outright means authorising the attempt's 
 inside the report protocol, which is a durable protocol change with its own compatibility promise
 for stale retries, and it is not part of this contour.
 
+What ends the round instead is the dispatcher's own wait, which is the only place that knows which
+generation is open. A round ends when a marker for that generation is on the board, and a head that
+has stopped working without producing one is pointed at the current command once, and then the card
+is blocked. That covers a stale call as it covers a call never made, whatever the head did or did
+not run, because both leave the same nothing behind. The mechanics are the wait watchdog's, in
+`docs/OPERATIONS.md`.
+
 It is dispatcher state, so a dispatcher that lost its record recovers it: the `TASK.md` in the
 checkout names the round its live worker is working from, and the reports already on the card are
 the floor when no document can be read. Both are lower bounds and the larger one wins, so a

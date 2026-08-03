@@ -19,6 +19,7 @@ from secretary.dispatcher_launch import (
     write_launch_intent,
 )
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from secretary.dispatcher_tui import READINESS_READY, terminal_readiness
 from secretary.dispatcher_types import (
     HeadLaunchAborted,
     HostError,
@@ -87,12 +88,19 @@ def command_terminal_status(
         )
         if supplemental:
             activity = max(activity or 0.0, float(supplemental))
-        return {
+        pid_confirmed = bool(pid_status.get("known") and pid_status.get("alive"))
+        status = {
             "known": True, "live": True, "reason": "live", "last_activity": activity,
             # A pid-heartbeat that proves this exact process still runs; only this — not a
             # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
-            "pid_confirmed": bool(pid_status.get("known") and pid_status.get("alive")),
+            "pid_confirmed": pid_confirmed,
         }
+        if pid_confirmed:
+            # Whether the head is working or waiting at its prompt. Only asked of a process the
+            # heartbeat proves is running, because that is the one case where no timing ceiling
+            # applies and silence has to be told apart from a finished turn (secretary-1063).
+            status["idle"] = _pane_is_idle(host, str(terminal.get("handle") or ""))
+        return status
     if not pane_known:
         # A head adopted from a launch intent (secretary-820): its bring-up outlived the tick that
         # started it, so no pane identity was ever persisted for it. The pid heartbeat proves the
@@ -102,6 +110,20 @@ def command_terminal_status(
         if pid_status.get("known") and pid_status.get("alive"):
             return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
     return {"known": True, "live": False, "reason": "missing-terminal"}
+
+
+def _pane_is_idle(host: Any, handle: str) -> bool:
+    """Is this pane waiting for input rather than working on a turn?
+
+    Orca's `tui-idle`, the same readiness the delivery path waits on before it sends to any head
+    and the same one the observer's lifecycle reads. It comes from the pane's own agent status,
+    falling back to a quiescence window, so it answers for the claude and the codex adapter alike
+    and reads no screen. A probe that cannot be answered is not an idle head: only a definite
+    `ready` counts, so a runtime that cannot say leaves the wait exactly as it was.
+    """
+    if not handle:
+        return False
+    return terminal_readiness(handle, run_json=host._run_json) == READINESS_READY
 
 
 def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:

@@ -48,6 +48,7 @@ from secretary.dispatcher_launcher import (
     with_pid_heartbeat,
 )
 from secretary.dispatcher_review import start_review as start_reviewer
+from secretary.dispatcher_tui import TUI_IDLE_PROBE_TIMEOUT_MS
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch, review_pane_label
 from secretary.head_registry import canonical_heads
@@ -59,10 +60,12 @@ from secretary.routing_journal import (
 from secretary.head_health import HeadReadiness
 from secretary.sprints import SPRINT_BOARD_NAME, instance_open_sprint_limit
 from secretary.dispatcher_watchdog import (
+    IDLE_STALL_DEFAULT,
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
     head_process_status,
+    idle_stall_seconds,
     pid_file_path,
     stall_seconds,
     wait_outcome,
@@ -5691,6 +5694,193 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
 
+    # the bounded wait for a worker report (secretary-1063) --------------------
+
+    def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
+        """The live incident's head: its process is alive and it is not working on anything.
+
+        A pid-confirmed head is exempt from every timing ceiling, so this is the only state that
+        distinguishes a finished or wedged head from one that is thinking.
+        """
+        status = {
+            "known": True, "live": True, "reason": "live",
+            "last_activity": time.time(), "pid_confirmed": True, "idle": idle,
+        }
+        if kind == "review":
+            self.host.review_status_result = status
+        else:
+            self.host.worker_status_result = status
+
+    def _rewind_idle(self, kind: str = "worker") -> None:
+        """Age the current idleness past the window that separates it from a head between turns."""
+        payload = self.runtime.state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        self.assertTrue(record[f"{kind}_idle_since"], f"{kind} idleness was never stamped")
+        record[f"{kind}_idle_since"] -= idle_stall_seconds() + 60
+        self.runtime.state.save(payload)
+
+    def _open_the_second_round(self) -> str:
+        """Round 1 reported under its generation, round 2 opened and owns the next one.
+
+        Hands back the report command of the round that is over, read out of the document the
+        first worker was actually given: that is what a retained conversation still holds.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_pilot()
+        self.runtime.tick(self.selector)
+        stale_id = self._worker_report_request_id()
+        self._report_done()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+        self.runtime.tick(self.selector)
+        self._review_red()
+        self._park_and_decide("rework")
+        self._assert_one_generation(2)
+        self.assertNotEqual(stale_id, self._worker_report_request_id())
+        return stale_id
+
+    def _bounce_the_idle_worker(self) -> dict:
+        """Drive the tick that acts on a head sitting idle with nothing delivered."""
+        self._head_at_its_prompt()
+        self.assertEqual(
+            self.runtime.tick(self.selector)["action"], "waiting-worker-report",
+            "one reading of an idle pane is a head between turns, not a stalled one",
+        )
+        self._rewind_idle()
+        return self.runtime.tick(self.selector)
+
+    def test_a_working_head_is_never_bounced_for_idleness(self) -> None:
+        """Liveness for a head that is genuinely working is unchanged: a pane Orca reports as busy
+        is not ready for input, whatever its output has done, and no window applies to it."""
+        self._open_the_second_round()
+        self._head_at_its_prompt(idle=False)
+        self.runtime.tick(self.selector)
+        payload = self.runtime.state.load()
+        payload["records"]["secretary-510-pilot"]["worker_progress_at"] = (
+            time.time() - stall_seconds("worker") - 1
+        )
+        self.runtime.state.save(payload)
+
+        result = self.runtime.tick(self.selector)
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_a_head_seen_idle_and_then_working_again_starts_over(self) -> None:
+        """A turn that starts after a moment at the prompt clears the window rather than carrying
+        it: the head is working again and owes nothing until it stops."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.runtime.tick(self.selector)
+        self.assertTrue(self._pilot_record()["worker_idle_since"])
+
+        self._head_at_its_prompt(idle=False)
+        self.runtime.tick(self.selector)
+
+        self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_an_idle_worker_is_pointed_at_the_current_command_once(self) -> None:
+        """The live incident (issue:df7d0778b26357e60046): work complete, nothing on the card, and
+        a head holding a live pid at its prompt. The round does not move; the command comes back."""
+        self._open_the_second_round()
+
+        bounced = self._bounce_the_idle_worker()
+
+        self.assertEqual(bounced["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
+        self._assert_one_generation(2)
+        comment = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("generation 2", comment)
+        self.assertIn("respawned the worker head", comment)
+
+    def test_a_current_report_after_the_bounce_advances_the_card(self) -> None:
+        """The bounce is a retry through the open round, so the command it re-materialises is the
+        one whose report the dispatcher is waiting for."""
+        self._open_the_second_round()
+        self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
+
+        self.host.commit = "round2-c0ffee1234"
+        self._report_done("round two")
+
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "validate")
+
+    def test_an_idle_worker_that_delivers_nothing_after_the_bounce_is_blocked(self) -> None:
+        """The end of the unbounded wait: one retry through the generation, then an actionable
+        state naming the round that was waited for."""
+        self._open_the_second_round()
+        self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
+
+        self.assertEqual(
+            self.runtime.tick(self.selector)["action"], "waiting-worker-report",
+            "the replacement head owns its own window",
+        )
+        self._rewind_idle()
+        escalated = self.runtime.tick(self.selector)
+
+        self.assertEqual(escalated["to"], "blocked")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        reason = card["comments"][-1]["body"]
+        self.assertIn("generation 2", reason)
+        self.assertIn("after respawn", reason)
+        self.assertEqual(
+            self.host.calls.count("restart_worker"), 1, "the escalation must not respawn again"
+        )
+
+    def test_a_replayed_stale_report_ends_in_the_bounded_state(self) -> None:
+        """The silent shape: the retained worker repeats the command of the round that is over,
+        with that round's own body. The protocol answers the retry it is required to answer, so
+        nothing lands on the card and nothing fails. The wait ends anyway."""
+        stale_id = self._open_the_second_round()
+        markers = len(self.reader.show("secretary-510-pilot")["comments"])
+
+        replay = self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="done", request_id=stale_id,
+        )
+
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(self.reader.show("secretary-510-pilot")["comments"]), markers)
+        self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
+        self.runtime.tick(self.selector)
+        self._rewind_idle()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
+
+    def test_a_refused_stale_report_ends_in_the_bounded_state(self) -> None:
+        """The loud shape: the same stale command carrying this round's work. The payload claim
+        refuses it, and that refusal is visible only in the worker's own terminal."""
+        stale_id = self._open_the_second_round()
+
+        with self.assertRaises(TaskError) as refused:
+            self.writer.report(
+                role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+                body="the second round's work", request_id=stale_id,
+            )
+
+        self.assertEqual(refused.exception.code, "validation")
+        self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
+        self.runtime.tick(self.selector)
+        self._rewind_idle()
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
+
+    def test_an_idle_reviewer_with_no_verdict_is_bounded_the_same_way(self) -> None:
+        """One wait machinery serves both heads, so the reviewer inherits this: a reviewer that
+        finished its turn without registering a verdict leaves the same nothing behind."""
+        self.start_pilot()
+        self._run_worker_to_validate()
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "review-started")
+        self._head_at_its_prompt("review")
+        self.assertEqual(self.runtime.tick(self.selector)["action"], "waiting-review-verdict")
+
+        self._rewind_idle("review")
+        respawned = self.runtime.tick(self.selector)
+
+        self.assertEqual(respawned["action"], "review-respawned")
+        self.runtime.tick(self.selector)
+        self._rewind_idle("review")
+        self.assertEqual(self.runtime.tick(self.selector)["to"], "blocked")
+
 
 class HeadPromptTests(unittest.TestCase):
     """The report/verdict commands handed to a head must survive the codex runtime: a concrete
@@ -5937,7 +6127,18 @@ class WaitWatchdogTests(unittest.TestCase):
             self,
             "SECRETARY_REVIEW_VERDICT_STALL_SECONDS",
             "SECRETARY_WORKER_REPORT_STALL_SECONDS",
+            "SECRETARY_HEAD_IDLE_STALL_SECONDS",
         )
+
+    def test_the_idle_window_comes_from_the_env_at_call_time(self) -> None:
+        with mock.patch.dict(os.environ, {"SECRETARY_HEAD_IDLE_STALL_SECONDS": "30"}):
+            self.assertEqual(idle_stall_seconds(), 30)
+        self.assertEqual(idle_stall_seconds(), IDLE_STALL_DEFAULT)
+
+    def test_an_unparseable_idle_window_falls_back_to_the_default(self) -> None:
+        for bogus in ("", "soon", "0", "-5"):
+            with mock.patch.dict(os.environ, {"SECRETARY_HEAD_IDLE_STALL_SECONDS": bogus}):
+                self.assertEqual(idle_stall_seconds(), IDLE_STALL_DEFAULT)
 
     def test_inside_the_ceiling_keeps_waiting(self) -> None:
         outcome = wait_outcome(waiting_since=0.0, now=7199.0, stall_seconds=7200, respawns=0)
@@ -7969,6 +8170,9 @@ class RecordingReviewHost(CommandHostRuntime):
         self.terminals = [
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}
         ] if terminals is None else terminals
+        # What Orca answers a `tui-idle` probe with. The default is a satisfied wait, which is a
+        # pane ready for input.
+        self.wait_answer: dict = {}
 
     def _run_json(self, args: list[str]) -> dict:
         self.calls.append(args)
@@ -7986,6 +8190,8 @@ class RecordingReviewHost(CommandHostRuntime):
             return {"split": {"handle": "term-review", "tabId": "tab-1", "paneRuntimeId": -1}}
         if op == "create":
             return {"terminal": {"handle": "term-created"}}
+        if op == "wait":
+            return self.wait_answer
         return {}
 
     def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
@@ -8338,6 +8544,48 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertTrue(status["live"])
 
+    def test_a_live_head_reports_whether_its_pane_is_waiting_for_input(self) -> None:
+        """secretary-1063: the timing ceilings do not apply to a pid-confirmed head, so the wait
+        needs the one signal that separates a finished turn from a thinking one."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertTrue(status["idle"])
+        self.assertIn(
+            ["orca", "terminal", "wait", "--terminal", "term-worker", "--for", "tui-idle",
+             "--timeout-ms", str(TUI_IDLE_PROBE_TIMEOUT_MS), "--json"],
+            host.calls,
+        )
+
+    def test_a_working_pane_is_not_idle(self) -> None:
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+        host.wait_answer = {"wait": {"satisfied": False}}
+
+        self.assertFalse(host.worker_status(self.task, self._record())["idle"])
+
+    def test_readiness_is_not_probed_without_a_confirmed_head_process(self) -> None:
+        """Without the heartbeat the ordinary ceilings still run, and a probe per waiting tick
+        would buy nothing."""
+        host = self._host([
+            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+        ])
+
+        status = host.worker_status(self.task, self._record())
+
+        self.assertNotIn("idle", status)
+        self.assertNotIn("wait", [call[2] for call in host.calls if call[:2] == ["orca", "terminal"]])
+
     def test_pid_file_not_written_yet_falls_back_to_ordinary_liveness(self) -> None:
         """Nothing has written the heartbeat file yet (a launch mid-flight, or a raw
         SECRETARY_DISPATCHER_*_COMMAND override that never will). That is not evidence of death."""
@@ -8584,6 +8832,9 @@ class ProductionPauseTests(unittest.TestCase):
         stale = time.time() - (WORKER_REPORT_STALL_DEFAULT * 2)
         records[self.ref].worker_waiting_since = stale
         records[self.ref].worker_progress_at = stale
+        # A head seen at its prompt before the freeze is given its idle window back too, or the
+        # freeze itself reads as a head that stopped working and delivered nothing.
+        records[self.ref].worker_idle_since = stale
         self.runtime.production_state.put_records(payload, records)
         self.runtime.production_state.save(payload)
         self.pause("freeze")
@@ -8597,6 +8848,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.runtime.resume_pipeline(actor="operator")
 
         self.assertGreater(self.record().worker_waiting_since, stale)
+        self.assertEqual(self.record().worker_idle_since, 0.0)
         # The watchdog did not read the paused head as a stall: no respawn, no Blocked.
         self.assertEqual(self.runtime.production_tick()["actions"][0]["action"], "waiting-worker-report")
         self.assertEqual(self.reader.show(self.ref)["state"], "in_progress")
