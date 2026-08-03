@@ -29,15 +29,15 @@ def restore_card(
         except Exception as exc:
             raise _CommittedWriteError() from exc
 
+    payload = {
+        "target": target,
+        "metadata_keys": sorted(metadata),
+        "position": position,
+        "swimlane": swimlane or None,
+    }
     return writer._write(
-        "restored", "steward", "restore", reference, request_id,
-        {
-            "target": target,
-            "metadata_keys": sorted(metadata),
-            "position": position,
-            "swimlane": swimlane or None,
-        },
-        mutation,
+        "restored", "steward", "restore", reference, request_id, payload, mutation,
+        identity=payload,
     )
 
 
@@ -62,7 +62,13 @@ def restore_comment(
             raise
         payload.pop("restore_body", None)
 
-    return writer._write("restored_comment", "steward", "restore", reference, request_id, payload, mutation)
+    # `restore_body` is dropped from the payload once the comment is known to be on the card, so
+    # it is not part of what the id claims; the body digest and the occurrence are.
+    identity = {"body_sha256": payload["body_sha256"], "restore_occurrence": occurrence}
+    return writer._write(
+        "restored_comment", "steward", "restore", reference, request_id, payload, mutation,
+        identity=identity,
+    )
 
 
 def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:

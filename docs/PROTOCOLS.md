@@ -501,15 +501,18 @@ unresolved pending write blocks a consistent export and the recovery checkpoint 
 
 A `--request-id` is an ownership claim over the operation it recorded, not only a de-duplication key for
 the append. A retry under an id the audit already holds, committed or still staged, is answered from that
-record only when the caller means the same operation: the same event kind, the same card, and, for the
-writes whose payload is a function of their own arguments (`comment`, `report`, `verdict`, `decide`,
-`archive`, `create`), the same payload. For a report the payload is the marker, the body digest and the
-classification, so a second `report --kind done` on one card under the previous round's id and with a new
-body is refused with error code `validation` and exit code 2 instead of being answered with the old event:
-no second audit event, no second comment, and no success reported for a report the board never received.
-`move`, `edit`, `claim`, `routing` and the restore writes compare the kind and the card only, because
-their payloads read board state the operation itself changed and a retry cannot recompute the recorded
-dict.
+record only when the caller means the same operation: the same event kind, the same card, and the same
+request. Every task write is compared this way, `create`, `comment`, `report`, `verdict`, `decide`,
+`claim`, `move`, `edit`, `archive`, `routing` and the restore writes alike. For a report the comparison
+covers the marker, the body digest and the classification, so a second `report --kind done` on one card
+under the previous round's id and with a new body is refused with error code `validation` and exit code 2
+instead of being answered with the old event: no second audit event, no second comment, and no success
+reported for a report the board never received.
+
+Three fields are left out of that comparison, and only because a retry after the write cannot recompute
+them: the column a `move` left, the digests of the text an `edit` overwrote, and the body a restored
+comment carries until it is confirmed on the card. Each describes the state the write itself replaced, so
+comparing it would refuse ordinary retries. Everything the caller asked for is compared.
 
 Every task write result carries `replayed`. It is `false` when this call performed the write, and `true`
 when it answered from an event an earlier call under the same id had already committed or staged, so a

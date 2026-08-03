@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import subprocess
@@ -2197,6 +2198,178 @@ class RequestIdOwnershipTests(unittest.TestCase):
         self.assertIs(json.loads(output.getvalue().splitlines()[0])["replayed"], False)
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "validation")
         self.assertEqual(len(self._comments()), 1)
+
+    def test_every_write_has_to_declare_what_its_id_claims(self) -> None:
+        """A new caller cannot inherit the blind replay by forgetting one keyword."""
+        identity = inspect.signature(TaskWriter._write).parameters["identity"]
+        self.assertIs(identity.default, inspect.Parameter.empty)
+
+    def _routing_payload(self, attempt: int, head: str = "codex-terra") -> dict:
+        return routing_payload(
+            attempt=attempt,
+            attempt_id="att-1",
+            phase="worker",
+            heads=[
+                head_run_from_profile(
+                    role="worker", head=head, head_source="role_default",
+                    profile={"adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra"},
+                    resources={},
+                )
+            ],
+        )
+
+    def _routing(self, attempt: int, **overrides: object) -> dict:
+        call = {
+            "role": "dispatcher", "actor": "pilot", "reference": "secretary-468",
+            "payload": self._routing_payload(attempt), "request_id": "round-1",
+        }
+        call.update(overrides)
+        return self.writer.routing(**call)  # type: ignore[arg-type]
+
+    def test_a_reused_routing_id_with_another_record_is_refused(self) -> None:
+        """A journal-only write is caller-supplied end to end, so it owns its id too."""
+        first = self._routing(1)
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation") as raised:
+            self._routing(2)
+
+        self.assertEqual(raised.exception.exit_code, 2)
+        recorded = self._events("round-1")
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["event_id"], first["event_id"])
+        self.assertEqual(recorded[0]["payload"]["attempt"], 1)
+
+    def test_a_staged_routing_record_is_owned_by_its_id_too(self) -> None:
+        staged = {
+            "event_id": "evt_staged_routing", "schema_version": 1,
+            "occurred_at": "2026-08-03T00:00:00Z", "actor": {"role": "dispatcher", "id": "pilot"},
+            "kind": "routing", "outcome": "success", "task_id": "task_kanboard_12",
+            "ref": "secretary-468",
+            "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
+            "request_id": "round-1", "payload": self._routing_payload(1),
+        }
+        self.writer.audit.stage("round-1", staged)
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self._routing(2)
+
+        self.assertEqual(self._events(), [])
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+
+        # The record its own id claims still commits.
+        self.assertEqual(self._routing(1)["event_id"], "evt_staged_routing")
+        self.assertEqual(self._events("round-1")[0]["payload"]["attempt"], 1)
+
+    def test_a_reused_edit_id_with_another_spec_is_refused(self) -> None:
+        self.writer.edit(
+            role="po", actor="operator", reference="secretary-468", description="first spec",
+            request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.edit(
+                role="po", actor="operator", reference="secretary-468", description="second spec",
+                request_id="round-1",
+            )
+
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self.client.tasks[0]["description"], "first spec")
+
+    def test_an_edit_retried_after_it_landed_stays_idempotent(self) -> None:
+        """The `_was` digests are of text the edit replaced, so a retry must not compare them."""
+        first = self.writer.edit(
+            role="po", actor="operator", reference="secretary-468", description="one spec",
+            head="codex-terra", request_id="round-1",
+        )
+        second = self.writer.edit(
+            role="po", actor="operator", reference="secretary-468", description="one spec",
+            head="codex-terra", request_id="round-1",
+        )
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertIs(second["replayed"], True)
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "updateTask"]), 1)
+
+    def test_a_reused_claim_id_with_another_worker_is_refused(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        self.writer.claim(
+            role="dispatcher", actor="d", reference="secretary-468", worker="worker-a",
+            request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.claim(
+                role="dispatcher", actor="d", reference="secretary-468", worker="worker-b",
+                request_id="round-1",
+            )
+
+        self.assertEqual(self._events("round-1")[0]["payload"]["worker"], "worker-a")
+        self.assertEqual(self.client.metadata[12]["claim"], "worker-a")
+
+    def test_a_reused_move_id_with_another_destination_is_refused(self) -> None:
+        self.client.tasks[0]["column_id"] = 3  # In progress
+        self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="ready",
+            reason="requeue", request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="blocked",
+                reason="requeue", request_id="round-1",
+            )
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="ready",
+                reason="a different reason entirely", request_id="round-1",
+            )
+
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self._events("round-1")[0]["payload"]["to"], "ready")
+
+    def test_a_move_retried_after_it_landed_stays_idempotent(self) -> None:
+        """`from` is the column the move left, so a retry must not compare it."""
+        self.client.tasks[0]["column_id"] = 3  # In progress
+        call = {
+            "role": "dispatcher", "actor": "d", "reference": "secretary-468", "target": "ready",
+            "reason": "requeue", "request_id": "round-1",
+        }
+        first = self.writer.move(**call)  # type: ignore[arg-type]
+        second = self.writer.move(**call)  # type: ignore[arg-type]
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertIs(second["replayed"], True)
+        self.assertEqual(self._events("round-1")[0]["payload"]["from"], "in_progress")
+
+    def test_a_reused_restore_id_with_another_placement_is_refused(self) -> None:
+        self.writer.restore_card(
+            reference="secretary-468", metadata={"project": "secretary"}, target="ready",
+            request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.restore_card(
+                reference="secretary-468", metadata={"project": "secretary"}, target="blocked",
+                request_id="round-1",
+            )
+
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self._events("round-1")[0]["payload"]["target"], "ready")
+
+    def test_a_reused_restore_comment_id_with_another_body_is_refused(self) -> None:
+        self.writer.restore_comment(
+            reference="secretary-468", body="the original comment", occurrence=0,
+            request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.restore_comment(
+                reference="secretary-468", body="another comment entirely", occurrence=0,
+                request_id="round-1",
+            )
+
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self._comments(), ["the original comment"])
 
     def _create(self, **overrides: object) -> dict:
         call = {

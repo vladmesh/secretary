@@ -610,12 +610,13 @@ class TaskAudit:
         equal: the replay paths hand the recorded event straight back to `append`. This
         compares the caller's intent instead, before anything is appended or answered.
 
-        The event kind and the card ref always have to match. The payload is compared only
-        against an `identity` the operation declares, and only an operation whose payload is a
-        pure function of its own arguments declares one: a `moved` payload reads the state the
-        move already changed, an `edited` payload carries the digests of the text it replaced,
-        and a restore payload drops a field as its cleanup finishes, so recomputing any of
-        those on a retry gives a different dict for the same operation.
+        The event kind and the card ref always have to match, and so does the `identity` every
+        write declares: what the caller asked for, which is the whole payload for most writes.
+        The only fields left out are the ones a retry cannot recompute after the write went
+        through, because they describe the state the write itself replaced: `moved` records the
+        column the card left, `edited` records the digests of the text it overwrote, and
+        `restored_comment` drops its body from the payload once the comment is known to be on
+        the card. Comparing those would turn an ordinary retry into a conflict.
         """
         if str(existing.get("kind") or "") != kind:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
@@ -1094,7 +1095,10 @@ class TaskWriter:
         heads = payload.get("heads")
         if not isinstance(heads, list) or not heads:
             raise TaskError("validation", "routing requires at least one head record", 2)
-        return self._write("routing", role, actor, reference, request_id, dict(payload), lambda task: None)
+        return self._write(
+            "routing", role, actor, reference, request_id, dict(payload), lambda task: None,
+            identity=dict(payload),
+        )
 
     def claim(
         self,
@@ -1162,21 +1166,16 @@ class TaskWriter:
             except Exception as exc:
                 raise _CommittedWriteError() from exc
 
+        payload = {
+            "worker": worker,
+            "resolved_head": resolved_head or None,
+            "resolved_review_head": resolved_review_head or None,
+            "slug": slug or None,
+            "base_branch": base_branch or None,
+            "cap": cap,
+        }
         return self._write(
-            "claimed",
-            role,
-            actor,
-            reference,
-            request_id,
-            {
-                "worker": worker,
-                "resolved_head": resolved_head or None,
-                "resolved_review_head": resolved_review_head or None,
-                "slug": slug or None,
-                "base_branch": base_branch or None,
-                "cap": cap,
-            },
-            mutation,
+            "claimed", role, actor, reference, request_id, payload, mutation, identity=payload,
         )
 
     def move(
@@ -1228,6 +1227,14 @@ class TaskWriter:
                 **override_payload,
             },
             mutation,
+            # `from` is the column the move already left, so it is the one field a retry cannot
+            # recompute. Everything the caller asked for is compared.
+            identity={
+                "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+                "decision": decision or None,
+                "sprint_override_reason": override_payload.get("sprint_override_reason"),
+            },
         )
 
     def _check_decision(
@@ -1363,7 +1370,11 @@ class TaskWriter:
                         raise _CommittedWriteError() from exc
                     raise
 
-        return self._write("edited", role, actor, reference, request_id, payload, mutation)
+        # The `_was` digests describe the text this edit replaced, which a retry after the write
+        # can no longer read off the card. The new spec, the heads and the override reason are
+        # what the caller asked for, and they are compared.
+        identity = {key: value for key, value in payload.items() if not key.endswith("_was")}
+        return self._write("edited", role, actor, reference, request_id, payload, mutation, identity=identity)
 
     def _sprint_holds_project(self, project: str) -> bool:
         """Whether an open sprint reserves this card's project.
@@ -1568,9 +1579,11 @@ class TaskWriter:
         payload: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
         mutation: Any,
         *,
+        identity: dict[str, Any],
         retry_payload: dict[str, Any] | None = None,
-        identity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # `identity` has no default: what a request id claims is part of declaring an operation,
+        # and a write that never says it would replay another caller's payload as its own.
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
         if committed is not None:
