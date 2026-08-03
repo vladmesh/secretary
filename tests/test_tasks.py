@@ -2010,3 +2010,224 @@ class BlockedContractTests(unittest.TestCase):
             )["task"]["state"],
             "ready",
         )
+
+
+class RequestIdOwnershipTests(unittest.TestCase):
+    """A request id owns the operation it committed (secretary-1060).
+
+    A retained worker reused the previous round's report id while submitting the next
+    round's body. The committed event was replayed, no comment was appended, and the
+    caller was told the report succeeded, so the dispatcher waited for a marker that
+    could never arrive. The id has to be refused, not replayed.
+    """
+
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        # Outside git, so the done report's durability gate is not what these tests measure.
+        workspace = Path(self.tmpdir.name) / "workspace"
+        workspace.mkdir()
+        self.writer = TaskWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmpdir.name, workspace=str(workspace),
+        )
+
+    def _events(self, request_id: str = "") -> list[dict]:
+        try:
+            with open(self.writer.audit.events_path, encoding="utf-8") as events:
+                recorded = [json.loads(line) for line in events if line.strip()]
+        except FileNotFoundError:
+            return []
+        if not request_id:
+            return recorded
+        return [event for event in recorded if event["request_id"] == request_id]
+
+    def _comments(self, task_id: int = 12) -> list[str]:
+        return [str(comment["comment"]) for comment in self.client.comments[task_id]]
+
+    def _report(self, **overrides: object) -> dict:
+        call = {
+            "role": "worker", "actor": "w", "reference": "secretary-468", "kind": "done",
+            "body": "first round", "request_id": "round-1",
+        }
+        call.update(overrides)
+        return self.writer.report(**call)  # type: ignore[arg-type]
+
+    def test_a_reused_report_id_with_another_body_is_refused(self) -> None:
+        """The live shape of issue:df7d0778b26357e60046."""
+        first = self._report()
+        self.client.calls.clear()
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation") as raised:
+            self._report(body="third round, a different report entirely")
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(raised.exception.exit_code, 2)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self._events("round-1")[0]["event_id"], first["event_id"])
+        self.assertEqual(len(self._comments()), 1)
+
+    def test_the_same_report_under_the_same_id_stays_idempotent(self) -> None:
+        first = self._report()
+        second = self._report()
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(second["action"], "reported")
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(len(self._comments()), 1)
+
+    def test_structured_output_tells_a_replay_from_an_accepted_write(self) -> None:
+        self.assertIs(self._report()["replayed"], False)
+        self.assertIs(self._report()["replayed"], True)
+
+    def test_a_reused_report_id_with_another_kind_is_refused(self) -> None:
+        self._report()
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self._report(kind="blocked", classification="external_fact")
+
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self._events("round-1")[0]["payload"]["marker"], "report:done")
+        self.assertEqual(len(self._comments()), 1)
+
+    def test_a_reused_report_id_with_another_classification_is_refused(self) -> None:
+        self._report(kind="blocked", body="stuck", classification="external_fact")
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self._report(kind="blocked", body="stuck", classification="wrong_task_definition")
+
+        self.assertEqual(
+            self._events("round-1")[0]["payload"]["classification"], "external_fact"
+        )
+        self.assertEqual(len(self._comments()), 1)
+
+    def test_a_reused_report_id_on_another_card_is_refused(self) -> None:
+        self._report()
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self._report(reference="old-1")
+
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self._events("round-1")[0]["ref"], "secretary-468")
+        self.assertEqual(self._comments(13), [])
+
+    def test_a_reused_id_from_another_write_is_refused(self) -> None:
+        """The claim is over the operation, not only over the report vocabulary."""
+        self.writer.comment(
+            role="worker", actor="w", reference="secretary-468", body="a note",
+            request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self._report()
+
+        self.assertEqual(self._events("round-1")[0]["kind"], "commented")
+        self.assertEqual(len(self._comments()), 1)
+
+    def _stage_pending_report(self, body: str) -> dict:
+        """A report staged by a crashed attempt: written, never appended."""
+        event = {
+            "event_id": "evt_staged", "schema_version": 1, "occurred_at": "2026-08-03T00:00:00Z",
+            "actor": {"role": "worker", "id": "w"}, "kind": "reported", "outcome": "success",
+            "task_id": "task_kanboard_12", "ref": "secretary-468",
+            "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
+            "request_id": "round-1",
+            "payload": {"marker": "report:done", "body_sha256": hashlib.sha256(body.encode()).hexdigest()},
+        }
+        self.writer.audit.stage("round-1", event)
+        return event
+
+    def test_a_pending_report_is_owned_by_its_id_too(self) -> None:
+        self._stage_pending_report("first round")
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation") as raised:
+            self._report(body="third round, a different report entirely")
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self._events(), [])
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(self._comments(), [])
+
+    def test_a_pending_report_still_commits_under_its_own_payload(self) -> None:
+        staged = self._stage_pending_report("first round")
+
+        result = self._report()
+
+        self.assertEqual(result["event_id"], staged["event_id"])
+        self.assertIs(result["replayed"], True)
+        self.assertEqual(len(self._events("round-1")), 1)
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        # The crashed attempt already wrote the comment; recovery writes no second one.
+        self.assertEqual(self._comments(), [])
+
+    def test_a_reused_verdict_id_with_another_verdict_is_refused(self) -> None:
+        self.writer.verdict(
+            role="reviewer", actor="r", reference="secretary-468", kind="green", body="ok",
+            request_id="round-1",
+        )
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self.writer.verdict(
+                role="reviewer", actor="r", reference="secretary-468", kind="red",
+                body="the gate is red", request_id="round-1",
+            )
+
+        self.assertEqual(self._events("round-1")[0]["payload"]["marker"], "review:green")
+        self.assertEqual(len(self._comments()), 1)
+
+    def test_the_cli_refuses_a_reused_report_id_with_exit_code_two(self) -> None:
+        data_dir = str(Path(self.tmpdir.name) / "cli")
+        body = Path(self.tmpdir.name) / "report.md"
+        body.write_text("first round\n", encoding="utf-8")
+        argv = [
+            "task", "report", "--role", "worker", "--ref", "secretary-468", "--kind", "done",
+            "--data-dir", data_dir, "--body-file", str(body), "--request-id", "cli-round-1",
+        ]
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+             mock.patch("secretary.tasks.workspace_dirt", return_value=[]), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertEqual(main(argv), 0)
+            body.write_text("third round, a different report entirely\n", encoding="utf-8")
+            code = main(argv)
+
+        self.assertEqual(code, 2)
+        self.assertIs(json.loads(output.getvalue().splitlines()[0])["replayed"], False)
+        self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "validation")
+        self.assertEqual(len(self._comments()), 1)
+
+    def _create(self, **overrides: object) -> dict:
+        call = {
+            "role": "observer", "actor": "observer", "project": "secretary", "task_type": "code",
+            "title": "First card", "target": "ready", "request_id": "create-1",
+        }
+        call.update(overrides)
+        with open_sprint() as sprint:
+            return self.writer.create(sprint=sprint, **call)  # type: ignore[arg-type]
+
+    def test_a_reused_create_id_with_another_card_is_refused(self) -> None:
+        created = self._create()
+        cards = len(self.client.tasks)
+
+        with self.assertRaisesRegex(TaskError, "belongs to another operation") as raised:
+            self._create(title="A different card entirely")
+
+        self.assertEqual(raised.exception.exit_code, 2)
+        self.assertEqual(len(self.client.tasks), cards)
+        self.assertEqual(len(self._events("create-1")), 1)
+        self.assertEqual(self._events("create-1")[0]["event_id"], created["event_id"])
+
+    def test_the_same_create_under_the_same_id_stays_idempotent(self) -> None:
+        first = self._create()
+        cards = len(self.client.tasks)
+
+        second = self._create()
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(first["task"]["ref"], second["task"]["ref"])
+        self.assertIs(first["replayed"], False)
+        self.assertIs(second["replayed"], True)
+        self.assertEqual(len(self.client.tasks), cards)
+        self.assertEqual(len(self._events("create-1")), 1)
