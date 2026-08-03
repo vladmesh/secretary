@@ -228,27 +228,6 @@ MARKER_WATCHDOG_RETRY = "watchdog:retry"
 MARKER_STEWARD_OVERRIDE = "steward:blocked-done"
 
 
-def merge_status(mergeable: str | None, merge_state: str | None) -> str:
-    """Normalize GitHub's two mergeability axes into one base-freshness signal, kept apart from the
-    CI rollup (triggered-agents-442). `mergeable` (MERGEABLE/CONFLICTING/UNKNOWN) answers "is there
-    a textual conflict"; `mergeStateStatus` (CLEAN/BEHIND/DIRTY/BLOCKED/UNSTABLE/UNKNOWN) answers
-    "how does the head sit against the base". Only two states drive recovery: CONFLICTING (a real
-    text conflict, DIRTY is its mergeStateStatus twin) and BEHIND (base moved ahead, no conflict —
-    a clean auto-update). CLEAN and a still-computing UNKNOWN both fall through to the ordinary CI
-    path: a transient UNKNOWN (GitHub hasn't finished recomputing mergeability right after a push)
-    is never treated as a conflict nor as a green state. Pure domain logic, so it lives here rather
-    than in the dispatcher's host boundary, and every PR-polling and merge-recovery path reads it."""
-    mergeable = (mergeable or "").upper()
-    merge_state = (merge_state or "").upper()
-    if mergeable == "CONFLICTING" or merge_state == "DIRTY":
-        return "CONFLICTING"
-    if not mergeable or mergeable == "UNKNOWN" or merge_state == "UNKNOWN":
-        return "UNKNOWN"
-    if merge_state == "BEHIND":
-        return "BEHIND"
-    return "CLEAN"
-
-
 class GuardError(RuntimeError):
     """A role, transition, or claim guard was violated."""
 

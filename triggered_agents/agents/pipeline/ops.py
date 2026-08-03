@@ -566,12 +566,12 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
 
     The claim persists across In progress<->Validate rework (the worker session still owns
     the card) and resets on arrival in Ready — from Blocked (a human's manual recovery) or from
-    In progress (the dispatcher's own watchdog auto-retry requeue, model TRANSITIONS["dispatcher"])
-    — to the unclaimed/fresh-retry-budget defaults (empty string; every guard that reads these
-    checks truthiness, so empty means "unset"). A human recovering a Blocked card this way gets a
-    full watchdog retry budget again, same as a brand new card; a watchdog requeue's own caller
-    (the dispatcher's watchdog retry) restates the real counters (and, on a head switch, the new head)
-    right after via set_retry_state, so this reset is never the last write for that path.
+    In progress (a watchdog auto-retry requeue, model TRANSITIONS["dispatcher"]) — to the
+    unclaimed/fresh-retry-budget defaults (empty string; every guard that reads these checks
+    truthiness, so empty means "unset"). A human recovering a Blocked card this way gets a full
+    watchdog retry budget again, same as a brand new card; a watchdog requeue's own caller is
+    expected to restate the real counters right after, so the reset is never the last write for
+    that path.
 
     A non-empty `reason` is posted as a comment after any successful move. The Blocked->Done
     override keeps its [steward:blocked-done] marker and still requires a reason. Steward's manual
@@ -633,47 +633,6 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     elif reason_text:
         add_comment(role, reference, reason)
     return {"action": "moved", "reference": reference, "from": cur, "to": to_column}
-
-
-def get_metadata(reference: str) -> dict:
-    """Raw metadata dict for `reference` — used by the watchdog retry path to read
-    retry_same/retry_switch/retry_heads without show_card's extra getAllComments fetch."""
-    task = _get_by_ref(reference)
-    return call("getTaskMetadata", task_id=int(task["id"])) or {}
-
-
-def set_retry_state(reference: str, *, retry_same: int, retry_switch: int, retry_heads: str,
-                    head: str | None = None) -> dict:
-    """Dispatcher-only: stamp the watchdog retry counters (model.META_RETRY_*) on a card, and its
-    head too when a switch just picked a new one. Always called right after move_card(..., 'Ready')
-    during a watchdog retry — that move already reset these fields to defaults; this restates the
-    real values on top, in the same tick, so the reset is never the last write."""
-    task = _get_by_ref(reference)
-    values = {
-        model.META_RESOLVED_HEAD: "",
-        model.META_RETRY_SAME: str(retry_same),
-        model.META_RETRY_SWITCH: str(retry_switch),
-        model.META_RETRY_HEADS: retry_heads,
-    }
-    if head is not None:
-        values[model.META_HEAD] = head
-    call("saveTaskMetadata", task_id=int(task["id"]), values=values)
-    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
-    _sync_head_tags(board_id(), int(task["id"]), meta)
-    return {"action": "retry-state", "reference": reference, **values}
-
-
-def set_resolved_review_head(reference: str, review_head: str) -> dict:
-    """Dispatcher-only: stamp the reviewer profile actually spawned after health fallback."""
-    if review_head != model.NO_REVIEW_HEAD:
-        _check_review_head(review_head)
-    pid = board_id()
-    task = _get_by_ref(reference)
-    values = {model.META_RESOLVED_REVIEW_HEAD: review_head}
-    call("saveTaskMetadata", task_id=int(task["id"]), values=values)
-    meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
-    _sync_head_tags(pid, int(task["id"]), meta)
-    return {"action": "resolved-review-head", "reference": reference, **values}
 
 
 def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | None = None) -> dict:

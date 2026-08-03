@@ -285,46 +285,6 @@ def resolve_head(preferred: str, statuses: dict[str, str],
     return None
 
 
-def next_retry_head(current: str, tried: set[str], statuses: dict[str, str],
-                    registry: heads_mod.Registry | None = None) -> tuple[str | None, bool]:
-    """The next profile for a watchdog retry-switch to land `current` on: breadth-first over
-    `current`'s own fallback chain (same walk as resolve_head), skipping anything already in
-    `tried` (every head this card's watchdog has already used this life, `current` included) and
-    any red resource. Returns (head, False) on a hit.
-
-    A miss carries a second flag distinguishing why, so a watchdog retry can tell "spend the
-    switch budget's one shot on nothing" from "there's a real target, just not up right now":
-      (None, True)  nothing untried left to try at all (empty/exhausted chain, or `current` itself
-                    unknown to the registry) — stop retrying, nothing here will ever turn green.
-      (None, False) untried candidates exist but every one sits on a red resource right now —
-                    requeue without spending the budget; the next claim's own red-skip
-                    (_claim_next/resolve_head) picks the card up once a resource recovers."""
-    reg = registry or heads_mod.load_registry()
-    try:
-        queue = list(reg.profile(current).get("fallback") or [])
-    except heads_mod.HeadRegistryError:
-        return None, True
-    visited = {current}   # cycle guard only — a tried-but-not-visited node's OWN fallback is still
-                          # worth walking, it may lead to something genuinely untried further out
-    found_untried = False
-    while queue:
-        pid = queue.pop(0)
-        if pid in visited:
-            continue
-        visited.add(pid)
-        try:
-            prof = reg.profile(pid)
-        except heads_mod.HeadRegistryError:
-            continue
-        queue.extend(prof.get("fallback") or [])
-        if pid in tried:
-            continue
-        found_untried = True
-        if statuses.get(prof["resource"], GREEN) == GREEN:
-            return pid, False
-    return None, not found_untried
-
-
 # Real, cheap probes for the builtin resources this repo names in heads.toml. Deliberately
 # not resource-id-dispatched inside `refresh`/`_run_probe_cmd` above (those stay pure "run this
 # shell command" — heads.toml's `probe` field is the single source of what each resource runs);
