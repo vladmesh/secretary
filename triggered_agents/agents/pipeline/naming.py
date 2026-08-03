@@ -12,7 +12,7 @@ down to the numeric tail the workspace/title functions below key off.
 
 Collision (a re-claim while the previous attempt's workspace is still alive, e.g. left on
 Blocked) is resolved by `dedupe`, which takes an `exists` predicate rather than touching disk
-itself — the caller (dispatcher.py) supplies worker.workspace_exists, keeping this module free of
+itself — the caller supplies the workspace-exists probe, keeping this module free of
 host I/O and trivially unit-testable.
 """
 from __future__ import annotations
@@ -78,7 +78,7 @@ def reviewer_title(card_id: str, card_title: str) -> str:
 
 # --- git ref names (git hygiene: one ref per actor, see design-task-pipeline.md) ---------------
 # Single source of truth for every actor's branch name, keyed off the card `reference` (not the
-# workspace id above) so worker.py and dispatcher.py never hardcode the `pipeline/`/`review/`
+# workspace id above) so no caller ever hardcodes the `pipeline/`/`review/`
 # prefix in more than one place.
 
 

@@ -6,15 +6,13 @@ from — red is a property of the resource, not of any one profile, so a card wh
 profile sits on a red resource can still claim onto a fallback profile that draws from a
 *different*, green resource (`resolve_head`), and a worker already running on a red-resource
 profile has its watchdog clock frozen rather than mistaken for a dead head (`resource_of`, used
-by dispatcher._advance).
+by the dispatcher when it advances a card).
 
-`refresh` is the only thing that ever runs a probe. It is meant to be called once per tick (from
-precheck, which runs unconditionally every timer fire, and again from tick() for the rare case a
-resource's TTL lapsed between the two) — probes cost real tokens/quota, so the TTL cache
-(`PROBE_TTL_S`, ~5 min) is what keeps that cost to "once per window", not "once per 3-min tick".
-Cache lives in a JSON file (state/pipeline/resource_health.json), not in memory: precheck and
-tick are two separate `python3 -m triggered_agents` processes per timer fire (via
-deploy/ta-gate.sh), so nothing survives in-process between them.
+`refresh` is the only thing that ever runs a probe, and it is meant to be called once per tick —
+probes cost real tokens/quota, so the TTL cache (`PROBE_TTL_S`, ~5 min) is what keeps that cost
+to "once per window", not "once per tick". Cache lives in a JSON file
+(state/pipeline/resource_health.json), not in memory: the callers are separate short-lived
+processes, so nothing survives in-process between them.
 
 A resource's red<->green flip is logged to runs.jsonl (`head-health`) exactly once per flip, not
 on every re-probe of an unchanged status — a resource pinned red for hours must not spam the log
@@ -294,8 +292,8 @@ def next_retry_head(current: str, tried: set[str], statuses: dict[str, str],
     `tried` (every head this card's watchdog has already used this life, `current` included) and
     any red resource. Returns (head, False) on a hit.
 
-    A miss carries a second flag distinguishing why, so dispatcher._watchdog_retry can tell "spend
-    the switch budget's one shot on nothing" from "there's a real target, just not up right now":
+    A miss carries a second flag distinguishing why, so a watchdog retry can tell "spend the
+    switch budget's one shot on nothing" from "there's a real target, just not up right now":
       (None, True)  nothing untried left to try at all (empty/exhausted chain, or `current` itself
                     unknown to the registry) — stop retrying, nothing here will ever turn green.
       (None, False) untried candidates exist but every one sits on a red resource right now —

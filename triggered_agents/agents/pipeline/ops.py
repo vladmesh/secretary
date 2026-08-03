@@ -20,7 +20,8 @@ import os
 import time
 
 from ...runtime.kanboard import KanboardError, call, call_batch
-from . import heads, model, naming, worker
+from ...runtime.redact import scrub_secrets
+from . import heads, model, naming
 from .state import STATE
 
 
@@ -382,8 +383,8 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     at bring-up. `review_head`, when given, must name a profile, except the reserved PO-only
     value `none`, which disables Validate layer 3 for this card. Omitted means Validate uses
     heads.reviewer_head(). `base_branch`, when given, overrides the project's manifest base_branch
-    for this card only (worker.resolve_base_branch); omitted, bring-up falls back to the manifest
-    lookup exactly as before this field existed.
+    for this card only; omitted, bring-up falls back to the manifest lookup exactly as before
+    this field existed.
 
     `role="steward"` scrubs title/description the same way add_comment does for steward — the
     escalation/idea path SKILL.md sends steward through (create in Ready, or file an Idea then move to
@@ -438,8 +439,8 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     if role == "worker":
         _check_worker_continuation(project, column, blocked_by, own_ref)
     if role == "steward":
-        title = worker.scrub_secrets(title)
-        description = worker.scrub_secrets(description)
+        title = scrub_secrets(title)
+        description = scrub_secrets(description)
     pid = board_id()
     col_id = _column_id(pid, column)
     sw_id = _ensure_swimlane(pid, project)
@@ -482,8 +483,8 @@ def create_report_card(project: str, title: str, slug: str, description: str = "
     """
     if not naming.SLUG_RE.match(slug):
         raise model.GuardError(f"slug {slug!r} must match [a-z0-9-]{{1,30}}")
-    title = worker.scrub_secrets(title)
-    description = worker.scrub_secrets(description)
+    title = scrub_secrets(title)
+    description = scrub_secrets(description)
     pid = board_id()
     col_id = _column_id(pid, model.IN_PROGRESS)
     sw_id = _ensure_swimlane(pid, project)
@@ -569,7 +570,7 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     — to the unclaimed/fresh-retry-budget defaults (empty string; every guard that reads these
     checks truthiness, so empty means "unset"). A human recovering a Blocked card this way gets a
     full watchdog retry budget again, same as a brand new card; a watchdog requeue's own caller
-    (dispatcher._watchdog_retry) restates the real counters (and, on a head switch, the new head)
+    (the dispatcher's watchdog retry) restates the real counters (and, on a head switch, the new head)
     right after via set_retry_state, so this reset is never the last write for that path.
 
     A non-empty `reason` is posted as a comment after any successful move. The Blocked->Done
@@ -635,9 +636,8 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
 
 
 def get_metadata(reference: str) -> dict:
-    """Raw metadata dict for `reference` — used by the watchdog retry path (dispatcher.
-    _watchdog_retry) to read retry_same/retry_switch/retry_heads without show_card's extra
-    getAllComments fetch."""
+    """Raw metadata dict for `reference` — used by the watchdog retry path to read
+    retry_same/retry_switch/retry_heads without show_card's extra getAllComments fetch."""
     task = _get_by_ref(reference)
     return call("getTaskMetadata", task_id=int(task["id"])) or {}
 
@@ -772,13 +772,13 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
 
 def add_comment(role: str, reference: str, body: str, marker: str | None = None) -> dict:
     """Post a comment as `[marker or role]\\n<body>`; user_id=0 (app-token author). Scrubbed for
-    steward specifically (worker.scrub_secrets), same as the reviewer's verdict/reviewer_idea:
+    steward specifically (runtime.redact.scrub_secrets), same as the reviewer's verdict/reviewer_idea:
     steward reads more raw system surface than any other role (transcripts, journalctl, env
     files) and could quote a secret by accident (2026-07-04 review, triggered-agents-244 remark
     Z1). Every other role keeps its body verbatim, unchanged from before."""
     task = _get_by_ref(reference)
     tag = marker or role
-    text = worker.scrub_secrets(body) if role == "steward" else body
+    text = scrub_secrets(body) if role == "steward" else body
     call("createComment", task_id=int(task["id"]), user_id=0, content=f"[{tag}]\n{text}")
     return {"action": "commented", "reference": reference, "marker": tag}
 
@@ -816,7 +816,7 @@ def verdict(reference: str, kind: str, body: str = "") -> dict:
     if kind == "red" and not body.strip():
         raise model.GuardError("a red verdict requires a non-empty body (the blocker findings)")
     marker = model.MARKER_REVIEW_GREEN if kind == "green" else model.MARKER_REVIEW_RED
-    out = add_comment("reviewer", reference, worker.scrub_secrets(body), marker=marker)
+    out = add_comment("reviewer", reference, scrub_secrets(body), marker=marker)
     out["action"] = "verdict"
     out["kind"] = kind
     return out
@@ -829,8 +829,8 @@ def reviewer_idea(project: str, title: str, description: str = "", task_type: st
     code-creation exception). Title and description are scrubbed for the same reason as a verdict.
     The card goes to the board's first column; _proposal_column resolves it."""
     return _create_proposal_card(project=project, task_type=task_type,
-                                 title=worker.scrub_secrets(title),
-                                 description=worker.scrub_secrets(description),
+                                 title=scrub_secrets(title),
+                                 description=scrub_secrets(description),
                                  ref=ref, head=head, slug=slug)
 
 
@@ -842,8 +842,8 @@ def retro_idea(project: str, title: str, description: str = "", task_type: str =
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
     return _create_proposal_card(project=project, task_type=task_type,
-                                 title=worker.scrub_secrets(title),
-                                 description=worker.scrub_secrets(description),
+                                 title=scrub_secrets(title),
+                                 description=scrub_secrets(description),
                                  ref=ref, head=head, slug=slug)
 
 
@@ -857,8 +857,8 @@ def steward_idea(project: str, title: str, description: str = "", task_type: str
     steward move it on to Blocked or Ready afterwards.
     """
     return _create_proposal_card(project=project, task_type=task_type,
-                                 title=worker.scrub_secrets(title),
-                                 description=worker.scrub_secrets(description),
+                                 title=scrub_secrets(title),
+                                 description=scrub_secrets(description),
                                  ref=ref, head=head, slug=slug)
 
 

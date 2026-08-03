@@ -3,9 +3,9 @@
 A worker/reviewer head is data (`[resources.*]` the accounts/limits heads draw from,
 `[profiles.*]` the runtime+model+resource+fallback-chain combos, `[role_defaults]` which head each
 role runs on), not a hardcoded `claude` invocation. `render_command` picks a profile's adapter
-(ADAPTERS below) and builds the shell command worker.py hands to `orca terminal create`. A new head
-is a new `[profiles.<id>]` entry plus, only if its launch shape is genuinely new, one more
-`_render_*` function here — dispatcher.py and worker.py never change.
+(ADAPTERS below) and builds the shell command the dispatcher hands to `orca terminal create`. A
+new head is a new `[profiles.<id>]` entry plus, only if its launch shape is genuinely new, one
+more `_render_*` function here — no caller changes.
 
 Which heads exist is installation configuration, not product code: the accounts, models and
 fallback chains one host pays for are not the ones another host has. So an installation that has

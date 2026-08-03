@@ -21,7 +21,6 @@ pause/resume moved out (secretary-731). The production dispatcher never read thi
 pausing here reported success while it kept claiming cards. Both commands now refuse and name
 `secretary pause` / `secretary resume`, which write the production flag and mirror it back to
 `state/pipeline/pause.json` for runtime/dispatch.py, still the flag steward/curator/retro read.
-pause-status stays read-only and still reports this flag, labelled as the legacy one.
 
 `probe --resource <id>` exits 0/1 for green/red (see health.run_builtin_probe), not the generic
 KanboardError/GuardError table below — it is heads.toml's own probe command, run by
@@ -73,15 +72,14 @@ def _need_role(role: str | None, allowed: tuple[str, ...]) -> bool:
 
 MOVED_PAUSE = "secretary pause drain|freeze --instance <instance> --reason ..."
 MOVED_RESUME = "secretary resume --instance <instance>"
-MOVED_PAUSE_STATUS = "secretary pause-status --instance <instance>"
 
 
 def _moved_pause_command(cmd: str) -> int:
     """Refuse a legacy pause/resume and name the command that works.
 
-    The legacy dispatcher no longer moves cards, so writing its flag here would report success
-    while the production dispatcher kept claiming. One door only: `secretary pause` writes the
-    production flag and mirrors it to this one for the background roles that still read it.
+    Nothing dispatches off this flag any more, so writing it here would report success while the
+    production dispatcher kept claiming. One door only: `secretary pause` writes the production
+    flag and mirrors it to this one for the background roles that still read it.
     """
     replacement = MOVED_RESUME if cmd == "resume" else MOVED_PAUSE
     _err(
@@ -97,8 +95,6 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("setup")
-    sub.add_parser("tick")       # dispatcher: one deterministic tick (claim/advance)
-    sub.add_parser("precheck")   # dispatcher: exit 0 if there is work, PRECHECK_SKIP (100) to skip
 
     p_pause = sub.add_parser("pause")     # po/steward: drain (claims off) or freeze (heads stopped)
     p_pause.add_argument(
@@ -113,7 +109,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pause.add_argument("--exclude-workspace", action="append", default=[],
                          help="hard pause: leave this worker workspace running")
     sub.add_parser("resume")              # po/steward: undo pause, idempotent if not paused
-    sub.add_parser("pause-status")        # any role: current pause state, read-only
 
     p_probe = sub.add_parser("probe")   # heads.toml's own probe command for a resource
     p_probe.add_argument("--resource", required=True)
@@ -220,20 +215,8 @@ def main(argv=None) -> int:
     try:
         if args.cmd == "setup":
             return _emit(ops.ensure_structure())
-        if args.cmd in ("tick", "precheck"):
-            from . import dispatcher
-            return dispatcher.tick() if args.cmd == "tick" else dispatcher.precheck()
         if args.cmd in ("pause", "resume"):
             return _moved_pause_command(args.cmd)
-        if args.cmd == "pause-status":
-            from . import dispatcher
-            status = dispatcher.pause_status()
-            status["authoritative_command"] = MOVED_PAUSE_STATUS
-            status["note"] = (
-                "this is the legacy flag; the pipeline is paused and read through "
-                f"{MOVED_PAUSE_STATUS}"
-            )
-            return _emit(status)
         if args.cmd == "probe":
             from . import health
             try:

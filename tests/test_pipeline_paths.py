@@ -1,8 +1,9 @@
 """Path/env resolving after the control-panel / triggered-agents decommission (secretary-624).
 
-These cover the runtime path defaults that used to point at removed checkouts: the OpenRouter key
-location, the optional setup provisioner and central manifest dir, and the pause-flag candidate
-lists. They pin the new behaviour so a future edit can't silently repoint them back at a dead path.
+These cover the runtime path defaults that used to point at removed checkouts: the instance and
+checkout defaults, the launcher PYTHONPATH, the OpenRouter key location, and the pause-flag
+candidate lists. They pin the new behaviour so a future edit can't silently repoint them back at
+a dead path.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.agents.pipeline import health, pause, task_protocol, worker
+from triggered_agents.agents.pipeline import health, pause, task_protocol
 from triggered_agents.runtime import paths, role_env as runtime_role_env
 from secretary import dispatcher_pause, role_env as secretary_role_env
 
@@ -229,54 +230,6 @@ class PauseCandidateTests(unittest.TestCase):
         expected = root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
         self.assertIn(expected, candidates)
         self.assertFalse(any(dead_root in p.parents for p in candidates))
-
-
-class ProvisionTests(unittest.TestCase):
-    def setUp(self):
-        preflight = mock.patch.object(worker.task_protocol, "preflight",
-                                      return_value=(True, "preflight-ok"))
-        preflight.start()
-        self.addCleanup(preflight.stop)
-        log = mock.patch.object(worker.STATE, "log_run")
-        log.start()
-        self.addCleanup(log.stop)
-
-    def test_no_provisioner_configured_skips_and_succeeds(self):
-        with mock.patch.object(worker, "PROVISION", None):
-            ok, log = worker.provision("/tmp/ws")
-        self.assertTrue(ok)
-        self.assertIn("no provisioner configured", log)
-
-    def test_configured_but_missing_provisioner_blocks(self):
-        with mock.patch.object(worker, "PROVISION", Path("/no/such/provision.py")):
-            ok, log = worker.provision("/tmp/ws")
-        self.assertFalse(ok)
-        self.assertIn("provisioner missing", log)
-
-
-class LoadManifestTests(unittest.TestCase):
-    def test_local_workspace_toml_wins(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "workspace.toml").write_text(
-                '[workspace]\nbase_branch = "dev"\ncontrib = true\n', encoding="utf-8")
-            with mock.patch.object(worker, "project_root", return_value=root):
-                self.assertEqual(worker.read_base_branch("proj"), "dev")
-                self.assertTrue(worker.is_contrib("proj"))
-
-    def test_central_manifest_only_when_configured(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "repo"      # no workspace.toml here
-            root.mkdir()
-            central = Path(tmp) / "manifests"
-            central.mkdir()
-            (central / "proj.toml").write_text('[workspace]\nbase_branch = "release"\n',
-                                               encoding="utf-8")
-            with mock.patch.object(worker, "project_root", return_value=root):
-                with mock.patch.object(worker, "MANIFEST_DIR", None):
-                    self.assertEqual(worker.read_base_branch("proj"), "main")
-                with mock.patch.object(worker, "MANIFEST_DIR", central):
-                    self.assertEqual(worker.read_base_branch("proj"), "release")
 
 
 if __name__ == "__main__":

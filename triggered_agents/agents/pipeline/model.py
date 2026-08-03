@@ -219,7 +219,7 @@ MARKER_CLAIM_STARTED = "claim:started"
 # won't parse). The failure is localized to that card — the tick keeps going for the others.
 MARKER_VALIDATE_ERROR = "validate:error"
 # A watchdog auto-retry requeue (same head or a head switch) on an In-progress card — see
-# dispatcher._watchdog_retry. Never posted on the terminal Blocked (budget exhausted): that one
+# the dispatcher's watchdog retry. Never posted on the terminal Blocked (budget exhausted): that one
 # stays a plain [dispatcher] comment, same as before this marker existed.
 MARKER_WATCHDOG_RETRY = "watchdog:retry"
 # The steward's justification for a Blocked->Done override (STEWARD_OVERRIDE), posted by
@@ -237,7 +237,7 @@ def merge_status(mergeable: str | None, merge_state: str | None) -> str:
     a clean auto-update). CLEAN and a still-computing UNKNOWN both fall through to the ordinary CI
     path: a transient UNKNOWN (GitHub hasn't finished recomputing mergeability right after a push)
     is never treated as a conflict nor as a green state. Pure domain logic, so it lives here rather
-    than in worker.py's host boundary and both poll_pr and merge_recovery read it."""
+    than in the dispatcher's host boundary, and every PR-polling and merge-recovery path reads it."""
     mergeable = (mergeable or "").upper()
     merge_state = (merge_state or "").upper()
     if mergeable == "CONFLICTING" or merge_state == "DIRTY":

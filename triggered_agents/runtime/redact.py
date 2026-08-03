@@ -8,6 +8,9 @@ anything is written. Two layers:
      occurrences. Strongest — catches whatever actually lives in this VPS's secrets.
   2. Pattern scrub: regexes for well-known key shapes (sk-…, AGE-SECRET, Bearer, …),
      a backstop for secrets pasted into a transcript that aren't in any .env we know.
+
+`scrub_secrets` adds a third, wider layer on top of those two for text that goes onto a board
+card: secret-looking KEY=value assignments and long token-shaped blobs.
 """
 from __future__ import annotations
 
@@ -70,6 +73,33 @@ def redact(text: str, env_files=None) -> str:
     for pat, label in PATTERNS:
         text = pat.sub(f"{REDACTED}:{label}", text)
     return text
+
+
+# Board comments are a card's public journal, so error texts and captured logs get scrubbed
+# before posting. `redact` above catches known .env values and token shapes; on top of that:
+# KEY=value assignments whose name smells like a secret, and long base64/hex-ish blobs
+# (no `/`, so filesystem paths survive).
+_ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
+_BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
+_HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def _is_git_sha(blob: str) -> bool:
+    """A git sha — full (40 hex) or abbreviated (7-40 hex) — is plain hex, no `+`/`=`/mixed-case
+    entropy a real token would carry. Masking it turns a commit reference in a CI-failure comment
+    into noise for no security gain."""
+    return bool(_HEX_RE.match(blob))
+
+
+def scrub_secrets(text: str) -> str:
+    """Mask secret-looking material in `text` before it reaches a board comment. `_BLOB_RE` casts
+    a wide net over long alnum runs, so a git sha or any other hex-shaped identifier is spared —
+    only the rest (base64/token-looking blobs) gets masked."""
+    if not text:
+        return text
+    text = redact(text)
+    text = _ASSIGN_RE.sub(rf"\1={REDACTED}", text)
+    return _BLOB_RE.sub(lambda m: m.group(0) if _is_git_sha(m.group(0)) else f"{REDACTED}:blob", text)
 
 
 if __name__ == "__main__":
