@@ -14,7 +14,7 @@ from unittest import mock
 from secretary.cli import main
 from secretary.config import load_config
 from secretary.data import normalize_sprint_entity
-from secretary.sprint_observer import head_choice, none_choice
+from secretary.sprint_observer import OBSERVER_FIELD, head_choice, none_choice
 from secretary.sprints import (
     BUDGET_EVENT_TYPES,
     SprintReader,
@@ -384,6 +384,17 @@ class SprintOwnershipTests(SprintFixture):
     def _refuse_metadata(self, field: str):
         return self._refuse_once("saveTaskMetadata", field)
 
+    def _reject_removal(self):
+        """Answer every `removeTask` the way a backend that keeps the row does."""
+        original = self.client.call
+
+        def refuse(method: str, **params: object) -> object:
+            if method == "removeTask":
+                return False
+            return original(method, **params)
+
+        return mock.patch.object(self.client, "call", side_effect=refuse)
+
     def _stall_create(self, request_id: str, **kwargs) -> None:
         """Leave one admitted create staged, repairable by its own request id."""
         with self._refuse_metadata("sprint_goal"):
@@ -513,6 +524,49 @@ class SprintOwnershipTests(SprintFixture):
             [("created", "shared-winner", "sprint:shared")],
         )
         self.assertEqual(winner["ref"], "sprint:shared")
+
+    def test_a_refused_create_whose_row_survives_is_answered_as_repairable(self) -> None:
+        """A refusal is only an answer when the request is left holding nothing.
+
+        Here the backend keeps the row of a stalled create, so the repeat that loses the
+        slot cannot be told `sprint_conflict`: that would call the request over while its
+        row and its staged intent are both still there. It is repairable under the same
+        request id until the removal goes through.
+        """
+        with self._reject_removal():
+            with self._refuse_metadata("sprint_goal"):
+                with self.assertRaisesRegex(TaskError, "pending repair"):
+                    self._create(
+                        goal="kept row", reference="sprint:kept", request_id="kept",
+                    )
+        self.assertEqual(len(self._sprint_rows()), 1)
+        staged = self._transactions()
+        self.assertEqual(len(staged), 1)
+
+        winner = self._create(
+            goal="winner", reference="sprint:winner", projects=["secretary-instance"],
+        )["sprint"]["ref"]
+
+        with self._reject_removal():
+            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
+                self._create(goal="kept row", reference="sprint:kept", request_id="kept")
+
+        self.assertEqual(pending.exception.code, "audit_pending")
+        # The refusal was not answered, so the repair the caller is told to retry is still
+        # there, with the row it has to take back.
+        self.assertEqual(self._transactions(), staged)
+        self.assertEqual(len(self._sprint_rows()), 2)
+        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [winner])  # type: ignore[arg-type]
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
+
+        with self.assertRaisesRegex(TaskError, winner) as raised:
+            self._create(goal="kept row", reference="sprint:kept", request_id="kept")
+
+        self.assertEqual(raised.exception.code, "sprint_conflict")
+        self.assertEqual(self._transactions(), [])
+        self.assertEqual(len(self._sprint_rows()), 1)
+        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [winner])  # type: ignore[arg-type]
+        self.assertEqual([event["kind"] for event in self._events()], ["created"])
 
     def test_a_repeated_create_records_exactly_one_audit_event(self) -> None:
         first = self._create(goal="repeated", request_id="repeat-once")
@@ -784,6 +838,56 @@ class SprintOwnershipTests(SprintFixture):
             self.writer.reopen(
                 observer=none_choice(), role="po", actor="operator", reference=ref,
                 request_id="reopen-rollback",
+            )
+
+        self.assertEqual(raised.exception.code, "sprint_conflict")
+        restored = reader.show(ref, include_cards=False)
+        self.assertEqual(restored["status"], "closed")
+        self.assertEqual(restored["observer"], head_choice("codex-observer"))
+        self.assertEqual(self._transactions(), [])
+        self.assertEqual([event["event_id"] for event in self._events()], events)
+        self.assertEqual([event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()], [])
+
+    def test_a_refused_reopen_that_cannot_put_the_observer_back_stays_repairable(self) -> None:
+        """The rollback of a refused reopen is a backend write, and it can be rejected.
+
+        Until it goes through, the row still carries the observer the stalled attempt
+        wrote, so the repeat that lost the slot is repairable rather than refused: the
+        same request id keeps the rollback that has not happened yet.
+        """
+        ref = self._create(goal="reopen kept", reference="sprint:kept")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+        with self._refuse_metadata("sprint_status"):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                self.writer.reopen(
+                    observer=none_choice(), role="po", actor="operator", reference=ref,
+                    request_id="reopen-kept",
+                )
+        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+        self.assertEqual(reader.show(ref, include_cards=False)["observer"], none_choice())
+        self._create(goal="winner", reference="sprint:winner", projects=["secretary-instance"])
+        staged = self._transactions()
+        self.assertEqual(len(staged), 1)
+        events = [event["event_id"] for event in self._events()]
+
+        with self._refuse_metadata(OBSERVER_FIELD):
+            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
+                self.writer.reopen(
+                    observer=none_choice(), role="po", actor="operator", reference=ref,
+                    request_id="reopen-kept",
+                )
+
+        self.assertEqual(pending.exception.code, "audit_pending")
+        kept = reader.show(ref, include_cards=False)
+        self.assertEqual(kept["status"], "closed")
+        self.assertEqual(kept["observer"], none_choice())
+        self.assertEqual(self._transactions(), staged)
+        self.assertEqual([event["event_id"] for event in self._events()], events)
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.reopen(
+                observer=none_choice(), role="po", actor="operator", reference=ref,
+                request_id="reopen-kept",
             )
 
         self.assertEqual(raised.exception.code, "sprint_conflict")
