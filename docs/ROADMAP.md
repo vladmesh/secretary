@@ -56,8 +56,30 @@ The card model separates the durable product plane from execution:
 - tasks are execution records, not product backlog, and are archived when their sprint closes;
 - only the PO explicitly closes an issue after checking the sprint outcome and product invariants.
 
-The first implementation permits one active sprint per installation. Reservations are recorded from the
-start so this can later loosen to parallel sprints whose project sets do not overlap.
+One open sprint per installation is the shipped default. A second one exists as a gated pilot: the
+instance setting `open_sprint_limit` accepts 1 or 2, is absent by default, and at 2 admits a second sprint
+only when it declares a different Product, reserves no project the other reserves, overlaps none of its
+canonical repository roots, and runs without an observer head if the other sprint has one. The admission
+contract, restore included, is in [Protocols](PROTOCOLS.md#the-open-sprint-limit); the operator's view,
+the limitations and the rollback are in [Operations](OPERATIONS.md#the-two-sprint-pilot). The code is
+complete and covered by tests; the pilot has not been enabled on the live installation, so there is no
+operational experience of two sprints running side by side yet.
+
+The pilot deliberately isolates admission and the per-sprint mechanisms (the observer fence when the
+board is readable, the budget and its hard stop, claim suppression by a blocked card) and nothing else.
+Pause, the single production tick writer and the blind fence stay installation-wide.
+
+Raising the limit past two, or lifting the one-observer ceiling, needs work that does not exist:
+
+- an observer call bound to a sprint identity. Today the observer role's commands are not scoped to the
+  sprint they are about, so two heads observing at once would each read the other's cards as their own.
+  This is the ceiling's whole reason, and it is the first thing to build.
+- pause and drain scoped to a sprint rather than to the installation, so one sprint can be stopped for
+  repair without stopping the other.
+- a way for a tick that cannot read the sprint board to fence less than everything, which needs a
+  declaration it can check without that board.
+- evidence from running the pair, plus the exact-string round trip of repository roots through the live
+  Kanboard metadata calls, which is currently covered by in-memory fixtures only.
 
 The model does not yet have typed execution gates, a coded completeness check, per-project overlay
 deviations, an in-house CI runner for private repositories, or cleanup by owner label. Known defects in
@@ -89,7 +111,8 @@ After cutover, the sprint system implements its remaining programme through itse
    five, one exceptional sixth fix round, and then a mechanical wait for the owner;
 4. durable product decision requests and `awaiting_decision` when the Definition of Done proves impossible
    or materially incomplete;
-5. parallel product sprints whose project reservations do not overlap.
+5. parallel product sprints beyond the gated two-sprint pilot: more than two at once, and an observer per
+   sprint, both of which need observer calls bound to a sprint identity.
 
 Reviewer verdict and release decision remain distinct. Review stays independent and may report every real
 blocker. At the budget boundary the observer may accept a mechanically green, architecturally convergent

@@ -241,9 +241,10 @@ Product, and every `--project` is an id from the instance project registry; `--r
 meaning as the write-guard scope. A repository root is canonicalized where it is declared, so the row
 persists the absolute path and a root this host cannot resolve is refused with the value it could not
 resolve. An Issue of another Product and a closed Issue are refused with their
-own messages. One installation holds at most one open sprint: a second `create` is refused as
+own messages. By default one installation holds at most one open sprint: a second `create` is refused as
 `sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
-that, as `resource_conflict` naming the project and its holder. Every one of these checks is a read, so a
+that, as `resource_conflict` naming the project and its holder. The gated pilot that raises the limit to
+two is [below](#the-open-sprint-limit). Every one of these checks is a read, so a
 refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
 returns the first event instead of colliding with the sprint it already opened.
 
@@ -322,6 +323,57 @@ not part of the six stored resume fields. `secretary status --json` exposes the
 same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.
+
+### The open-sprint limit
+
+How many sprints an installation may hold open at once is the instance setting `open_sprint_limit`, an
+integer that is either 1 or 2. Absent means 1, which is what every installation does and what the shipped
+default is. Two is a gated pilot and nothing enables it by itself. A value the setting cannot honour
+(3, a string, `true`, anything the schema refuses) fails closed to 1 rather than raising, so a malformed
+setting can never widen the limit and can never stop admission either; `validate_instance` reports it as
+an `open_sprint_limit` finding, because failing closed is otherwise silent to the operator who wrote it.
+The limit is read from the installation config at the moment admission asks for it, so changing it needs
+no restart and an installation whose config cannot be read answers 1.
+
+At limit 1 nothing below applies: the second `create` is refused on the count, exactly as before.
+
+At limit 2 a second sprint is admitted only when it can be proven disjoint from the one already open.
+Three requirements, all of them checked against live state before the first board write:
+
+- **a different product.** Two open sprints may not share the owning Product. A sprint that declares no
+  product at all, a row from before sprints owned one, cannot be proven disjoint and is refused,
+  whichever of the two it is: the candidate is judged on its own value first, so the answer does not
+  depend on which row was looked at first.
+- **disjoint project reservations.** This refusal predates the limit and reads the same at either limit.
+- **non-overlapping canonical repository roots.** Roots are compared as absolute resolved paths, and
+  overlap includes nesting: two spellings of one working tree are one working tree, and a root that
+  contains another's is the same tree twice. A stored root that is not already absolute is refused on
+  either side rather than resolved at check time, because resolving it would answer against the working
+  directory of whichever process happens to run admission. The candidate's own roots are judged before
+  any pairwise comparison and whether or not another sprint is open, so a one-row open set published by
+  restore or by a reopen cannot carry a root the next check would read as a different tree.
+
+Above the three there is a fourth, and it is a ceiling rather than a disjointness rule: **at most one of
+the open sprints may declare an observer head.** Nothing binds an observer call to the sprint it is about,
+so two heads observing at once would each read the other's cards as their own. The second sprint is opened
+with `--observer none`, and the refusal says so. Only `{"kind": "none"}` proves a sprint runs without a
+head: a row whose observer is missing or unreadable is counted as one, because admitting a second head
+because one row could not be read is the collision the ceiling exists to prevent.
+
+Every resource collision the limit lets the installation check is reported before the generic count
+refusal, including when the installation is already at its limit. The count names every
+open sprint and distinguishes none of them, so a caller who acts on it can close the wrong one and come
+back for a second refusal; a resource refusal names the sprint holding the resource, and closing that one
+sprint both frees a slot and clears the collision. The order is reservation, product, repository root,
+observer ceiling, then count.
+
+`create`, `reopen` and restore are held to the same invariants, under the same
+`sprints/admission.lock`. `restore_create` is deliberately not an admission decision, since it reproduces
+exported rows one after another, so recovery judges the exported open sprints as a *set* instead: once,
+before the first backend write of either set, by admitting the rows one at a time in reference order
+against the rows already accepted. An archive is therefore not a way to arrive at a pair admission would
+have refused. The limit applied is the target installation's, not the source's, and the whole restore runs
+inside the admission lock so a `create` cannot slip between recovery's check and its write.
 
 ### The declared observer
 
