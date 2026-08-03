@@ -370,11 +370,11 @@ setting, it is off unless somebody turns it on, and turning it on is a deliberat
 listed under [what stays installation-wide](#what-the-pilot-does-not-isolate) below. Read those first: they
 are the part an operator meets during an incident, not during setup.
 
-The admission rules themselves are in [Protocols](PROTOCOLS.md#the-open-sprint-limit). The short form: at
-limit two a second sprint is admitted only if it has a different Product, reserves no project the other
-one reserves, declares no repository root that overlaps the other's, and, because nothing yet binds an
-observer call to a sprint identity, declares `--observer none` if the other sprint already has an
-observer head.
+What admission checks, in what order and at which limit is stated once, in
+[Protocols](PROTOCOLS.md#the-open-sprint-limit). Read it before enabling the setting: it is what decides
+whether a second sprint you have in mind can be opened at all. In operator terms the second sprint has to
+be work that touches nothing the first one touches, and it runs without an observer head if the first one
+has one.
 
 ### Enabling it
 
@@ -401,18 +401,16 @@ python3 -c 'import sys; from pathlib import Path; from secretary.sprints import 
 
 `1` after writing `2` means the file the command read is not the file that was edited, or the value was
 refused; check `secretary doctor` and the `--instance` path. The other observable difference is the
-wording of the count refusal, the one a full installation gives a candidate that collides with nothing
-more specific: at limit one it reads `installation already has an open sprint`, at limit two
-`installation already holds its limit of 2 open sprints`.
+wording of the count refusal: at limit one it reads `installation already has an open sprint`, at limit
+two `installation already holds its limit of 2 open sprints`. That is the refusal a candidate gets when
+nothing more specific collided, so it is a confirmation when it appears, not a check you can force.
 
 ### Reading a refusal
 
 Every refusal happens before any board row, metadata or audit event is written, so a refused `sprint
-create` leaves nothing behind and is repeated by fixing the argument. Resource collisions are reported
-before the generic count refusal, so the message names something to act on rather than just a full
-installation. Which collisions are checked depends on the limit: the reservation clash is checked at
-either limit and comes before the count at either limit; the product, repository-root and observer
-collisions are checked only at limit two.
+create` leaves nothing behind and is repeated by fixing the argument. Which of these a given candidate
+meets, and which are checked at which limit, follows the rule in
+[Protocols](PROTOCOLS.md#the-open-sprint-limit). This table is for reading the message that came back.
 
 | refusal | what it says | what to do |
 | --- | --- | --- |
@@ -474,10 +472,9 @@ claims that cycle, and nothing beyond them.
 The limit is checked when a sprint is admitted, not continuously, so lowering it does not close anything.
 An installation that already holds two open sprints and then sets the limit back to one keeps both open,
 keeps ticking both, and refuses every new `create` and `reopen` while it is over its limit. Which refusal
-the caller gets is the ordinary one: a candidate that reserves a project either open sprint holds is
-refused as `resource_conflict` naming that sprint, because the reservation check runs before the count at
-either limit, and a candidate that collides with neither reservation is refused on the count naming both
-sprints. The one place this bites is
+the caller gets follows the ordinary rule in [Protocols](PROTOCOLS.md#the-open-sprint-limit), so do not
+expect it to always be the count: a candidate that wants a project one of the two open sprints holds is
+told which sprint holds it. The one place this bites is
 recovery: a checkpoint taken while two sprints were open cannot be restored onto an installation whose
 limit is one, because restore judges the exported open set against the target's limit and refuses the
 whole restore with `restored open sprints are not admissible on this installation`.

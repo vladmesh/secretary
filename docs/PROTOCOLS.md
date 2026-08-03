@@ -241,10 +241,9 @@ Product, and every `--project` is an id from the instance project registry; `--r
 meaning as the write-guard scope. A repository root is canonicalized where it is declared, so the row
 persists the absolute path and a root this host cannot resolve is refused with the value it could not
 resolve. An Issue of another Product and a closed Issue are refused with their
-own messages. By default one installation holds at most one open sprint: a second `create` is refused as
-`sprint_conflict` naming the open one. A project another open sprint already reserves is refused before
-that, as `resource_conflict` naming the project and its holder. The gated pilot that raises the limit to
-two is [below](#the-open-sprint-limit). Every one of these checks is a read, so a
+own messages. By default one installation holds at most one open sprint, and the gated pilot that raises
+that to two is [below](#the-open-sprint-limit), which is also where what admission checks and in what
+order is stated. Every one of these checks is a read, so a
 refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
 returns the first event instead of colliding with the sprint it already opened.
 
@@ -335,40 +334,42 @@ an `open_sprint_limit` finding, because failing closed is otherwise silent to th
 The limit is read from the installation config at the moment admission asks for it, so changing it needs
 no restart and an installation whose config cannot be read answers 1.
 
-Admission reads the same at both limits in one respect: a project another open sprint already reserves is
-refused first, whatever the limit is. At limit 1 that is the only disjointness rule there is, and
-anything else is refused on the count, exactly as before the pilot existed.
+What admission checks, in which order, and at which limit is stated here and nowhere else; every other
+passage in these docs points here rather than repeating it. Each check is a read of live state, and all
+of them run before the first board write. In the order admission applies them:
 
-At limit 2 a second sprint is admitted only when it can be proven disjoint from the one already open.
-Three requirements, all of them checked against live state before the first board write:
+1. **disjoint project reservations**, at either limit. A project another open sprint already reserves is
+   refused, naming the project and its holder. This rule predates the limit and reads the same at 1 and
+   at 2.
+2. **a different product**, at limit 2 only. Two open sprints may not share the owning Product. A sprint
+   that declares no product at all, a row from before sprints owned one, cannot be proven disjoint and is
+   refused, whichever of the two it is: the candidate is judged on its own value first, so the answer
+   does not depend on which row was looked at first.
+3. **non-overlapping canonical repository roots**, at limit 2 only. Roots are compared as absolute
+   resolved paths, and overlap includes nesting: two spellings of one working tree are one working tree,
+   and a root that contains another's is the same tree twice. A stored root that is not already absolute
+   is refused on either side rather than resolved at check time, because resolving it would answer
+   against the working directory of whichever process happens to run admission. The candidate's own roots
+   are judged before any pairwise comparison and whether or not another sprint is open, so a one-row open
+   set published by restore or by a reopen cannot carry a root the next check would read as a different
+   tree.
+4. **the observer ceiling**, at limit 2 only, and a ceiling rather than a disjointness rule: at most one
+   of the open sprints may declare an observer head. Nothing binds an observer call to the sprint it is
+   about, so two heads observing at once would each read the other's cards as their own. The second
+   sprint is opened with `--observer none`, and the refusal says so. Only `{"kind": "none"}` proves a
+   sprint runs without a head: a row whose observer is missing or unreadable is counted as one, because
+   admitting a second head because one row could not be read is the collision the ceiling exists to
+   prevent.
+5. **the count**, at either limit: the installation already holds as many open sprints as it may.
 
-- **disjoint project reservations.** The one rule of the three that is also checked at limit 1: it
-  predates the limit and reads the same at either.
-- **a different product.** Checked only at limit 2. Two open sprints may not share the owning Product. A
-  sprint that declares no product at all, a row from before sprints owned one, cannot be proven disjoint
-  and is refused, whichever of the two it is: the candidate is judged on its own value first, so the
-  answer does not depend on which row was looked at first.
-- **non-overlapping canonical repository roots**, also checked only at limit 2. Roots are compared as
-  absolute resolved paths, and overlap includes nesting: two spellings of one working tree are one working tree, and a root that
-  contains another's is the same tree twice. A stored root that is not already absolute is refused on
-  either side rather than resolved at check time, because resolving it would answer against the working
-  directory of whichever process happens to run admission. The candidate's own roots are judged before
-  any pairwise comparison and whether or not another sprint is open, so a one-row open set published by
-  restore or by a reopen cannot carry a root the next check would read as a different tree.
+The count is last because it names every open sprint and distinguishes none of them, so a caller who acts
+on it can close the wrong one and come back for a second refusal. A resource refusal names the sprint
+holding the resource, and closing that one sprint both frees a slot and clears the collision. Every
+collision above the count is therefore reported before it, including when the installation is already at
+its limit.
 
-Above the three there is a fourth, and it is a ceiling rather than a disjointness rule: **at most one of
-the open sprints may declare an observer head.** Nothing binds an observer call to the sprint it is about,
-so two heads observing at once would each read the other's cards as their own. The second sprint is opened
-with `--observer none`, and the refusal says so. Only `{"kind": "none"}` proves a sprint runs without a
-head: a row whose observer is missing or unreadable is counted as one, because admitting a second head
-because one row could not be read is the collision the ceiling exists to prevent.
-
-Every resource collision the limit lets the installation check is reported before the generic count
-refusal, including when the installation is already at its limit. The count names every
-open sprint and distinguishes none of them, so a caller who acts on it can close the wrong one and come
-back for a second refusal; a resource refusal names the sprint holding the resource, and closing that one
-sprint both frees a slot and clears the collision. The order is reservation, product, repository root,
-observer ceiling, then count.
+At limit 1, where checks 2 to 4 do not run, admission reads exactly as it did before the pilot: a project
+another open sprint reserves is refused first, and everything else is refused on the count.
 
 `create`, `reopen` and restore are held to the same invariants, under the same
 `sprints/admission.lock`. `restore_create` is deliberately not an admission decision, since it reproduces

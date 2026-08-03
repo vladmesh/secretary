@@ -56,14 +56,13 @@ The card model separates the durable product plane from execution:
 - tasks are execution records, not product backlog, and are archived when their sprint closes;
 - only the PO explicitly closes an issue after checking the sprint outcome and product invariants.
 
-One open sprint per installation is the shipped default. A second one exists as a gated pilot: the
-instance setting `open_sprint_limit` accepts 1 or 2, is absent by default, and at 2 admits a second sprint
-only when it declares a different Product, reserves no project the other reserves, overlaps none of its
-canonical repository roots, and runs without an observer head if the other sprint has one. The admission
-contract, restore included, is in [Protocols](PROTOCOLS.md#the-open-sprint-limit); the operator's view,
-the limitations and the rollback are in [Operations](OPERATIONS.md#the-two-sprint-pilot). The code is
-complete and covered by tests; the pilot has not been enabled on the live installation, so there is no
-operational experience of two sprints running side by side yet.
+One open sprint per installation is the shipped default. A second one exists as a gated pilot behind the
+instance setting `open_sprint_limit`, which accepts 1 or 2 and is absent by default: at 2 a second sprint
+is admitted only when it can be proven to share nothing with the first. What that means exactly, restore
+included, is in [Protocols](PROTOCOLS.md#the-open-sprint-limit); the operator's view, the limitations and
+the rollback are in [Operations](OPERATIONS.md#the-two-sprint-pilot). The code is complete and covered by
+tests; the pilot has not been enabled on the live installation, so there is no operational experience of
+two sprints running side by side yet.
 
 The pilot deliberately isolates admission and the per-sprint mechanisms (the observer fence when the
 board is readable, the budget and its hard stop, claim suppression by a blocked card) and nothing else.
