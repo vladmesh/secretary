@@ -80,7 +80,9 @@ def render_interactive(
     if adapter == "claude":
         model = profile.get("model")
         model_flag = f" --model {model}" if model else ""
-        return f"claude --dangerously-skip-permissions{model_flag}"
+        effort = str(profile.get("effort") or "default")
+        effort_flag = f" --effort {effort}" if effort != "default" else ""
+        return f"claude --dangerously-skip-permissions{model_flag}{effort_flag}"
     if adapter == "codex":
         # Reuse the pipeline's TUI render: it carries CODEX_HOME, model/effort and the
         # directory-trust flags for the workspace so no trust dialog blocks the pinned launch.

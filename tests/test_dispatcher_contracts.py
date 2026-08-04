@@ -509,6 +509,28 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(heads.registry_path(), heads.HEADS_TOML)
 
+    def test_claude_effort_is_validated_and_rendered_by_shared_launcher(self) -> None:
+        resources = {"claude-sub": {"account": "subscription"}}
+        profiles = {
+            "opus-medium": {
+                "resource": "claude-sub", "adapter": "claude", "model": "opus",
+                "effort": "medium", "fallback": [],
+            }
+        }
+        heads.validate_registry(resources, profiles)
+        registry = heads.Registry(resources, profiles)
+
+        command = heads.render_command(
+            "opus-medium", role="reviewer", prompt="review", registry=registry
+        )
+
+        self.assertIn("--model opus --effort medium", command)
+        with self.assertRaisesRegex(heads.HeadRegistryError, "unknown claude effort"):
+            heads.validate_registry(
+                resources,
+                {"bad": {**profiles["opus-medium"], "effort": "unbounded"}},
+            )
+
     def test_a_selected_installation_without_a_usable_snapshot_fails_by_its_path(self) -> None:
         """The product default is for no installation at all, not for a broken one.
 

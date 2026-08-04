@@ -100,6 +100,8 @@ CODEX_EFFORTS = {
     "ultra": "ultra",
 }
 
+CLAUDE_EFFORTS = {"default", "low", "medium", "high", "xhigh", "max"}
+
 CODEX_LAUNCH_MODES = {"exec", "tui"}
 
 
@@ -110,7 +112,9 @@ class HeadRegistryError(RuntimeError):
 def _render_claude(profile: dict, *, prompt: str) -> str:
     model = profile.get("model")
     model_flag = f" --model {model}" if model else ""
-    return f"claude --dangerously-skip-permissions{model_flag} {prompt!r}"
+    effort = profile.get("effort", "default")
+    effort_flag = f" --effort {effort}" if effort != "default" else ""
+    return f"claude --dangerously-skip-permissions{model_flag}{effort_flag} {prompt!r}"
 
 
 def _render_hermes(profile: dict, *, prompt: str) -> str:
@@ -313,9 +317,8 @@ def reviewer_head(registry: Registry | None = None) -> str:
 def profile_info(profile_id: str, registry: Registry | None = None) -> dict:
     """Display-facing profile facts. Unknown profiles return a marked record instead of raising.
 
-    `effort` is Codex-specific in the current registry. Non-Codex adapters deliberately show
-    `n/a` rather than an empty string, so board/list consumers never have to special-case a blank
-    label.
+    Claude and Codex profiles may pin effort. Other adapters deliberately show `n/a` rather than
+    an empty string, so board/list consumers never have to special-case a blank label.
     """
     reg = registry or load_registry()
     try:
@@ -329,7 +332,7 @@ def profile_info(profile_id: str, registry: Registry | None = None) -> dict:
             "effort": "unknown",
         }
     adapter = prof.get("adapter") or "unknown"
-    effort = prof.get("effort", "default") if adapter == "codex" else "n/a"
+    effort = prof.get("effort", "default") if adapter in {"claude", "codex"} else "n/a"
     return {
         "profile": profile_id,
         "known": True,
@@ -387,6 +390,12 @@ def validate_registry(resources: dict, profiles: dict) -> None:
             if mode not in CODEX_LAUNCH_MODES:
                 known = ", ".join(sorted(CODEX_LAUNCH_MODES))
                 raise HeadRegistryError(f"profile {pid!r} has unknown codex launch mode {mode!r} "
+                                        f"(known: {known})")
+        if adapter == "claude":
+            effort = _named(prof.get("effort", "default"), f"profile {pid!r} effort")
+            if effort not in CLAUDE_EFFORTS:
+                known = ", ".join(sorted(CLAUDE_EFFORTS))
+                raise HeadRegistryError(f"profile {pid!r} has unknown claude effort {effort!r} "
                                         f"(known: {known})")
         fallback = prof.get("fallback") or []
         if not isinstance(fallback, list):

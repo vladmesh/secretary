@@ -2265,6 +2265,20 @@ class RoutingJournalTests(unittest.TestCase):
 
         self.assertEqual((unpinned.model, unpinned.model_source), ("", "cli_default"))
 
+    def test_claude_effort_is_part_of_the_routing_record(self) -> None:
+        run = head_run_from_profile(
+            role="reviewer",
+            head="claude-opus-medium",
+            head_source="card",
+            profile={
+                "adapter": "claude", "model": "opus", "effort": "medium",
+                "resource": "claude-sub",
+            },
+            resources={"claude-sub": {"account": "claude-subscription"}},
+        )
+
+        self.assertEqual(run.effort, "medium")
+
 
 class ReportDurabilityGateTests(unittest.TestCase):
     """`report --kind done` refuses to run from a dirty workspace (secretary-653).

@@ -139,6 +139,8 @@ def head_run_from_profile(
     if adapter == "codex":
         mode = str(codex_mode or profile.get("codex_mode") or "exec")
         effort = str(profile.get("effort") or "default")
+    elif adapter == "claude":
+        effort = str(profile.get("effort") or "default")
     if model is None:
         model = str(profile.get("model") or "")
         model_source = model_source or (MODEL_FROM_PROFILE if model else MODEL_FROM_CLI_DEFAULT)

@@ -21,7 +21,11 @@ from secretary.role_env import (
     RoleEnvError,
     runtime_env,
 )
-from triggered_agents.agents.pipeline.heads import CODEX_EFFORTS, CODEX_LAUNCH_MODES
+from triggered_agents.agents.pipeline.heads import (
+    CLAUDE_EFFORTS,
+    CODEX_EFFORTS,
+    CODEX_LAUNCH_MODES,
+)
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 
 # What a launched head has to be told about the installation it belongs to. The env file name
@@ -131,6 +135,12 @@ def render_claude_command(
     model = profile.get("model")
     if model:
         args += ["--model", str(model)]
+    effort = str(profile.get("effort") or "default")
+    if effort not in CLAUDE_EFFORTS:
+        known = ", ".join(sorted(CLAUDE_EFFORTS))
+        raise HeadLaunchError(f"claude profile has unknown effort {effort!r} (known: {known})")
+    if effort != "default":
+        args += ["--effort", effort]
     return f"{shlex.join(args)} {_delivered_prompt(prompt_file, launch_prompt)}"
 
 

@@ -7282,6 +7282,24 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("claude --dangerously-skip-permissions --model opus", command)
         self.assertIn("python3 -m secretary.role_env exec --role worker", command)
 
+    def test_claude_command_pins_profile_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = str(Path(tmp) / "workspace")
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = {  # type: ignore[attr-defined]
+                "profiles": {
+                    "claude-opus-medium": {
+                        "adapter": "claude", "model": "opus", "effort": "medium"
+                    }
+                }
+            }
+            command = catalog.head_command(  # type: ignore[attr-defined]
+                "claude-opus-medium", "TASK.md", workspace=workspace, role="reviewer"
+            )
+
+        self.assertIn("--model opus --effort medium", command)
+        self.assertIn("python3 -m secretary.role_env exec --role reviewer", command)
+
     def test_claude_ready_preserves_existing_theme_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".claude.json"

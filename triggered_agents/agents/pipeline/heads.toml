@@ -56,6 +56,13 @@ adapter = "claude"
 model = "opus"
 fallback = []
 
+[profiles.claude-opus-medium]
+resource = "claude-sub"
+adapter = "claude"
+model = "opus"
+effort = "medium"
+fallback = []
+
 [profiles.claude-observer]
 # The observer's Claude head is a profile of its own rather than a pointer at claude-opus: the
 # observer slices cards and judges drift from the sprint goal, so its head stays a deliberate
@@ -63,6 +70,13 @@ fallback = []
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
+fallback = []
+
+[profiles.claude-observer-medium]
+resource = "claude-sub"
+adapter = "claude"
+model = "opus"
+effort = "medium"
 fallback = []
 
 # Codex heads. Each falls back to its Claude counterpart, so a host whose OpenAI subscription is

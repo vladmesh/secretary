@@ -71,6 +71,7 @@ class RenderInteractiveTest(unittest.TestCase):
         cases = {
             "claude": "claude --dangerously-skip-permissions",
             "claude-opus": "--model opus",
+            "claude-opus-medium": "--model opus --effort medium",
             "codex": "codex --dangerously-bypass-approvals-and-sandbox",
         }
         for head, needle in cases.items():
