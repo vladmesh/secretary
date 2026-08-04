@@ -8,6 +8,7 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -910,6 +911,57 @@ class TaskWriterTests(unittest.TestCase):
             [params["status_id"] for method, params in self.client.calls if method == "getAllTasks"][:2],
             [1, 0],
         )
+
+    def test_auto_reference_serializes_concurrent_creates(self) -> None:
+        first_create_started = threading.Event()
+        release_first_create = threading.Event()
+        second_reached_board = threading.Event()
+        original_call = self.client.call
+        first_create = True
+        results: list[dict[str, object]] = []
+        failures: list[BaseException] = []
+
+        def paused_first_create(method: str, **params: object) -> object:
+            nonlocal first_create
+            if method == "createTask" and first_create:
+                first_create = False
+                first_create_started.set()
+                if not release_first_create.wait(2):
+                    raise AssertionError("first create was not released")
+            elif method == "getProjectByName" and first_create_started.is_set():
+                second_reached_board.set()
+            return original_call(method, **params)
+
+        def create(writer: TaskWriter, request_id: str, sprint: str) -> None:
+            try:
+                results.append(writer.create(
+                    role="po", actor="operator", project="secretary", task_type="code",
+                    title=request_id, target="ready", request_id=request_id, sprint=sprint,
+                    sprint_override=True, sprint_override_reason="concurrent allocation test",
+                ))
+            except BaseException as exc:  # Preserve thread failures for the assertion below.
+                failures.append(exc)
+
+        with mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), \
+             open_sprint() as sprint, \
+             mock.patch.object(self.client, "call", side_effect=paused_first_create):
+            first = threading.Thread(target=create, args=(self.writer, "first-auto-reference", sprint))
+            first.start()
+            self.assertTrue(first_create_started.wait(2))
+            second = threading.Thread(
+                target=create,
+                args=(TaskWriter(self.client, data_dir=self.tmpdir.name), "second-auto-reference", sprint),
+            )
+            second.start()
+            self.assertFalse(second_reached_board.wait(0.2))
+            release_first_create.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(sorted(result["task"]["ref"] for result in results), ["secretary-469", "secretary-470"])
 
     def test_auto_reference_enumeration_failure_writes_no_card(self) -> None:
         original_call = self.client.call

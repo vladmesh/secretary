@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -13,7 +14,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -328,6 +329,19 @@ def next_project_reference(client: KanboardClient, project_id: int, project: str
         if match:
             highest = max(highest, int(match.group(1)))
     return f"{project}-{highest + 1}"
+
+
+@contextlib.contextmanager
+def project_reference_allocation_lock(data_dir: Path) -> Iterator[None]:
+    """Serialize allocation and assignment across task-create processes."""
+    board_dir = data_dir / "board"
+    board_dir.mkdir(parents=True, exist_ok=True)
+    with (board_dir / ".create.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 class TaskReader:
@@ -988,60 +1002,63 @@ class TaskWriter:
         event: dict[str, Any],
         request_id: str,
     ) -> str:
-        board_id, columns, swimlanes = self.reader._board()
-        if reference:
-            if project_card_by_reference(self.client, board_id, reference):
-                raise TaskError("validation", "task reference already exists", 2)
-            created_ref = reference
-        else:
-            created_ref = next_project_reference(self.client, board_id, project)
-        column_id = _target_column_id(columns, target)
-        if column_id is None:
-            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
-        swimlane_id = _matching_swimlane(swimlanes, project)
-        task_id = _positive_int(self.client.call(
-            "createTask",
-            project_id=board_id,
-            title=title,
-            description=description,
-            column_id=column_id,
-            swimlane_id=swimlane_id or 0,
-        ))
-        if task_id is None:
-            raise TaskError("backend_error", "Kanboard rejected the write", 1)
-        event["ref"] = created_ref
-        event["task_id"] = f"task_kanboard_{task_id}"
-        event["backend"]["task_id"] = task_id
-        self.audit.stage(request_id, event)
-        try:
-            ok = self.client.call("updateTask", id=task_id, reference=created_ref)
-            if not ok:
+        # The board accepts duplicate references, so holding this lock from the high-water
+        # read through updateTask prevents two local task-create processes assigning one ref.
+        with project_reference_allocation_lock(self.data_dir):
+            board_id, columns, swimlanes = self.reader._board()
+            if reference:
+                if project_card_by_reference(self.client, board_id, reference):
+                    raise TaskError("validation", "task reference already exists", 2)
+                created_ref = reference
+            else:
+                created_ref = next_project_reference(self.client, board_id, project)
+            column_id = _target_column_id(columns, target)
+            if column_id is None:
+                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            swimlane_id = _matching_swimlane(swimlanes, project)
+            task_id = _positive_int(self.client.call(
+                "createTask",
+                project_id=board_id,
+                title=title,
+                description=description,
+                column_id=column_id,
+                swimlane_id=swimlane_id or 0,
+            ))
+            if task_id is None:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            values = {
-                "record_type": "task",
-                "task_type": task_type,
-                "project": project,
-                "complexity": complexity,
-                "family_preference": family_preference,
-            }
-            if blocked_by:
-                values["blocked_by"] = blocked_by
-            if head:
-                values["head"] = head
-            if review_head:
-                values["review_head"] = review_head
-            if slug:
-                values["slug"] = slug
-            if base_branch:
-                values["base_branch"] = base_branch
-            if codex_launch_mode:
-                values["codex_launch_mode"] = codex_launch_mode
-            if sprint:
-                values["sprint_ref"] = sprint
-            self.client.call("saveTaskMetadata", task_id=task_id, values=values)
-        except Exception as exc:
-            raise _CommittedWriteError() from exc
-        return created_ref
+            event["ref"] = created_ref
+            event["task_id"] = f"task_kanboard_{task_id}"
+            event["backend"]["task_id"] = task_id
+            self.audit.stage(request_id, event)
+            try:
+                ok = self.client.call("updateTask", id=task_id, reference=created_ref)
+                if not ok:
+                    raise TaskError("backend_error", "Kanboard rejected the write", 1)
+                values = {
+                    "record_type": "task",
+                    "task_type": task_type,
+                    "project": project,
+                    "complexity": complexity,
+                    "family_preference": family_preference,
+                }
+                if blocked_by:
+                    values["blocked_by"] = blocked_by
+                if head:
+                    values["head"] = head
+                if review_head:
+                    values["review_head"] = review_head
+                if slug:
+                    values["slug"] = slug
+                if base_branch:
+                    values["base_branch"] = base_branch
+                if codex_launch_mode:
+                    values["codex_launch_mode"] = codex_launch_mode
+                if sprint:
+                    values["sprint_ref"] = sprint
+                self.client.call("saveTaskMetadata", task_id=task_id, values=values)
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+            return created_ref
 
     def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, _COMMENT_ROLES)
