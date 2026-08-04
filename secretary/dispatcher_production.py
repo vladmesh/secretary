@@ -456,6 +456,8 @@ def _production_tick_body(
     # The card work may continue for this tick, but reporting it as healthy hid
     # an active durability incident from the unit health line and steward.
     checkpoint_blocked = bool(checkpoint and checkpoint.get("status") == "blocked")
+    if checkpoint_blocked:
+        outcomes.append(_checkpoint_degradation(checkpoint))
     result = {
         "status": "ok" if not errors and not degraded_actions(outcomes) and not checkpoint_blocked else "degraded",
         "step": "production-tick",
@@ -545,6 +547,7 @@ def _frozen_tick_body(
         result["checkpoint"] = checkpoint
         if checkpoint.get("status") == "blocked":
             result["status"] = "degraded"
+            result.setdefault("actions", []).append(_checkpoint_degradation(checkpoint))
     push = _push_checkpoint(runtime, payload)
     if push is not None:
         payload["checkpoint_push"] = push
@@ -556,6 +559,21 @@ def _frozen_tick_body(
     record_tick_telemetry(payload, result)
     runtime.production_state.save(payload)
     return result
+
+
+def _checkpoint_degradation(checkpoint: dict[str, Any]) -> dict[str, str]:
+    """Expose a durability gate failure as an ordinary degraded action.
+
+    Telemetry already knows how to retain and report degraded actions.  Putting
+    the checkpoint here gives the health line and steward the blocking reason
+    rather than only a bare top-level ``degraded`` status.
+    """
+    return {
+        "status": "degraded",
+        "step": "checkpoint",
+        "action": "blocked",
+        "reason": str(checkpoint.get("reason") or "checkpoint gate blocked"),
+    }
 
 
 def _write_checkpoint(runtime: Any) -> dict[str, Any] | None:

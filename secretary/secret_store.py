@@ -779,6 +779,39 @@ def read_secret(instance_dir: Path, secret_id: str) -> bytes:
     return _read_value(instance_dir, secret_id, load_installation_key(instance_dir))
 
 
+def redaction_values(instance_dir: Path) -> tuple[str, ...]:
+    """Return plaintext values that an instance's writers must redact.
+
+    The catalog is an explicit statement that a custom variable is secret even
+    when its name is innocuous.  Two legacy runtime fields are ordinary board
+    configuration despite older imports storing every runtime line as a
+    "secret": the endpoint URL and API user.  Their values are excluded only
+    when plain; an URL with userinfo still remains a credential through the
+    runtime-file classifier.
+
+    A locked or partial store contributes no plaintext values.  It remains a
+    separate doctor finding; treating it as a checkpoint gate would turn a
+    recovery that deliberately left stale encrypted credentials locked into a
+    permanent durability outage.  Runtime-file and pattern scanning still run.
+    """
+    instance_dir = Path(instance_dir).expanduser()
+    if not _store_exists(instance_dir):
+        return ()
+    if not is_initialized(instance_dir) or not key_path(instance_dir).is_file():
+        return ()
+    values: list[str] = []
+    try:
+        for entry in list_secrets(instance_dir):
+            environment = str(entry.get("environment") or "")
+            value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
+            if environment in {"KANBOARD_URL", "KANBOARD_API_USER"}:
+                continue
+            values.append(value)
+    except (SecretStoreError, UnicodeDecodeError):
+        return ()
+    return tuple(values)
+
+
 def remove_secret(instance_dir: Path, *, secret_id: str, actor: str) -> RemoveResult:
     """Drop the catalog entry and its envelope in one commit.
 

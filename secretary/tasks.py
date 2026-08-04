@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
-from triggered_agents.runtime.redact import scrub_secrets
+from triggered_agents.runtime.redact import redact
 from secretary.role_env import runtime_env_path
 
 
@@ -807,7 +807,7 @@ class TaskWriter:
         self.audit = TaskAudit(data_dir)
         self.workspace = Path(workspace) if workspace is not None else None
 
-    def _scrub_for_board(self, text: str) -> str:
+    def _redact_for_board(self, text: str) -> str:
         """Remove credentials before they reach either board or audit history.
 
         Task events normally retain only digests, but an interrupted archive
@@ -817,7 +817,17 @@ class TaskWriter:
         installation, unlike the redactor's home-directory compatibility
         default.
         """
-        return scrub_secrets(text, env_files=[runtime_env_path()])
+        runtime_env = runtime_env_path()
+        # Keep TaskWriter importable while config is loading sprints.  The
+        # store depends on that same config module and is needed only at a real
+        # protocol write, long after startup imports have settled.
+        from secretary.secret_store import redaction_values
+
+        return redact(
+            text,
+            env_files=[runtime_env],
+            secret_values=redaction_values(runtime_env.parent),
+        )
 
     def create(
         self,
@@ -852,8 +862,8 @@ class TaskWriter:
         self._role(role, _CREATE_ROLES)
         project = project.strip()
         task_type = task_type.strip()
-        title = self._scrub_for_board(title.strip())
-        description = self._scrub_for_board(description)
+        title = title.strip() if restoring else self._redact_for_board(title.strip())
+        description = description if restoring else self._redact_for_board(description)
         target = target.strip()
         reference = reference.strip()
         blocked_by = blocked_by.strip()
@@ -867,7 +877,7 @@ class TaskWriter:
         sprint = sprint.strip()
         priority = priority.strip()
         budget_event = budget_event.strip()
-        sprint_override_reason = self._scrub_for_board(sprint_override_reason.strip())
+        sprint_override_reason = sprint_override_reason.strip() if restoring else self._redact_for_board(sprint_override_reason.strip())
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
         if task_type not in _TASK_TYPES:
@@ -1114,7 +1124,7 @@ class TaskWriter:
 
     def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, _COMMENT_ROLES)
-        body = self._scrub_for_board(body)
+        body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
         return self._write("commented", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"), identity=payload)
 
@@ -1159,7 +1169,7 @@ class TaskWriter:
         own and leave a field that silently disagrees with the audit.
         """
         self._role(role, {"worker"})
-        body = self._scrub_for_board(body)
+        body = self._redact_for_board(body)
         if kind not in {"done", "blocked"} or (kind == "blocked" and not body.strip()):
             raise TaskError("validation", "blocked reports require a non-empty body", 2)
         classification = classification.strip()
@@ -1188,7 +1198,7 @@ class TaskWriter:
 
     def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"reviewer"})
-        body = self._scrub_for_board(body)
+        body = self._redact_for_board(body)
         if kind not in {"green", "red"} or (kind == "red" and not body.strip()):
             raise TaskError("validation", "red verdicts require a non-empty body", 2)
         marker = f"review:{kind}"
@@ -1216,7 +1226,7 @@ class TaskWriter:
         binding, not the actor id, is what distinguishes one sprint's observer from another's.
         """
         self._role(role, {"observer"})
-        body = self._scrub_for_board(body)
+        body = self._redact_for_board(body)
         if kind not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
         if not body.strip():
@@ -1360,8 +1370,8 @@ class TaskWriter:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _ROLES)
-        reason = self._scrub_for_board(reason)
-        sprint_override_reason = self._scrub_for_board(sprint_override_reason)
+        reason = self._redact_for_board(reason)
+        sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
         task = self.reader.show(reference)
         override_payload = self._guard_sprint_write(
@@ -1496,9 +1506,9 @@ class TaskWriter:
         preempt/requeue, not a silent spec swap.
         """
         self._role(role, _EDIT_ROLES)
-        title = self._scrub_for_board(title) if title is not None else None
-        description = self._scrub_for_board(description) if description is not None else None
-        sprint_override_reason = self._scrub_for_board(sprint_override_reason)
+        title = self._redact_for_board(title) if title is not None else None
+        description = self._redact_for_board(description) if description is not None else None
+        sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
         if title is not None and not title.strip():
             raise TaskError("validation", "edit title must be non-empty", 2)
@@ -1726,7 +1736,7 @@ class TaskWriter:
         self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
     ) -> dict[str, Any]:
         self._role(role, {"po"})
-        reason = self._scrub_for_board(reason)
+        reason = self._redact_for_board(reason)
         if not reason.strip():
             raise TaskError("validation", "archive requires a non-empty reason", 2)
 
@@ -1991,6 +2001,18 @@ class TaskWriter:
         event_payload = event.get("payload")
         expected_digest = _text(event_payload.get("reason_sha256")) if isinstance(event_payload, dict) else ""
         retry_reason = _text((retry_payload or {}).get("reason"))
+        safe_retry_reason = self._redact_for_board(retry_reason)
+        if retry_reason and safe_retry_reason != retry_reason:
+            # The old pending record predates the board-boundary redactor.  Its
+            # digest names the raw text, so silently replacing it would make
+            # reconciliation believe a different archive reason was committed.
+            # Leave it pending for an operator rather than publish a secret or
+            # falsify the append-only history.
+            raise TaskError(
+                "audit_pending",
+                "pending archive reason contains credential material; reissue the archive safely",
+                4,
+            )
         if retry_reason and _digest(retry_reason) != expected_digest:
             raise TaskError("validation", "archive retry reason does not match the pending request", 2)
         board_id, _, _ = self.reader._board()

@@ -12,6 +12,9 @@ from secretary.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
 )
+from secretary import secret_store
+from secretary.secret_store import initialize_store, set_secret
+from secretary.secret_words import RECOVERY_WORDS
 from secretary.data import DataExport
 from secretary.routing_journal import attempts
 from secretary.tasks import TaskAudit
@@ -406,6 +409,43 @@ class CheckpointWriterTests(unittest.TestCase):
             f"KANBOARD_API_TOKEN={secret}\n", encoding="utf-8"
         )
         self.seed_board([{**CARD, "description": f"token {secret}"}])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
+
+    def test_custom_catalog_secret_in_a_card_still_blocks_the_checkpoint(self):
+        secret = b"catalogued-but-unusually-named-value"
+        with mock.patch.object(
+            secret_store,
+            "_new_key_params",
+            return_value={
+                "format": secret_store.KEY_PARAMS_FORMAT,
+                "version": secret_store.KEY_PARAMS_VERSION,
+                "kdf": {
+                    "id": secret_store.PHRASE_KDF_ID,
+                    "salt": secret_store._b64(b"0123456789abcdef"),
+                    "length": secret_store.KEY_LENGTH,
+                    "n": 2**10,
+                    "r": 8,
+                    "p": 1,
+                },
+            },
+        ):
+            initialize_store(
+                self.instance_dir, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester"
+            )
+        set_secret(
+            self.instance_dir,
+            secret_id="custom.value",
+            value=secret,
+            scope="installation",
+            purpose="a custom integration credential",
+            actor="tester",
+            environment="UNUSUAL_INTEGRATION_SETTING",
+        )
+        self.seed_board([{**CARD, "description": secret.decode("utf-8")}])
 
         result = self.write()
 

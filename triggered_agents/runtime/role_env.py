@@ -106,9 +106,21 @@ ROLE_REQUIRED: dict[str, tuple[str, ...]] = {
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SENSITIVE_NAME_RE = re.compile(
-    r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL)(_|$)", re.IGNORECASE
+SENSITIVE_ENV_NAME_RE = re.compile(
+    r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",
+    re.IGNORECASE,
 )
+
+
+def is_sensitive_env_name(name: str) -> bool:
+    """Whether an env variable's *name* declares credential material.
+
+    This is the canonical classification shared by role environment filtering
+    and every exact-value redaction gate.  Values alone are not enough: normal
+    endpoint URLs are long configuration, while a custom secret-store variable
+    need not resemble a provider token.
+    """
+    return bool(SENSITIVE_ENV_NAME_RE.search(str(name)))
 
 
 class RoleEnvError(RuntimeError):
@@ -161,7 +173,7 @@ def allowlist(role: str) -> tuple[str, ...]:
 
 
 def _is_sensitive_name(name: str) -> bool:
-    return bool(_SENSITIVE_NAME_RE.search(name))
+    return is_sensitive_env_name(name)
 
 
 def runtime_env(role: str, *, base_env: dict[str, str] | None = None,

@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from triggered_agents.runtime.role_env import is_sensitive_env_name
+
 # .env files whose VALUES are known secrets on this host. Exact matches get scrubbed.
 DEFAULT_ENV_FILES = [
     Path.home() / ".hermes" / ".env",
@@ -37,7 +39,9 @@ PATTERNS = [
     (re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"), "openai-project-key"),
     (re.compile(r"sk-[A-Za-z0-9]{32,}"), "openai-key"),
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"), "github-token"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "github-pat"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "slack-token"),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+"), "slack-webhook"),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "aws-access-key-id"),
     (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "google-api-key"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), "bearer-token"),
@@ -55,10 +59,6 @@ PATTERNS = [
 # named DATABASE_URL or KANBOARD_URL, so its value is protected too.  Pattern
 # redaction below remains the backstop for credentials that arrive outside the
 # selected runtime file.
-_SECRET_ENV_NAME_RE = re.compile(
-    r"(?:^|_)(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)(?:_|$)",
-    re.IGNORECASE,
-)
 _URL_WITH_USERINFO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
 
 
@@ -76,18 +76,20 @@ def _load_env_values(env_files) -> list[str]:
             name = name.strip()
             val = val.strip().strip('"').strip("'")
             if len(val) >= MIN_ENV_VALUE_LEN and (
-                _SECRET_ENV_NAME_RE.search(name) or _URL_WITH_USERINFO_RE.match(val)
+                is_sensitive_env_name(name) or _URL_WITH_USERINFO_RE.match(val)
             ):
                 values.append(val)
     # Longest first so a value that contains another gets scrubbed whole.
     return sorted(set(values), key=len, reverse=True)
 
 
-def redact(text: str, env_files=None) -> str:
+def redact(text: str, env_files=None, secret_values=None) -> str:
     """Return `text` with known secrets replaced by a labeled placeholder."""
     if not text:
         return text
-    for val in _load_env_values(DEFAULT_ENV_FILES if env_files is None else env_files):
+    files = [*DEFAULT_ENV_FILES, *(env_files or ())]
+    values = [*(_load_env_values(files)), *(secret_values or ())]
+    for val in sorted({str(value) for value in values if len(str(value)) >= MIN_ENV_VALUE_LEN}, key=len, reverse=True):
         if val in text:
             text = text.replace(val, f"{REDACTED}:env-value")
     for pat, label in PATTERNS:
@@ -118,13 +120,13 @@ def _is_git_sha(blob: str) -> bool:
     return bool(_HEX_RE.match(blob))
 
 
-def scrub_secrets(text: str, env_files=None) -> str:
+def scrub_secrets(text: str, env_files=None, secret_values=None) -> str:
     """Mask secret-looking material in `text` before it reaches a board comment. `_BLOB_RE` casts
     a wide net over long alnum runs, so a git sha or any other hex-shaped identifier is spared —
     only the rest (base64/token-looking blobs) gets masked."""
     if not text:
         return text
-    text = redact(text, env_files=env_files)
+    text = redact(text, env_files=env_files, secret_values=secret_values)
     text = _ASSIGN_RE.sub(rf"\1={REDACTED}", text)
     return _BLOB_RE.sub(lambda m: m.group(0) if _is_git_sha(m.group(0)) else f"{REDACTED}:blob", text)
 

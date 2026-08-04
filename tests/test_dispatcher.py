@@ -1661,6 +1661,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["step"], "claim")
         self.assertEqual(result["checkpoint"]["status"], "blocked")
         self.assertIn("secret detected", result["checkpoint"]["reason"])
+        telemetry = self.runtime.production_state.load()["tick_telemetry"]["last"]
+        self.assertFalse(telemetry["healthy"])
+        self.assertEqual(telemetry["degradations"][-1]["step"], "checkpoint")
+        self.assertIn("secret detected", telemetry["degradations"][-1]["reason"])
 
     def test_production_tick_pushes_and_carries_the_push_state_forward(self) -> None:
         pusher = FakePusher({"status": "pushed", "last_push_commit": "abc123"})

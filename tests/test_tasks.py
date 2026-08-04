@@ -436,6 +436,49 @@ class TaskWriterTests(unittest.TestCase):
         events = Path(self.writer.audit.events_path).read_text(encoding="utf-8")
         self.assertNotIn(secret, events)
 
+    def test_ordinary_long_text_is_preserved_for_board_protocol_text(self) -> None:
+        ordinary = "build-attestation-" + "a" * 64
+
+        self.writer.comment(
+            role="worker", actor="w", reference="secretary-468", body=ordinary,
+            request_id="ordinary-long-comment",
+        )
+        self.writer.report(
+            role="worker", actor="w", reference="secretary-468", kind="blocked",
+            classification="external_fact", body=ordinary, request_id="ordinary-long-report",
+        )
+        self.writer.verdict(
+            role="reviewer", actor="r", reference="secretary-468", kind="red",
+            body=ordinary, request_id="ordinary-long-verdict",
+        )
+
+        comments = [str(call[1]["content"]) for call in self.client.calls if call[0] == "createComment"]
+        self.assertTrue(all(ordinary in content for content in comments[-3:]))
+
+    def test_custom_catalog_value_is_scrubbed_before_a_board_comment(self) -> None:
+        secret = "custom-catalogued-credential"
+        with mock.patch("secretary.secret_store.redaction_values", return_value=(secret,)):
+            self.writer.comment(
+                role="worker", actor="w", reference="secretary-468", body=secret,
+                request_id="custom-catalog-scrub",
+            )
+
+        content = str([call for call in self.client.calls if call[0] == "createComment"][-1][1]["content"])
+        self.assertNotIn(secret, content)
+        self.assertIn("«REDACTED»:env-value", content)
+
+    def test_restoring_a_card_preserves_ordinary_long_text_byte_for_byte(self) -> None:
+        ordinary = "restore-proof-" + "a" * 64
+
+        result = self.writer.create(
+            role="po", actor="operator", project="secretary", task_type="code",
+            title=ordinary, description=ordinary, target="ready", reference="secretary-restore-long",
+            request_id="restore-long", restoring=True,
+        )
+
+        self.assertEqual(result["task"]["title"], ordinary)
+        self.assertEqual(result["task"]["description"], ordinary)
+
     def test_backend_failure_removes_uncommitted_pending_record(self) -> None:
         self.client.fail_comments = True
         with self.assertRaisesRegex(TaskError, "rejected"):

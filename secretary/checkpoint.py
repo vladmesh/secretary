@@ -680,7 +680,17 @@ def _scan_for_secrets(
         # Scan against this installation rather than the process home default:
         # a recovery/doctor can intentionally point at another instance, and a
         # credential in that instance must still fail closed.
-        if redact(text, env_files=[runtime_env]) != text:
+        # Import here: checkpoint is imported while config is assembling its
+        # sprint validators, and secret_store itself validates through config.
+        # The scan only runs after that import graph is complete.
+        from secretary.secret_store import redaction_values
+
+        scrubbed = redact(
+            text,
+            env_files=[runtime_env],
+            secret_values=redaction_values(runtime_env.parent),
+        )
+        if scrubbed != text:
             raise CheckpointBlocked(f"secret detected in state/{component}/{entry}")
 
 

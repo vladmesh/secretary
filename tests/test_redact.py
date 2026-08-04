@@ -10,6 +10,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import tempfile
+from unittest import mock
 
 from triggered_agents.runtime.redact import REDACTED, redact, scrub_secrets
 
@@ -66,6 +67,45 @@ class ScrubSecretsTests(unittest.TestCase):
                 redact("token opaque-token-value", env_files=[runtime]),
                 f"token {REDACTED}:env-value",
             )
+
+    def test_pat_and_identity_runtime_names_are_exact_value_secrets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            runtime.write_text(
+                "GITHUB_PAT=opaque-pat-value\nORCA_IDENTITY=opaque-identity-value\n",
+                encoding="utf-8",
+            )
+
+            output = redact(
+                "pat opaque-pat-value identity opaque-identity-value", env_files=[runtime]
+            )
+
+            self.assertNotIn("opaque-pat-value", output)
+            self.assertNotIn("opaque-identity-value", output)
+
+    def test_github_pat_and_slack_webhook_patterns_are_redacted(self):
+        pat = "github_pat_" + "a" * 24
+        webhook = "https://hooks.slack.com/services/T00000000/B00000000/abcdEFGHijklMNOP"
+
+        output = redact(f"{pat} {webhook}", env_files=[])
+
+        self.assertNotIn(pat, output)
+        self.assertNotIn(webhook, output)
+
+    def test_selected_runtime_file_adds_to_the_default_scan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            default = root / "default.env"
+            selected = root / "selected.env"
+            default.write_text("SERVICE_TOKEN=default-secret-value\n", encoding="utf-8")
+            selected.write_text("SERVICE_TOKEN=selected-secret-value\n", encoding="utf-8")
+            with mock.patch("triggered_agents.runtime.redact.DEFAULT_ENV_FILES", [default]):
+                output = redact(
+                    "default-secret-value selected-secret-value", env_files=[selected]
+                )
+
+        self.assertNotIn("default-secret-value", output)
+        self.assertNotIn("selected-secret-value", output)
 
     def test_url_with_embedded_credentials_stays_an_exact_value_secret(self):
         with tempfile.TemporaryDirectory() as tmpdir:
