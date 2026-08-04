@@ -1300,7 +1300,7 @@ The product ships no absolute path of its own. Each of these resolves in order, 
 | a skill's shell root | the manifest's `root`, expanded against the installation owner's home |
 | a skill's command link | `SECRETARY_BIN_DIR`, else `<owner home>/bin` |
 | a role worktree and an automation workspace | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
-| the role runtime env file | `TA_RUNTIME_ENV_FILE` / `SECRETARY_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
+| the role runtime env file | `SECRETARY_RUNTIME_ENV_FILE`, else `TA_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
 | the head registry a tick reads | `TA_HEADS_REGISTRY`, else `<instance>/heads/heads.yaml`, else the running checkout's default |
 
 `~` in a shipped manifest and `$HOME` in a shipped entry point are the *installation owner's* home.

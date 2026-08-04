@@ -791,6 +791,14 @@ class MaterializeCase(EnvStoreCase):
         self.assertEqual(moved.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV)
         self.assertFalse(self.target.exists())
 
+    def test_secretary_runtime_env_pin_beats_an_ambient_ta_override(self) -> None:
+        pinned = Path(self.tmpdir.name) / "recovery" / "runtime.env"
+        ambient = Path(self.tmpdir.name) / "live" / "runtime.env"
+        entry = {"materialize": {"target": "runtime-env"}}
+        with mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": str(ambient)}, clear=True):
+            with installation._runtime_environment({"SECRETARY_RUNTIME_ENV_FILE": str(pinned)}):
+                self.assertEqual(secret_store.materialize_path(self.instance_dir, entry), pinned)
+
     def test_a_second_run_leaves_the_file_byte_for_byte_the_same(self) -> None:
         materialize_secrets(self.instance_dir)
         first = self.target.read_bytes()
