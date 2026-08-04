@@ -44,7 +44,6 @@ from secretary.dispatcher_observer import (
 from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
-    ensure_claude_workspace_trusted,
     ensure_codex_workspace_trusted,
     role_launch_env,
     with_pid_heartbeat,
@@ -54,7 +53,6 @@ from secretary.dispatcher_tui import TUI_IDLE_PROBE_TIMEOUT_MS
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
-    ensure_attempt,
     now_rfc3339,
 )
 from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch, review_pane_label
@@ -81,6 +79,7 @@ from secretary.dispatcher_watchdog import (
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from tests.dispatcher_fixtures import ensure_attempt
 from tests.observer_identity import bind_observer
 
 
@@ -7077,7 +7076,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(after_first["projects"]["/ws/x"]["hasTrustDialogAccepted"])
         replace.assert_not_called()
 
-    def test_claude_trust_preserves_other_config_entries_and_is_idempotent(self) -> None:
+    def test_claude_ready_preserves_other_config_entries_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".claude.json"
             config.write_text(
@@ -7092,10 +7091,10 @@ class DispatcherLauncherTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            ensure_claude_workspace_trusted("/ws/new", config)
+            ensure_claude_workspace_ready("/ws/new", config)
             after_first = json.loads(config.read_text(encoding="utf-8"))
             with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
-                ensure_claude_workspace_trusted("/ws/new", config)
+                ensure_claude_workspace_ready("/ws/new", config)
 
         self.assertEqual(after_first["theme"], "dark")
         self.assertEqual(after_first["other"], {"keep": True})
@@ -7104,7 +7103,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(after_first["projects"]["/ws/new"]["hasTrustDialogAccepted"])
         replace.assert_not_called()
 
-    def test_claude_trust_rejects_corrupt_or_symlinked_config(self) -> None:
+    def test_claude_ready_rejects_corrupt_or_symlinked_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corrupt = Path(tmp) / "corrupt.json"
             corrupt.write_text("{not-json", encoding="utf-8")
@@ -7114,21 +7113,9 @@ class DispatcherLauncherTests(unittest.TestCase):
             symlink.symlink_to(target)
 
             with self.assertRaisesRegex(RuntimeError, "cannot read Claude config"):
-                ensure_claude_workspace_trusted("/ws/x", corrupt)
+                ensure_claude_workspace_ready("/ws/x", corrupt)
             with self.assertRaisesRegex(RuntimeError, "refusing symlinked Claude config"):
-                ensure_claude_workspace_trusted("/ws/x", symlink)
-
-    def test_claude_trust_fails_closed_when_atomic_replace_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / ".claude.json"
-            config.write_text(json.dumps({"projects": {"/old": {"keep": True}}}), encoding="utf-8")
-
-            with mock.patch("secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")):
-                with self.assertRaisesRegex(RuntimeError, "cannot update Claude config"):
-                    ensure_claude_workspace_trusted("/ws/x", config)
-
-            data = json.loads(config.read_text(encoding="utf-8"))
-        self.assertEqual(data, {"projects": {"/old": {"keep": True}}})
+                ensure_claude_workspace_ready("/ws/x", symlink)
 
     def test_claude_ready_fails_closed_when_atomic_replace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

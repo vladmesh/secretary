@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -31,8 +32,8 @@ from secretary.memory_write import (
     MemoryPermissionError,
     MemoryProtocolError,
     MemoryValidationError,
+    _gc_staging_proposals,
     commit_memory_proposal,
-    gc_memory_proposals,
     propose_memory_fact,
     supersede_memory_fact,
 )
@@ -777,8 +778,11 @@ class ExportTests(unittest.TestCase):
                 proposal_path.write_text(json.dumps(payload), encoding="utf-8")
             (active.path / MEMORY_PROPOSAL_ACTIVE_MARKER).write_text("{}", encoding="utf-8")
 
-            result = gc_memory_proposals(
-                data_dir,
+            # The GC has no standalone entry point: it runs inside the journal lock on the
+            # write path, so the test drives the same function that path calls.
+            result = _gc_staging_proposals(
+                (data_dir / "memory").expanduser().resolve(),
+                now=int(time.time()),
                 max_age_seconds=60,
                 active_grace_seconds=3600,
             )

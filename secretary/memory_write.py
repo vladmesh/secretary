@@ -222,28 +222,6 @@ def supersede_memory_fact(
         return result
 
 
-def gc_memory_proposals(
-    data_dir: Path,
-    *,
-    max_age_seconds: int = MEMORY_PROPOSAL_TTL_SECONDS,
-    active_grace_seconds: int = MEMORY_PROPOSAL_ACTIVE_SECONDS,
-) -> MemoryProposalGCResult:
-    data_dir = data_dir.expanduser().resolve()
-    memory_dir = data_dir / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    if max_age_seconds < 0:
-        raise MemoryValidationError("proposal max age must be non-negative")
-    if active_grace_seconds < 0:
-        raise MemoryValidationError("proposal active grace must be non-negative")
-    with _memory_journal_lock(memory_dir):
-        return _gc_staging_proposals(
-            memory_dir,
-            now=int(time.time()),
-            max_age_seconds=max_age_seconds,
-            active_grace_seconds=active_grace_seconds,
-        )
-
-
 def _ensure_writer_actor(actor: str) -> None:
     role = _actor_role(actor)
     if role not in {"curator", "secretary", "operator"}:

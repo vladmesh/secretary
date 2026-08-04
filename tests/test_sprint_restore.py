@@ -201,15 +201,28 @@ class SprintRestoreTests(unittest.TestCase):
         )
 
     def test_an_export_missing_an_observer_is_refused(self) -> None:
-        """Every row carries the field, so a row without it is a corrupt export."""
+        """A row without the field is refused, and the refusal names both ways it happens.
+
+        A pre-migration export is not corrupt, only older than the field, and the archive carries
+        nothing that tells the two apart. Naming only corruption would send the operator looking
+        for damage that is not there, so the message names both and gives the one repair.
+        """
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0].pop("observer")
         (self.target_data / "board" / "sprints.json").write_text(
             json.dumps(payload), encoding="utf-8"
         )
+        client = _EmptyBoardsKanboard()
 
-        with self.assertRaisesRegex(RestoreError, "a row without observer metadata"):
-            import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+        with self.assertRaises(RestoreError) as caught:
+            import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
+
+        message = str(caught.exception)
+        self.assertIn("carries no observer field", message)
+        self.assertIn("either corrupt or was taken before the observer migration", message)
+        self.assertIn("state/board/sprints.json", message)
+        # Diagnosis only: the refusal is still whole-set and nothing reached the backend.
+        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
 
     def test_a_declared_head_the_registry_no_longer_has_is_refused(self) -> None:
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))

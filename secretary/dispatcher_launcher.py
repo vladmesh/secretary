@@ -67,14 +67,6 @@ class HeadLaunch:
     prompt_after_start: bool = False
 
 
-def ensure_claude_workspace_trusted(workspace: str, config: Path | None = None) -> None:
-    """Mark one Claude Code workspace trusted before a headless launch."""
-    config_path = config or Path(os.environ.get("TA_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
-    data = _load_claude_config(config_path)
-    if _mark_claude_workspace_trusted(data, str(workspace), config_path):
-        _save_claude_config(config_path, data)
-
-
 def ensure_claude_workspace_ready(
     workspace: str,
     config: Path | None = None,

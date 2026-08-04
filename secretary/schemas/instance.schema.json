@@ -88,12 +88,12 @@
         "units": {
           "type": "array",
           "items": {"type": "string", "minLength": 1, "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"},
-          "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
+          "description": "Units this installation claims on the host. Read by host.build_expectations, the expectation set the host inventory is collected against for 'reconcile plan'/'reconcile apply', the host step of upgrade and 'restore-reconcile'. A non-empty list makes the live collector require host.unit_prefix, since without a namespace to enumerate it cannot report unmanaged-on-host and refuses rather than emit a partial diff. The units the plan installs come from packaging/systemd and host.components, not from here; doctor derives its own parity from the plan (host.build_doctor_expectations) and does not read this field."
         },
         "orca_repos": {
           "type": "array",
           "items": {"type": "string", "minLength": 1},
-          "description": "Deprecated doctor compatibility input; reconcile plan ignores it."
+          "description": "Orca repos this installation claims on the host. Read by host.build_expectations into the same expectation set as host.units, for 'reconcile plan'/'reconcile apply', the host step of upgrade and 'restore-reconcile'; on those paths the collector enumerates registered repos without consulting it. Doctor derives Orca repo parity from the plan (host.build_doctor_expectations) and does not read this field."
         },
         "components": {
           "type": "object",

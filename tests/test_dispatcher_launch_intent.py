@@ -33,7 +33,8 @@ from secretary.dispatcher_tui import TuiDeliveryError
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launch import launch_intent_liveness
 from secretary._fsutil import file_lock
-from secretary.dispatcher_state import DispatcherRecord, ensure_attempt
+from secretary.dispatcher_state import DispatcherRecord
+from tests.dispatcher_fixtures import ensure_attempt
 from secretary.dispatcher_types import HeadLaunchAborted, HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage

@@ -13,7 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.backup import create_backup, create_backups, verify_backup
+from secretary.backup import create_backups, verify_backup
+from tests.restore_fixtures import create_backup
 from secretary.backup_policy import POLICIES, should_skip_data_entry
 from secretary._fsutil import sha256_file
 from secretary.data import DataExport

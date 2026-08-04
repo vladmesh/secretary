@@ -382,7 +382,7 @@ tri-state. Four tagged forms exist, and only the first two are executable:
 | --- | --- |
 | `{"kind": "head", "profile": "claude-observer"}` | the sprint is observed by that one head profile |
 | `{"kind": "none"}` | the sprint runs without an observer |
-| `{"kind": "historical", "profile": HEAD, "source": "observer_lifecycle_audit", "event_id": EVT}` | a closed row whose head the migration recovered from durable lifecycle events |
+| `{"kind": "historical", "profile": HEAD, "source": "observer_lifecycle_audit", "event_id": EVT}` | a closed row whose head was recovered from durable lifecycle events when the field was introduced |
 | `{"kind": "historical", "profile": null, "source": "migration_unknown"}` | a closed row that never launched an observer, so there is nothing honest to recover |
 
 A `historical` value is provenance of what ran, never a declaration of what to run. An open sprint
@@ -391,37 +391,26 @@ carrying one is corrupt in exactly the way a missing value is.
 `create` and `reopen` both require `--observer`, spelled either `none` or one head profile from
 `heads.yaml`. Absent, null, empty, `default` and `inherited` are not interpretations this model has.
 A named profile is resolved against this installation's head snapshot — the same registry the
-dispatcher launches from — at every boundary that can put one on a row: create, reopen, the restore
-preflight, and the migration's rescan. A sprint is never opened, reopened or republished on a head
-that does not exist, because the fence would stop its projects on the first tick and the operator
-would be reading a critical outcome instead of a validation error. Registry drift *after* the
+dispatcher launches from — at every boundary that can put one on a row: create, reopen, and the
+restore preflight. A sprint is never opened, reopened or republished on a head that does not exist,
+because the fence would stop its projects on the first tick and the operator would be reading a
+critical outcome instead of a validation error. Registry drift *after* the
 declaration is what the fence is for.
 `reopen` writes the fresh choice while the sprint is still closed and only then changes its status,
 so the row is never readable open under a value the reopening caller did not choose; `create` writes
 it with the rest of the fields, before the reference publishes the row.
 
-After the migration below has run, the reader is strict: an open sprint whose observer metadata is
-missing, unreadable, historical, or names a profile the registry does not have is corrupt. It is not
-launched from `role_defaults.observer`, its cards do not move, and it does not silently become
-observer-free.
-
-"After the migration" is read from the durable `observer_migration_completed` audit event, which is
-checkpoint canon and comes back with a recovered host, rather than from a local file that would not.
-A log carrying only part of the backfill does not count: the completion event is written after the
-strict rescan, so the strict reader is never active against rows the cutover has not reached.
+The reader is strict everywhere and always: an open sprint whose observer metadata is missing,
+unreadable, historical, or names a profile the registry does not have is corrupt. It is not launched
+from `role_defaults.observer`, its cards do not move, and it does not silently become observer-free.
 
 Restore validates the whole exported set before the first backend write of any set, cards included,
-and refuses rather than publishing part of it. What it accepts follows the same signal: an export
-from a migrated installation must carry a value on every row, and one from an unmigrated
-installation carries none.
-
-An unmigrated export's closed rows come back without the field, and the installation comes back
-tolerant, which is the state it was in. Its one open row is different, because an open sprint may
-never be published without an executable value: its head is recovered from the same durable
-lifecycle log the migration reads, which the checkpoint carries, and written before the reference
-publishes the row. A row with nothing to recover, or whose recovered head has left the registry, is
-named and refused; the repair is to declare the value in the checkpoint's `sprints.json` before
-restoring.
+and refuses rather than publishing part of it. Every exported row must carry a value, closed rows
+too. A row without one is named and refused, and the refusal does not guess why: an export can lack
+the field because it is damaged or because it was taken before the field existed, and nothing in the
+archive tells the two apart. The repair is the same either way — declare the value on that row in
+the export's `state/board/sprints.json` and restore again. So is the repair for an open row whose
+declared head has left the registry.
 
 ### The observer fence
 

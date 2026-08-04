@@ -51,27 +51,6 @@ class BackupResult:
     manifest: dict[str, Any]
 
 
-def create_backup(
-    instance_path: Path,
-    *,
-    data_dir: Path | None = None,
-    copy_transcripts: bool = False,
-    allow_claimed_worker: bool = False,
-    caller_workspace: Path | None = None,
-    pipeline_command: list[str] | None = None,
-    backup_kind: BackupKind = "full",
-) -> BackupResult:
-    return create_backups(
-        instance_path,
-        data_dir=data_dir,
-        copy_transcripts=copy_transcripts,
-        allow_claimed_worker=allow_claimed_worker,
-        caller_workspace=caller_workspace,
-        pipeline_command=pipeline_command,
-        backup_kinds=(backup_kind,),
-    )[0]
-
-
 def create_backups(
     instance_path: Path,
     *,

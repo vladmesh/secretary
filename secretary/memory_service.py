@@ -627,14 +627,6 @@ def incremental_update(
     }
 
 
-def rebuild_index() -> int:
-    """Daemon rebuild using its configured canon, model, and target database."""
-    result = offline_rebuild(
-        CANON, CANON_EXPORT, DB_PATH, MODEL, DIM, document_embed=embed_doc, allow_empty=True
-    )
-    return result["parity"]["indexed"]
-
-
 def update_index() -> dict:
     """Daemon-owned incremental update using the warm document embedder."""
     return incremental_update(

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
-from secretary.backup import create_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary.cli import main as cli_main
 from secretary.data import export_memory, init_layout
@@ -35,6 +34,7 @@ from secretary.restore import (
 )
 from tests.restore_fixtures import (
     _EmptyWriteKanboard,
+    create_backup,
     _producer_exports,
     _restore_card,
     _seed_instance_facts,
