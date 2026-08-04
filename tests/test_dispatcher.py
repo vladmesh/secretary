@@ -3249,14 +3249,27 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(self.host.reviews, [])
 
+    def test_unknown_gate_mode_from_an_alternate_host_fails_closed(self) -> None:
+        self.start_dispatcher()
+        self.catalog._adapter = {"validation": {"ci": "recovered"}}
+        self.host.gate_results = [GateResult("green", "alternate host said green")]
+        self._run_worker_to_validate()
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["reason"], "gate receipt unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.host.reviews, [])
+
     def test_attested_gate_reaches_assessment_and_release_audit(self) -> None:
         self.start_dispatcher()
         self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "c" * 40
 
         def receipt(marker: str) -> dict[str, object]:
             return {
                 "validated_sha": self.host.commit,
-                "base_sha": marker * 16,
+                "base_sha": marker * 40,
                 "gate_mode": "github",
                 "required_checks": [{
                     "name": f"unit-{marker}", "conclusion": "SUCCESS",
@@ -3296,11 +3309,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.start_dispatcher()
         self.unobserved_card()
         self.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
+        self.host.commit = "c" * 40
 
         def receipt(marker: str) -> dict[str, object]:
             return {
                 "validated_sha": self.host.commit,
-                "base_sha": "b" * 16,
+                "base_sha": "b" * 40,
                 "gate_mode": "local",
                 "required_checks": [{"name": marker, "conclusion": "SUCCESS", "url": ""}],
                 "completed_at": "2026-08-04T00:00:00+00:00",
@@ -8457,6 +8471,23 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.attestation["gate_mode"], "local")
         self.assertEqual(result.attestation["required_checks"][0]["conclusion"], "SUCCESS")
         self.assertRegex(str(result.attestation["command_or_check_set_digest"]), r"^[0-9a-f]{64}$")
+
+    def test_local_gate_rejects_a_command_that_changes_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            before = git(ws, "rev-parse", "HEAD")
+            command = "echo mutation > gate-mutated.txt; git add gate-mutated.txt; git commit -m gate-mutated"
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": command}})
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+            after = git(ws, "rev-parse", "HEAD")
+        self.assertNotEqual(after, before)
+        self.assertEqual(result.status, "red")
+        self.assertIn("did not preserve the validated HEAD", result.summary)
+        self.assertIn(before, result.log)
+        self.assertIn(after, result.log)
+        self.assertIsNone(result.attestation)
 
     def test_github_receipt_sanitizes_check_display_and_digest_ignores_run_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

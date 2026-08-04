@@ -65,7 +65,7 @@ from secretary.dispatcher_gate_receipt import (
     AcceptedGreenGate,
     accepted_receipt as _accepted_gate_receipt,
     is_exact_sha as _is_exact_sha,
-    render_receipt as _render_gate_receipt,
+    render_receipt,
 )
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
@@ -2204,7 +2204,7 @@ class CommandHostRuntime:
             sections[4:4] = [
                 "## Mechanical gate attestation",
                 "",
-                _render_gate_attestation(attestation),
+                render_receipt(attestation),
                 "",
                 "Independently inspect the diff, acceptance criteria and invariants. The attested broad",
                 "check above already passed on this exact SHA: do not rerun that broad command or suite on",
@@ -4971,11 +4971,6 @@ def _gate_attestation_for_prompt(
     """
     source = candidate if isinstance(candidate, dict) else getattr(record, "gate_attestation", {})
     return _accepted_gate_receipt(source, current_sha)
-
-
-def _render_gate_attestation(attestation: dict[str, object]) -> str:
-    """Compact human-readable receipt used in role packets and durable board audit comments."""
-    return _render_gate_receipt(attestation)
 
 
 def _continuation_prompt(

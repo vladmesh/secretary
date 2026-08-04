@@ -69,6 +69,10 @@ Every real mechanical gate result materializes a reusable receipt bound to one c
 `validated_sha`, `base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion and URL),
 `completed_at`, and a `command_or_check_set_digest`. For a local gate this is the configured command's
 digest; for GitHub it is a stable required-check-set identity, not a workflow-definition or run digest.
+Both object IDs are full 40-character SHA-1 or 64-character SHA-256 values; abbreviations are not
+evidence. A local gate captures HEAD before and after its command and fails closed if the command moves
+it. Only `local` and `github` may carry receipts; `none` and noop are valid only without one, and an
+unknown mode is never accepted.
 The dispatcher persists the receipt with the active card, renders it into `REVIEW.md`, replaces it with
 the fresh post-review receipt in the Assessment delivery, and writes the fresh final receipt into the
 release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence, not permission to

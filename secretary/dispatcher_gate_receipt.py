@@ -15,7 +15,7 @@ from typing import Iterable, Mapping
 
 from secretary.dispatcher_helpers import safe_one_line
 
-_EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_EXACT_SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _TERMINAL_CONCLUSIONS = frozenset(
     {
@@ -25,6 +25,7 @@ _TERMINAL_CONCLUSIONS = frozenset(
 )
 _PASSED_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 _EXECUTED_MODES = frozenset({"local", "github"})
+_ALLOWED_MODES = _EXECUTED_MODES | {"none"}
 
 
 @dataclass(frozen=True)
@@ -110,21 +111,25 @@ class AcceptedGreenGate:
     """The single policy result used at initial validation, park and release."""
 
     receipt: GateReceipt | None
-    receipt_required: bool
+    policy_valid: bool
 
     @classmethod
     def accept(
         cls, payload: object, *, current_sha: str, gate_mode: str, noop: bool
     ) -> AcceptedGreenGate:
-        required = not noop and gate_mode in _EXECUTED_MODES
-        receipt = GateReceipt.accept(payload, current_sha=current_sha) if required else None
+        if gate_mode not in _ALLOWED_MODES:
+            return cls(None, False)
+        receiptless = payload is None or payload == {}
+        if noop or gate_mode == "none":
+            return cls(None, receiptless)
+        receipt = GateReceipt.accept(payload, current_sha=current_sha)
         if receipt is not None and receipt.gate_mode != gate_mode:
             receipt = None
-        return cls(receipt, required)
+        return cls(receipt, receipt is not None)
 
     @property
     def valid(self) -> bool:
-        return self.receipt is not None or not self.receipt_required
+        return self.policy_valid
 
     def persisted_payload(self) -> dict[str, object]:
         return self.receipt.as_dict() if self.receipt else {}

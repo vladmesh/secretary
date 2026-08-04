@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
-from secretary.dispatcher_gate_receipt import mint_gate_receipt
+from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_types import HostError
 
 # How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog
@@ -176,9 +176,22 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     command = _validation(host, task).get("command")
     if not isinstance(command, str) or not command.strip():
         raise HostError("local validation has no command")
+    pre_run_sha = _head_sha(host, workspace)
+    if not is_exact_sha(pre_run_sha):
+        raise HostError("local gate could not capture a full pre-run HEAD object id")
     completed = host.run_capture(["bash", "-lc", command], "local gate", cwd=Path(workspace))
+    post_run_sha = _head_sha(host, workspace)
+    if not is_exact_sha(post_run_sha) or post_run_sha != pre_run_sha:
+        detail = (
+            f"HEAD changed while local validation ran ({pre_run_sha} -> "
+            f"{post_run_sha or '(unavailable)'})"
+        )
+        return GateResult(
+            "red", "local validation did not preserve the validated HEAD", detail,
+            fingerprint=_fingerprint("local-head-mutated", pre_run_sha, post_run_sha),
+        )
     receipt = mint_gate_receipt(
-        validated_sha=_head_sha(host, workspace),
+        validated_sha=pre_run_sha,
         base_sha=_base_sha(host, workspace, host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))),
         gate_mode="local",
         required_checks=[{"name": "local validation", "conclusion": "SUCCESS" if completed.returncode == 0 else "FAILURE", "url": ""}],

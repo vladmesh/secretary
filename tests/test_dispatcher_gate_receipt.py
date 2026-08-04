@@ -45,20 +45,49 @@ class GateReceiptPolicyTests(unittest.TestCase):
                 self.assertFalse(accepted.valid)
                 self.assertIsNone(accepted.receipt)
 
-    def test_none_and_noop_never_turn_candidate_data_into_evidence(self) -> None:
+    def test_none_and_noop_accept_only_receiptless_results(self) -> None:
         candidate = self.receipt()
 
-        none_gate = AcceptedGreenGate.accept(
-            candidate, current_sha="a" * 40, gate_mode="none", noop=False
-        )
-        noop_gate = AcceptedGreenGate.accept(
-            candidate, current_sha="a" * 40, gate_mode="local", noop=True
-        )
+        for gate_mode, noop in (("none", False), ("local", True)):
+            with self.subTest(gate_mode=gate_mode, noop=noop):
+                receiptless = AcceptedGreenGate.accept(
+                    None, current_sha="a" * 40, gate_mode=gate_mode, noop=noop
+                )
+                forged = AcceptedGreenGate.accept(
+                    candidate, current_sha="a" * 40, gate_mode=gate_mode, noop=noop
+                )
+                self.assertTrue(receiptless.valid)
+                self.assertEqual(receiptless.persisted_payload(), {})
+                self.assertFalse(forged.valid)
 
-        self.assertTrue(none_gate.valid)
-        self.assertTrue(noop_gate.valid)
-        self.assertEqual(none_gate.persisted_payload(), {})
-        self.assertEqual(noop_gate.persisted_payload(), {})
+    def test_unknown_mode_is_invalid_even_when_receiptless_or_noop(self) -> None:
+        for noop in (False, True):
+            accepted = AcceptedGreenGate.accept(
+                None, current_sha="a" * 40, gate_mode="alternate", noop=noop
+            )
+            self.assertFalse(accepted.valid)
+
+    def test_only_full_sha1_or_sha256_object_ids_are_receipts(self) -> None:
+        for length in (7, 12, 39, 41, 63, 65):
+            with self.subTest(length=length):
+                self.assertIsNone(mint_gate_receipt(
+                    validated_sha="a" * length,
+                    base_sha="b" * 40,
+                    gate_mode="local",
+                    required_checks=[{"name": "unit", "conclusion": "SUCCESS", "url": ""}],
+                    check_set_identity="unit",
+                ))
+        abbreviated_base = self.receipt()
+        abbreviated_base["base_sha"] = "b" * 12
+        self.assertIsNone(GateReceipt.accept(abbreviated_base, current_sha="a" * 40))
+        sha256 = mint_gate_receipt(
+            validated_sha="a" * 64,
+            base_sha="b" * 64,
+            gate_mode="local",
+            required_checks=[{"name": "unit", "conclusion": "SUCCESS", "url": ""}],
+            check_set_identity="unit",
+        )
+        self.assertIsNotNone(GateReceipt.accept(sha256, current_sha="a" * 64))
 
 
 if __name__ == "__main__":
