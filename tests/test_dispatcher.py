@@ -696,8 +696,6 @@ class FakeHost:
         # The sprint binding each bring-up handed the head, in launch order.
         self.observer_identities: list[dict[str, str]] = []
         self.observer_nudges: list[str] = []
-        # The delivery criterion each wake was handed, so a test can prove the lifecycle passes one.
-        self.observer_wake_confirms: list = []
         self.stopped_observers: list[str] = []
         # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
         self.observer_terminals: dict[str, str] = {}
@@ -844,15 +842,14 @@ class FakeHost:
             return dict(self.observer_status_result)
         return {"last_activity": time.time(), "idle": False}
 
-    def nudge_observer(self, record, *, confirm=None) -> str:
+    def nudge_observer(self, record) -> str:
         self.calls.append("nudge_observer")
         if self.fail_observer_reason:
             raise HostError(self.fail_observer_reason)
         self.observer_nudges.append(str(record.sprint))
-        # Like the real host: the pane took the prompt, and the delivery criterion the lifecycle
-        # passed in is what decides whether the batch is closed.
-        self.observer_wake_confirms.append(confirm)
-        return "confirmed" if confirm is not None and confirm(time.time()) else "accepted"
+        # Like the real host, this confirms terminal acceptance only. The later durable resume
+        # closes the observer delivery during normal reconciliation.
+        return "accepted"
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")

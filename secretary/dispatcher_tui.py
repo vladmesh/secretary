@@ -225,7 +225,7 @@ def deliver_interactive_prompt(
     prompt: str,
     *,
     run_json: RunJson,
-    confirm: Callable[[float], bool],
+    confirm: Callable[[float], bool] | None = None,
     ack_out_of_band: bool = False,
 ) -> str:
     """Deliver a prompt into a live interactive head, on one path for every role that has one.
@@ -234,12 +234,12 @@ def deliver_interactive_prompt(
     send, then keep re-entering the prompt while the pane stays idle, which is what a swallowed
     prompt looks like. Exhausting the retries raises, so the caller can take its own failure path.
 
-    What closes the delivery is the caller's, and this function has no opinion of its own: `confirm`
-    is required, and it is called with the moment the prompt was sent. Worker and reviewer pass the
-    criterion they always had, their head's turn having visibly started. A caller whose proof
-    arrives later (an observer resume naming this delivery) passes that criterion and sets
-    `ack_out_of_band`, and gets `DELIVERY_ACCEPTED` as soon as the pane has taken the prompt.
+    Worker and reviewer pass `confirm`, the criterion they always had: their head's turn having
+    visibly started. A caller whose proof arrives later sets `ack_out_of_band` and passes no
+    callback at all; it gets `DELIVERY_ACCEPTED` as soon as the pane has taken the prompt.
     """
+    if confirm is None and not ack_out_of_band:
+        raise ValueError("interactive delivery requires a confirmation criterion")
     wait_for_tui_idle(handle, run_json=run_json)
     sent_at = time.time()
     run_json([
@@ -279,7 +279,7 @@ def _confirm_interactive_turn(
     sent_at: float,
     *,
     run_json: RunJson,
-    confirm: Callable[[float], bool],
+    confirm: Callable[[float], bool] | None,
     ack_out_of_band: bool = False,
 ) -> str:
     deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
@@ -288,7 +288,7 @@ def _confirm_interactive_turn(
     accepted = False
     readiness = READINESS_READY
     while time.monotonic() < deadline:
-        if confirm(sent_at):
+        if confirm is not None and confirm(sent_at):
             return DELIVERY_CONFIRMED
         readiness = terminal_readiness(handle, run_json=run_json)
         if readiness == READINESS_UNKNOWN:

@@ -132,6 +132,7 @@ from secretary.dispatcher_state import (
     request_token as _request_token,
 )
 from secretary.dispatcher_tui import (
+    DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
     READINESS_READY,
     READINESS_UNKNOWN,
@@ -847,16 +848,16 @@ class CommandHostRuntime:
             pass
         return status
 
-    def nudge_observer(self, record: Any, *, confirm: Callable[[float], bool] | None = None) -> str:
+    def nudge_observer(self, record: Any) -> str:
         """Give an idle observer one event-driven turn without replacing its head.
 
         The prompt goes through the same delivery path as a worker or reviewer continuation: wait
         for the pane, send, re-enter a swallowed prompt, and refuse upwards when the retries run
-        out. What the observer's delivery is closed by is `confirm`, which the lifecycle owns: a
-        turn that merely started does not acknowledge the batch this nudge carries.
+        out. This reports terminal acceptance only. The observer's later durable resume, consumed
+        by the next lifecycle reconciliation, is the sole acknowledgement of the batch.
         """
         if self.mode == "noop":
-            return DELIVERY_CONFIRMED
+            return DELIVERY_ACCEPTED
         workspace = str(getattr(record, "workspace", "") or "")
         handle = str(getattr(record, "handle", "") or "")
         leaf = str(getattr(record, "leaf", "") or "")
@@ -892,9 +893,6 @@ class CommandHostRuntime:
                 current,
                 message,
                 run_json=self._run_json,
-                # A wake with no criterion of its own is never confirmed in this call: an
-                # observer's proof of delivery is a resume, and it arrives long after the send.
-                confirm=confirm or (lambda _sent_at: False),
                 ack_out_of_band=True,
             )
         except TuiDeliveryError as exc:

@@ -1638,14 +1638,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         real_events = TaskAudit.events
         calls: list[TaskAudit] = []
-        confirms: list[object] = []
 
         def counted(audit: TaskAudit, *args: object, **kwargs: object) -> list[dict]:
             calls.append(audit)
             return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
 
-        def accept_while_ready(record: ObserverRecord, *, confirm: object = None) -> str:
-            confirms.append(confirm)
+        def accept_while_ready(record: ObserverRecord) -> str:
             self.host.observer_nudges.append(str(record.sprint))
             return "accepted"
 
@@ -1657,7 +1655,6 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             result = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
-        self.assertEqual(confirms, [None])
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK,
@@ -3235,10 +3232,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         nudge = self.host.nudge_observer
         self.host.observer_nudges.clear()
 
-        def refuse_the_first_sprints_wake(record, *, confirm=None):
+        def refuse_the_first_sprints_wake(record):
             if str(record.sprint) == self.FIRST:
                 raise HostError("the pane never took the prompt")
-            return nudge(record, confirm=confirm)
+            return nudge(record)
 
         with mock.patch.object(
             self.host, "nudge_observer", side_effect=refuse_the_first_sprints_wake
@@ -3500,12 +3497,8 @@ class ObserverConfigurationTests(unittest.TestCase):
             [["terminal", "list"], ["terminal", "wait"], ["terminal", "send"], ["terminal", "wait"]],
         )
 
-    def test_real_host_nudge_on_a_claude_head_needs_no_screen_marker(self) -> None:
-        """The gap this closes: a claude pane shows none of Codex's screen forms.
-
-        Nothing here answers `terminal read` at all. The wake still goes out, because readiness and
-        acceptance both come from Orca's `tui-idle`, and it is refused only by a caller criterion.
-        """
+    def test_real_host_nudge_api_rejects_a_synchronous_confirm_callback(self) -> None:
+        """Observer acknowledgement is out of band and cannot re-enter prompt delivery."""
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
             record = ObserverRecord(
@@ -3514,26 +3507,16 @@ class ObserverConfigurationTests(unittest.TestCase):
                 handle="observer:sprint:1",
                 delivery=ObserverDelivery(delivery_id="delivery-2", through_event="evt-card-2"),
             )
-            calls: list[list[str]] = []
-            acknowledged: list[bool] = [False]
+            reached = [False]
 
-            def run_json(args: list[str]) -> dict:
-                calls.append(args)
-                if args[1:3] == ["terminal", "list"]:
-                    return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
-                if args[1:3] == ["terminal", "send"]:
-                    # The head answers: its resume for this delivery reaches the audit log.
-                    acknowledged[0] = True
-                    return {}
-                if args[1:3] == ["terminal", "wait"]:
-                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
-                raise AssertionError(args)
+            def forbidden(_sent_at: float) -> bool:
+                reached[0] = True
+                return True
 
-            with mock.patch.object(host, "_run_json", side_effect=run_json):
-                outcome = host.nudge_observer(record, confirm=lambda _sent_at: acknowledged[0])
+            with self.assertRaises(TypeError):
+                host.nudge_observer(record, confirm=forbidden)  # type: ignore[call-arg]
 
-        self.assertEqual(outcome, "confirmed")
-        self.assertEqual([call for call in calls if call[1:3] == ["terminal", "read"]], [])
+        self.assertFalse(reached[0])
 
     def test_real_host_nudge_refuses_a_wake_the_pane_never_took(self) -> None:
         """A pane that stays idle swallowed the prompt: retries, then an explicit failure."""
@@ -3563,7 +3546,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                  mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
                  mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2), \
                  self.assertRaises(HostError) as raised:
-                host.nudge_observer(record, confirm=lambda _sent_at: False)
+                host.nudge_observer(record)
 
         self.assertIn("observer wake was not delivered", str(raised.exception))
         self.assertIn("pane-stayed-ready", str(raised.exception))
