@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 import tarfile
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,10 +66,7 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         if raw_kind not in BACKUP_KINDS:
             findings.append("unsupported backup kind")
         findings.extend(_verify_manifest_components(manifest, policy, members, names))
-        payload_findings = verify_restore_payload(path, manifest, policy)
-        findings.extend(payload_findings)
-        if not payload_findings:
-            findings.extend(_verify_memory_journal(path))
+        findings.extend(verify_restore_payload(path, manifest, policy))
 
     if policy.kind == "core":
         findings.extend(_verify_core_archive(names, path, policy))
@@ -109,15 +103,7 @@ def _policy_from_manifest(manifest: Any) -> BackupPolicy:
 
 
 def _required_entries_for_manifest(manifest: Any, policy: BackupPolicy) -> set[str]:
-    entries = set(policy.required_entries)
-    components = manifest.get("components") if isinstance(manifest, dict) else None
-    if (
-        policy.kind == "full"
-        and isinstance(components, dict)
-        and _is_legacy_full_manifest(manifest, components)
-    ):
-        entries.discard(f"{ARCHIVE_ROOT}/secretary-data/runs/claims.json")
-    return entries
+    return set(policy.required_entries)
 
 
 def _verify_manifest_components(
@@ -132,8 +118,6 @@ def _verify_manifest_components(
         return ["versions manifest has no components object"]
 
     required_components = set(policy.required_components)
-    if policy.kind == "full" and _is_legacy_full_manifest(manifest, components):
-        required_components.discard("runs_state")
     missing_components = sorted(required_components - set(components))
     findings.extend(f"versions manifest missing component: {name}" for name in missing_components)
     component_policies = {component.name: component for component in policy.components}
@@ -158,10 +142,6 @@ def _verify_manifest_components(
             if not _archive_has_path(names, field_archive_name):
                 findings.append(f"{name} component path missing from archive: {field}")
     return findings
-
-
-def _is_legacy_full_manifest(manifest: dict[str, Any], components: dict[str, Any]) -> bool:
-    return "backup_kind" not in manifest and "kind" not in manifest and "runs_state" not in components
 
 
 def _read_member_json(archive: tarfile.TarFile, name: str) -> Any:
@@ -240,84 +220,6 @@ def _unsafe_member(member: tarfile.TarInfo) -> bool:
         or member.isdev()
         or member.isfifo()
     )
-
-
-def _verify_memory_journal(plain_archive: Path) -> list[str]:
-    """Check a nested memory journal, for archives old enough to carry one.
-
-    Facts are canon in the private repo since the flatten (docs/RECOVERY.md,
-    "Layout"), so a current archive has no `memory/facts` at all and there is
-    nothing here to verify; its memory component is covered by the required
-    `memory/export.ndjson`. Archives predating the flatten still get the full
-    journal check.
-    """
-    prefix = f"{ARCHIVE_ROOT}/secretary-data/memory/facts/"
-    try:
-        with tempfile.TemporaryDirectory(prefix=".secretary-journal-") as temporary:
-            journal = Path(temporary) / "facts"
-            found_journal = False
-            with tarfile.open(plain_archive, "r") as archive:
-                for member in archive.getmembers():
-                    if not member.name.startswith(prefix):
-                        continue
-                    found_journal = True
-                    relative = Path(member.name.removeprefix(prefix))
-                    if is_memory_journal_git_runtime_entry(
-                        Path("memory", "facts") / relative
-                    ):
-                        continue
-                    if _unsafe_member(member):
-                        return [f"unsafe archive entry: {member.name}"]
-                    destination = journal / relative
-                    if member.isdir():
-                        destination.mkdir(parents=True, exist_ok=True)
-                        continue
-                    if not member.isfile():
-                        return [f"unsupported archive entry type: {member.name}"]
-                    source = archive.extractfile(member)
-                    if source is None:
-                        return [f"could not read archive entry: {member.name}"]
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    with source, destination.open("wb") as output:
-                        shutil.copyfileobj(source, output)
-            if not found_journal:
-                return []
-            head = subprocess.run(
-                ["git", "rev-parse", "--verify", "HEAD^{commit}"],
-                cwd=journal,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            has_facts = any(
-                path.is_file() and ".git" not in path.parts for path in journal.rglob("*")
-            )
-            if head.returncode and has_facts:
-                return ["memory journal has no valid HEAD commit"]
-            if not head.returncode:
-                reset = subprocess.run(
-                    ["git", "reset", "-q"],
-                    cwd=journal,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                if reset.returncode:
-                    return ["memory journal worktree cannot be reconstructed"]
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=journal,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if status.returncode:
-                return ["memory journal worktree cannot be checked"]
-            if status.stdout:
-                return ["memory journal worktree is not clean"]
-    except (OSError, tarfile.TarError) as exc:
-        return [f"could not verify memory journal: {exc}"]
-    return []
 
 
 def _is_forbidden_archive_entry(name: str) -> bool:

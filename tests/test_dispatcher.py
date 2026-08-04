@@ -84,35 +84,45 @@ from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.observer_identity import bind_observer
 
 
-class WorkerContinuationStateTests(unittest.TestCase):
-    def test_flat_retained_worker_state_is_migrated(self) -> None:
-        record = DispatcherRecord.from_json({
-            "state": "worker_resuming",
-            "worker_retained_at": 10.0,
-            "worker_resume_phase": "merge-gate",
-            "worker_resume_delivery": "pending",
-            "worker_resume_sent_at": 12.0,
-        })
+class LegacyDispatcherRecordTests(unittest.TestCase):
+    """A record from before the continuation was one object is refused, not read as empty."""
 
-        self.assertEqual(
-            record.worker_continuation.stage,
-            WorkerContinuationStage.DELIVERY_PENDING,
-        )
-        self.assertEqual(record.worker_continuation.phase, "merge-gate")
-        self.assertEqual(record.worker_continuation.retained_at, 10.0)
-        self.assertEqual(record.worker_continuation.sent_at, 12.0)
+    def test_a_flat_continuation_record_is_refused(self) -> None:
+        with self.assertRaises(DispatcherError) as caught:
+            DispatcherRecord.from_json({
+                "state": "worker_retained",
+                "worker_retained_at": 1.0,
+                "worker_resume_delivery": "pending",
+            })
 
-    def test_flat_pre_validate_checkpoint_is_migrated(self) -> None:
+        self.assertEqual(caught.exception.code, "unsupported_legacy_record")
+        self.assertIn("unsupported legacy dispatcher record", caught.exception.message)
+        self.assertIn("worker_retained_at", caught.exception.message)
+        self.assertIn("worker_resume_delivery", caught.exception.message)
+
+    def test_every_flat_field_is_refused_on_its_own(self) -> None:
+        for field_name in (
+            "worker_retained_at",
+            "worker_resume_delivery",
+            "worker_resume_phase",
+            "worker_resume_sent_at",
+        ):
+            with self.subTest(field=field_name):
+                with self.assertRaises(DispatcherError):
+                    DispatcherRecord.from_json({"state": "claimed", field_name: ""})
+
+    def test_a_current_record_still_loads(self) -> None:
+        continuation = WorkerContinuation()
+        continuation.begin_retention(10.0)
         record = DispatcherRecord.from_json({
             "state": "worker_retained",
-            "worker_retained_at": 10.0,
+            "worker_continuation": continuation.to_json(),
         })
 
-        self.assertEqual(
-            record.worker_continuation.stage,
-            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
-        )
+        self.assertTrue(record.worker_continuation.retained)
 
+
+class WorkerContinuationStateTests(unittest.TestCase):
     def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
         """A dropped session ends a plain retention. It does not end a park: the card is still
         waiting for a decision, and a rework decision on it is owed a replacement worker."""
@@ -8967,14 +8977,6 @@ class ReviewLivenessTests(unittest.TestCase):
         all that is left to recognise it by — and a duplicate reviewer is the cost of missing it."""
         host = self._host([
             {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 reviewer", "connected": True},
-        ])
-
-        self.assertTrue(host.review_running(self.task, self._record()))
-
-    def test_label_fallback_still_matches_a_pre_651_reviewer(self) -> None:
-        """A card already in review when the dispatcher upgraded must not get a second reviewer."""
-        host = self._host([
-            {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 review", "connected": True},
         ])
 
         self.assertTrue(host.review_running(self.task, self._record()))

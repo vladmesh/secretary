@@ -12,17 +12,15 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_and_remove_atomic, publish_pair_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.contract_migrations import (  # re-exported: one registry of legacy shapes
-    MUTABLE_BINDING_FIELDS,
-    normalize_contract,
-    project_lock_path,
-)
 from triggered_agents.runtime.paths import default_instance_path
 
 
 # The installation of a host that configured none. One spelling of the fallback, shared with the
 # runtime, so the CLI and a launched role cannot disagree about which installation they mean.
 DEFAULT_INSTANCE = str(default_instance_path())
+# Binding-owned fields. They live in the binding, never in the contract's ``identity``, and a
+# rewrite of the binding carries the values the operator set instead of resetting them.
+MUTABLE_BINDING_FIELDS = ("plane", "policy")
 IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
 REQUIRED_DECISIONS = [
     "setup.commands",
@@ -53,7 +51,7 @@ def project_add(
         return _project_add_locked(
             repo, project_id, instance_dir, binding_path, draft_path, dry_run=True
         )
-    with file_lock(_project_lock_path(instance_dir, project_id)):
+    with file_lock(project_lock_path(instance_dir, project_id)):
         return _project_add_locked(
             repo, project_id, instance_dir, binding_path, draft_path, dry_run=False
         )
@@ -99,7 +97,6 @@ def _project_add_locked(
     if error:
         return 1, _fail_draft(artifact, "draft.invalid", error)
     if existing_draft:
-        normalize_contract(existing_draft)
         errors = validate(existing_draft, "onboarding-contract", draft_path.name)
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
@@ -170,8 +167,9 @@ def _project_id(name: str) -> str:
     return value or "project"
 
 
-def _project_lock_path(instance_dir: Path, project_id: str) -> Path:
-    return project_lock_path(instance_dir, project_id)
+def project_lock_path(instance_dir: Path, project_id: str) -> Path:
+    """The lock onboarding, provision and the gate serialize their draft writes on."""
+    return instance_dir / ".locks" / f"{project_id}.lock"
 
 
 def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any]:

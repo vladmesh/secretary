@@ -28,7 +28,6 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_types import (
     HeadLaunchAborted,
     HostError,
-    legacy_review_pane_label,
     review_pane_label,
 )
 from secretary.dispatcher_watchdog import (
@@ -60,12 +59,12 @@ def command_terminal_status(
     if not isinstance(terminals, list):
         raise HostError("orca terminal list returned an unsupported shape")
     if kind == "review":
-        labels = {review_pane_label(task["ref"]), legacy_review_pane_label(task["ref"])}
+        label = review_pane_label(task["ref"])
         pane_known = bool(record.review_handle or record.review_leaf)
         matches = lambda terminal: bool(
             (record.review_handle and terminal.get("handle") == record.review_handle)
             or (record.review_leaf and terminal.get("leafId") == record.review_leaf)
-            or (not pane_known and terminal.get("title") in labels)
+            or (not pane_known and terminal.get("title") == label)
         )
     else:
         pane_known = bool(record.handle or record.worker_leaf)

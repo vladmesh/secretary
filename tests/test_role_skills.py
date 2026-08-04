@@ -29,10 +29,11 @@ from secretary.role_skills import (
     main,
     manifest_sources,
     product_manifest_path,
-    roles_root,
     skill_delivery,
     sync,
 )
+
+ROLES_ROOT = MANIFEST.parent / "roles"
 
 OBSERVER_SKILL = "observe-sprint"
 OPEN_SPRINT_SKILL = "open-sprint"
@@ -61,12 +62,12 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertEqual(self.manifest["roles"]["observer"]["skills"], [OBSERVER_SKILL])
 
     def test_the_canonical_observer_skill_is_in_this_repository(self) -> None:
-        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
+        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
     def test_observer_skill_contains_the_minimal_supported_change_guardrails(self) -> None:
-        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
+        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
         text = source.read_text(encoding="utf-8")
 
         self.assertIn("Before creating a `code` card, work through this decision sequence", text)
@@ -88,7 +89,7 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertIn("Apply the same classification to the Blocked evidence", text)
 
     def test_observer_skill_stops_a_round_that_only_moves_the_defect(self) -> None:
-        source = roles_root(MANIFEST) / "observer" / OBSERVER_SKILL / "SKILL.md"
+        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
         text = source.read_text(encoding="utf-8")
 
         self.assertIn("blockers that the previous round's own repairs introduced", text)
@@ -117,13 +118,13 @@ class CanonicalRegistryTests(unittest.TestCase):
 
         for skill in ("start-sprint", "run-sprint"):
             self.assertNotIn(skill, skills)
-            self.assertFalse((roles_root(MANIFEST) / "secretary" / skill).exists())
+            self.assertFalse((ROLES_ROOT / "secretary" / skill).exists())
 
     def test_the_secretary_role_owns_the_sprint_entity_skill(self) -> None:
         self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["secretary"]["skills"])
 
     def test_the_canonical_open_sprint_skill_is_in_this_repository(self) -> None:
-        source = roles_root(MANIFEST) / "secretary" / OPEN_SPRINT_SKILL / "SKILL.md"
+        source = ROLES_ROOT / "secretary" / OPEN_SPRINT_SKILL / "SKILL.md"
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
@@ -177,7 +178,7 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertTrue(sources)
         for source in sources:
             with self.subTest(str(source)):
-                self.assertEqual(source.parent.parent, roles_root(MANIFEST))
+                self.assertEqual(source.parent.parent, ROLES_ROOT)
 
     def test_the_product_canon_reads_the_same_without_an_instance_directory(self) -> None:
         """A checkout on a machine with no installation at all is still a readable registry."""

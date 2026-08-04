@@ -39,7 +39,6 @@ from secretary.backup_retention import (
 from secretary.backup_verify import VerifyResult, verify_backup
 
 
-PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "secretary" / "pipeline"
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 PIPELINE_PAUSE_REASON = "secretary backup create"
 PIPELINE_PAUSE_ACTOR = "secretary-backup"

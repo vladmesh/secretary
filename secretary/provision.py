@@ -12,8 +12,7 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.contract_migrations import normalize_contract
-from secretary.onboarding import IDENTITY_FIELDS, scan_repo
+from secretary.onboarding import IDENTITY_FIELDS, project_lock_path, scan_repo
 
 ENVIRONMENT_SUMMARIES = {
     "dependency-missing": "required dependency is missing",
@@ -49,7 +48,7 @@ def apply_provision_result(
     result_value: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     instance = _instance_dir(instance_value)
-    with file_lock(_project_lock_path(instance, project_id)):
+    with file_lock(project_lock_path(instance, project_id)):
         return _apply_provision_result_locked(instance, project_id, result_value)
 
 
@@ -157,10 +156,6 @@ def _instance_dir(value: str) -> Path:
     return path.parent if path.name == "instance.yaml" else path
 
 
-def _project_lock_path(instance: Path, project_id: str) -> Path:
-    return instance / ".locks" / f"{project_id}.lock"
-
-
 def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
     draft_path = instance / "adapter-drafts" / f"{project_id}.yaml"
     binding_path = instance / "projects" / f"{project_id}.yaml"
@@ -172,7 +167,6 @@ def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
         return _status(status, errors=[str(exc)])
     if not isinstance(draft, dict) or not isinstance(binding, dict):
         return _status("draft_invalid", errors=["draft and binding must be mappings"])
-    normalize_contract(draft)
     errors = validate(draft, "onboarding-contract", draft_path.name)
     errors += validate(binding, "project-binding", binding_path.name)
     if errors:

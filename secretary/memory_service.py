@@ -27,12 +27,7 @@ DEFAULT_MEMORY_DIR = Path.home() / "secretary-data" / "memory"
 # export and the vector index stay derived under the data dir.
 DEFAULT_CANON = Path.home() / "secretary-instance" / "state" / "memory" / "facts"
 
-if "MEMORY_CANON_ROOT" in os.environ:
-    CANON = Path(os.environ["MEMORY_CANON_ROOT"])
-elif "PANELMEM_KB" in os.environ:
-    CANON = Path(os.environ["PANELMEM_KB"]) / "memory"
-else:
-    CANON = DEFAULT_CANON
+CANON = Path(os.environ.get("MEMORY_CANON_ROOT", DEFAULT_CANON))
 
 DB_PATH = os.environ.get("MEMORY_DB", str(DEFAULT_MEMORY_DIR / "index.sqlite"))
 MODEL = os.environ.get("MEMORY_MODEL", "intfloat/multilingual-e5-large")
@@ -143,22 +138,6 @@ def mark_search_not_ready(error: Exception | None = None) -> None:
     _ready_event.clear()
 
 
-def add_memory(text: str, tags=None, source=None) -> int:
-    conn = db()
-    cur = conn.execute(
-        "INSERT INTO memories(text, tags, source, created_at) VALUES (?,?,?,?)",
-        (text, tags, source, datetime.datetime.utcnow().isoformat()),
-    )
-    rid = cur.lastrowid
-    conn.execute(
-        "INSERT INTO vec_memories(rowid, embedding) VALUES (?, ?)",
-        (rid, sqlite_vec.serialize_float32(embed_doc(text).tolist())),
-    )
-    conn.commit()
-    conn.close()
-    return rid
-
-
 def normalize_scope(scope: str | None) -> str | None:
     """Accept "global", "project:<dir>" or a bare project dir name ("orca" → "project:orca")."""
     if not scope:
@@ -229,10 +208,9 @@ def log_search(query: str, k: int, results: list,
 
 
 # ── Canon → index (daemon-owned reindex) ──────────────────────────────────────
-# The production canon is the private instance repo's state/memory/facts.
-# Prefer the atomically published export.ndjson snapshot; rollback to the old
-# panelmem-kb repo is one setting, MEMORY_CANON_ROOT=/home/dev/panelmem-kb/memory,
-# and then we read HEAD.
+# The production canon is the private instance repo's state/memory/facts, named
+# by MEMORY_CANON_ROOT. Prefer the atomically published export.ndjson snapshot;
+# without one we read the canon checkout at HEAD.
 
 
 def scope_for_relative(path: Path) -> str:
@@ -267,52 +245,6 @@ def parse_fact_text(raw: str, path: str | Path, fact_id: str | None = None) -> d
         "created_at": str(meta["created"]) if meta.get("created") else None,
         "meta": meta,
     }
-
-
-def deleted_fact(meta: dict) -> bool:
-    status = str(meta.get("status") or meta.get("state") or "").strip().lower()
-    return (
-        meta.get("deleted") is True
-        or meta.get("tombstone") is True
-        or meta.get("active") is False
-        or status in {"deleted", "superseded", "removed", "tombstone"}
-    )
-
-
-def supersede_refs(meta: dict) -> list[str]:
-    value = meta.get("supersedes")
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
-    if isinstance(value, list):
-        return [str(part).strip() for part in value if str(part).strip()]
-    return [str(value).strip()] if str(value).strip() else []
-
-
-def fact_ref_matches(fact: dict, ref: str) -> bool:
-    ref_path = Path(ref)
-    if "/" in ref:
-        normalized = str(ref_path.with_suffix(""))
-        return normalized in {
-            fact["id"],
-            str(Path(fact["path"]).with_suffix("")),
-            fact["path"],
-        }
-    return ref in {fact["slug"], fact["id"], str(Path(fact["path"]).with_suffix(""))}
-
-
-def filter_current_facts(facts: list[dict]) -> list[dict]:
-    active = [fact for fact in facts if not deleted_fact(fact["meta"])]
-    superseded: list[tuple[str, str]] = []
-    for fact in active:
-        superseded.extend((fact["id"], ref) for ref in supersede_refs(fact["meta"]))
-    current = []
-    for fact in active:
-        removed = any(owner != fact["id"] and fact_ref_matches(fact, ref) for owner, ref in superseded)
-        if not removed:
-            current.append(fact)
-    return current
 
 
 def load_export_snapshot(path: Path) -> list[dict]:
@@ -385,10 +317,6 @@ def load_canon_entries(canon: Path | None = None, export: Path | None = None) ->
     if not canon.is_dir():
         return []
     return load_git_head_snapshot(canon)
-
-
-def load_canon(canon: Path | None = None, export: Path | None = None) -> list:
-    return filter_current_facts(load_canon_entries(canon, export))
 
 
 def canon_signature() -> tuple:
@@ -564,7 +492,7 @@ def offline_rebuild(
         raise RuntimeError(
             f"canon snapshot unavailable: no export at {export_path} and no canon at {canon_path}"
         )
-    facts = load_canon(canon_path, export_path)
+    facts = load_canon_entries(canon_path, export_path)
     if not facts and not allow_empty:
         raise RuntimeError("canon snapshot has no current facts; pass allow_empty=True to publish an empty index")
     document_embed = document_embed or build_document_embedder(model, cache_dir, threads)
@@ -602,7 +530,7 @@ def incremental_update(
     canon_path = Path(canon)
     export_path = Path(export)
     target = Path(target_db)
-    facts = load_canon(canon_path, export_path)
+    facts = load_canon_entries(canon_path, export_path)
     if not facts and not allow_empty:
         raise RuntimeError("canon snapshot has no current facts")
     compatibility, _ = index_compatibility(target, model, int(dim))
@@ -792,7 +720,7 @@ def start_canon_watcher() -> None:
 mcp = FastMCP("memory", host="127.0.0.1", port=PORT)
 
 # Memory is read-only for agents: only the curator writes (the markdown canon, then a reindex).
-# The internal add_memory is kept for migration and self-test but is not exposed over MCP.
+# Nothing here writes the index directly; the index is derived from the canon by a reindex.
 
 
 @mcp.tool()

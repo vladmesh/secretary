@@ -1,4 +1,4 @@
-"""Memory lives flat in the private repo: migration, writer target, coexistence.
+"""Memory lives flat in the private repo: writer target and coexistence.
 
 Contract: docs/RECOVERY.md, "Layout" and "Writer".
 """
@@ -11,10 +11,11 @@ import threading
 import unittest
 from pathlib import Path
 
-from secretary import state_repo
+from secretary import memory_journal, state_repo
 from secretary.checkpoint import CheckpointWriter
 from secretary.data import DataExport
-from secretary.memory_journal import migrate_memory_journal, verify_memory_journal
+from secretary.memory_errors import MemoryProtocolError
+from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import commit_memory_proposal, propose_memory_fact
 from secretary.tasks import TaskAudit
 from unittest import mock
@@ -54,7 +55,7 @@ def seed_nested_journal(data_dir: Path, facts: dict[str, str]) -> Path:
     return legacy
 
 
-class MemoryMigrationTests(unittest.TestCase):
+class NestedJournalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
@@ -67,29 +68,18 @@ class MemoryMigrationTests(unittest.TestCase):
     def facts_dir(self) -> Path:
         return state_repo.memory_facts_dir(self.instance_dir)
 
-    def test_flatten_carries_existing_facts_and_drops_the_nested_git(self):
-        legacy = seed_nested_journal(
-            self.data_dir,
-            {"global/one.md": "first fact\n", "secretary/two.md": "second fact\n"},
+    def test_a_fact_write_refuses_while_a_nested_journal_is_present(self):
+        """A pre-flatten journal is refused at the boundary, not migrated and not written past.
+
+        The facts under `<data_dir>/memory/facts` are unreadable for this release. Writing the
+        new canon anyway would leave them on disk while they stop being memory, so the write
+        stops with the path and what the operator has to do. Nothing migrates them: carrying
+        them over on the fly is the compatibility promise this product dropped.
+        """
+        legacy = seed_nested_journal(self.data_dir, {"global/one.md": "first fact\n"})
+        legacy_before = sorted(
+            path.relative_to(legacy).as_posix() for path in legacy.rglob("*") if path.is_file()
         )
-
-        result = migrate_memory_journal(self.data_dir, self.instance_dir)
-
-        self.assertEqual(result.migrated, 2)
-        self.assertFalse(legacy.exists())
-        facts = self.facts_dir()
-        self.assertEqual((facts / "global" / "one.md").read_text(encoding="utf-8"), "first fact\n")
-        self.assertEqual(
-            (facts / "secretary" / "two.md").read_text(encoding="utf-8"), "second fact\n"
-        )
-        tracked = git(self.instance_dir, "ls-files", "--", "state/memory").split()
-        self.assertIn("state/memory/facts/global/one.md", tracked)
-        self.assertIn("state/memory/facts/secretary/two.md", tracked)
-        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state/memory"), "")
-
-    def test_first_write_after_flatten_keeps_the_migrated_facts(self):
-        """The 637 regression: the flatten must not be what drops the facts."""
-        seed_nested_journal(self.data_dir, {"global/one.md": "first fact\n"})
         fact_file = Path(self.tmpdir.name) / "new.md"
         fact_file.write_text("a brand new fact\n", encoding="utf-8")
 
@@ -101,50 +91,79 @@ class MemoryMigrationTests(unittest.TestCase):
             fact_file=fact_file,
             source="curator:claude/session",
         )
-        commit_memory_proposal(
-            self.data_dir,
-            self.instance_dir,
-            actor="curator:claude/session",
-            propose_id=proposal.propose_id,
+        with self.assertRaises(MemoryProtocolError) as caught:
+            commit_memory_proposal(
+                self.data_dir,
+                self.instance_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+
+        self.assertIn("legacy memory journal is still present", str(caught.exception))
+        self.assertIn(str(legacy), str(caught.exception))
+
+        # Nothing was written into the new canon, and the old journal was neither carried
+        # over nor deleted.
+        facts = self.facts_dir()
+        self.assertFalse((facts / "global" / "two.md").exists())
+        self.assertFalse((facts / "global" / "one.md").exists())
+        self.assertEqual(
+            git(self.instance_dir, "status", "--porcelain", "--", "state/memory"), ""
+        )
+        self.assertEqual(
+            sorted(
+                path.relative_to(legacy).as_posix() for path in legacy.rglob("*") if path.is_file()
+            ),
+            legacy_before,
+        )
+
+    def test_a_fact_write_never_migrates_a_journal(self):
+        """The one entry point a write has into the journal takes the instance repo only.
+
+        There is no data dir to migrate from, and no migrator left to call.
+        """
+        fact_file = Path(self.tmpdir.name) / "new.md"
+        fact_file.write_text("a brand new fact\n", encoding="utf-8")
+
+        with mock.patch(
+            "secretary.memory_write.init_memory_journal",
+            wraps=memory_journal.init_memory_journal,
+        ) as init:
+            proposal = propose_memory_fact(
+                self.data_dir,
+                actor="curator:claude/session",
+                scope="global",
+                slug="two",
+                fact_file=fact_file,
+                source="curator:claude/session",
+            )
+            commit_memory_proposal(
+                self.data_dir,
+                self.instance_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+
+        self.assertTrue(init.call_args_list)
+        for call in init.call_args_list:
+            self.assertEqual(call.kwargs, {})
+            self.assertEqual(len(call.args), 1)
+        self.assertEqual(
+            [name for name in dir(memory_journal) if name.startswith("migrate")], []
         )
 
         facts = self.facts_dir()
-        self.assertEqual((facts / "global" / "one.md").read_text(encoding="utf-8"), "first fact\n")
         self.assertIn("a brand new fact", (facts / "global" / "two.md").read_text(encoding="utf-8"))
-        tracked = git(self.instance_dir, "ls-files", "--", "state/memory").split()
-        self.assertIn("state/memory/facts/global/one.md", tracked)
-        self.assertIn("state/memory/facts/global/two.md", tracked)
 
-    def test_flatten_is_idempotent_after_a_crash_between_commit_and_cleanup(self):
-        """A carried-but-not-deleted legacy tree is finished, not refused."""
+    def test_an_export_refuses_to_publish_over_a_nested_journal(self):
+        """The export publishes the canon. With an unreadable journal beside it, it refuses."""
         legacy = seed_nested_journal(self.data_dir, {"global/one.md": "first fact\n"})
-        with mock.patch(
-            "secretary.memory_journal._remove_legacy_journal", side_effect=RuntimeError("boom")
-        ):
-            with self.assertRaises(RuntimeError):
-                migrate_memory_journal(self.data_dir, self.instance_dir)
-        self.assertTrue(legacy.is_dir())
 
-        result = migrate_memory_journal(self.data_dir, self.instance_dir)
+        with self.assertRaises(MemoryProtocolError) as caught:
+            memory_journal.export_memory_snapshot(self.data_dir, self.instance_dir)
 
-        self.assertEqual(result.migrated, 0)
-        self.assertFalse(legacy.exists())
-        self.assertEqual(
-            (self.facts_dir() / "global" / "one.md").read_text(encoding="utf-8"), "first fact\n"
-        )
-
-    def test_flatten_refuses_when_the_two_trees_disagree(self):
-        """Divergent copies are an operator call; neither side is silently lost."""
-        seed_nested_journal(self.data_dir, {"global/one.md": "legacy body\n"})
-        target = self.facts_dir() / "global" / "one.md"
-        target.parent.mkdir(parents=True)
-        target.write_text("repo body\n", encoding="utf-8")
-
-        with self.assertRaisesRegex(RuntimeError, "memory flatten refused"):
-            migrate_memory_journal(self.data_dir, self.instance_dir)
-
-        self.assertTrue((self.data_dir / "memory" / "facts" / "global" / "one.md").is_file())
-        self.assertEqual(target.read_text(encoding="utf-8"), "repo body\n")
+        self.assertIn(str(legacy), str(caught.exception))
+        self.assertFalse((self.data_dir / "memory" / "export.ndjson").exists())
 
     def test_verify_flags_a_nested_journal_that_is_still_present(self):
         seed_nested_journal(self.data_dir, {"global/one.md": "first fact\n"})

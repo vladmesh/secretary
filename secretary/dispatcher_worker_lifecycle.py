@@ -287,26 +287,3 @@ class WorkerContinuation:
             # retaining one.
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),
         )
-
-    @classmethod
-    def from_legacy_record(cls, payload: dict[str, Any]) -> "WorkerContinuation":
-        """Read records written by the abandoned flat-field implementation."""
-        retained_at = float(payload.get("worker_retained_at") or 0.0)
-        delivery = str(payload.get("worker_resume_delivery") or "")
-        if delivery == "confirmed":
-            stage = WorkerContinuationStage.DELIVERY_CONFIRMED
-        elif delivery == "pending":
-            stage = WorkerContinuationStage.DELIVERY_PENDING
-        elif payload.get("state") == "worker_retained":
-            stage = WorkerContinuationStage.VALIDATION_MOVE_PENDING
-        elif retained_at:
-            stage = WorkerContinuationStage.RETAINED
-        else:
-            stage = WorkerContinuationStage.NONE
-        return cls(
-            stage=stage,
-            phase=str(payload.get("worker_resume_phase") or ""),
-            retained_at=retained_at,
-            sent_at=float(payload.get("worker_resume_sent_at") or 0.0),
-            session_held=stage != WorkerContinuationStage.NONE,
-        )

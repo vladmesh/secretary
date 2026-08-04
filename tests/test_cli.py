@@ -496,13 +496,10 @@ class CliTests(unittest.TestCase):
             root = Path(tmpdir)
             instance_dir = root / "instance"
             data_dir = root / "secretary-data"
-            source = root / "panelmem-kb"
             state = root / "state"
             transcript_root = root / "transcripts"
             instance_dir.mkdir()
             data_dir.write_text("not a directory", encoding="utf-8")
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "fact.md").write_text("fact\n", encoding="utf-8")
             (state / "pipeline").mkdir(parents=True)
             (state / "pipeline" / "runs.jsonl").write_text("{}\n", encoding="utf-8")
             (state / "pipeline" / "cards.json").write_text("{}", encoding="utf-8")
@@ -527,14 +524,7 @@ class CliTests(unittest.TestCase):
                     "secretary data export-board: cannot prepare board data dir",
                 ),
                 (
-                    [
-                        "data",
-                        "export-memory",
-                        "--instance",
-                        str(instance_dir),
-                        "--source-dir",
-                        str(source),
-                    ],
+                    ["data", "export-memory", "--instance", str(instance_dir)],
                     "secretary data export-memory: cannot prepare memory data dir",
                 ),
                 (
@@ -572,9 +562,6 @@ class CliTests(unittest.TestCase):
     def test_export_memory_command_uses_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "fact.md").write_text("fact\n", encoding="utf-8")
             instance_dir = root / "instance"
             data_dir = root / "secretary-data"
             instance_dir.mkdir()
@@ -588,16 +575,12 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            facts = instance_dir / "state" / "memory" / "facts" / "secretary"
+            facts.mkdir(parents=True)
+            (facts / "fact.md").write_text("fact\n", encoding="utf-8")
 
             code, output = self.run_cli(
-                [
-                    "data",
-                    "export-memory",
-                    "--instance",
-                    str(instance_dir),
-                    "--source-dir",
-                    str(source),
-                ]
+                ["data", "export-memory", "--instance", str(instance_dir)]
             )
             export_exists = (data_dir / "memory" / "export.ndjson").is_file()
 
@@ -608,10 +591,6 @@ class CliTests(unittest.TestCase):
     def test_export_memory_command_reports_decode_error_without_traceback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            fact = source / "memory" / "secretary" / "bad.md"
-            fact.parent.mkdir(parents=True)
-            fact.write_bytes(b"\xff\xfe")
             instance_dir = root / "instance"
             data_dir = root / "secretary-data"
             instance_dir.mkdir()
@@ -625,74 +604,17 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            fact = instance_dir / "state" / "memory" / "facts" / "secretary" / "bad.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_bytes(b"\xff\xfe")
 
             code, output = self.run_cli(
-                [
-                    "data",
-                    "export-memory",
-                    "--instance",
-                    str(instance_dir),
-                    "--source-dir",
-                    str(source),
-                ]
+                ["data", "export-memory", "--instance", str(instance_dir)]
             )
 
         self.assertEqual(code, 1)
         self.assertIn("secretary data export-memory: could not decode memory fact", output)
         self.assertNotIn("Traceback", output)
-
-    def test_memory_import_command_uses_data_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "fact.md").write_text("fact\n", encoding="utf-8")
-            instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
-            instance_dir.mkdir()
-            (instance_dir / "instance.yaml").write_text(
-                "version: 1\n"
-                "name: example\n"
-                f"data_dir: {data_dir}\n"
-                "offsite:\n"
-                "  instance_remote: git@example.invalid:x/y.git\n",
-                encoding="utf-8",
-            )
-            self.run_cli(["data", "init", "--instance", str(instance_dir)])
-            init_instance_repo(instance_dir)
-
-            first_code, first_output = self.run_cli(
-                [
-                    "memory",
-                    "import",
-                    "--instance",
-                    str(instance_dir),
-                    "--from",
-                    str(source),
-                ]
-            )
-            second_code, second_output = self.run_cli(
-                [
-                    "memory",
-                    "import",
-                    "--instance",
-                    str(instance_dir),
-                    "--from",
-                    str(source),
-                ]
-            )
-            export_exists = (data_dir / "memory" / "export.ndjson").is_file()
-            fact_exists = (
-                instance_dir / "state" / "memory" / "facts" / "secretary" / "fact.md"
-            ).is_file()
-
-        self.assertEqual(first_code, 0, first_output)
-        self.assertIn("memory facts: 1", first_output)
-        self.assertIn("changed: yes", first_output)
-        self.assertEqual(second_code, 0, second_output)
-        self.assertIn("changed: no", second_output)
-        self.assertTrue(export_exists)
-        self.assertTrue(fact_exists)
 
     def test_memory_protocol_commands_return_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
