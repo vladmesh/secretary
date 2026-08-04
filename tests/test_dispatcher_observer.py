@@ -3321,6 +3321,8 @@ class ObserverConfigurationTests(unittest.TestCase):
         message = sent[sent.index("--text") + 1]
         self.assertIn("--delivery-id delivery-1", message)
         self.assertIn("--through-event evt-card-1", message)
+        self.assertIn("only when that receipt exists", message)
+        self.assertIn("none/noop/missing evidence proves no broad suite", message)
         # The pane started a turn, and that alone does not close an observer delivery.
         self.assertEqual(outcome, "accepted")
         self.assertEqual(

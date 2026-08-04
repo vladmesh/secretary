@@ -3251,18 +3251,24 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     def test_attested_gate_reaches_assessment_and_release_audit(self) -> None:
         self.start_dispatcher()
-        receipt = {
-            "validated_sha": self.host.commit,
-            "base_sha": "b" * 16,
-            "gate_mode": "github",
-            "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
-            "completed_at": "2026-08-04T00:00:00+00:00",
-            "command_or_check_set_digest": "a" * 64,
-        }
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+
+        def receipt(marker: str) -> dict[str, object]:
+            return {
+                "validated_sha": self.host.commit,
+                "base_sha": marker * 16,
+                "gate_mode": "github",
+                "required_checks": [{
+                    "name": f"unit-{marker}", "conclusion": "SUCCESS",
+                    "url": f"https://ci.invalid/{marker}",
+                }],
+                "completed_at": f"2026-08-04T00:00:0{len(marker)}+00:00",
+                "command_or_check_set_digest": marker * 64,
+            }
         self.host.gate_results = [
-            GateResult("green", "pre-review", attestation=receipt),
-            GateResult("green", "park", attestation=receipt),
-            GateResult("green", "release", attestation=receipt),
+            GateResult("green", "pre-review", attestation=receipt("a")),
+            GateResult("green", "park", attestation=receipt("b")),
+            GateResult("green", "release", attestation=receipt("c")),
         ]
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
@@ -3274,11 +3280,43 @@ class DispatcherRuntimeTests(unittest.TestCase):
         assessment = self.reader.show("secretary-510-pilot")["comments"][-2]["body"]
         self.assertIn("Assessment delivery", assessment)
         self.assertIn("validated_sha: " + self.host.commit, assessment)
+        self.assertIn("unit-b", assessment)
+        self.assertNotIn("unit-a", assessment)
+        parked = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(parked["gate_attestation"]["command_or_check_set_digest"], "b" * 64)
 
         self._decide("release", request_id="attested-release")
         self.assertEqual(self.tick()["to"], "done")
         comments = self.reader.show("secretary-510-pilot")["comments"]
-        self.assertTrue(any("release audit" in item["body"] for item in comments))
+        release_audit = next(item["body"] for item in comments if "release audit" in item["body"])
+        self.assertIn("unit-c", release_audit)
+        self.assertNotIn("unit-b", release_audit)
+
+    def test_no_observer_immediate_release_audits_its_fresh_gate_receipt(self) -> None:
+        self.start_dispatcher()
+        self.unobserved_card()
+        self.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
+
+        def receipt(marker: str) -> dict[str, object]:
+            return {
+                "validated_sha": self.host.commit,
+                "base_sha": "b" * 16,
+                "gate_mode": "local",
+                "required_checks": [{"name": marker, "conclusion": "SUCCESS", "url": ""}],
+                "completed_at": "2026-08-04T00:00:00+00:00",
+                "command_or_check_set_digest": marker * 64,
+            }
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=receipt("a")),
+            GateResult("green", "pre-merge", attestation=receipt("d")),
+        ]
+        self._drive_to_green_verdict()
+
+        self.assertEqual(self.tick()["to"], "done")
+        comments = self.reader.show("secretary-510-pilot")["comments"]
+        audit = next(item["body"] for item in comments if "release audit" in item["body"])
+        self.assertIn("  - d: SUCCESS", audit)
+        self.assertNotIn("  - a: SUCCESS", audit)
 
     def test_red_transition_sanitizes_previous_blockers_and_unattested_assessment_claims_nothing(self) -> None:
         self.start_dispatcher()
@@ -6636,6 +6674,14 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("name the test, what it", doc)
         self.assertIn("silently rewritten assertion", doc)
 
+    def test_worker_prompt_does_not_call_none_or_noop_validation_authoritative(self) -> None:
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("only if it produces a valid exact-SHA receipt", doc)
+        self.assertIn("none/noop gate", doc)
+        self.assertIn("attests no broad suite", doc)
+        self.assertNotIn("authoritative broad suite belongs", doc)
+
     def test_review_prompt_refuses_a_fixture_as_backend_evidence(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
 
@@ -6703,6 +6749,8 @@ class HeadPromptTests(unittest.TestCase):
         with mock.patch.object(self.host, "head_commit", return_value=""):
             doc = self.host._review_prompt(self.task, "attempt-1", 3, record=record)
         self.assertIn("No valid SHA-bound", doc)
+        self.assertIn("none/noop", doc)
+        self.assertIn("focused or broad validation", doc)
         self.assertNotIn("do not rerun that broad command", doc)
 
     def test_review_prompt_flattens_prior_blocker_instructions_and_delta_failures(self) -> None:

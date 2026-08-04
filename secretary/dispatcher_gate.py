@@ -30,11 +30,11 @@ import json
 import os
 import re
 import subprocess
-from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
+from secretary.dispatcher_gate_receipt import mint_gate_receipt
 from secretary.dispatcher_types import HostError
 
 # How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog
@@ -65,8 +65,6 @@ _INFRA_MARK_RE = re.compile(
     r"temporary failure in name resolution|failed to fetch|apt-get|npm err! network|"
     r"pip.{0,20}(?:could not find|could not install)|dependency resolution)\b"
 )
-_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
-_TERMINAL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 
 
 @dataclass
@@ -179,7 +177,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     if not isinstance(command, str) or not command.strip():
         raise HostError("local validation has no command")
     completed = host.run_capture(["bash", "-lc", command], "local gate", cwd=Path(workspace))
-    receipt = _attestation(
+    receipt = mint_gate_receipt(
         validated_sha=_head_sha(host, workspace),
         base_sha=_base_sha(host, workspace, host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))),
         gate_mode="local",
@@ -202,7 +200,7 @@ def _github_gate(host, task: dict, workspace: str, base: str, required: list[str
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
     rollup, failed, checked = _poll_ci(host, repo, sha, required or [])
-    receipt = _attestation(
+    receipt = mint_gate_receipt(
         validated_sha=sha,
         base_sha=_base_sha(host, workspace, base),
         gate_mode="github",
@@ -331,39 +329,6 @@ def _base_sha(host, workspace: str, base: str) -> str:
         return host._run(["git", "-C", workspace, "rev-parse", f"origin/{base}"], "gate attestation base").stdout.strip()
     except HostError:
         return ""
-
-
-def _attestation(
-    *, validated_sha: str, base_sha: str, gate_mode: str, required_checks: list[dict[str, str]],
-    check_set_identity: str,
-) -> dict[str, object] | None:
-    """Canonical, redaction-safe receipt for one mechanical gate result.
-
-    GitHub exposes a stable check set here, not a durable workflow definition, so its digest is
-    named after that check set.  It deliberately excludes per-run URLs and conclusions; command
-    output remains on the existing scrubbed failure path.
-    """
-    if (
-        gate_mode not in {"local", "github"}
-        or not _GIT_SHA_RE.fullmatch(validated_sha)
-        or not _GIT_SHA_RE.fullmatch(base_sha)
-        or not required_checks
-        or any(
-            not check.get("name")
-            or str(check.get("conclusion") or "").upper() not in _TERMINAL_CONCLUSIONS
-            for check in required_checks
-        )
-    ):
-        return None
-    digest = hashlib.sha256(check_set_identity.encode("utf-8", "surrogateescape")).hexdigest()
-    return {
-        "validated_sha": validated_sha,
-        "base_sha": base_sha,
-        "gate_mode": gate_mode,
-        "required_checks": required_checks,
-        "completed_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
-        "command_or_check_set_digest": digest,
-    }
 
 
 def _gh_api(host, path: str, *, jq: str):

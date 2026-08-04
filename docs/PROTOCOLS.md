@@ -69,22 +69,25 @@ Every real mechanical gate result materializes a reusable receipt bound to one c
 `validated_sha`, `base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion and URL),
 `completed_at`, and a `command_or_check_set_digest`. For a local gate this is the configured command's
 digest; for GitHub it is a stable required-check-set identity, not a workflow-definition or run digest.
-The dispatcher persists the receipt with the
-active card, renders it into `REVIEW.md`, writes it with the Assessment delivery, and writes a fresh
-receipt into the release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence,
-not permission to skip the pre-merge check or independent review.
+The dispatcher persists the receipt with the active card, renders it into `REVIEW.md`, replaces it with
+the fresh post-review receipt in the Assessment delivery, and writes the fresh final receipt into the
+release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence, not permission to
+skip the pre-merge check or independent review.
 
 Workers use focused checks while developing and run no more than one local broad suite for a report
-generation/unchanged SHA unless they state why it was rerun. The authoritative broad run is the
-mechanical gate. Reviewers independently inspect changed code and invariants, but do not repeat an
-attested broad command on the same SHA without a recorded `rerun_reason`; targeted reproduction remains
-appropriate for a new blocker, uncovered external behaviour, or security/data-loss risk. Re-review
+generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a
+valid exact-SHA receipt is authoritative reusable evidence downstream. A none/noop gate or missing
+receipt attests no broad suite, so the role runs or requests validation appropriate to the decision.
+Reviewers independently inspect changed code and invariants, but do not repeat an attested broad command
+on the same SHA without a recorded `rerun_reason`; targeted reproduction remains appropriate for a new
+blocker, uncovered external behaviour, or security/data-loss risk. Re-review
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path delta,
 so the next reviewer verifies the delta and closure rather than restarting at the original base.
 
-Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration, and
-do not run routine broad suites. Missing or contradictory evidence, RED/Blocked classification, a real
-Definition-of-Done gap, or a security/data-loss concern is the narrow escape hatch for focused research.
+Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration. A
+valid executed exact-SHA receipt suppresses its routine broad rerun; none/noop or missing evidence does
+not, and permits appropriate focused or broad validation. Contradictory evidence, RED/Blocked
+classification, a real Definition-of-Done gap, or a security/data-loss concern also requires research.
 
 A card parks only where a decision can come from: its sprint is open and declares a concrete
 observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
