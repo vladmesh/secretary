@@ -479,8 +479,8 @@ class BootstrapBoardTests(unittest.TestCase):
                 self.assertEqual(bootstrap(args), 0)
 
             runtime = (target / "runtime.env").read_text(encoding="utf-8")
-            self.assertIn("KANBOARD_API_USER=jsonrpc\n", runtime)
-            self.assertIn("KANBOARD_API_TOKEN=", runtime)
+            self.assertNotIn("KANBOARD_API_USER=", runtime)
+            self.assertNotIn("KANBOARD_API_TOKEN=", runtime)
             self.assertNotIn("KANBOARD_BOOTSTRAP_TOKEN", runtime)
             self.assertNotIn("KANBOARD_IMAGE", runtime)
             self.assertNotIn("KANBOARD_ADMIN_PASSWORD", runtime)
@@ -489,6 +489,9 @@ class BootstrapBoardTests(unittest.TestCase):
             exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
             self.assertIn(f"/{BOOTSTRAP_STAMP}", exclude)
             self.assertIn("/runtime.env", exclude)
+            self.assertIn("/board-transport.env", exclude)
+            transport = (target / "board-transport.env").read_text(encoding="utf-8")
+            self.assertIn("KANBOARD_API_USER=jsonrpc\n", transport)
             compose = (target.parent / "compose.yml")
             from secretary.bootstrap import _compose_file
             _compose_file(compose)

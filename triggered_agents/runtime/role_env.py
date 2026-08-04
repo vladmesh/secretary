@@ -58,7 +58,7 @@ def runtime_pythonpath() -> str:
     configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
     return configured or str(REPO_ROOT)
 
-BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
+BOARD_ENV: tuple[str, ...] = ()
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
 # allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
 # data dir through that file moves the WRITER. A role stripped of the same name would fall back to
@@ -82,22 +82,17 @@ LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV)
 LAUNCH_BOUND_ENV = (*RUNTIME_ENV_FILE_ENVS, "SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
-    "pipeline": (*BOARD_ENV, *NONSECRET_ENV),
-    "worker": (*BOARD_ENV, *NONSECRET_ENV),
-    "reviewer": (*BOARD_ENV, *NONSECRET_ENV),
-    "observer": (*BOARD_ENV, *NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
-    "steward": (*BOARD_ENV, *NONSECRET_ENV),
-    "retro": (*BOARD_ENV, *NONSECRET_ENV),
+    "pipeline": NONSECRET_ENV,
+    "worker": NONSECRET_ENV,
+    "reviewer": NONSECRET_ENV,
+    "observer": (*NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
+    "steward": NONSECRET_ENV,
+    "retro": NONSECRET_ENV,
     "curator": NONSECRET_ENV,
 }
 
 ROLE_REQUIRED: dict[str, tuple[str, ...]] = {
-    "pipeline": BOARD_ENV,
-    "worker": BOARD_ENV,
-    "reviewer": BOARD_ENV,
-    "observer": BOARD_ENV,
-    "steward": BOARD_ENV,
-    "retro": BOARD_ENV,
+    "pipeline": (), "worker": (), "reviewer": (), "observer": (), "steward": (), "retro": (),
     "curator": (),
 }
 

@@ -500,9 +500,9 @@ class InterruptedWriteCase(SecretStoreCase):
 # '=' padding so a value that looks like another KEY=VALUE split has to survive
 # the round trip too.
 LIVE_RUNTIME_ENV = (
-    "KANBOARD_URL=https://board.example.invalid/jsonrpc.php\n"
-    "KANBOARD_API_USER=secretary\n"
-    "KANBOARD_API_TOKEN=1f2e3d4c5b6a==\n"
+    "EXAMPLE_URL=https://board.example.invalid/jsonrpc.php\n"
+    "EXAMPLE_API_USER=secretary\n"
+    "EXAMPLE_API_TOKEN=1f2e3d4c5b6a==\n"
 )
 
 
@@ -538,15 +538,15 @@ class ImportCase(EnvStoreCase):
     def test_import_makes_one_secret_per_variable(self) -> None:
         result = self.do_import()
         self.assertEqual(
-            result.created, ("kanboard_url", "kanboard_api_user", "kanboard_api_token")
+            result.created, ("example_url", "example_api_user", "example_api_token")
         )
         entries = list_secrets(self.instance_dir)
         self.assertEqual(
             [(entry["id"], entry["environment"]) for entry in entries],
             [
-                ("kanboard_api_token", "KANBOARD_API_TOKEN"),
-                ("kanboard_api_user", "KANBOARD_API_USER"),
-                ("kanboard_url", "KANBOARD_URL"),
+                ("example_api_token", "EXAMPLE_API_TOKEN"),
+                ("example_api_user", "EXAMPLE_API_USER"),
+                ("example_url", "EXAMPLE_URL"),
             ],
         )
         # The catalog is sorted by id, the file is not: each entry carries the
@@ -554,12 +554,12 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(
             [(entry["id"], entry["materialize"]) for entry in entries],
             [
-                ("kanboard_api_token", {"target": "runtime-env", "order": 2}),
-                ("kanboard_api_user", {"target": "runtime-env", "order": 1}),
-                ("kanboard_url", {"target": "runtime-env", "order": 0}),
+                ("example_api_token", {"target": "runtime-env", "order": 2}),
+                ("example_api_user", {"target": "runtime-env", "order": 1}),
+                ("example_url", {"target": "runtime-env", "order": 0}),
             ],
         )
-        self.assertEqual(read_secret(self.instance_dir, "kanboard_api_user"), b"secretary")
+        self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"secretary")
         self.assertEqual(store_divergence(self.instance_dir), ())
 
     def test_import_lands_as_one_commit(self) -> None:
@@ -571,23 +571,23 @@ class ImportCase(EnvStoreCase):
             sorted(touched),
             [
                 "secrets/catalog.yaml",
-                "secrets/values/kanboard_api_token.enc.json",
-                "secrets/values/kanboard_api_user.enc.json",
-                "secrets/values/kanboard_url.enc.json",
+                "secrets/values/example_api_token.enc.json",
+                "secrets/values/example_api_user.enc.json",
+                "secrets/values/example_url.enc.json",
             ],
         )
 
     def test_reimporting_the_same_file_duplicates_nothing_and_writes_nothing(self) -> None:
         self.do_import()
         head = state_repo.head(self.instance_dir)
-        envelope = self.instance_dir / "secrets" / "values" / "kanboard_url.enc.json"
+        envelope = self.instance_dir / "secrets" / "values" / "example_url.enc.json"
         sealed = envelope.read_bytes()
 
         result = self.do_import()
         self.assertEqual(result.created, ())
         self.assertEqual(result.updated, ())
         self.assertEqual(
-            result.unchanged, ("kanboard_url", "kanboard_api_user", "kanboard_api_token")
+            result.unchanged, ("example_url", "example_api_user", "example_api_token")
         )
         self.assertEqual(state_repo.head(self.instance_dir), head)
         self.assertEqual(envelope.read_bytes(), sealed)
@@ -599,14 +599,14 @@ class ImportCase(EnvStoreCase):
             LIVE_RUNTIME_ENV.replace("=secretary\n", "=secretary-two\n"), encoding="utf-8"
         )
         result = self.do_import()
-        self.assertEqual(result.updated, ("kanboard_api_user",))
+        self.assertEqual(result.updated, ("example_api_user",))
         self.assertEqual(result.created, ())
-        self.assertEqual(result.unchanged, ("kanboard_url", "kanboard_api_token"))
-        self.assertEqual(read_secret(self.instance_dir, "kanboard_api_user"), b"secretary-two")
+        self.assertEqual(result.unchanged, ("example_url", "example_api_token"))
+        self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"secretary-two")
         # Only the rotated envelope moves: the catalog says the same thing it did
         # before, so the commit does not restate it.
         touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
-        self.assertEqual(touched, ["secrets/values/kanboard_api_user.enc.json"])
+        self.assertEqual(touched, ["secrets/values/example_api_user.enc.json"])
 
     def test_import_keeps_created_at_across_a_rotation(self) -> None:
         self.do_import()
@@ -620,11 +620,11 @@ class ImportCase(EnvStoreCase):
     def test_a_file_import_cannot_read_is_refused_before_anything_is_written(self) -> None:
         head = state_repo.head(self.instance_dir)
         cases = [
-            "export KANBOARD_URL=https://board\n",
+            "export EXAMPLE_URL=https://board\n",
             "KANBOARD URL\n",
             "1BAD=value\n",
-            "KANBOARD_URL=a\nKANBOARD_URL=b\n",
-            "KANBOARD_URL=\n",
+            "EXAMPLE_URL=a\nEXAMPLE_URL=b\n",
+            "EXAMPLE_URL=\n",
             "# only a comment\n",
         ]
         for text in cases:
@@ -644,14 +644,14 @@ class ImportCase(EnvStoreCase):
         """
         head = state_repo.head(self.instance_dir)
         cases = {
-            "no trailing newline": "KANBOARD_URL=https://board\nKANBOARD_API_USER=x",
-            "blank line between": "KANBOARD_URL=https://board\n\nKANBOARD_API_USER=x\n",
-            "blank line at the end": "KANBOARD_URL=https://board\n\n",
-            "comment above": "# board\nKANBOARD_URL=https://board\n",
-            "padded name": "  KANBOARD_URL=https://board\n",
-            "space around the equals": "KANBOARD_URL = https://board\n",
-            "trailing space in the value": "KANBOARD_URL=https://board \n",
-            "crlf": "KANBOARD_URL=https://board\r\n",
+            "no trailing newline": "EXAMPLE_URL=https://board\nEXAMPLE_API_USER=x",
+            "blank line between": "EXAMPLE_URL=https://board\n\nEXAMPLE_API_USER=x\n",
+            "blank line at the end": "EXAMPLE_URL=https://board\n\n",
+            "comment above": "# board\nEXAMPLE_URL=https://board\n",
+            "padded name": "  EXAMPLE_URL=https://board\n",
+            "space around the equals": "EXAMPLE_URL = https://board\n",
+            "trailing space in the value": "EXAMPLE_URL=https://board \n",
+            "crlf": "EXAMPLE_URL=https://board\r\n",
         }
         for name, text in cases.items():
             with self.subTest(case=name):
@@ -679,9 +679,9 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(
             orders,
             {
-                "kanboard_url": 0,
-                "kanboard_api_user": 1,
-                "kanboard_api_token": 2,
+                "example_url": 0,
+                "example_api_user": 1,
+                "example_api_token": 2,
                 "extra.flag": 3,
             },
         )
@@ -740,23 +740,23 @@ class RemoveCase(EnvStoreCase):
         self.do_import()
 
     def test_remove_drops_the_entry_and_the_envelope_in_one_commit(self) -> None:
-        envelope = self.instance_dir / "secrets" / "values" / "kanboard_url.enc.json"
-        result = remove_secret(self.instance_dir, secret_id="kanboard_url", actor="tester")
+        envelope = self.instance_dir / "secrets" / "values" / "example_url.enc.json"
+        result = remove_secret(self.instance_dir, secret_id="example_url", actor="tester")
         self.assertEqual(result.commit, state_repo.head(self.instance_dir))
         self.assertFalse(envelope.exists())
         self.assertEqual(
             [entry["id"] for entry in list_secrets(self.instance_dir)],
-            ["kanboard_api_token", "kanboard_api_user"],
+            ["example_api_token", "example_api_user"],
         )
         self.assertEqual(store_divergence(self.instance_dir), ())
         self.assertEqual(state_repo.status(self.instance_dir, ("secrets",)), "")
         touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertEqual(
             sorted(touched),
-            ["secrets/catalog.yaml", "secrets/values/kanboard_url.enc.json"],
+            ["secrets/catalog.yaml", "secrets/values/example_url.enc.json"],
         )
         self.assertNotIn(
-            "secrets/values/kanboard_url.enc.json",
+            "secrets/values/example_url.enc.json",
             git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split(),
         )
 
@@ -814,11 +814,11 @@ class MaterializeCase(EnvStoreCase):
         before = self.target.read_bytes()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard_api_user",
+            secret_id="example_api_user",
             value=b"rotated",
             scope="installation",
             purpose="board api",
-            environment="KANBOARD_API_USER",
+            environment="EXAMPLE_API_USER",
             materialize={"target": "runtime-env"},
             actor="tester",
         )
@@ -841,9 +841,9 @@ class MaterializeCase(EnvStoreCase):
         self.assertEqual(
             values,
             {
-                "KANBOARD_API_TOKEN": "1f2e3d4c5b6a==",
-                "KANBOARD_API_USER": "secretary",
-                "KANBOARD_URL": "https://board.example.invalid/jsonrpc.php",
+                "EXAMPLE_API_TOKEN": "1f2e3d4c5b6a==",
+                "EXAMPLE_API_USER": "secretary",
+                "EXAMPLE_URL": "https://board.example.invalid/jsonrpc.php",
             },
         )
 
@@ -853,7 +853,7 @@ class MaterializeCase(EnvStoreCase):
         # Not by accident of sorting: the file's order is not alphabetical, and
         # the last line carries '=' padding that a re-split would mangle.
         written = self.target.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(written[0].split("=", 1)[0], "KANBOARD_URL")
+        self.assertEqual(written[0].split("=", 1)[0], "EXAMPLE_URL")
         self.assertNotEqual(written, sorted(written))
         self.assertTrue(written[-1].endswith("1f2e3d4c5b6a=="))
 
@@ -865,8 +865,8 @@ class MaterializeCase(EnvStoreCase):
         # Same values, new layout: only the catalog moves, no envelope is resealed.
         self.assertEqual(result.created, ())
         # The middle line did not move, so only the two that swapped are updated.
-        self.assertEqual(result.updated, ("kanboard_api_token", "kanboard_url"))
-        self.assertEqual(result.unchanged, ("kanboard_api_user",))
+        self.assertEqual(result.updated, ("example_api_token", "example_url"))
+        self.assertEqual(result.unchanged, ("example_api_user",))
         touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertEqual(touched, ["secrets/catalog.yaml"])
         materialize_secrets(self.instance_dir)
@@ -939,13 +939,13 @@ class MaterializeCase(EnvStoreCase):
             value=b"https://other.example.invalid/jsonrpc.php",
             scope="installation",
             purpose="a second claim on the same variable",
-            environment="KANBOARD_URL",
+            environment="EXAMPLE_URL",
             materialize={"target": "runtime-env"},
             actor="tester",
         )
         with self.assertRaises(SecretStoreStateError) as caught:
             materialize_secrets(self.instance_dir)
-        self.assertIn("KANBOARD_URL", str(caught.exception))
+        self.assertIn("EXAMPLE_URL", str(caught.exception))
         self.assertEqual(self.target.read_bytes(), before)
 
     def test_a_secret_with_no_materialize_record_stays_in_the_store(self) -> None:
@@ -986,7 +986,7 @@ class ObservabilityCase(SecretStoreCase):
             value=b"token-value",
             scope="installation",
             purpose="board api",
-            environment="KANBOARD_API_TOKEN",
+            environment="EXAMPLE_API_TOKEN",
             materialize={"target": "runtime-env"},
             actor="tester",
         )
@@ -1172,7 +1172,7 @@ class CatalogSchemaCase(unittest.TestCase):
             "version": secret_store.CATALOG_VERSION,
             "secrets": [
                 {
-                    "id": "kanboard_url",
+                    "id": "example_url",
                     "scope": "installation",
                     "purpose": "board api",
                     "created_at": "2026-07-26T10:00:00Z",
@@ -1188,16 +1188,16 @@ class CatalogSchemaCase(unittest.TestCase):
         ):
             with self.subTest(instruction=instruction):
                 catalog = self.catalog(
-                    {"environment": "KANBOARD_URL", "materialize": instruction}
+                    {"environment": "EXAMPLE_URL", "materialize": instruction}
                 )
                 self.assertEqual(validate(catalog, "secret-catalog", "catalog.yaml"), [])
 
     def test_a_record_nothing_could_act_on_is_rejected(self) -> None:
         cases = [
-            {"environment": "KANBOARD_URL", "materialize": {"target": "elsewhere", "order": 0}},
-            {"environment": "KANBOARD_URL", "materialize": {"target": "file", "order": 0}},
+            {"environment": "EXAMPLE_URL", "materialize": {"target": "elsewhere", "order": 0}},
+            {"environment": "EXAMPLE_URL", "materialize": {"target": "file", "order": 0}},
             {
-                "environment": "KANBOARD_URL",
+                "environment": "EXAMPLE_URL",
                 "materialize": {
                     "target": "runtime-env", "path": "/etc/runtime.env", "order": 0
                 },
@@ -1209,10 +1209,10 @@ class CatalogSchemaCase(unittest.TestCase):
                 "materialize": {"target": "runtime-env", "order": 0},
             },
             # Without a line number the file layout is not recorded at all.
-            {"environment": "KANBOARD_URL", "materialize": {"target": "runtime-env"}},
-            {"environment": "KANBOARD_URL", "materialize": {"target": "runtime-env", "order": -1}},
+            {"environment": "EXAMPLE_URL", "materialize": {"target": "runtime-env"}},
+            {"environment": "EXAMPLE_URL", "materialize": {"target": "runtime-env", "order": -1}},
             {
-                "environment": "KANBOARD_URL",
+                "environment": "EXAMPLE_URL",
                 "materialize": {"target": "runtime-env", "order": "first"},
             },
         ]
@@ -1495,14 +1495,14 @@ class SecretCliCase(SecretStoreCase):
         self.assertEqual(target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV)
 
         code, out, _ = self.run_cli(
-            ["secret", "remove", "--instance", str(self.instance_dir), "--id", "kanboard_url"]
+            ["secret", "remove", "--instance", str(self.instance_dir), "--id", "example_url"]
         )
         self.assertEqual(code, 0)
         self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)],
-                         ["kanboard_api_token", "kanboard_api_user"])
+                         ["example_api_token", "example_api_user"])
 
         code, out, _ = self.run_cli(
-            ["secret", "remove", "--instance", str(self.instance_dir), "--id", "kanboard_url"]
+            ["secret", "remove", "--instance", str(self.instance_dir), "--id", "example_url"]
         )
         self.assertEqual(code, 3)
         self.assertIn("no secret named", json.loads(out)["message"])

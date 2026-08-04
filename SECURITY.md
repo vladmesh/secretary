@@ -19,6 +19,8 @@ with that user's filesystem and network access. They are not sandboxed and are n
 untrusted tenants. Anything an agent can reach, a compromised agent can reach.
 
 - Board and memory endpoints listen on loopback. Host access control is the perimeter.
+- Kanboard JSON-RPC transport, including its application-token Basic-Auth value, is deterministic
+  local configuration in `board-transport.env`, not a recovery secret or secret-store value.
 - Installation secrets live in an encrypted store in the private instance repository. The raw
   installation key stays on the host, mode `0600`, outside Git; the recovery phrase is printed once
   and is never stored by the product.

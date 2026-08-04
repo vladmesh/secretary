@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from secretary._fsutil import publish_component_entries, publish_state_atomic, write_json, write_text_atomic
+from secretary.board_transport import BoardTransportError, ensure_from_runtime_file
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
@@ -243,10 +244,6 @@ def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str
         if not key or not key.replace("_", "a").isalnum() or key[0].isdigit():
             raise InstallError(f"runtime.env line {number} has an invalid variable name")
         values[key] = value
-    required = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
-    missing = [name for name in required if not values.get(name)]
-    if missing:
-        raise InstallError("runtime.env is missing required Kanboard credentials: " + ", ".join(missing))
     return values
 
 
@@ -884,14 +881,28 @@ def install(args: argparse.Namespace) -> InstallResult:
         try:
             values = _read_runtime_env(target, args.runtime_env)
         except InstallError as exc:
-            if not secrets.store_present:
+            # A legacy board-only catalog is inert after this migration. It
+            # must not force a recovery phrase merely to recreate transport.
+            if secrets.store_present and not secrets.locked and not secrets.missing:
+                values = {}
+            elif not secrets.store_present:
                 # No store: the operator still owns this file, and the refusal
                 # that tells them so is the right one.
                 raise
-            _restore_without_credentials(args, target, result)
-            raise _blocked_by_secrets(exc, secrets, runtime_env) from None
-        result.add("runtime-env", "unchanged", "credentials loaded from host-only file")
-        with _runtime_environment(values):
+            else:
+                _restore_without_credentials(args, target, result)
+                raise _blocked_by_secrets(exc, secrets, runtime_env) from None
+        try:
+            _transport, transport_status = ensure_from_runtime_file(
+                target, runtime_env, dry_run=args.dry_run
+            )
+        except BoardTransportError as exc:
+            raise InstallError(str(exc)) from None
+        result.add("board-transport", "would-change" if args.dry_run and transport_status != "unchanged" else (
+            "changed" if transport_status != "unchanged" else "unchanged"
+        ), transport_status)
+        result.add("runtime-env", "unchanged", "host-only runtime configuration loaded")
+        with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
             check_prerequisites(args.installation_user)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
             report = _validated_instance(target)

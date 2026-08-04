@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from secretary import role_skills
+from secretary.board_transport import BoardTransportError, ensure_from_runtime_file
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -604,6 +605,19 @@ def step_verify(context: UpgradeContext) -> StepResult:
     return StepResult("verify", "unchanged", "host reconciled and role skills in sync")
 
 
+def step_board_transport(context: UpgradeContext) -> StepResult:
+    """Migrate old runtime values once, or create the deterministic local config."""
+    try:
+        _transport, status = ensure_from_runtime_file(context.instance_path, dry_run=context.dry_run)
+    except BoardTransportError as exc:
+        return StepResult("board-transport", "failed", str(exc))
+    return StepResult(
+        "board-transport",
+        "unchanged" if status == "unchanged" else "changed",
+        status,
+    )
+
+
 # `registries` runs directly after the pull and before every step that writes. `dependencies` is
 # one of those: a checkout with a `.venv` and a moved dependency manifest gets `pip install -e`,
 # which mutates the checkout being installed. Rejecting a malformed manifest, overlay or head canon
@@ -611,6 +625,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_registries,
+    step_board_transport,
     step_dependencies,
     step_head_registry,
     step_worktrees,

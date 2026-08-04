@@ -1,7 +1,7 @@
-"""Kanboard JSON-RPC transport — thin, stdlib-only, credentials from env.
+"""Kanboard JSON-RPC transport — thin, stdlib-only, local configuration.
 
-App-level access is HTTP Basic `jsonrpc:$KANBOARD_API_TOKEN` against the endpoint in
-`$KANBOARD_URL` (`.../jsonrpc.php`). Launchers provide these through role-scoped runtime env.
+App-level access is HTTP Basic against the endpoint in the installation's
+``board-transport.env`` (`.../jsonrpc.php`).
 
 `call(method, **params)` returns the JSON-RPC `result` or raises KanboardError on a
 transport failure or an RPC-level error. `call_batch` sends several calls in one request
@@ -12,13 +12,9 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import urllib.error
 import urllib.request
 
-_ENV_URL = "KANBOARD_URL"
-_ENV_USER = "KANBOARD_API_USER"
-_ENV_TOKEN = "KANBOARD_API_TOKEN"
 _BATCH_CHUNK = 200
 
 
@@ -27,15 +23,12 @@ class KanboardError(RuntimeError):
 
 
 def _creds() -> tuple[str, str, str]:
+    from secretary.board_transport import BoardTransportError, resolve
     try:
-        url = os.environ[_ENV_URL]
-        user = os.environ[_ENV_USER]
-        token = os.environ[_ENV_TOKEN]
-    except KeyError as e:
-        raise KanboardError(
-            f"missing {e.args[0]} in runtime env (check provisioning/launcher)"
-        ) from e
-    return url, user, token
+        transport = resolve()
+    except BoardTransportError as exc:
+        raise KanboardError(f"board transport configuration is unavailable: {exc}") from exc
+    return transport.url, transport.user, transport.token
 
 
 def _post(payload, label: str):

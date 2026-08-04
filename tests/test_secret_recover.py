@@ -29,9 +29,9 @@ from tests.test_installation import PRODUCT_ROOT, _checkpoint, _git
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
 RUNTIME_ENV = (
-    "KANBOARD_URL=http://127.0.0.1/jsonrpc.php\n"
-    "KANBOARD_API_USER=jsonrpc\n"
-    "KANBOARD_API_TOKEN=live-token\n"
+    "EXAMPLE_URL=http://127.0.0.1/jsonrpc.php\n"
+    "EXAMPLE_API_USER=jsonrpc\n"
+    "EXAMPLE_API_TOKEN=live-token\n"
 )
 
 
@@ -151,8 +151,8 @@ class PhraseBranchCase(RecoveryCase):
         self.recover("--recovery-phrase-file", str(self.phrase_file))
 
         values = installation._read_runtime_env(self.target, None)
-        self.assertEqual(values["KANBOARD_API_TOKEN"], "live-token")
-        self.assertEqual(values["KANBOARD_URL"], "http://127.0.0.1/jsonrpc.php")
+        self.assertEqual(values["EXAMPLE_API_TOKEN"], "live-token")
+        self.assertEqual(values["EXAMPLE_URL"], "http://127.0.0.1/jsonrpc.php")
 
     def test_the_phrase_arrives_through_stdin_without_touching_argv(self) -> None:
         with mock.patch("sys.stdin", io.StringIO(PHRASE + "\n")):
@@ -230,13 +230,13 @@ class NoPhraseBranchCase(RecoveryCase):
         self.assertIn("skipped   host", output)
 
     def test_the_report_separates_locked_from_missing_and_holds_no_values(self) -> None:
-        self.drop_value("kanboard_api_token")
+        self.drop_value("example_api_token")
 
         code, output = self.recover()
 
         self.assertEqual(code, 1)
-        self.assertIn("locked    secret:kanboard_url", output)
-        self.assertIn("missing   secret:kanboard_api_token", output)
+        self.assertIn("locked    secret:example_url", output)
+        self.assertIn("missing   secret:example_api_token", output)
         self.assertNotIn("live-token", output)
         self.assertFalse(self.restored.exists())
 
@@ -260,7 +260,7 @@ class NoPhraseBranchCase(RecoveryCase):
         code, output = self.recover()
 
         self.assertEqual(code, 0, output)
-        self.assertIn("locked    secret:kanboard_api_token", output)
+        self.assertIn("locked    secret:example_api_token", output)
         self.assertIn("3 secret(s) locked", output)
 
 
@@ -268,13 +268,13 @@ class MissingValueCase(RecoveryCase):
     def test_a_gap_in_the_store_leaves_the_env_file_alone(self) -> None:
         """A file written without one of its variables is a component that starts
         with a plausible configuration and fails somewhere else."""
-        self.drop_value("kanboard_api_token")
+        self.drop_value("example_api_token")
 
         code, output = self.recover("--recovery-phrase-file", str(self.phrase_file))
 
         self.assertEqual(code, 1)
         self.assertFalse(self.restored.exists())
-        self.assertIn("missing   secret:kanboard_api_token", output)
+        self.assertIn("missing   secret:example_api_token", output)
         self.assertIn("withheld", output)
 
 
@@ -326,7 +326,7 @@ class ReportCase(RecoveryCase):
         self.assertTrue(locked.store_present)
         self.assertEqual(
             sorted(entry["id"] for entry in locked.locked),
-            ["kanboard_api_token", "kanboard_api_user", "kanboard_url"],
+            ["example_api_token", "example_api_user", "example_url"],
         )
         self.assertEqual(locked.missing, ())
         for entry in locked.locked:

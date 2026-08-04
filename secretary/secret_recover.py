@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.secret_store import (
+    LEGACY_BOARD_SECRET_IDS,
     MaterializeResult,
     RecoveryPhraseError,
     SecretStoreStateError,
@@ -136,7 +137,9 @@ def recover_secrets(
     if not is_initialized(instance_dir):
         return SecretRecovery(store_present=False, unlocked=False)
 
-    entries = [dict(entry) for entry in list_secrets(instance_dir)]
+    # Old board tuples are intentionally ignored, even when locked: transport
+    # now comes from board-transport.env and clean recovery needs no phrase for it.
+    entries = [dict(entry) for entry in list_secrets(instance_dir) if entry.get("id") not in LEGACY_BOARD_SECRET_IDS]
     missing = tuple(
         _describe(instance_dir, entry)
         for entry in entries

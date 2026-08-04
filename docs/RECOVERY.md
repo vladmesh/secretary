@@ -7,6 +7,11 @@ separate bundle or object-store transport is not part of the main path.
 
 ## Topology
 
+Kanboard transport is local non-secret configuration in `board-transport.env`, not secret-store
+content. A clean-host recovery recreates the deterministic default without a recovery phrase. It does
+not restore a legacy random container token: first run the upgrade migration on an installation that
+still uses one. Legacy encrypted `kanboard_*` entries remain inert until the operator removes them.
+
 ```text
 product repository    public template: product, CLI, runtime, schemas, generic skills
 instance repository   one private repository per owner: config + state/

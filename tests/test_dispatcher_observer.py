@@ -3331,7 +3331,7 @@ class ObserverConfigurationTests(unittest.TestCase):
         env = runtime_env("observer", base_env={"PATH": "/usr/bin"}, env_file=env_file)
 
         self.assertEqual(env["BOARD_ROLE"], "observer")
-        self.assertEqual(env["KANBOARD_URL"], "http://board")
+        self.assertNotIn("KANBOARD_URL", env)
         self.assertNotIn("UNRELATED_SECRET_TOKEN", env)
 
     def test_runtime_env_cannot_rename_the_sprint_a_head_observes(self) -> None:

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import secrets
 import shutil
 import socket
 import subprocess
@@ -22,6 +21,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import write_text_atomic
+from secretary.board_transport import BoardTransport, ensure_from_runtime_file, transport_path
 from secretary.config import validate_instance
 from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
@@ -423,14 +423,11 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
         time.sleep(1)
 
 
-def _wait_for_kanboard(values: dict[str, str], *, timeout: int = 90) -> None:
+def _wait_for_kanboard(transport: BoardTransport, *, timeout: int = 90) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            KanboardClient({
-                "KANBOARD_URL": values["KANBOARD_URL"], "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": values["KANBOARD_API_TOKEN"],
-            }).call("getVersion")
+            KanboardClient(transport.as_environ()).call("getVersion")
             return
         except TaskError:
             if time.monotonic() >= deadline:
@@ -464,11 +461,9 @@ def bootstrap(args: argparse.Namespace) -> int:
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
         values = _runtime_values(runtime)
-        values.setdefault("KANBOARD_URL", "http://127.0.0.1:8080/jsonrpc.php")
-        # Kanboard's supported application-token API authenticates as `jsonrpc`.
-        # It avoids trying to mutate admin credentials through an API that cannot do so.
-        values.setdefault("KANBOARD_API_USER", "jsonrpc")
-        values.setdefault("KANBOARD_API_TOKEN", secrets.token_urlsafe(32))
+        transport, _ = ensure_from_runtime_file(target, runtime, dry_run=args.dry_run)
+        for key in transport.as_environ():
+            values.pop(key, None)
         if not args.dry_run:
             _write_runtime(runtime, values)
             _mark_bootstrap_checkout(target)
@@ -476,9 +471,9 @@ def bootstrap(args: argparse.Namespace) -> int:
             _install_platform(dry_run=False, runtime_user=args.installation_user)
             compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)
-            _run(["docker", "compose", "--env-file", str(runtime), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)
-            _wait_for_kanboard(values)
-            ensure_pipeline_board(target, client=KanboardClient(values))
+            _run(["docker", "compose", "--env-file", str(transport_path(target)), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)
+            _wait_for_kanboard(transport)
+            ensure_pipeline_board(target, client=KanboardClient(transport.as_environ()))
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, TaskError, OSError, RuntimeError) as exc:

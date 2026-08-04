@@ -36,6 +36,18 @@ check and its `--json` form returns a structured list of findings. Changing the 
 
 ## Runtime secrets
 
+### Board transport
+
+`board-transport.env` beside `instance.yaml` is local, non-secret configuration for Kanboard's
+JSON-RPC endpoint, application user and application token. Kanboard still requires Basic Auth, but
+this token is not a recoverable credential: bootstrap and clean recovery deterministically create the
+same default. The file is gitignored and its ordinary contents may appear in board reports.
+
+During upgrade a complete legacy `KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN` tuple is
+copied once into this file, then removed from `runtime.env`. This keeps an existing container working
+without recreating it. A disagreement is reported as `board transport mismatch`; inspect the container
+and resolve it explicitly, rather than rotating a live token.
+
 Installation secrets live in a recoverable store (`secretary secret init/set/import`, the `secrets/`
 directory of the private repository) and are materialised from there into env files. The `runtime.env`
 next to `instance.yaml` can be one such target: the canonical values then live in the store and the file
@@ -43,8 +55,8 @@ is a materialised copy. Whether a given installation has been moved to materiali
 `secretary status --json` under `secret_store.materialize`; the product does not do this on its own, the
 operator runs `secret import`. Either way the file is `0600`, is gitignored in the private repository,
 and is part of no checkpoint or archive payload. `secretary shell` receives the whole file for a trusted
-operator session; dispatcher-launched workers and reviewers receive only allowlisted board credentials
-and non-secret runtime switches through the role-environment wrapper.
+operator session; dispatcher-launched workers and reviewers receive non-secret runtime switches through
+the role-environment wrapper and resolve board transport from the installation.
 
 The store does not promise worker isolation: it has no broker and no grants, and the installation key
 opens every secret at once, with the same rights that previously read `runtime.env` (see

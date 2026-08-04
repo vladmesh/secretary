@@ -8037,7 +8037,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("/bin/sh -lc", wrapped)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", wrapped)
 
-    def test_role_env_loads_board_env_and_strips_unallowed_secrets(self) -> None:
+    def test_role_env_uses_local_board_transport_and_strips_unallowed_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / ".env"
             env_file.write_text(
@@ -8059,7 +8059,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             )
 
         self.assertEqual(env["BOARD_ROLE"], "worker")
-        self.assertEqual(env["KANBOARD_API_TOKEN"], "board-token")
+        self.assertNotIn("KANBOARD_API_TOKEN", env)
         self.assertNotIn("TA_CODEX_MODE", env)
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)

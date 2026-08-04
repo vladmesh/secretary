@@ -629,7 +629,8 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(by_id["systemd:dispatcher:production.timer"].name, "secretary-dispatcher-production.timer")
         self.assertEqual(service["managed_by"], "secretary")
         self.assertIn("production-tick", service["runtime"])
-        self.assertIn("KANBOARD_API_TOKEN", service["env"])
+        self.assertNotIn("KANBOARD_API_TOKEN", service["env"])
+        self.assertIn("SECRETARY_INSTANCE", service["env"])
         self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 
     def test_production_dispatcher_unit_sets_path_for_orca_lookup(self):

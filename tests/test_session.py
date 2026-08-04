@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from secretary import session
+from secretary.board_transport import ensure as ensure_board_transport
 from triggered_agents.agents.pipeline import heads as head_registry
 
 
@@ -19,15 +20,12 @@ class OperatorEnvTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = _write_env(
                 Path(tmp),
-                "KANBOARD_URL=http://board/jsonrpc.php\n"
-                "KANBOARD_API_USER=svc\n"
-                "KANBOARD_API_TOKEN=tok\n"
                 "KANBOARD_ADMIN_PASSWORD=hunter2\n"
                 "GITHUB_TOKEN=gh-test-token\n",
             )
-            env = session.operator_env(env_file, base_env={"PATH": "/bin"})
-        # Board creds plus every other secret from the file — operator is unscoped on purpose.
-        self.assertEqual(env["KANBOARD_URL"], "http://board/jsonrpc.php")
+            ensure_board_transport(Path(tmp))
+            env = session.operator_env(env_file, base_env={"PATH": "/bin", "SECRETARY_INSTANCE": tmp})
+        self.assertNotIn("KANBOARD_API_TOKEN", env)
         self.assertEqual(env["KANBOARD_ADMIN_PASSWORD"], "hunter2")
         self.assertEqual(env["GITHUB_TOKEN"], "gh-test-token")
         self.assertEqual(env["PATH"], "/bin")
@@ -38,7 +36,7 @@ class OperatorEnvTest(unittest.TestCase):
             env_file = _write_env(Path(tmp), "SOMETHING=else\n")
             with self.assertRaises(session.SessionError) as ctx:
                 session.operator_env(env_file, base_env={})
-        self.assertIn("KANBOARD_URL", str(ctx.exception))
+        self.assertIn("board transport", str(ctx.exception))
 
 
 # The product ships a small neutral registry; an OpenRouter-backed hermes head is one

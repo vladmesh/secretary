@@ -71,6 +71,9 @@ from secretary.state_repo import SECRETS_PATHSPEC
 from triggered_agents.runtime.redact import looks_like_credential, redact
 
 
+LEGACY_BOARD_SECRET_IDS = frozenset({"kanboard_url", "kanboard_api_user", "kanboard_api_token"})
+
+
 CATALOG_NAME = "catalog.yaml"
 KEY_PARAMS_NAME = "installation-key.json"
 KEY_NAME = "installation.key"
@@ -802,6 +805,10 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     values: list[str] = []
     try:
         for entry in list_secrets(instance_dir):
+            if entry.get("id") in LEGACY_BOARD_SECRET_IDS:
+                # Legacy encrypted transport values deliberately stay inert until
+                # an operator removes them. They must not block publication.
+                continue
             environment = str(entry.get("environment") or "")
             try:
                 value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
@@ -990,6 +997,8 @@ def materialize_secrets(
         key = load_installation_key(instance_dir)
         groups: dict[Path, list[dict[str, Any]]] = {}
         for entry in list_secrets(instance_dir):
+            if entry.get("id") in LEGACY_BOARD_SECRET_IDS:
+                continue
             instruction = entry.get("materialize")
             if not instruction:
                 continue
@@ -1359,6 +1368,10 @@ def _clean_secret_id(secret_id: str) -> str:
         )
     if ".." in value:
         raise SecretStoreValidationError("secret id must not contain '..'")
+    if value in LEGACY_BOARD_SECRET_IDS:
+        raise SecretStoreValidationError(
+            f"{value} is board transport configuration, not a recoverable secret"
+        )
     return value
 
 

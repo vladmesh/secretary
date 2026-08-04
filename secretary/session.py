@@ -15,12 +15,10 @@ import os
 import sys
 
 from secretary.role_env import RUNTIME_ENV, load_env_file
+from secretary.board_transport import BoardTransportError, resolve as resolve_board_transport
+from secretary.board_transport import LEGACY_ENV
 from triggered_agents.agents.pipeline import heads as head_registry
 
-# Board credentials the operator must have to touch the Pipeline board. The operator gets the whole
-# runtime env, but a missing board token is a launch-time error worth catching loudly rather than a
-# confusing `secretary task` failure once inside the head.
-BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"). Map a
 # bare adapter name to a concrete default profile. Any real heads.toml profile id is also accepted
@@ -44,17 +42,20 @@ def operator_env(
 ) -> dict[str, str]:
     """Full runtime env for the operator: base process env overlaid with the entire runtime.env.
 
-    No allowlist and no sensitive-name scrubbing — that is the point. Fails closed if the board
-    credentials are absent.
+    No allowlist and no sensitive-name scrubbing — that is the point. Board transport is checked
+    from local configuration, not injected as credentials.
     """
     base = dict(os.environ if base_env is None else base_env)
     source = load_env_file(env_file)
     env = {**base, **source}
+    for key in LEGACY_ENV:
+        env.pop(key, None)
     env["SECRETARY_ROLE"] = "operator"
-    missing = [key for key in BOARD_ENV if not env.get(key)]
-    if missing:
+    try:
+        resolve_board_transport(env.get("SECRETARY_INSTANCE"))
+    except BoardTransportError:
         where = env_file or RUNTIME_ENV
-        raise SessionError(f"runtime env missing {', '.join(missing)} (checked {where})")
+        raise SessionError(f"board transport configuration is unavailable (checked {where})")
     return env
 
 

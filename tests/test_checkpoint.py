@@ -13,6 +13,7 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
 )
 from secretary import secret_store
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.data import DataExport
@@ -387,13 +388,10 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
         self.assertNotIn("state/board/cards.ndjson", self.head_files())
 
-    def test_board_url_in_a_card_does_not_block_the_checkpoint(self):
-        url = "https://board.example.invalid/jsonrpc.php"
-        (self.instance_dir / "runtime.env").write_text(
-            f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN=opaque-token-value\n",
-            encoding="utf-8",
-        )
-        self.seed_board([{**CARD, "description": f"See {url} for the board"}])
+    def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
+        transport, _ = ensure_board_transport(self.instance_dir)
+        contents = (self.instance_dir / "board-transport.env").read_text(encoding="utf-8")
+        self.seed_board([{**CARD, "description": f"Board configuration:\n{contents}"}])
 
         result = self.write()
 
@@ -401,12 +399,14 @@ class CheckpointWriterTests(unittest.TestCase):
         published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(
             encoding="utf-8"
         )
-        self.assertIn(url, published)
+        self.assertIn(transport.url, published)
+        self.assertIn("KANBOARD_API_USER=jsonrpc", published)
+        self.assertIn("KANBOARD_API_TOKEN=secretary-local-kanboard-jsonrpc-v1", published)
 
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"
         (self.instance_dir / "runtime.env").write_text(
-            f"KANBOARD_API_TOKEN={secret}\n", encoding="utf-8"
+            f"EXAMPLE_API_TOKEN={secret}\n", encoding="utf-8"
         )
         self.seed_board([{**CARD, "description": f"token {secret}"}])
 
@@ -471,8 +471,8 @@ class CheckpointWriterTests(unittest.TestCase):
                 [
                     f"SECRETARY_DATA_DIR={data_dir}",
                     f"TA_SECRETARY_REPO={product_root}",
-                    f"KANBOARD_URL={url}",
-                    "KANBOARD_API_TOKEN=opaque-token-value",
+                    f"EXAMPLE_URL={url}",
+                    "EXAMPLE_API_TOKEN=opaque-token-value",
                     "",
                 ]
             ),
