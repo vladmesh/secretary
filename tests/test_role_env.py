@@ -9,7 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import role_env as secretary_role_env
+from secretary.board_transport import ensure as ensure_board_transport
 from triggered_agents.runtime import role_env
+from triggered_agents.runtime import kanboard
 
 
 class RuntimeEnvPathTests(unittest.TestCase):
@@ -57,21 +59,21 @@ class RuntimeEnvRoleTests(unittest.TestCase):
 
     def test_every_merged_role_builds_an_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            env_file = Path(tmp) / "runtime.env"
-            env_file.write_text(
-                "KANBOARD_URL=https://board.invalid\n"
-                "KANBOARD_API_USER=bot\n"
-                "KANBOARD_API_TOKEN=token\n",
-                encoding="utf-8",
-            )
+            instance = Path(tmp)
+            env_file = instance / "runtime.env"
+            env_file.write_text("EXAMPLE_API_TOKEN=secret\n", encoding="utf-8")
+            transport, _ = ensure_board_transport(instance)
             for role in ("worker", "reviewer", "observer", "pipeline", "steward", "retro", "curator"):
                 with self.subTest(role=role):
-                    self.assertIsInstance(
-                        role_env.runtime_env(
-                            role, base_env={"PATH": "/usr/bin"}, env_file=env_file, require=True
-                        ),
-                        dict,
+                    env = role_env.runtime_env(
+                        role,
+                        base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                        env_file=env_file,
+                        require=True,
                     )
+                    self.assertNotIn("KANBOARD_API_TOKEN", env)
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        self.assertEqual(kanboard._creds(), (transport.url, transport.user, transport.token))
 
 
 if __name__ == "__main__":

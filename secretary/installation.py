@@ -34,7 +34,12 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from secretary._fsutil import publish_component_entries, publish_state_atomic, write_json, write_text_atomic
-from secretary.board_transport import BoardTransportError, ensure_from_runtime_file
+from secretary.board_transport import (
+    BoardTransportError,
+    LEGACY_ENV,
+    ensure_from_runtime_file,
+    resolve as resolve_board_transport,
+)
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
@@ -378,7 +383,10 @@ def check_prerequisites(installation_user: str | None = None) -> None:
     else:
         _run(["orca", "--version"], label="inspect Orca")
     try:
+        resolve_board_transport()
         TaskReader(KanboardClient()).list()
+    except BoardTransportError as exc:
+        raise InstallError(f"board transport configuration is unavailable: {exc}") from None
     except TaskError as exc:
         raise InstallError(f"Kanboard prerequisite failed: {exc.message}") from None
 
@@ -824,8 +832,8 @@ def _restore_without_credentials(
         "changed" if cloned or seeded else "unchanged",
         f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
     )
-    result.add("board", "skipped", "needs the Kanboard credentials that stayed locked")
-    result.add("host", "skipped", "needs the Kanboard credentials that stayed locked")
+    result.add("board", "skipped", "requires an available board backend after locked secret recovery")
+    result.add("host", "skipped", "requires full recovery before host materialization")
 
 
 def install(args: argparse.Namespace) -> InstallResult:
@@ -898,6 +906,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             )
         except BoardTransportError as exc:
             raise InstallError(str(exc)) from None
+        for name in LEGACY_ENV:
+            values.pop(name, None)
         result.add("board-transport", "would-change" if args.dry_run and transport_status != "unchanged" else (
             "changed" if transport_status != "unchanged" else "unchanged"
         ), transport_status)

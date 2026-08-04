@@ -267,6 +267,7 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation.os.geteuid", return_value=0),
             mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
             mock.patch("secretary.installation._run") as run,
+            mock.patch("secretary.installation.resolve_board_transport"),
             mock.patch("secretary.installation.KanboardClient"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
@@ -277,6 +278,15 @@ class InstallationTests(unittest.TestCase):
             [call.args[0] for call in run.call_args_list],
         )
         reader.return_value.list.assert_called_once()
+
+    def test_missing_board_transport_is_reported_as_configuration(self):
+        with (
+            mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
+            mock.patch("secretary.installation._run"),
+            mock.patch("secretary.installation.resolve_board_transport", side_effect=installation.BoardTransportError("missing file")),
+        ):
+            with self.assertRaisesRegex(InstallError, "board transport configuration is unavailable: missing file"):
+                check_prerequisites()
 
     def test_existing_runtime_env_is_not_a_bootstrap_marker(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1103,7 +1103,7 @@ def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
 
 
 def secret_id_for_variable(name: str) -> str:
-    """`KANBOARD_API_TOKEN` -> `kanboard_api_token`, and back by upper-casing."""
+    """Map an environment-variable name to its validated store identifier."""
     return _clean_secret_id(str(name).strip().lower())
 
 

@@ -161,9 +161,11 @@ raises a `remote diverged` alarm, and the operator resolves it.
 
 ## Secrets
 
-The host `runtime.env` is mode `0600`, is not part of the checkpoint, and holds only the
-machine-generated board URL, API user and API token. Forge access and interactive head logins stay in
-the operator's password manager and are never copied to the host by the product.
+The host `runtime.env` is mode `0600`, is not part of the checkpoint, and may hold materialised
+installation secrets. Board transport is separate: `board-transport.env` is ordinary local
+configuration, is not restored from the encrypted store, and never needs a recovery phrase. Forge
+access and interactive head logins stay in the operator's password manager and are never copied to the
+host by the product.
 
 The secret store (`secretary/secret_store.py`, `secrets/` in the instance repository) is a separate,
 recoverable canon on the same repository: a metadata catalog and versioned envelopes tracked in Git
@@ -221,11 +223,12 @@ produce no findings.
 ## Fresh install and recovery
 
 Install the product with the memory extra first. On Ubuntu 24.04, `secretary bootstrap` installs the
-pinned board and session-manager runtimes, generates `runtime.env` and creates the Pipeline board.
+pinned board and session-manager runtimes, writes deterministic `board-transport.env`, and creates the
+Pipeline board.
 `secretary install` installs neither and fail-closed checks both runtimes before changing live state.
 
-On a clean host, bootstrap creates the checkout, a local `0600` `runtime.env` and the Pipeline board
-without manual entry of board credentials:
+On a clean host, bootstrap creates the checkout, deterministic local board transport and the Pipeline
+board without a recovery phrase or manual entry of board credentials:
 
 ```bash
 python3 -m pip install '.[memory]'
@@ -240,8 +243,9 @@ sudo secretary install \
   --installation-user INSTALL_USER
 ```
 
-`runtime.env` stays a gitignored ordinary file with mode `0600`. Bootstrap generates it on a fresh
-install, prints no values and adds it to no commit.
+`runtime.env` stays a gitignored ordinary file with mode `0600` when an installation needs it for
+other materialised secrets. `board-transport.env` is also gitignored, but its contents are non-secret
+and bootstrap recreates its default on a clean host. Neither file is added to a checkpoint commit.
 
 `recover` runs one supported sequence:
 
@@ -250,9 +254,10 @@ install, prints no values and adds it to no commit.
    is not yet on disk), the installation key is rebuilt and values are materialised into the files the
    catalog names, including `runtime.env` if any secret materialises there. Without the phrase this step
    writes nothing and reports locked/missing, and `runtime.env` stays whatever is already on disk.
-2. Checks the remote and checkout, credentials, board reachability and the installed session manager. If
+2. Checks the remote and checkout, materialised credentials (when any), board reachability and the
+   installed session manager. Board transport is created or read independently of that secret step. If
    `runtime.env` did not appear in step 1 and there is no store at all, it remains a manual operator
-   step.
+   step only for any other required host configuration.
 3. Materialises `state/board` and `state/runs` from the checkpoint into a new local data plane. The
    derived JSON forms are built from the NDJSON, and counters are verified before any live write.
 4. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`.

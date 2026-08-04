@@ -48,6 +48,14 @@ copied once into this file, then removed from `runtime.env`. This keeps an exist
 without recreating it. A disagreement is reported as `board transport mismatch`; inspect the container
 and resolve it explicitly, rather than rotating a live token.
 
+For an installation from before this change, first upgrade with its existing container still running.
+The upgrade writes the one local transport file only when the legacy tuple is complete and agrees with
+any existing file; it never guesses or rotates a token. The old encrypted
+`kanboard_url`, `kanboard_api_user` and `kanboard_api_token` entries are deliberately ignored by
+recovery, redaction and materialisation. Leave them inert until the owner can remove them through the
+normal secret-store procedure after verifying the migrated installation. Do not recreate the running
+container merely to remove those entries.
+
 Installation secrets live in a recoverable store (`secretary secret init/set/import`, the `secrets/`
 directory of the private repository) and are materialised from there into env files. The `runtime.env`
 next to `instance.yaml` can be one such target: the canonical values then live in the store and the file

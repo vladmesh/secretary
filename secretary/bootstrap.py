@@ -1,9 +1,9 @@
 """Bootstrap the host-owned Kanboard and Orca prerequisites.
 
-The checkpoint deliberately does not carry these services or their credentials.
-They are reproducible host state: this module installs the pinned transports,
-generates the local credentials, and builds the small Kanboard schema that the
-task protocol requires.
+The checkpoint deliberately does not carry these services or their transport
+configuration. They are reproducible host state: this module installs the
+pinned transports, creates the deterministic local board configuration, and
+builds the small Kanboard schema that the task protocol requires.
 """
 
 from __future__ import annotations

@@ -391,7 +391,20 @@ class CheckpointWriterTests(unittest.TestCase):
     def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
         transport, _ = ensure_board_transport(self.instance_dir)
         contents = (self.instance_dir / "board-transport.env").read_text(encoding="utf-8")
-        self.seed_board([{**CARD, "description": f"Board configuration:\n{contents}"}])
+        self.seed_board([{
+            **CARD,
+            "description": f"Board configuration:\n{contents}",
+            "comments": [{"text": f"report comment:\n{contents}"}],
+        }])
+        (self.data_dir / "board" / "export.json").write_text(
+            json.dumps({
+                "version": 1,
+                "card_count": 1,
+                "sprint_count": 0,
+                "report": f"exported board configuration:\n{contents}",
+            }),
+            encoding="utf-8",
+        )
 
         result = self.write()
 
@@ -402,6 +415,8 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn(transport.url, published)
         self.assertIn("KANBOARD_API_USER=jsonrpc", published)
         self.assertIn("KANBOARD_API_TOKEN=secretary-local-kanboard-jsonrpc-v1", published)
+        exported = (self.instance_dir / "state" / "board" / "export.json").read_text(encoding="utf-8")
+        self.assertIn(contents, exported)
 
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"

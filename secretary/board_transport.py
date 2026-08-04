@@ -94,15 +94,17 @@ def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
 def resolve(instance_dir: Path | str | None = None, *, environ: Mapping[str, str] | None = None) -> BoardTransport:
     """Read the one authoritative local transport file.
 
-    ``environ`` accepts a complete tuple only as an explicit test/legacy adapter;
-    production callers use the file selected by ``SECRETARY_INSTANCE``.
+    ``environ`` accepts a complete tuple only as an explicit in-process adapter.
+    A normal caller never falls back to ambient legacy variables: after migration
+    the file is the sole authority, rather than one of two competing sources.
     """
     path = transport_path(instance_dir, environ=environ)
     if path.is_file():
         return _parse(path)
-    direct = legacy_transport(environ)
-    if direct is not None:
-        return direct
+    if environ is not None:
+        direct = legacy_transport(environ)
+        if direct is not None:
+            return direct
     raise BoardTransportError(f"board transport configuration is missing: {path}")
 
 
@@ -147,10 +149,15 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
     path = Path(runtime_env) if runtime_env is not None else Path(instance_dir) / "runtime.env"
     values: dict[str, str] = {}
     if path.is_file():
-        for line in path.read_text(encoding="utf-8", errors="strict").splitlines():
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="strict").splitlines(), 1):
             if "=" in line and not line.lstrip().startswith("#"):
                 key, value = line.split("=", 1)
                 if key in LEGACY_ENV:
+                    if key in values:
+                        raise BoardTransportError(
+                            f"legacy Kanboard runtime configuration is ambiguous: {key} appears more than once "
+                            f"(line {number})"
+                        )
                     values[key] = value
     transport, status = ensure(instance_dir, legacy_values=values, dry_run=dry_run)
     if values and not dry_run:
