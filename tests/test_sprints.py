@@ -2048,7 +2048,11 @@ class SprintTests(SprintFixture):
             role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="resume-card",
         )["task"]
-        task_writer.comment(role="po", actor="operator", reference=task["ref"], body="meaningful", request_id="later")
+        TaskAudit(self.tmp.name).append("later", {
+            "event_id": "evt_later", "request_id": "later", "ref": task["ref"],
+            "kind": "moved", "outcome": "success", "actor": {"role": "dispatcher"},
+            "payload": {"to": "assessment"}, "occurred_at": "2099-01-01T00:00:00Z",
+        })
         stale = SprintReader(self.client, data_dir=self.tmp.name).show(ref)  # type: ignore[arg-type]
         self.assertFalse(stale["resume_freshness"]["fresh"])
         self.assertEqual(stale["resume_freshness"]["error"], "resume_stale")
@@ -2069,9 +2073,11 @@ class SprintTests(SprintFixture):
             role="observer", actor="observer", project="secretary", task_type="code", title="linked", target="ready",
             sprint=ref, request_id="naive-card",
         )["task"]
-        TaskWriter(self.client, data_dir=self.tmp.name).comment(
-            role="po", actor="operator", reference=task["ref"], body="meaningful", request_id="naive-event",
-        )
+        TaskAudit(self.tmp.name).append("naive-event", {
+            "event_id": "evt_naive_event", "request_id": "naive-event", "ref": task["ref"],
+            "kind": "moved", "outcome": "success", "actor": {"role": "dispatcher"},
+            "payload": {"to": "assessment"}, "occurred_at": "2099-01-01T00:00:00Z",
+        })
 
         shown = SprintReader(self.client, data_dir=self.tmp.name).show(ref)  # type: ignore[arg-type]
 

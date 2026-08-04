@@ -163,8 +163,34 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
         )
+        self._board_comment = self.writer.comment
+        self.writer.comment = self._comment_with_semantic_test_event  # type: ignore[method-assign]
 
     # helpers -----------------------------------------------------------------
+
+    def _comment_with_semantic_test_event(self, **kwargs: object) -> dict:
+        """Keep delivery tests explicit after generic dispatcher comments stopped waking heads."""
+        result = self._board_comment(**kwargs)
+        request_id = str(kwargs.get("request_id") or "")
+        test_wake = (
+            request_id.endswith("-event")
+            or request_id.startswith(("burst-", "cursor-event-", "hung-event-", "event-of-"))
+            or request_id in {"after-burst-resume", "replacement-event", "event-during-active-turn"}
+        )
+        if not test_wake:
+            return result
+        reference = str(kwargs["reference"])
+        self.audit.append(request_id + ":semantic", {
+            "event_id": "evt_" + request_id + "_semantic",
+            "request_id": request_id + ":semantic",
+            "ref": reference,
+            "kind": "moved",
+            "outcome": "success",
+            "actor": {"role": "dispatcher", "id": "dispatcher"},
+            "payload": {"to": "assessment"},
+            "occurred_at": _now(),
+        })
+        return result
 
     def open_sprint(self, reference: str = "sprint:1", **metadata: object) -> None:
         # Every row declares its observer, so the fixture declares one too: the registry default,
@@ -1005,7 +1031,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.audit.append("same-second-card-event", {
             "event_id": "evt_same_second_card", "request_id": "same-second-card-event",
-            "ref": "secretary-510-pilot", "kind": "commented", "outcome": "success",
+            "ref": "secretary-510-pilot", "kind": "moved", "outcome": "success",
+            "actor": {"role": "dispatcher"}, "payload": {"to": "assessment"},
             "occurred_at": same_second,
         })
 
@@ -1239,7 +1266,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.audit.append("old-event", {
             "event_id": "evt_old_event", "request_id": "old-event", "ref": "secretary-510-pilot",
-            "kind": "commented", "outcome": "success", "occurred_at": "2000-01-01T00:00:00Z",
+            "kind": "moved", "outcome": "success", "actor": {"role": "dispatcher"},
+            "payload": {"to": "assessment"}, "occurred_at": "2000-01-01T00:00:00Z",
         })
 
         first = self.runtime.production_tick()
@@ -1435,16 +1463,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # once the observer is up, the way a card does in production.
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
-        # The dispatcher claim in the initial tick is a real card transition. Acknowledge its
-        # delivery first, then prove the later routing-only audit line starts no additional turn.
-        self.assertEqual(
-            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-nudged"]
-        )
-        entry = {
-            "selected_step": "check board", "selected_why": "initial card claim", "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
-        }
-        self.acknowledge_delivery(entry, request_id="routing-baseline")
+        # The dispatcher claim is routine machinery progress, and the later routing-only audit
+        # line also starts no observer turn.
         self.assertEqual(
             [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-idle"]
         )
@@ -1459,7 +1479,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([row["action"] for row in self.actions(routing)], ["observer-idle"])
         self.assertEqual([row["action"] for row in self.actions(closed)], ["observer-stopped"])
-        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.host.observer_nudges, [])
 
     def test_denied_and_failed_card_events_do_not_wake_an_observer(self) -> None:
         self.open_sprint()
@@ -1528,22 +1548,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "last_activity": time.time() - 2,
             "idle": True,
         }
-        # The initial dispatcher tick claims the linked card after the observer comes up. That
-        # transition gets one nudge; the completed turn below is then quiet despite the active
-        # card remaining on the board.
+        # The initial dispatcher claim is machinery progress, not observer work. The completed
+        # observer remains quiet despite the active card remaining on the board.
         self.assertEqual(
-            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-nudged"]
+            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-idle"]
         )
-        entry = {
-            "selected_step": "wait for card", "selected_why": "the card is active", "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait for transition",
-        }
-        self.acknowledge_delivery(entry, request_id="active-card-baseline")
         result = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observers, ["sprint:1"])
-        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.host.observer_nudges, [])
 
     def test_closed_sprint_stops_the_head_and_drops_the_record(self) -> None:
         self.open_sprint()
@@ -3041,10 +3055,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.assertEqual(self.reader.show("fourth-1")["state"], "ready")
         self.assertEqual(self.reader.show("third-1")["state"], "in_progress")
-        # The surviving head is untouched: the replacement of the dead one stops that head's own
-        # pane and no other, and the second sprint's record keeps its first launch.
+        # The surviving head is untouched. With no semantic observer work pending, a dead head is
+        # not relaunched merely because a worker card is in flight.
         self.assertTrue(observer_alive(self.observers()[self.SECOND])["alive"])
-        self.assertEqual(self.host.stopped_observers, [f"observer:{self.FIRST}"])
+        self.assertEqual(self.host.stopped_observers, [])
         self.assertEqual(self.observers()[self.SECOND].launches, 1)
 
     def test_a_head_that_will_not_take_its_wake_does_not_hold_the_other_sprint(self) -> None:

@@ -29,6 +29,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    is_significant_observer_event,
     standing_decision,
     _STATE_BY_COLUMN,
     _STATES,
@@ -1647,6 +1648,54 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(event["payload"]["decision"], "reslice")
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
 
+    def test_assessment_visit_accepts_one_canonical_decision_across_delivery_retries(self) -> None:
+        self._park()
+
+        first = self._decide("release", request_id="decision-first-delivery")
+        replay = self._decide("release", request_id="decision-retried-delivery")
+
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["event_id"], first["event_id"])
+        decisions = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")
+        self.assertEqual(len(decisions), 1)
+        self.assertTrue(decisions[0]["payload"]["assessment_visit"])
+        with self.assertRaisesRegex(TaskError, "already has a release decision") as raised:
+            self._decide("rework", request_id="decision-conflicting-delivery")
+        self.assertEqual(raised.exception.code, "decision_already_recorded")
+
+    def test_observer_wake_predicate_excludes_routine_and_self_card_events(self) -> None:
+        refs = {"secretary-468"}
+
+        def event(kind: str, *, actor: str, ref: str = "secretary-468", payload: dict | None = None) -> dict:
+            return {
+                "ref": ref, "kind": kind, "outcome": "success",
+                "actor": {"role": actor}, "payload": payload or {},
+            }
+
+        for routine in (
+            event("created", actor="observer"),
+            event("claimed", actor="dispatcher"),
+            event("reported", actor="worker"),
+            event("commented", actor="dispatcher"),
+            event("moved", actor="dispatcher", payload={"to": "validate"}),
+            event("routing", actor="dispatcher"),
+            event("decided", actor="observer", payload={"decision": "release"}),
+        ):
+            self.assertFalse(is_significant_observer_event(
+                routine, linked_refs=refs, sprint_ref=SPRINT,
+            ))
+        for semantic in (
+            event("moved", actor="dispatcher", payload={"to": "assessment"}),
+            event("moved", actor="dispatcher", payload={"to": "blocked"}),
+            event("moved", actor="dispatcher", payload={"to": "done"}),
+            event("budget_recorded", actor="dispatcher", ref=SPRINT),
+            event("commented", actor="po", ref=SPRINT),
+        ):
+            self.assertTrue(is_significant_observer_event(
+                semantic, linked_refs=refs, sprint_ref=SPRINT,
+            ))
+
     def test_a_decision_needs_a_parked_card_a_reason_and_a_permitted_role(self) -> None:
         self._park()
         with self.assertRaisesRegex(TaskError, "non-empty reason"):
@@ -1733,23 +1782,22 @@ class AssessmentStateTests(unittest.TestCase):
         """
         self._park()
 
-        for kind, target in (("release", "done"), ("rework", "in_progress"), ("reslice", "blocked")):
-            self._decide(kind, request_id=f"decision-performed-by-{kind}")
-            with self.assertRaises(TaskError) as raised:
-                self.writer.move(
-                    role="observer", actor="observer", reference="secretary-468", target=target,
-                    reason="", decision=kind, request_id=f"observer-performs-{kind}",
-                )
-            self.assertEqual(raised.exception.code, "transition_forbidden")
-            self.assertIn("task decide", str(raised.exception))
-            self.assertEqual(self.client.tasks[0]["column_id"], 7)
+        self._decide("release", request_id="decision-performed-by-observer")
+        with self.assertRaises(TaskError) as raised:
+            self.writer.move(
+                role="observer", actor="observer", reference="secretary-468", target="done",
+                reason="", decision="release", request_id="observer-performs-release",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertIn("task decide", str(raised.exception))
+        self.assertEqual(self.client.tasks[0]["column_id"], 7)
 
-        # And the dispatcher performs the decision that is standing, from the same state.
+        # And the dispatcher performs the one canonical decision that is standing.
         performed = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="blocked",
-            reason="", decision="reslice", request_id="dispatcher-performs-reslice",
+            role="dispatcher", actor="d", reference="secretary-468", target="done",
+            reason="", decision="release", request_id="dispatcher-performs-release",
         )
-        self.assertEqual(performed["task"]["state"], "blocked")
+        self.assertEqual(performed["task"]["state"], "done")
 
     def test_a_decision_needs_an_open_sprint_to_hold_the_project(self) -> None:
         """A decision is refused where no open sprint holds the card's project, the reservation

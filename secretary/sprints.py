@@ -27,7 +27,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
-    is_significant_card_event,
+    is_significant_observer_event,
     _digest,
     _now,
     _positive_int,
@@ -599,7 +599,7 @@ class SprintReader:
                 if isinstance(card, dict) and str(card.get("ref") or "")
             }
             for event in TaskAudit(self.data_dir).events():
-                if is_significant_card_event(event, linked_refs=refs):
+                if is_significant_observer_event(event, linked_refs=refs, sprint_ref=sprint["ref"]):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")
         lag_seconds = _resume_lag_seconds(recorded_at, last_event)

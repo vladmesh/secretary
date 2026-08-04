@@ -235,13 +235,88 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
     return decision
 
 
+def assessment_visit(events: Iterable[dict[str, Any]]) -> str:
+    """Return the durable id of the card's current visit to Assessment, if any."""
+    visit = ""
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
+            visit = str(event.get("event_id") or event.get("request_id") or "")
+    return visit
+
+
+def assessment_decision(events: Iterable[dict[str, Any]], *, visit: str) -> dict[str, Any] | None:
+    """The canonical decision for one Assessment visit, if the observer made one.
+
+    Older audit rows did not carry ``assessment_visit``.  They remain readable by ordering them
+    after the latest park, while new rows are explicitly tied to that immutable entry event.
+    """
+    ordered = list(events)
+    latest_park = -1
+    for index, event in enumerate(ordered):
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
+            latest_park = index
+    if latest_park < 0 or not visit:
+        return None
+    for event in ordered[latest_park + 1:]:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("kind") != "decided" or not str(payload.get("decision") or ""):
+            continue
+        recorded_visit = str(payload.get("assessment_visit") or "")
+        if not recorded_visit or recorded_visit == visit:
+            return event
+    return None
+
+
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
-    """Whether a committed card-audit line requires the sprint observer's attention."""
-    return (
-        str(event.get("ref") or "") in linked_refs
-        and str(event.get("kind") or "") not in {"routing", "sprint_guard_denied"}
-        and str(event.get("outcome") or "") == "success"
-    )
+    """Whether a card transition needs a new observer decision.
+
+    The dispatcher already owns ordinary progress: claiming, reports, Validate moves and reviewer
+    launch are inputs to the next machine step, not work for the observer.  Keep this predicate
+    deliberately small because it drives both wake delivery and resume freshness.  A broad
+    ``successful event`` rule turns every piece of machinery telemetry (including the observer's
+    own decision) into another observer turn.
+    """
+    if str(event.get("ref") or "") not in linked_refs:
+        return False
+    if str(event.get("outcome") or "") != "success":
+        return False
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    if str(actor.get("role") or "") == "observer":
+        return False
+    if str(event.get("kind") or "") != "moved":
+        return False
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    # Assessment needs an observer decision; Blocked needs classification; Done is the semantic
+    # post-release edge where the observer can choose the next cut or close the sprint.
+    return str(payload.get("to") or "") in {"assessment", "blocked", "done"}
+
+
+def is_significant_observer_event(
+    event: dict[str, Any], *, linked_refs: set[str], sprint_ref: str,
+) -> bool:
+    """Whether an audit event is a semantic wake for one sprint observer.
+
+    Card transitions use :func:`is_significant_card_event`.  The remaining two sources are scoped
+    to the sprint entity itself: a budget threshold and an operator's comment.  This keeps
+    dispatcher routing and observer writes from waking the same head again, while preserving a
+    human's ability to change direction without inventing a card transition.
+    """
+    if is_significant_card_event(event, linked_refs=linked_refs):
+        return True
+    if str(event.get("ref") or "") != sprint_ref:
+        return False
+    if str(event.get("outcome") or "") != "success":
+        return False
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    if str(actor.get("role") or "") == "observer":
+        return False
+    kind = str(event.get("kind") or "")
+    if kind in {"budget_recorded", "budget_hard_stopped"}:
+        return True
+    # PO is the human control-plane role.  Dispatcher and role comments are routine telemetry.
+    return kind == "commented" and str(actor.get("role") or "") == "po"
 
 
 class KanboardClient:
@@ -1268,6 +1343,32 @@ class TaskWriter:
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         if current["state"] != "assessment":
             raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+        events = self.audit.events(reference)
+        visit = assessment_visit(events)
+        existing = assessment_decision(events, visit=visit)
+        # Preserve normal request-id claim validation for an actual retry.  The per-visit
+        # shortcut is only for a second delivery that arrived with a new request id.
+        known_request = (
+            self.audit.committed_event(request_id) is not None
+            or self.audit.pending_event(request_id) is not None
+        )
+        if existing is not None and not known_request:
+            existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+            existing_kind = str(existing_payload.get("decision") or "")
+            if existing_kind != kind:
+                raise TaskError(
+                    "decision_already_recorded",
+                    f"Assessment visit {visit} already has a {existing_kind} decision",
+                    3,
+                )
+            # A delivery retry can have a different caller UUID.  The decision is still one fact:
+            # return its original event rather than adding a second board comment for the same
+            # Assessment visit.
+            return {
+                "action": "decided", "task": current,
+                "event_id": str(existing.get("event_id") or existing.get("request_id") or ""),
+                "replayed": True,
+            }
         marker = f"decision:{kind}"
 
         def mutation(task: dict[str, Any]) -> Any:
@@ -1275,7 +1376,10 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
             self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
 
-        payload = {"marker": marker, "decision": kind, "body_sha256": _digest(body)}
+        payload = {
+            "marker": marker, "decision": kind, "body_sha256": _digest(body),
+            "assessment_visit": visit or None,
+        }
         return self._write(
             "decided", role, actor, reference, request_id, payload, mutation, identity=payload,
         )

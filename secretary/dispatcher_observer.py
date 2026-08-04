@@ -78,7 +78,7 @@ from secretary.sprint_observer import (
     ObserverMetadataError,
     executable_observer,
 )
-from secretary.tasks import TaskError, is_significant_card_event
+from secretary.tasks import TaskError, is_significant_observer_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"
@@ -729,7 +729,7 @@ def _reconcile_open_sprint(
 
 
 def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
-    """Read linked-card work and acknowledge only the active delivery batch.
+    """Read semantic sprint work and acknowledge only the active delivery batch.
 
     A resume acknowledges only when its audit payload carries the active delivery's immutable
     marker. That prevents an older turn, which may complete after a newer intent is persisted,
@@ -751,7 +751,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     for event in events:
         if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
             resumes.append(event)
-        if is_significant_card_event(event, linked_refs=refs):
+        if is_significant_observer_event(event, linked_refs=refs, sprint_ref=ref):
             significant.append(event)
     _acknowledge_delivery_from_resume(record.delivery, resumes)
     if not significant:

@@ -1,6 +1,6 @@
 ---
 name: observe-sprint
-description: "Run an open sprint as the observer head the dispatcher launched: recover state from the sprint entity and the live board, check the Definition of Done, cut one card at a time, watch it to a terminal state, work through reports and verdicts, write a resume entry after every significant transition, and communicate only through the board. This is the observer role's skill, not the interactive secretary's."
+description: "Run an open sprint as the observer head the dispatcher launched: recover semantic state from the sprint entity and board, cut one card at a time, classify Assessment and Blocked evidence, and write concise semantic resumes. The dispatcher owns waiting and wakes this head only when a decision is needed. This is the observer role's skill, not the interactive secretary's."
 ---
 
 # Observe Sprint
@@ -10,11 +10,13 @@ sprint closes. You are not the interactive secretary: its skills (`open-sprint`,
 apply to you, and knowledge documents are not your state.
 
 You are not a worker or a reviewer. Cards are claimed and executed by the dispatcher, and code is
-written by workers. Consume the worker report, reviewer verdict and any valid executed exact-SHA
-mechanical-gate receipt first. Only that receipt suppresses a routine broad rerun. A none/noop gate or
-missing receipt attests no broad suite: run or request appropriate validation when the decision needs
-it. Go into the code when evidence is absent or contradictory, a RED/Blocked finding needs
-classification, a real DoD gap remains, or a security/data-loss high-risk flag needs a targeted check.
+written by workers. The dispatcher owns waiting for worker, reviewer, CI and delivery state. End your
+turn after a durable semantic update; do not use `Monitor`, polling loops or periodic card/CI checks.
+Consume the worker report, reviewer verdict and any valid executed exact-SHA mechanical-gate receipt
+first. Only that receipt suppresses a routine broad rerun. A none/noop gate or missing receipt attests
+no broad suite: run or request appropriate validation when the decision needs it. Go into the code only
+as an escalation when evidence is absent or contradictory, a RED/Blocked finding is high risk, a reslice
+is needed, a real Definition-of-Done gap remains, or a security/data-loss flag needs a targeted check.
 
 Your memory is the sprint entity and the live board, not the transcript. Anything not written there
 disappears when the head restarts.
@@ -63,9 +65,12 @@ served from data (`sprint status`, `task list --sprint`) without you.
 
 ## The resume entry
 
-Write a resume entry after every significant transition. A significant transition is choosing the next
-step, creating a card, a card reaching a terminal state and being analysed, a Blocked, a hotfix, a
-change of plan at a budget threshold, a stop, and closing the sprint.
+Write a concise resume only when semantic state changes: choosing the next cut, analysing Assessment,
+classifying Blocked or a release failure, changing plan at a budget/human signal, stopping, or closing.
+Do **not** write one for a claim, worker report, Validate move, reviewer launch, routine routing, or
+your own previous decision. A straight-green card normally needs only its Assessment decision and the
+post-Done next-cut/close update. Keep each field to the delta a replacement head needs; do not repeat
+machine-derived CI, delivery or board telemetry.
 
 ```bash
 python3 -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
@@ -80,8 +85,9 @@ python3 -m secretary sprint resume --ref <sprint-ref> --role observer --body-fil
 ```
 
 They are an audit acknowledgement, not resume fields. Copy the exact pair from the live status or
-the wake message. Do not reuse a pair from an earlier turn, and do not invent one. A resume without
-the matching pair still records the six fields but does not acknowledge the wake.
+the wake message. Do not reuse a pair from an earlier turn, and do not invent one. The current
+protocol couples acknowledgement to this durable resume; do not reread delivery state or retry prose
+solely to prove the acknowledgement—the dispatcher owns redelivery and crash recovery.
 
 `<file.json>` is an object with all fields present, each a non-empty string:
 
@@ -107,22 +113,21 @@ You always start here, both on the first launch and after your own death.
 1. Read the sprint entity: goal, Definition of Done, repositories, status, budget, current task, resume
    entry, comments.
 2. Read the sprint's cards and their states, reports and verdicts.
-3. Read the report, verdict and any valid executed exact-SHA gate receipt for the active card before
-   any code, PR or CI research. Only such a receipt suppresses a broad rerun. With none/noop or missing
-   evidence, run or request the focused or broad validation the decision needs. Read the live system
-   for DoD items it directly confirms, or when evidence is missing, contradictory or high-risk.
-4. Compare the resume entry against the board. If they disagree, the board is right; write a new resume
-   entry with the real state before doing anything else.
+3. Start from the structured worker report, reviewer verdict and SHA-bound mechanical receipt when one
+    is present. Only a valid executed exact-SHA receipt suppresses a routine broad rerun; with none/noop
+    or missing evidence, run or request the focused or broad validation the decision needs.
+4. Compare the resume entry against the board. If they disagree, the board is right; record a concise
+    semantic correction only if it changes the next decision.
 5. If the sprint already has an active card (the current task, or a card in Ready, In progress,
    Validate or Assessment), keep watching it. Do not create a second one.
 6. If the sprint's status is closed or stopped, start nothing.
 
 ## 2. Check whether the goal is reached
 
-Before each new card, check the Definition of Done using the smallest evidence that answers it: the
-current default branch and live system only where they directly matter, plus the structured worker,
-reviewer and gate artifacts for closed work. If the goal is reached, do not create work; move to closing.
-If the evidence is insufficient, your own targeted check can be the next step.
+Before each new card, check the Definition of Done from the available structured evidence and merged
+state. If the goal is reached, do not create work; move to closing. Read code, a diff, CI or the live
+system only for the escalation cases above. Never rerun a broad suite that a valid exact-SHA gate receipt
+already attested; if the receipt is none/noop or missing, do not infer that a broad suite passed.
 
 There is no decomposition of the DoD into phases and tick-boxes. The path to the goal is rewritten at
 every step.
@@ -214,12 +219,11 @@ mechanical trivial change.
 
 A card that pulls changes beyond its own repository is cut into a chain with `--blocked-by`.
 
-## 6. Watch the card to a terminal state
+## 6. Let the dispatcher wait for the card
 
-Do not end the step while the card is in Ready, In progress or Validate, while checks are queued or
-running, or before the pull request reaches a terminal result. Watch the card's state and structured
-reports/verdicts/receipts first; inspect the pull request or CI only when that primary evidence leaves
-a decision-relevant gap.
+After cutting a card, end the turn. Do not watch its state, poll its comments, wait for CI, or use
+`Monitor`. The dispatcher owns those waits and wakes you only for Assessment, Blocked, Done/release
+failure, a budget/human signal, or an initial/no-active-card next-cut decision.
 
 Assessment is not a terminal state either, and it is the one column that waits for you rather than for
 a machine. Every substantive reviewer verdict parks the card there, green or red: the reviewer is
@@ -287,14 +291,15 @@ Do not preempt an unusual but contract-compatible implementation.
 
 ## 7. Analyse the result
 
-After a terminal state, read the content rather than the headline, in this order:
+At Assessment, read the structured evidence rather than repeating the mechanics:
 
 - worker reports and card comments;
 - every reviewer verdict, including non-blocking remarks in a green review: those either go into the next
   card or are explicitly rejected with a reason;
-- the SHA-bound gate attestation in the Assessment delivery or release audit;
-- the pull request, final diff, CI and merge result only if the preceding evidence is missing,
-  contradictory, RED/Blocked, or signals a real DoD or security/data-loss risk;
+- the SHA-bound gate receipt and merge/release result;
+- the SHA-bound gate receipt and merge/release result; inspect the pull request, final diff or CI only
+  if the preceding evidence is missing, contradictory, RED/Blocked, or signals a real DoD or
+  security/data-loss risk;
 - new constraints, disproved premises, deferred findings;
 - the live state of the system after a self-deploy, if there was one.
 
@@ -304,7 +309,8 @@ appropriate validation. For a concrete claim, prefer a focused reviewer retry or
 record why it was necessary.
 
 A card does not have to close a Definition of Done item that was named in advance: what matters is the
-actual contribution. Record the conclusion in a resume entry and return to step 2.
+actual contribution. Open code, a final diff or one targeted reproduction only for missing or conflicting
+evidence, high risk, reslice, or a concrete DoD gap. Record the conclusion concisely and return to step 2.
 
 ## 8. Work through a Blocked card
 
