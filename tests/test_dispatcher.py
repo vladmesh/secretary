@@ -9051,6 +9051,52 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertEqual(status["reason"], "pid")
         self.assertTrue(status["pid_confirmed"])
 
+    def test_a_freshly_respawned_head_with_no_pid_file_yet_is_live_within_the_launch_grace_window(
+        self,
+    ) -> None:
+        """secretary-1158: the dispatcher clears the pid file before a fresh launch and the new
+        head has not written its own yet, so right after a respawn neither identity answers. A
+        watchdog tick landing in that window used to read a live head as missing-terminal and,
+        being the second one, escalated straight to Blocked without the head ever failing."""
+        host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
+
+        status = host.worker_status(
+            self.task,
+            self._record(handle="term-worker", worker_leaf="", worker_started_at=time.time()),
+        )
+
+        self.assertTrue(status["live"])
+        self.assertEqual(status["reason"], "pid-not-written-yet")
+        self.assertFalse(status["pid_confirmed"])
+
+    def test_a_reviewer_with_no_pid_file_yet_is_live_within_the_launch_grace_window(self) -> None:
+        host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
+
+        status = host.review_status(
+            self.task,
+            self._record(review_handle="term-review", review_leaf="", review_started_at=time.time()),
+        )
+
+        self.assertTrue(status["live"])
+        self.assertEqual(status["reason"], "pid-not-written-yet")
+
+    def test_a_head_with_no_pid_file_past_the_launch_grace_window_is_missing(self) -> None:
+        """The grace window is short and bounded: once it has passed, a still-unwritten pid file
+        goes back to being read as a dead head, same as before this fix."""
+        host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
+
+        status = host.worker_status(
+            self.task,
+            self._record(
+                handle="term-worker",
+                worker_leaf="",
+                worker_started_at=time.time() - initial_output_stall_seconds() - 1,
+            ),
+        )
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["reason"], "missing-terminal")
+
     def test_a_persisted_handle_that_matches_nothing_with_a_dead_head_is_missing(self) -> None:
         """The heartbeat is evidence, not an amnesty: without it the verdict stays unchanged."""
         Path(pid_file_path("worker", self.task["ref"])).write_text(
