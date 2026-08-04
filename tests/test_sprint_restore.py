@@ -132,7 +132,7 @@ class SprintRestoreTests(unittest.TestCase):
             exported["repositories"], [_root("secretary"), _root("secretary-instance")],
         )
         self.assertEqual(exported["budget"]["by_type"]["red_ci"], 1)
-        self.assertEqual(exported["current_task"], "secretary-26")
+        self.assertEqual(exported["current_task"], "secretary-13")
         self.assertEqual(exported["resume"]["selected_step"], RESUME["selected_step"])
         self.assertEqual([comment["text"] for comment in exported["comments"]],
                          ["[po]\nfirst note", "[sprint:resume]\n" + RESUME["selected_step"]])
