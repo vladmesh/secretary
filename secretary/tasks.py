@@ -1332,11 +1332,23 @@ class TaskWriter:
             current = self.reader.show(reference)
             if current["state"] != "assessment":
                 raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
-            visit, existing = assessment_resolution(self.audit.events(reference))
+            committed_events = self.audit.events(reference)
+            pending_decisions = [
+                event for event in self.audit.pending_events()
+                if str(event.get("ref") or "") == reference and str(event.get("kind") or "") == "decided"
+            ]
+            visit, existing = assessment_resolution([*committed_events, *pending_decisions])
             known_request = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
             if existing is not None and not known_request:
                 existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
                 existing_kind = str(existing_payload.get("decision") or "")
+                existing_request = str(existing.get("request_id") or "")
+                if self.audit.pending_event(existing_request) is not None:
+                    raise TaskError(
+                        "decision_pending",
+                        f"Assessment visit {visit} has an unfinished {existing_kind} decision; reconcile request {existing_request}",
+                        4,
+                    )
                 if existing_kind != kind:
                     raise TaskError("decision_already_recorded", f"Assessment visit {visit} already has a {existing_kind} decision", 3)
                 return {"action": "decided", "task": current, "event_id": str(existing.get("event_id") or existing.get("request_id") or ""), "replayed": True}

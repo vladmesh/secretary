@@ -1692,6 +1692,37 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(sum(isinstance(result, dict) for _kind, result in outcomes), 1)
         self.assertEqual(sum(isinstance(result, TaskError) for _kind, result in outcomes), 1)
 
+    def test_pending_decision_blocks_conflict_until_audit_reconcile(self) -> None:
+        self._park()
+        real_append = self.writer.audit.append
+        failed = [False]
+
+        def fail_once(request_id: str, event: dict) -> str:
+            if event.get("kind") == "decided" and not failed[0]:
+                failed[0] = True
+                raise OSError("lost audit append")
+            return real_append(request_id, event)
+
+        with mock.patch.object(self.writer.audit, "append", side_effect=fail_once):
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self._decide("release", request_id="pending-release")
+        with self.assertRaisesRegex(TaskError, "unfinished release decision") as blocked:
+            self._decide("rework", request_id="conflicting-after-crash")
+        self.assertEqual(blocked.exception.code, "decision_pending")
+        comments = [
+            comment for comment in self.writer.reader.show("secretary-468")["comments"]
+            if comment.get("marker") == "decision:release"
+        ]
+        self.assertEqual(len(comments), 1)
+
+        repaired, unresolved = self.writer.reconcile()
+
+        self.assertEqual((repaired, unresolved), (1, 0))
+        decisions = self.writer.audit.events("secretary-468", kind="decided")
+        self.assertEqual(len(decisions), 1)
+        replay = self._decide("release", request_id="delivery-after-repair")
+        self.assertTrue(replay["replayed"])
+
     def test_observer_wake_predicate_excludes_routine_and_self_card_events(self) -> None:
         refs = {"secretary-468"}
 

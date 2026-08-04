@@ -1507,6 +1507,57 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-idle"])
         self.assertEqual(self.host.observer_nudges, [])
 
+    def test_legacy_noise_batch_preserves_semantic_events_after_prior_cursor(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        for request, kind, payload in (
+            ("legacy-ack", "routing", {}),
+            ("semantic-assessment", "moved", {"to": "assessment"}),
+            ("legacy-active-noise", "routing", {}),
+        ):
+            self.audit.append(request, {
+                "event_id": "evt_" + request, "request_id": request,
+                "ref": "secretary-510-pilot", "kind": kind, "outcome": "success",
+                "actor": {"role": "dispatcher"}, "payload": payload, "occurred_at": _now(),
+            })
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        delivery = observers["sprint:1"].delivery
+        delivery.stage = DeliveryStage.AWAITING_ACK
+        delivery.acknowledged_through = "evt_legacy-ack"
+        delivery.delivery_id = "legacy-delivery"
+        delivery.through_event = "evt_legacy-active-noise"
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-nudged")
+        self.assertEqual(action["event_id"], "evt_semantic-assessment")
+        self.assertEqual(self.observers()["sprint:1"].delivery.through_event, "evt_semantic-assessment")
+
+    def test_unknown_active_legacy_cursor_fails_closed(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        delivery = observers["sprint:1"].delivery
+        delivery.stage = DeliveryStage.AWAITING_ACK
+        delivery.delivery_id = "legacy-delivery"
+        delivery.through_event = "evt_missing"
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-cursor-unavailable")
+        self.assertEqual(action["status"], "degraded")
+        self.assertEqual(self.host.observer_nudges, [])
+
     def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
         """Orca may rotate the handle while retaining leafId, so status must read the alias."""
         self.open_sprint()

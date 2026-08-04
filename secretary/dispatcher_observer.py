@@ -619,6 +619,11 @@ def _reconcile_open_sprint(
             record.stopped_reason = ""
             record.paused_at = 0.0
         event = _observer_event_state(runtime, ref, record)
+        if not event.get("known", True):
+            _set_observer_state(record, "degraded", reason=event["reason"])
+            return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
+                    "action": "observer-cursor-unavailable", "head": record.head,
+                    "reason": event["reason"]}
         if event["pending"]:
             return _wake_for_event(runtime, payload, observers, ref, record, event)
         work = _observer_work_state(runtime, ref, record)
@@ -663,6 +668,11 @@ def _reconcile_open_sprint(
         and record.state != "pending"
     ):
         event = _observer_event_state(runtime, ref, record)
+        if not event.get("known", True):
+            _set_observer_state(record, "degraded", reason=event["reason"])
+            return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
+                    "action": "observer-cursor-unavailable", "head": record.head,
+                    "reason": event["reason"]}
         if not event["pending"]:
             _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
             return {
@@ -758,24 +768,28 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     cursor_at = _event_index(events, cursor)
     if cursor and cursor_at < 0:
         return {"known": False, "pending": False, "reason": "acknowledged observer cursor is unavailable"}
+    active_legacy_at = -1
     if record.delivery.stage != DeliveryStage.IDLE and record.delivery.through_event:
         active_at = _event_index(events, record.delivery.through_event)
-        if active_at >= 0 and not is_significant_observer_event(events[active_at], linked_refs=refs, sprint_ref=ref):
-            # The active legacy batch was for noise.  Durably advance past it before considering
-            # later semantic work; the enclosing reconciliation persists this replacement state.
-            _reset_delivery_to_idle(
-                record.delivery,
-                acknowledged_through=record.delivery.through_event,
-                acknowledged_delivery_id=record.delivery.delivery_id,
-                acknowledged_resume_id="",
-            )
-            cursor = record.delivery.acknowledged_through
-            cursor_at = active_at
+        if active_at < 0:
+            return {"known": False, "pending": False, "reason": "active observer cursor is unavailable"}
+        if not is_significant_observer_event(events[active_at], linked_refs=refs, sprint_ref=ref):
+            active_legacy_at = active_at
     following = events[cursor_at + 1:] if cursor_at >= 0 else events
     significant = [
         event for event in following
         if is_significant_observer_event(event, linked_refs=refs, sprint_ref=ref)
     ]
+    if active_legacy_at >= 0:
+        # Retire the obsolete batch without skipping semantic work which arrived after the prior
+        # acknowledged cursor. Only an empty semantic range permits advancing across the noise.
+        preserved_cursor = cursor if significant else record.delivery.through_event
+        _reset_delivery_to_idle(
+            record.delivery,
+            acknowledged_through=preserved_cursor,
+            acknowledged_delivery_id=record.delivery.delivery_id,
+            acknowledged_resume_id="",
+        )
     if not significant:
         return {"known": True, "pending": False, "reason": "no significant linked-card event"}
     latest = significant[-1]
