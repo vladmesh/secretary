@@ -40,7 +40,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from secretary.restore import _normalized_cards
+from secretary.restore import _normalized_cards, _restored_order_mismatch
 from secretary.product_issues import ProductIssueValidationError, validate_product_issue_records
 from secretary.tasks import TaskReader
 from tests.test_sprints import SprintKanboard
@@ -774,3 +774,64 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "could not create restored Product or Issue record"):
                 import_normalized_board(data_dir, client=RefusingBoard())
+
+
+class RestoredOrderParityTests(unittest.TestCase):
+    """Паритет расположения сверяет порядок, а не абсолютные номера позиций.
+
+    Kanboard держит позиции плотными среди активных задач, а закрытая задача
+    сохраняет устаревшее значение и слот не занимает. Поэтому экспорт живой доски
+    приходит с дырами и повторами: на восстановлении 745 карточек экспорт дал
+    [.. 13, 15, 16 ..] и пары 126,126 / 141,141 против плотных 1..142 на
+    восстановленной доске. Гейт по номерам делал восстановление любой установки с
+    закрытыми карточками принципиально непроходимым.
+    """
+
+    @staticmethod
+    def _card(reference: str, position: int, *, column: str = "Issues",
+              swimlane: str = "secretary", closed: bool = False) -> dict[str, object]:
+        return {
+            "reference": reference, "column": column, "swimlane": swimlane,
+            "position": position, "closed": closed,
+        }
+
+    def test_gaps_and_duplicates_pass_when_the_order_holds(self) -> None:
+        cards = [
+            self._card("a", 13), self._card("b", 15), self._card("c", 126),
+            self._card("d", 126), self._card("e", 141),
+        ]
+        actual = {"a": {"position": 1}, "b": {"position": 2}, "c": {"position": 3},
+                  "d": {"position": 4}, "e": {"position": 5}}
+
+        self.assertFalse(_restored_order_mismatch(cards, actual))
+
+    def test_a_swapped_pair_is_a_mismatch(self) -> None:
+        cards = [self._card("a", 1), self._card("b", 2)]
+        actual = {"a": {"position": 2}, "b": {"position": 1}}
+
+        self.assertTrue(_restored_order_mismatch(cards, actual))
+
+    def test_closed_cards_are_not_compared(self) -> None:
+        cards = [self._card("a", 1), self._card("gone", 2, closed=True), self._card("b", 3)]
+        # закрытая карточка получает от Kanboard произвольную позицию — это не расхождение
+        actual = {"a": {"position": 1}, "gone": {"position": 99}, "b": {"position": 2}}
+
+        self.assertFalse(_restored_order_mismatch(cards, actual))
+
+    def test_swimlanes_are_ordered_independently(self) -> None:
+        cards = [
+            self._card("a", 1, swimlane="secretary"), self._card("b", 2, swimlane="secretary"),
+            self._card("c", 1, swimlane="codegen"), self._card("d", 2, swimlane="codegen"),
+        ]
+        actual = {"a": {"position": 1}, "b": {"position": 2},
+                  "c": {"position": 1}, "d": {"position": 2}}
+
+        self.assertFalse(_restored_order_mismatch(cards, actual))
+
+    def test_a_duplicate_pair_keeps_the_reference_tiebreak(self) -> None:
+        """Повтор позиции разводится тем же тайбрейком, каким карточки раскладывались."""
+        cards = [self._card("zulu", 126), self._card("alpha", 126)]
+        actual = {"alpha": {"position": 1}, "zulu": {"position": 2}}
+
+        self.assertFalse(_restored_order_mismatch(cards, actual))
+        self.assertTrue(_restored_order_mismatch(cards, {"alpha": {"position": 2}, "zulu": {"position": 1}}))

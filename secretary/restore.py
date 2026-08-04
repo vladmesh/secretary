@@ -165,6 +165,9 @@ def import_normalized_board(
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed")
+            if _restored_order_mismatch(cards, actual):
+                _update_restore_state(data_dir, board="failed", board_parity="failed")
+                raise RestoreError("board parity check failed: restored card order")
             _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
         except TaskError as exc:
             raise RestoreError(exc.message) from None
@@ -745,6 +748,39 @@ def _restore_position(card: dict[str, Any]) -> int | None:
     return position if isinstance(position, int) and position > 0 else None
 
 
+def _restored_order_mismatch(cards: list[dict[str, Any]], actual: dict[str, dict[str, Any]]) -> bool:
+    """Сверяет порядок открытых карточек внутри (колонка, свимлейн).
+
+    Абсолютные номера позиций сравнивать нельзя. Kanboard держит позиции плотными
+    среди активных задач, а закрытая задача сохраняет устаревшее значение и перестаёт
+    занимать слот, поэтому экспорт живой доски содержит и дыры, и повторы: замерено на
+    восстановлении 745 карточек — экспорт [.. 13, 15, 16 ..] с парами 126,126 и 141,141
+    против плотных 1..142 на восстановленной доске. Две активные задачи на одной
+    позиции воспроизвести невозможно, так что гейт по номерам не проходим в принципе.
+
+    Восстановимо и осмысленно здесь относительное расположение. У закрытых карточек
+    позиции нет вовсе: их Kanboard в потоке колонки не держит.
+    """
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for card in cards:
+        if card.get("closed"):
+            continue
+        groups.setdefault((str(card["column"]), str(card.get("swimlane") or "")), []).append(card)
+    for group in groups.values():
+        # тот же порядок и тот же тайбрейк, которым карточки раскладывались
+        expected = [card["reference"] for card in sorted(group, key=_restore_card_order)]
+        live = sorted(
+            group,
+            key=lambda card: (
+                _positive_int(actual[card["reference"]].get("position")) or 0,
+                str(card["reference"]),
+            ),
+        )
+        if expected != [card["reference"] for card in live]:
+            return True
+    return False
+
+
 def _restore_card_order(card: dict[str, Any]) -> tuple[str, str, int, str]:
     return (
         str(card["column"]),
@@ -782,7 +818,7 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
             "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
             "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
             "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
-            "position": _restore_position(card),
+            # position здесь не сравнивается: см. _restored_order_mismatch
             "swimlane": str(card.get("swimlane") or "") or None,
             "comments": [{"body": body} for body in _restore_comments(card)],
             "product_issue_metadata": _product_issue_metadata(card["metadata"]),
@@ -797,7 +833,6 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
         "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
         "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
         "workspace": card.get("workspace"),
-        "position": card.get("position"),
         "swimlane": extensions.get("swimlane"),
         "comments": [{"body": str(comment.get("body") or "")} for comment in card.get("comments", [])],
         "product_issue_metadata": _product_issue_metadata(extensions),
