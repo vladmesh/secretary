@@ -84,6 +84,44 @@ from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.observer_identity import bind_observer
 
 
+class LegacyDispatcherRecordTests(unittest.TestCase):
+    """A record from before the continuation was one object is refused, not read as empty."""
+
+    def test_a_flat_continuation_record_is_refused(self) -> None:
+        with self.assertRaises(DispatcherError) as caught:
+            DispatcherRecord.from_json({
+                "state": "worker_retained",
+                "worker_retained_at": 1.0,
+                "worker_resume_delivery": "pending",
+            })
+
+        self.assertEqual(caught.exception.code, "unsupported_legacy_record")
+        self.assertIn("unsupported legacy dispatcher record", caught.exception.message)
+        self.assertIn("worker_retained_at", caught.exception.message)
+        self.assertIn("worker_resume_delivery", caught.exception.message)
+
+    def test_every_flat_field_is_refused_on_its_own(self) -> None:
+        for field_name in (
+            "worker_retained_at",
+            "worker_resume_delivery",
+            "worker_resume_phase",
+            "worker_resume_sent_at",
+        ):
+            with self.subTest(field=field_name):
+                with self.assertRaises(DispatcherError):
+                    DispatcherRecord.from_json({"state": "claimed", field_name: ""})
+
+    def test_a_current_record_still_loads(self) -> None:
+        continuation = WorkerContinuation()
+        continuation.begin_retention(10.0)
+        record = DispatcherRecord.from_json({
+            "state": "worker_retained",
+            "worker_continuation": continuation.to_json(),
+        })
+
+        self.assertTrue(record.worker_continuation.retained)
+
+
 class WorkerContinuationStateTests(unittest.TestCase):
     def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
         """A dropped session ends a plain retention. It does not end a park: the card is still

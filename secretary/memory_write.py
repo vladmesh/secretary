@@ -26,6 +26,7 @@ from secretary.memory_journal import (
     _read_memory_facts,
     _recover_journal_worktree,
     init_memory_journal,
+    reject_legacy_memory_journal,
 )
 from triggered_agents.runtime.redact import redact
 
@@ -567,6 +568,7 @@ def _apply_memory_write(
     `state/board`/`state/runs` at the same moment neither blocks this write nor
     picks up half of it.
     """
+    reject_legacy_memory_journal(memory_dir)
     facts_dir, _created = init_memory_journal(instance_dir)
     instance_dir = state_repo.require_repo(instance_dir)
     with state_repo.state_repo_lock(instance_dir):

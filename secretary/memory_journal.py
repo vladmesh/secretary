@@ -66,6 +66,35 @@ def init_memory_journal(instance_dir: Path) -> tuple[Path, bool]:
     return facts_dir, created
 
 
+def reject_legacy_memory_journal(memory_dir: Path) -> None:
+    """Refuse to write or publish while a pre-flatten journal sits in the data dir.
+
+    Facts live in `state/memory/facts` of the instance repo and nowhere else, so
+    a `<data-dir>/memory/facts` left by an older release holds facts this
+    release cannot read. Carrying them over on the fly is the compatibility
+    promise this product dropped, so the boundary refuses instead: the operator
+    moves them, and until then nothing writes a canon that silently excludes
+    them.
+    """
+    legacy = memory_dir / "facts"
+    if not _legacy_journal_facts(legacy):
+        return
+    raise MemoryProtocolError(
+        f"legacy memory journal is still present: {legacy}. "
+        "This release reads memory only from state/memory/facts in the instance repo; "
+        "move these facts there and remove the directory before writing memory again."
+    )
+
+
+def _legacy_journal_facts(legacy: Path) -> bool:
+    if (legacy / ".git").exists():
+        return True
+    try:
+        return any(legacy.rglob("*.md"))
+    except OSError:
+        return False
+
+
 def export_memory_snapshot(data_dir: Path, instance_dir: Path) -> MemoryExportSnapshot:
     """Refresh the derived export from the live facts in the private repo.
 
@@ -351,6 +380,7 @@ def _publish_memory_export(
     changed: bool,
     record_import: bool,
 ) -> None:
+    reject_legacy_memory_journal(memory_dir)
     try:
         staging = Path(
             tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir)

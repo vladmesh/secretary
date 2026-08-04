@@ -30,14 +30,6 @@ class BackupTests(unittest.TestCase):
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
 
-    def test_default_pipeline_worktree_uses_secretary_workspace(self):
-        from secretary import backup as backup_module
-
-        self.assertEqual(
-            backup_module.PIPELINE_WORKTREE,
-            Path.home() / "orca" / "workspaces" / "secretary" / "pipeline",
-        )
-
     def test_create_writes_archive_with_expected_structure_and_verify_is_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

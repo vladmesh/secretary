@@ -112,11 +112,6 @@ def product_manifest_path(product_root: Path | str) -> Path:
     return _absolute(product_root) / PRODUCT_MANIFEST_RELATIVE
 
 
-def roles_root(product_manifest: Path | str | None = None) -> Path:
-    """The canonical product skill sources, always beside the manifest that names them."""
-    return manifest_path(product_manifest).parent / "roles"
-
-
 def instance_dir(value: Path | str) -> Path:
     """The private repo root. An instance is named by its directory or by its instance.yaml."""
     path = _absolute(value)

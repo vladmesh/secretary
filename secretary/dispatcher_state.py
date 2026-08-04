@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from secretary.dispatcher_types import DispatcherError
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation
 
 
@@ -176,6 +177,29 @@ class DispatcherRecord:
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "DispatcherRecord":
+        # A record written before the continuation became one object carried the retention as flat
+        # fields. Nothing reads them any more, so loading such a record would report "no
+        # continuation" for a worker that is in fact frozen with a delivery pending: the lifecycle
+        # would then reuse or drop a head it cannot see. There is no conversion here on purpose,
+        # that is the compatibility promise this product dropped, so the load refuses instead.
+        legacy = [
+            field_name
+            for field_name in (
+                "worker_retained_at",
+                "worker_resume_delivery",
+                "worker_resume_phase",
+                "worker_resume_sent_at",
+            )
+            if field_name in payload
+        ]
+        if legacy:
+            raise DispatcherError(
+                "unsupported_legacy_record",
+                "unsupported legacy dispatcher record: flat continuation fields "
+                f"{', '.join(legacy)}; this release stores the retention under "
+                "'worker_continuation'. Let the recorded worker finish or clear the record "
+                "before upgrading.",
+            )
         return cls(
             worker=str(payload.get("worker") or ""),
             workspace=str(payload.get("workspace") or ""),

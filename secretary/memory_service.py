@@ -138,22 +138,6 @@ def mark_search_not_ready(error: Exception | None = None) -> None:
     _ready_event.clear()
 
 
-def add_memory(text: str, tags=None, source=None) -> int:
-    conn = db()
-    cur = conn.execute(
-        "INSERT INTO memories(text, tags, source, created_at) VALUES (?,?,?,?)",
-        (text, tags, source, datetime.datetime.utcnow().isoformat()),
-    )
-    rid = cur.lastrowid
-    conn.execute(
-        "INSERT INTO vec_memories(rowid, embedding) VALUES (?, ?)",
-        (rid, sqlite_vec.serialize_float32(embed_doc(text).tolist())),
-    )
-    conn.commit()
-    conn.close()
-    return rid
-
-
 def normalize_scope(scope: str | None) -> str | None:
     """Accept "global", "project:<dir>" or a bare project dir name ("orca" → "project:orca")."""
     if not scope:
@@ -736,7 +720,7 @@ def start_canon_watcher() -> None:
 mcp = FastMCP("memory", host="127.0.0.1", port=PORT)
 
 # Memory is read-only for agents: only the curator writes (the markdown canon, then a reindex).
-# The internal add_memory is kept for migration and self-test but is not exposed over MCP.
+# Nothing here writes the index directly; the index is derived from the canon by a reindex.
 
 
 @mcp.tool()
