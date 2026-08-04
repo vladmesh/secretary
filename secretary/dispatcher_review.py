@@ -110,14 +110,22 @@ def command_terminal_status(
                 status["idle"] = work != "working"
                 status["idle_reason"] = work
         return status
-    if not pane_known:
-        # A head adopted from a launch intent (secretary-820): its bring-up outlived the tick that
-        # started it, so no pane identity was ever persisted for it. The pid heartbeat proves the
-        # process is running, and respawning it for want of a handle would be exactly the second
-        # head the intent contour exists to prevent.
-        pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
-        if pid_status.get("known") and pid_status.get("alive"):
-            return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
+    # No pane in the inventory answers to this head. Two ways to get here, one verdict:
+    #
+    #   * no identity was ever persisted — a head adopted from a launch intent (secretary-820)
+    #     whose bring-up outlived the tick that started it;
+    #   * an identity was persisted and matches nothing. `orca terminal create` returns a handle
+    #     the inventory does not always list back (measured 2026-08-04: 0/3 on one worktree, 3/3
+    #     on another, stable across a 2s re-read), and `worker_leaf` is empty whenever the leaf
+    #     lookup that keys on that same handle came back empty. `dispatcher_state` already calls
+    #     this the handle-alias problem.
+    #
+    # In both the pid heartbeat is the stronger evidence: it proves this exact process runs. A
+    # pane we cannot name is not a dead head, and respawning over a live one is the second head
+    # the intent contour exists to prevent.
+    pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
+    if pid_status.get("known") and pid_status.get("alive"):
+        return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
     return {"known": True, "live": False, "reason": "missing-terminal"}
 
 

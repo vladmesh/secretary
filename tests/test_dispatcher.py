@@ -9035,6 +9035,34 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertFalse(status["live"])
         self.assertEqual(status["reason"], "missing-terminal")
 
+    def test_a_persisted_handle_the_inventory_never_lists_is_live_on_its_heartbeat(self) -> None:
+        """secretary-1158: `orca terminal create` can return a handle `terminal list` never lists
+        back, and the leaf lookup that would have saved us keys on that same handle, so
+        `worker_leaf` stays empty. A persisted-but-unmatchable identity used to make the heartbeat
+        unreachable and killed three live heads in a row, 1-2 minutes into each round."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._live_pid()), encoding="utf-8"
+        )
+        host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
+
+        status = host.worker_status(self.task, self._record(handle="term-worker", worker_leaf=""))
+
+        self.assertTrue(status["live"])
+        self.assertEqual(status["reason"], "pid")
+        self.assertTrue(status["pid_confirmed"])
+
+    def test_a_persisted_handle_that_matches_nothing_with_a_dead_head_is_missing(self) -> None:
+        """The heartbeat is evidence, not an amnesty: without it the verdict stays unchanged."""
+        Path(pid_file_path("worker", self.task["ref"])).write_text(
+            str(self._dead_pid()), encoding="utf-8"
+        )
+        host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
+
+        status = host.worker_status(self.task, self._record(handle="term-worker", worker_leaf=""))
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["reason"], "missing-terminal")
+
     def test_a_head_silent_since_launch_is_still_live_while_its_process_runs(self) -> None:
         """The pid signal must not read silence as death: a head that has said nothing since it
         started is a separate, pre-existing case (secretary-726's short initial-output window),
