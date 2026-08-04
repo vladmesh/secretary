@@ -120,6 +120,25 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
 
         self.assertTrue(record.worker_continuation.retained)
 
+    def test_gate_receipt_and_rereview_context_round_trip(self) -> None:
+        receipt = {
+            "validated_sha": "a" * 40,
+            "base_sha": "b" * 40,
+            "gate_mode": "github",
+            "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
+            "completed_at": "2026-08-04T00:00:00+00:00",
+            "command_or_workflow_digest": "c" * 64,
+        }
+        restored = DispatcherRecord.from_json({
+            "gate_attestation": receipt,
+            "previous_reviewed_sha": "d" * 40,
+            "previous_blockers": "BLOCKER-keeps-state: reachable failure",
+        })
+
+        self.assertEqual(restored.gate_attestation, receipt)
+        self.assertEqual(restored.previous_reviewed_sha, "d" * 40)
+        self.assertIn("BLOCKER-keeps-state", restored.to_json()["previous_blockers"])
+
 
 class WorkerContinuationStateTests(unittest.TestCase):
     def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
@@ -3216,6 +3235,37 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # checkout, and the round keeps a conversation for a red verdict to continue.
         self.assertNotIn("stop_head:worker", self.host.calls)
         self.assertIn("confirm_worker_retained", self.host.calls)
+
+    def test_attested_gate_reaches_assessment_and_release_audit(self) -> None:
+        self.start_dispatcher()
+        receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": "base-0123456789abcdef",
+            "gate_mode": "github",
+            "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
+            "completed_at": "2026-08-04T00:00:00+00:00",
+            "command_or_workflow_digest": "a" * 64,
+        }
+        self.host.gate_results = [
+            GateResult("green", "pre-review", attestation=receipt),
+            GateResult("green", "park", attestation=receipt),
+            GateResult("green", "release", attestation=receipt),
+        ]
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="green",
+            body="green", request_id="attested-green",
+        )
+        self.assertEqual(self.tick()["to"], "assessment")
+        assessment = self.reader.show("secretary-510-pilot")["comments"][-2]["body"]
+        self.assertIn("Assessment delivery", assessment)
+        self.assertIn("validated_sha: " + self.host.commit, assessment)
+
+        self._decide("release", request_id="attested-release")
+        self.assertEqual(self.tick()["to"], "done")
+        comments = self.reader.show("secretary-510-pilot")["comments"]
+        self.assertTrue(any("release audit" in item["body"] for item in comments))
 
     def test_gate_red_reuses_the_retained_worker_conversation(self) -> None:
         """A live TUI session keeps both its terminal identity and its provider conversation."""
@@ -6575,6 +6625,32 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("compatibility promise", doc)
         self.assertIn("do not silently widen the supported boundary or decide sprint scope", doc)
 
+    def test_review_prompt_uses_an_exact_sha_receipt_and_delta_packet(self) -> None:
+        record = DispatcherRecord(
+            worker="worker", workspace="", handle="", head="codex", review_head="reviewer",
+            attempt_id="attempt-1", comment_baseline=0, review_baseline=3, state="validate", claimed_at=0,
+            gate_attestation={
+                "validated_sha": "a" * 40,
+                "base_sha": "b" * 40,
+                "gate_mode": "github",
+                "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
+                "completed_at": "2026-08-04T00:00:00+00:00",
+                "command_or_workflow_digest": "c" * 64,
+            },
+            previous_reviewed_sha="d" * 40,
+            previous_blockers="BLOCKER-keeps-state: reachable failure",
+        )
+        doc = self.host._review_prompt(self.task, "attempt-1", 3, record=record)
+
+        self.assertIn("validated_sha: " + "a" * 40, doc)
+        self.assertIn("base_sha: " + "b" * 40, doc)
+        self.assertIn("command_or_workflow_digest", doc)
+        self.assertIn("do not rerun that broad command or suite", doc)
+        self.assertIn("rerun_reason", doc)
+        self.assertIn("previous_reviewed_sha: " + "d" * 40, doc)
+        self.assertIn("BLOCKER-keeps-state", doc)
+        self.assertIn("do not restart", doc)
+
     def test_body_file_lives_outside_the_workspace(self) -> None:
         """A body file inside the worktree would make `git status` dirty, and the done-report
         check rejects a dirty workspace."""
@@ -8217,6 +8293,20 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "test -f work.txt"}})
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "green")
+
+    def test_local_gate_green_materializes_exact_sha_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "test -f work.txt"}})
+            result = host.gate_check(self._task(), self._record(ws))
+            expected = git(ws, "rev-parse", "HEAD")
+            expected_base = git(ws, "rev-parse", "origin/main")
+        assert result.attestation is not None
+        self.assertEqual(result.attestation["validated_sha"], expected)
+        self.assertEqual(result.attestation["base_sha"], expected_base)
+        self.assertEqual(result.attestation["gate_mode"], "local")
+        self.assertEqual(result.attestation["required_checks"][0]["conclusion"], "SUCCESS")
+        self.assertRegex(str(result.attestation["command_or_workflow_digest"]), r"^[0-9a-f]{64}$")
 
     def test_local_gate_red_on_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

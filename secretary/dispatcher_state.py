@@ -47,6 +47,9 @@ class DispatcherRecord:
     # rollup first went non-terminal, driving the pending watchdog.
     gate_state: str = ""
     gate_pending_since: float = 0.0
+    # SHA-bound result of the last green mechanical gate.  It is an evidence receipt, not a
+    # cache key: release still re-runs the gate immediately before merge.
+    gate_attestation: dict[str, Any] = field(default_factory=dict)
     # Last checkout rejected by a mechanical gate or red review in this attempt. A worker that
     # reports done again at this exact SHA has not produced a new result, so the dispatcher can
     # return it to rework once and then escalate instead of looping forever.
@@ -61,6 +64,11 @@ class DispatcherRecord:
     review_handle: str = ""
     review_leaf: str = ""
     review_commit: str = ""
+    # Re-review packet: the last rejected checkout and the reviewer's prior blocker text.  These
+    # survive the red transition so the next independent reviewer can inspect the delta rather
+    # than rediscovering the full historical diff.
+    previous_reviewed_sha: str = ""
+    previous_blockers: str = ""
     # The worker pane has the same handle-alias problem as the reviewer pane.  Keep its leafId
     # too, so an inventory alias cannot turn a live worker into a missing-terminal respawn.
     worker_leaf: str = ""
@@ -137,6 +145,7 @@ class DispatcherRecord:
             "comment_baseline": self.comment_baseline,
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
+            "gate_attestation": dict(self.gate_attestation),
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
@@ -147,6 +156,8 @@ class DispatcherRecord:
             "report_decision": self.report_decision,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
+            "previous_reviewed_sha": self.previous_reviewed_sha,
+            "previous_blockers": self.previous_blockers,
             "review_handle": self.review_handle,
             "review_head": self.review_head,
             "review_leaf": self.review_leaf,
@@ -225,11 +236,14 @@ class DispatcherRecord:
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
+            gate_attestation=_run_snapshot(payload.get("gate_attestation")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),
+            previous_reviewed_sha=str(payload.get("previous_reviewed_sha") or ""),
+            previous_blockers=str(payload.get("previous_blockers") or ""),
             worker_leaf=str(payload.get("worker_leaf") or ""),
             worker_pid_file=str(payload.get("worker_pid_file") or ""),
             review_pid_file=str(payload.get("review_pid_file") or ""),

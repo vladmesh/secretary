@@ -30,6 +30,7 @@ import json
 import os
 import re
 import subprocess
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +75,11 @@ class GateResult:
     # Stable identity of the failure, independent of the head SHA (which changes on every rework
     # commit): what the repeat-bounce check compares round to round. Empty for green/pending.
     fingerprint: str = ""
+    # A green result is reusable evidence only when it names the exact tree and the terminal
+    # checks which judged it.  The dispatcher persists this plain JSON object with the card so it
+    # can hand the same receipt to review, Assessment and the release audit without asking another
+    # role to repeat a broad suite.
+    attestation: dict[str, object] | None = None
 
 
 @dataclass
@@ -99,26 +105,38 @@ def gate_check(host, task: dict, record) -> GateResult:
     """Run the mechanical gate for `task` in the worker workspace. Raises HostError on gate infra
     failures (missing workspace, git/gh unreachable); returns a GateResult otherwise."""
     if getattr(host, "mode", "real") == "noop":
-        return GateResult("green", "noop gate")
+        return GateResult("green", "noop gate", attestation=_attestation(
+            validated_sha="", base_sha="", gate_mode="noop", required_checks=[], source="noop"
+        ))
     ci = _validation(host, task).get("ci") or "none"
-    if ci == "none":
-        return GateResult("green", "ci none: mechanical gate skipped")
     workspace = record.workspace
-    if not workspace or not Path(workspace).is_dir():
+    if ci != "none" and (not workspace or not Path(workspace).is_dir()):
         raise HostError("gate workspace is missing")
     base = host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+    if ci == "none":
+        return GateResult("green", "ci none: mechanical gate skipped", attestation=_attestation(
+            validated_sha=_head_sha(host, workspace), base_sha=_base_sha(host, workspace, base),
+            gate_mode="none", required_checks=[], source="none",
+        ))
     if _recover_base(host, workspace, base) == "conflict":
         return GateResult(
             "red",
             f"branch fell behind base {base!r} and the merge conflicts — resolve it in the "
             f"workspace and report done again",
             fingerprint=_fingerprint("base-conflict", base),
+            attestation=_attestation(
+                validated_sha=_head_sha(host, workspace), base_sha=_base_sha(host, workspace, base),
+                gate_mode=ci, required_checks=[], source="base-conflict",
+            ),
         )
     if ci == "local":
         return _local_gate(host, task, record, workspace)
     if ci == "github":
         return _github_gate(host, task, workspace, base, _required_checks(host, task))
-    return GateResult("green", f"ci {ci!r}: no mechanical gate")
+    return GateResult("green", f"ci {ci!r}: no mechanical gate", attestation=_attestation(
+        validated_sha=_head_sha(host, workspace), base_sha=_base_sha(host, workspace, base),
+        gate_mode=ci, required_checks=[], source=ci,
+    ))
 
 
 def _validation(host, task: dict) -> dict:
@@ -168,13 +186,20 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     if not isinstance(command, str) or not command.strip():
         raise HostError("local validation has no command")
     completed = host.run_capture(["bash", "-lc", command], "local gate", cwd=Path(workspace))
+    receipt = _attestation(
+        validated_sha=_head_sha(host, workspace),
+        base_sha=_base_sha(host, workspace, host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))),
+        gate_mode="local",
+        required_checks=[{"name": "local validation", "conclusion": "SUCCESS" if completed.returncode == 0 else "FAILURE", "url": ""}],
+        source=command,
+    )
     if completed.returncode == 0:
-        return GateResult("green", "local validation passed")
+        return GateResult("green", "local validation passed", attestation=receipt)
     tail = _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
     summary = "local validation failed"
     if _INFRA_MARK_RE.search(tail):
         summary += "; this looks like an infrastructure setup failure rather than a test failure"
-    return GateResult("red", summary, tail, fingerprint=_fingerprint("local", tail))
+    return GateResult("red", summary, tail, fingerprint=_fingerprint("local", tail), attestation=receipt)
 
 
 def _github_gate(host, task: dict, workspace: str, base: str, required: list[str] | None = None) -> GateResult:
@@ -183,10 +208,17 @@ def _github_gate(host, task: dict, workspace: str, base: str, required: list[str
     _ensure_pr(host, workspace, task, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
-    rollup, failed = _poll_ci(host, repo, sha, required or [])
+    rollup, failed, checked = _poll_ci(host, repo, sha, required or [])
+    receipt = _attestation(
+        validated_sha=sha,
+        base_sha=_base_sha(host, workspace, base),
+        gate_mode="github",
+        required_checks=[_terminal_check(item) for item in checked],
+        source=json.dumps([_terminal_check(item) for item in checked], sort_keys=True, separators=(",", ":")),
+    )
     short = sha[:12] or sha
     if rollup == "SUCCESS":
-        return GateResult("green", f"CI green for `{branch}` @ `{short}`")
+        return GateResult("green", f"CI green for `{branch}` @ `{short}`", attestation=receipt)
     if rollup == "FAILURE":
         job = (failed or {}).get("name") or (failed or {}).get("context") or "?"
         fragment = _failed_log(host, repo, failed or {})
@@ -199,8 +231,11 @@ def _github_gate(host, task: dict, workspace: str, base: str, required: list[str
         log = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
         cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
         fingerprint = _fingerprint("github", job, fragment.step, cause)
-        return GateResult("red", summary, log, fingerprint=fingerprint)
-    return GateResult("pending", f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet")
+        return GateResult("red", summary, log, fingerprint=fingerprint, attestation=receipt)
+    return GateResult(
+        "pending", f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
+        attestation=receipt,
+    )
 
 
 def _name_with_owner(host, workspace: str) -> str:
@@ -255,7 +290,7 @@ def _open_pr_number(host, workspace: str, branch: str) -> int | None:
         return None
 
 
-def _poll_ci(host, repo: str, sha: str, required: list[str] | None = None) -> tuple[str, dict | None]:
+def _poll_ci(host, repo: str, sha: str, required: list[str] | None = None) -> tuple[str, dict | None, list[dict]]:
     """Combined CI rollup for `sha`: GitHub-Actions check-runs plus legacy commit statuses,
     narrowed to `required` when the adapter declares a required set."""
     items: list[dict] = []
@@ -265,7 +300,59 @@ def _poll_ci(host, repo: str, sha: str, required: list[str] | None = None) -> tu
     statuses = _gh_api(host, f"repos/{repo}/commits/{sha}/status", jq=".statuses")
     if isinstance(statuses, list):
         items.extend(item for item in statuses if isinstance(item, dict))
-    return _rollup(items, required)
+    rollup, failed = _rollup(items, required)
+    return rollup, failed, _selected_checks(items, required or [])
+
+
+def _selected_checks(items: list[dict], required: list[str]) -> list[dict]:
+    """The exact checks the gate judged, in stable order, for an attestation receipt."""
+    selected = [item for item in items if not required or _check_name(item) in required]
+    return sorted(selected, key=lambda item: (_check_name(item), str(item.get("id") or item.get("context") or "")))
+
+
+def _terminal_check(item: dict) -> dict[str, str]:
+    conclusion = str(item.get("conclusion") or item.get("state") or item.get("status") or "").upper()
+    return {
+        "name": _check_name(item),
+        "conclusion": conclusion,
+        "url": str(item.get("details_url") or item.get("html_url") or item.get("target_url") or item.get("targetUrl") or ""),
+    }
+
+
+def _head_sha(host, workspace: str) -> str:
+    if not workspace:
+        return ""
+    try:
+        return host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate attestation head").stdout.strip()
+    except HostError:
+        return ""
+
+
+def _base_sha(host, workspace: str, base: str) -> str:
+    if not workspace or not base:
+        return ""
+    try:
+        return host._run(["git", "-C", workspace, "rev-parse", f"origin/{base}"], "gate attestation base").stdout.strip()
+    except HostError:
+        return ""
+
+
+def _attestation(*, validated_sha: str, base_sha: str, gate_mode: str, required_checks: list[dict[str, str]], source: str) -> dict[str, object]:
+    """Canonical, redaction-safe receipt for one mechanical gate result.
+
+    The digest intentionally carries only the command/workflow identity, never command output.
+    Check URLs and conclusions remain inspectable evidence, while any output or secret-like value
+    stays in the existing scrubbed failure path.
+    """
+    digest = hashlib.sha256(source.encode("utf-8", "surrogateescape")).hexdigest()
+    return {
+        "validated_sha": validated_sha,
+        "base_sha": base_sha,
+        "gate_mode": gate_mode,
+        "required_checks": required_checks,
+        "completed_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "command_or_workflow_digest": digest,
+    }
 
 
 def _gh_api(host, path: str, *, jq: str):

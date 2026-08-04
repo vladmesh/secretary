@@ -63,6 +63,27 @@ Assessment to Blocked with a reason, its usual escalation when nobody comes back
 workers and reviewers move nothing, there as everywhere else. A card left in Assessment past the
 steward's stale threshold is reported like any other stuck card.
 
+## SHA-bound mechanical gate evidence
+
+Every real mechanical gate result materializes a reusable receipt bound to one checkout:
+`validated_sha`, `base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion and URL),
+`completed_at`, and a `command_or_workflow_digest`. The dispatcher persists the receipt with the
+active card, renders it into `REVIEW.md`, writes it with the Assessment delivery, and writes a fresh
+receipt into the release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence,
+not permission to skip the pre-merge check or independent review.
+
+Workers use focused checks while developing and run no more than one local broad suite for a report
+generation/unchanged SHA unless they state why it was rerun. The authoritative broad run is the
+mechanical gate. Reviewers independently inspect changed code and invariants, but do not repeat an
+attested broad command on the same SHA without a recorded `rerun_reason`; targeted reproduction remains
+appropriate for a new blocker, uncovered external behaviour, or security/data-loss risk. Re-review
+packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path delta,
+so the next reviewer verifies the delta and closure rather than restarting at the original base.
+
+Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration, and
+do not run routine broad suites. Missing or contradictory evidence, RED/Blocked classification, a real
+Definition-of-Done gap, or a security/data-loss concern is the narrow escape hatch for focused research.
+
 A card parks only where a decision can come from: its sprint is open and declares a concrete
 observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
 closed, keeps the immediate behaviour, where the verdict acts on its own tick.

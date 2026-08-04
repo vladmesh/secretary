@@ -869,7 +869,10 @@ class CommandHostRuntime:
         delivery = getattr(record, "delivery", None)
         delivery_id = str(getattr(delivery, "delivery_id", "") or "")
         through_event = str(getattr(delivery, "through_event", "") or "")
-        message = "A linked card changed. Reread the live sprint board, take the next step, then record resume."
+        message = (
+            "A linked card changed. Read its worker report, reviewer verdict and SHA-bound gate receipt "
+            "first; do not run a routine broad suite. Take the next semantic step, then record resume."
+        )
         if delivery_id and through_event:
             message += (
                 " Acknowledge this delivery in that resume with --delivery-id "
@@ -956,7 +959,10 @@ class CommandHostRuntime:
             raise HostError("review workspace is missing")
         review_file = Path(record.workspace) / "REVIEW.md"
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
-        self._write_prompt(review_file, self._review_prompt(task, record.attempt_id, record.review_baseline))
+        self._write_prompt(
+            review_file,
+            self._review_prompt(task, record.attempt_id, record.review_baseline, record=record),
+        )
         launched = self._launch(
             record.workspace,
             review_pane_label(task["ref"]),
@@ -2069,6 +2075,13 @@ class CommandHostRuntime:
                 "",
             ]
         sections += [
+            "## Check-cost contract",
+            "",
+            "During development, run the smallest relevant checks first. Run at most one local broad",
+            "suite for this report generation and unchanged SHA when it is actually useful; name any",
+            "additional broad rerun and its reason in the report. The authoritative broad suite belongs",
+            "to the mechanical gate after your report, so do not repeat it merely to recreate CI.",
+            "",
             "## Scope of a rework",
             "",
             "Address a reviewer finding when its repair is local to this card. Use `report:blocked`",
@@ -2132,7 +2145,10 @@ class CommandHostRuntime:
         ]
         return "\n".join(sections)
 
-    def _review_prompt(self, task: dict[str, Any], attempt_id: str, review_round: int) -> str:
+    def _review_prompt(
+        self, task: dict[str, Any], attempt_id: str, review_round: int,
+        *, record: DispatcherRecord | None = None,
+    ) -> str:
         # The round belongs in the key for the same reason it does in the worker report id: a card
         # that goes red twice within one attempt reuses attempt_id, so a round-less id makes the
         # second verdict a replay of the first. TaskWriter then skips the mutation, the CLI still
@@ -2140,16 +2156,28 @@ class CommandHostRuntime:
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
-        return "\n".join([
+        attestation = _gate_attestation_for_prompt(record, self.head_commit(record) if record else "")
+        sections = [
             f"# Review {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
             "",
+            "## Mechanical gate attestation",
+            "",
+            _render_gate_attestation(attestation),
+            "",
+            "Independently inspect the diff, acceptance criteria and invariants. The attested broad",
+            "check above already passed on this exact SHA: do not rerun that broad command or suite on",
+            "the same SHA unless you record a concrete `rerun_reason`. A focused reproduction is allowed",
+            "for a new blocker, an uncovered external behaviour, or a security/data-loss high-risk need.",
+            "Mandatory CI and the exact-SHA pre-merge gate remain machinery-owned and are not waived.",
+            "",
             # One verdict carries every blocker the reviewer has. Holding some back for a later
             # round ratchets the card through extra worker attempts, and each of those costs the
             # sprint a budget event.
-            "A red verdict must list every blocker you have found in this round. Do not hold "
-            "blockers back for a later round and do not widen the scope on the next one.",
+            "A red verdict must list every blocker you have found in this round. Prefix each with a",
+            "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
+            "Do not hold blockers back for a later round and do not widen the scope on the next one.",
             "",
             "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
             "criterion or operational invariant, material assumptions, whether this branch introduced",
@@ -2169,7 +2197,41 @@ class CommandHostRuntime:
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
             f'{_PYTHONPATH_PREFIX} python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
             "",
-        ])
+        ]
+        if record and record.previous_reviewed_sha:
+            current = str(attestation.get("validated_sha") or "")
+            sections[4:4] = [
+                "## Re-review packet",
+                "",
+                f"previous_reviewed_sha: {record.previous_reviewed_sha}",
+                f"current_sha: {current or '(unavailable)'}",
+                "Changed paths / delta from the prior review:",
+                self._review_delta(record, record.previous_reviewed_sha, current),
+                "Previous blockers (close or explicitly retain these stable IDs):",
+                record.previous_blockers or "(legacy verdict had no structured blocker IDs)",
+                "Review this delta, the closure of prior blockers and collateral impact; do not restart",
+                "from the original base unless a concrete suspicion requires the historical diff.",
+                "",
+            ]
+        return "\n".join(sections)
+
+    def _review_delta(self, record: DispatcherRecord, previous: str, current: str) -> str:
+        """A small re-review packet; failure to read it is evidence, never a broad test fallback."""
+        if self.mode == "noop" or not record.workspace or not previous or not current:
+            return "(delta unavailable; inspect only the necessary history)"
+        paths = self.run_capture(
+            ["git", "-C", record.workspace, "diff", "--name-only", f"{previous}..{current}"],
+            "review delta paths",
+        )
+        stat = self.run_capture(
+            ["git", "-C", record.workspace, "diff", "--stat", f"{previous}..{current}"],
+            "review delta stat",
+        )
+        if paths.returncode or stat.returncode:
+            return "(delta unavailable; inspect only the necessary history)"
+        names = (paths.stdout or "").strip()
+        summary = (stat.stdout or "").strip()
+        return "\n".join(part for part in (names, summary) if part) or "(no changed paths)"
 
     def _run_shell(self, command: str, cwd: Path, label: str) -> None:
         self._run(["bash", "-lc", command], label, cwd=cwd)
@@ -3177,6 +3239,11 @@ class DispatcherRuntime:
                 return unconfirmed
             record.rejected_sha = reviewed
             record.rejected_done_reports = 0
+            # This is the only point at which both the last review body and the SHA it judged are
+            # still available. Keep them for the next review packet, rather than asking the next
+            # reviewer to reconstruct the whole card from its original base.
+            record.previous_reviewed_sha = reviewed
+            record.previous_blockers = _last_review_red_body(task) or ""
             if not self._parks_for_decision(task):
                 # No observer to release it: the verdict acts on its own tick, as it did before
                 # Assessment existed. The worker of this round stayed suspended through the gate
@@ -3611,6 +3678,9 @@ class DispatcherRuntime:
         if result.status == "green":
             record.gate_state = "green"
             record.gate_pending_since = 0.0
+            record.gate_attestation = _gate_attestation_for_prompt(
+                record, self.host.head_commit(record), result.attestation
+            )
             self.save_records(payload, records)
             return None
         if result.status == "pending":
@@ -3753,6 +3823,7 @@ class DispatcherRuntime:
         record.report_decision = continuation.decision_body
         record.gate_state = ""
         record.gate_pending_since = 0.0
+        record.gate_attestation = {}
         # The round the verdict judged is over here. A park keeps the reviewed commit while the
         # card waits; the rework this opens is new code, and a stale pin would refuse its merge.
         record.review_commit = ""
@@ -4182,6 +4253,23 @@ class DispatcherRuntime:
         the card moves once. Nothing here re-reads the verdict: the park carries its own reason.
         """
         continuation = record.worker_continuation
+        attestation = _gate_attestation_for_prompt(record, record.review_commit)
+        if attestation:
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                body=(
+                    "## Mechanical gate attestation — Assessment delivery\n\n"
+                    + _render_gate_attestation(attestation)
+                    + "\n\nThe observer consumes this receipt, the worker report and the reviewer verdict "
+                    "before opening code or running any check."
+                ),
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "gate-attestation-assessment", ref,
+                    str(continuation.report_baseline),
+                ),
+            )
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
@@ -4437,7 +4525,7 @@ class DispatcherRuntime:
         decision back down, and that machinery is a card of its own.
         """
         ref = task["ref"]
-        kind, _result, detail = self._merge_readiness(task, record)
+        kind, result, detail = self._merge_readiness(task, record)
         if kind == "pending":
             return {"status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
         if kind != "green":
@@ -4450,6 +4538,23 @@ class DispatcherRuntime:
                 action=f"release-{kind}-blocked", reason=f"Observer decision: release. {summary}",
                 step="assessment", outcome=f"release {kind}",
             )
+        assert result is not None
+        record.gate_attestation = _gate_attestation_for_prompt(
+            record, self.host.head_commit(record), result.attestation
+        )
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                "## Mechanical gate attestation — release audit\n\n"
+                + _render_gate_attestation(record.gate_attestation)
+                + "\n\nExact-SHA pre-merge gate is green; merge follows as a separate effect."
+            ),
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-attestation-release", ref),
+        )
+        records[ref] = record
+        self.save_records(payload, records)
         return self._release_effect(
             task, record, records, payload, attempt_id, step="assessment",
             move_reason=f"Observer decision: release. {reason}".strip(),
@@ -4726,6 +4831,67 @@ def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, ow
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
+
+
+def _gate_attestation_for_prompt(
+    record: DispatcherRecord | None,
+    current_sha: str = "",
+    candidate: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return a complete persisted receipt, never a guessed substitute.
+
+    A FakeHost or a legacy record may have only the old boolean ``gate_state``.  Treat that as
+    unavailable evidence instead of inventing a SHA: the exact binding is the safety property.
+    ``current_sha`` is deliberately only a consistency check for callers that already hold one.
+    """
+    source = candidate if isinstance(candidate, dict) else getattr(record, "gate_attestation", {})
+    if not isinstance(source, dict):
+        return {}
+    required = {
+        "validated_sha", "base_sha", "gate_mode", "required_checks", "completed_at",
+        "command_or_workflow_digest",
+    }
+    if not required.issubset(source):
+        return {}
+    validated = str(source.get("validated_sha") or "")
+    if current_sha and validated and validated != current_sha:
+        return {}
+    checks = source.get("required_checks")
+    if not isinstance(checks, list):
+        return {}
+    return {
+        "validated_sha": validated,
+        "base_sha": str(source.get("base_sha") or ""),
+        "gate_mode": str(source.get("gate_mode") or ""),
+        "required_checks": [dict(item) for item in checks if isinstance(item, dict)],
+        "completed_at": str(source.get("completed_at") or ""),
+        "command_or_workflow_digest": str(source.get("command_or_workflow_digest") or ""),
+    }
+
+
+def _render_gate_attestation(attestation: dict[str, object]) -> str:
+    """Compact human-readable receipt used in role packets and durable board audit comments."""
+    if not attestation:
+        return "No SHA-bound receipt is available (legacy/no-op host); do not treat this as an attested broad check."
+    checks = attestation.get("required_checks")
+    check_lines = []
+    if isinstance(checks, list):
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            name = str(check.get("name") or "(unnamed check)")
+            conclusion = str(check.get("conclusion") or "UNKNOWN")
+            url = str(check.get("url") or "")
+            check_lines.append(f"  - {name}: {conclusion}" + (f" ({url})" if url else ""))
+    return "\n".join([
+        f"- validated_sha: {attestation.get('validated_sha') or '(unavailable)'}",
+        f"- base_sha: {attestation.get('base_sha') or '(unavailable)'}",
+        f"- gate_mode: {attestation.get('gate_mode') or '(unavailable)'}",
+        "- required terminal checks:",
+        *(check_lines or ["  - (none declared)"]),
+        f"- completed_at: {attestation.get('completed_at') or '(unavailable)'}",
+        f"- command_or_workflow_digest: {attestation.get('command_or_workflow_digest') or '(unavailable)'}",
+    ])
 
 
 def _continuation_prompt(
