@@ -269,8 +269,10 @@ install, prints no values and adds it to no commit.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
 validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed
-runtime. It uses `heads/source.yaml` to identify the installed heads canon, checkout and revision;
-the recovery path does not silently substitute a checkout or heads file from the host.
+runtime. `heads/source.yaml` is provenance for the installed heads snapshot: it records the canon,
+checkout and revision the snapshot came from and supports the read-only host-packaging lookup.
+Recovery selects the product root to materialise from `--product-root` or the configured/default root;
+the pin does not select that checkout or protect the snapshot from a different selected host checkout.
 
 Parity is checked separately for cards and for sprints, and both checks are fail-closed: a mismatch
 leaves recovery unfinished and visible in `doctor` rather than silently counting the restore as
