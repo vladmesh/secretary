@@ -238,6 +238,8 @@ def deliver_interactive_prompt(
     visibly started. A caller whose proof arrives later sets `ack_out_of_band` and passes no
     callback at all; it gets `DELIVERY_ACCEPTED` as soon as the pane has taken the prompt.
     """
+    if ack_out_of_band and confirm is not None:
+        raise ValueError("out-of-band delivery cannot use a synchronous confirmation callback")
     if confirm is None and not ack_out_of_band:
         raise ValueError("interactive delivery requires a confirmation criterion")
     wait_for_tui_idle(handle, run_json=run_json)

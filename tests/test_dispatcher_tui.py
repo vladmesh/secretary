@@ -28,6 +28,27 @@ from tests.test_dispatcher_observer import (
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
+    def test_out_of_band_delivery_rejects_confirm_before_touching_terminal(self) -> None:
+        terminal_calls: list[list[str]] = []
+        callback_calls = [0]
+
+        def run_json(command: list[str]) -> dict:
+            terminal_calls.append(command)
+            return {}
+
+        def confirm(_sent_at: float) -> bool:
+            callback_calls[0] += 1
+            return True
+
+        with self.assertRaisesRegex(ValueError, "out-of-band delivery cannot use"):
+            deliver_interactive_prompt(
+                "term-observer", "wake", run_json=run_json,
+                confirm=confirm, ack_out_of_band=True,
+            )
+
+        self.assertEqual(terminal_calls, [])
+        self.assertEqual(callback_calls[0], 0)
+
     def test_claude_turn_detection_accepts_real_status_lines(self) -> None:
         def run_json(command: list[str]) -> dict:
             return {"terminal": {"tail": [
