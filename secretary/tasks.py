@@ -423,6 +423,14 @@ class TaskAudit:
         self.events_path = os.path.join(self.board_dir, "events.ndjson")
         self.pending_dir = os.path.join(self.board_dir, "pending-audit")
         self.lock_path = os.path.join(self.board_dir, ".audit.lock")
+        # Индекс request_id -> смещение строки в журнале. Дочитывается инкрементально,
+        # только новые байты. Без него committed_event разбирал весь events.ndjson на
+        # каждой записи, а append/stage зовут его на каждое событие: прогон получался
+        # квадратичным по числу событий.
+        self._committed_offsets: dict[str, int] = {}
+        self._committed_read = 0
+        self._committed_ident: tuple[int, int] | None = None
+        self._committed_anchor = b""
 
     def _pending_path(self, request_id: str) -> str:
         """Keep untrusted request ids out of the installation filesystem layout."""
@@ -560,17 +568,84 @@ class TaskAudit:
             return []
         return result
 
-    def committed_event(self, request_id: str) -> dict[str, Any] | None:
+    def _anchor_intact(self) -> bool:
+        """Лежит ли последняя прочитанная строка всё там же.
+
+        Журнал по контракту только дописывается, но переписать его на месте может
+        починка: inode тот же, размер не меньше, и одних stat-полей не хватает.
+        Проверка якоря ловит это за одно короткое чтение вместо полного разбора.
+        """
+        if not self._committed_anchor:
+            return True
+        start = self._committed_read - len(self._committed_anchor)
+        if start < 0:
+            return False
         try:
-            with open(self.events_path, encoding="utf-8") as events:
-                for line in events:
-                    if line.strip():
-                        candidate = json.loads(line)
-                        if candidate.get("request_id") == request_id:
-                            return candidate
+            with open(self.events_path, "rb") as events:
+                events.seek(start)
+                return events.read(len(self._committed_anchor)) == self._committed_anchor
+        except OSError:
+            return False
+
+    def _refresh_committed_index(self) -> None:
+        """Дочитать журнал с прошлой позиции, оставив недописанный хвост следующему разу."""
+        try:
+            stat = os.stat(self.events_path)
         except FileNotFoundError:
-            pass
-        return None
+            self._committed_offsets = {}
+            self._committed_read = 0
+            self._committed_ident = None
+            self._committed_anchor = b""
+            return
+        ident = (stat.st_dev, stat.st_ino)
+        if ident != self._committed_ident or stat.st_size < self._committed_read or not self._anchor_intact():
+            # журнал пересоздан, усечён или переписан — индекс больше не про этот файл
+            self._committed_offsets = {}
+            self._committed_read = 0
+            self._committed_ident = ident
+            self._committed_anchor = b""
+        if stat.st_size == self._committed_read:
+            return
+        with open(self.events_path, "rb") as events:
+            events.seek(self._committed_read)
+            chunk = events.read()
+        consumed = 0
+        for raw in chunk.splitlines(keepends=True):
+            if not raw.endswith(b"\n"):
+                break  # писатель не дописал строку; вернёмся к ней при следующем обновлении
+            offset = self._committed_read + consumed
+            consumed += len(raw)
+            self._committed_anchor = raw
+            if not raw.strip():
+                continue
+            try:
+                candidate = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(candidate, dict):
+                continue
+            request_id = candidate.get("request_id")
+            # первым побеждает самое раннее совпадение — так вёл себя скан сверху вниз
+            if isinstance(request_id, str) and request_id not in self._committed_offsets:
+                self._committed_offsets[request_id] = offset
+        self._committed_read += consumed
+
+    def committed_event(self, request_id: str) -> dict[str, Any] | None:
+        self._refresh_committed_index()
+        offset = self._committed_offsets.get(request_id)
+        if offset is None:
+            return None
+        try:
+            with open(self.events_path, "rb") as events:
+                events.seek(offset)
+                line = events.readline()
+        except FileNotFoundError:
+            return None
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            return None
+        return candidate if isinstance(candidate, dict) else None
 
     def pending_event(self, request_id: str) -> dict[str, Any] | None:
         self._require_v2_pending_layout()
@@ -582,11 +657,8 @@ class TaskAudit:
             return None
 
     def _has_request(self, request_id: str) -> bool:
-        try:
-            with open(self.events_path, encoding="utf-8") as events:
-                return any(json.loads(line).get("request_id") == request_id for line in events if line.strip())
-        except FileNotFoundError:
-            return False
+        self._refresh_committed_index()
+        return request_id in self._committed_offsets
 
     def _product_issue_pending(self, request_id: str) -> bool:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()

@@ -2433,3 +2433,94 @@ class RequestIdOwnershipTests(unittest.TestCase):
         self.assertIs(second["replayed"], True)
         self.assertEqual(len(self.client.tasks), cards)
         self.assertEqual(len(self._events("create-1")), 1)
+
+
+class AuditCommittedIndexTests(unittest.TestCase):
+    """committed_event читает журнал инкрементально, а не целиком на каждый вызов.
+
+    append()/stage() зовут committed_event на каждое событие, а тот разбирал весь
+    events.ndjson с начала. На восстановлении 745 карточек (~30k событий) это давало
+    квадратичный прогон: ~8 МБ JSON перечитывались на каждую запись, борд при этом
+    отвечал за 5-10 мс. Индекс обязан оставаться согласованным с файлом, который
+    дописывает другой процесс.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.audit = TaskAudit(self.tmpdir.name)
+        Path(self.audit.board_dir).mkdir(parents=True, exist_ok=True)
+
+    def _append_raw(self, payload: dict, terminated: bool = True) -> None:
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        with open(self.audit.events_path, "a", encoding="utf-8") as events:
+            events.write(line + ("\n" if terminated else ""))
+
+    def test_missing_file_reads_as_no_event(self) -> None:
+        self.assertIsNone(self.audit.committed_event("nope"))
+
+    def test_picks_up_events_appended_after_the_first_read(self) -> None:
+        self._append_raw({"request_id": "one", "event_id": "e1"})
+        self.assertEqual(self.audit.committed_event("one")["event_id"], "e1")
+        self.assertIsNone(self.audit.committed_event("two"))
+
+        self._append_raw({"request_id": "two", "event_id": "e2"})
+        self.assertEqual(self.audit.committed_event("two")["event_id"], "e2")
+        self.assertEqual(self.audit.committed_event("one")["event_id"], "e1")
+
+    def test_earliest_duplicate_wins(self) -> None:
+        self._append_raw({"request_id": "dup", "event_id": "first"})
+        self._append_raw({"request_id": "dup", "event_id": "second"})
+        self.assertEqual(self.audit.committed_event("dup")["event_id"], "first")
+
+    def test_half_written_line_is_not_consumed_until_terminated(self) -> None:
+        self._append_raw({"request_id": "done", "event_id": "e1"})
+        self._append_raw({"request_id": "torn", "event_id": "e2"}, terminated=False)
+
+        self.assertEqual(self.audit.committed_event("done")["event_id"], "e1")
+        self.assertIsNone(self.audit.committed_event("torn"))
+
+        with open(self.audit.events_path, "a", encoding="utf-8") as events:
+            events.write("\n")
+        self.assertEqual(self.audit.committed_event("torn")["event_id"], "e2")
+
+    def test_rebuilds_when_the_journal_is_replaced(self) -> None:
+        self._append_raw({"request_id": "old", "event_id": "e1"})
+        self.assertIsNotNone(self.audit.committed_event("old"))
+
+        with open(self.audit.events_path, "w", encoding="utf-8") as events:
+            events.write(json.dumps({"request_id": "new", "event_id": "e2"}) + "\n")
+
+        self.assertIsNone(self.audit.committed_event("old"))
+        self.assertEqual(self.audit.committed_event("new")["event_id"], "e2")
+
+    def test_garbage_lines_are_skipped(self) -> None:
+        with open(self.audit.events_path, "a", encoding="utf-8") as events:
+            events.write("not json\n")
+            events.write("[1,2,3]\n")
+            events.write("\n")
+        self._append_raw({"request_id": "good", "event_id": "e1"})
+        self.assertEqual(self.audit.committed_event("good")["event_id"], "e1")
+
+    def test_warm_index_answers_misses_without_reparsing_the_journal(self) -> None:
+        """Суть фикса: на прогретом индексе промах не разбирает журнал заново.
+
+        Именно этот путь исполнялся на каждой записи (append -> committed_event ->
+        промах -> запись) и стоил полного json-разбора всего файла.
+        """
+        for index in range(20):
+            self._append_raw({"request_id": f"r{index}", "event_id": f"e{index}"})
+        self.assertIsNotNone(self.audit.committed_event("r0"))  # прогреваем индекс
+
+        parsed: list[int] = []
+        real_loads = json.loads
+
+        def counting_loads(payload, *args, **kwargs):  # type: ignore[no-untyped-def]
+            parsed.append(1)
+            return real_loads(payload, *args, **kwargs)
+
+        with mock.patch("secretary.tasks.json.loads", counting_loads):
+            for index in range(20):
+                self.assertIsNone(self.audit.committed_event(f"missing-{index}"))
+
+        self.assertEqual(parsed, [])
