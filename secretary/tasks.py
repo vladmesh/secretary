@@ -288,7 +288,7 @@ def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str,
     cards: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for status_id in (1, 0):
-        response = client.call("getAllTasks", project_id=project_id, status_id=status_id) or []
+        response = client.call("getAllTasks", project_id=project_id, status_id=status_id)
         if not isinstance(response, list):
             raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
         for card in response:
@@ -311,13 +311,23 @@ def project_card_by_reference(
     card = client.call("getTaskByReference", project_id=project_id, reference=reference)
     if not isinstance(card, dict) or _task_is_active(card):
         return card if isinstance(card, dict) else None
-    active_cards = client.call("getAllTasks", project_id=project_id, status_id=1) or []
+    active_cards = client.call("getAllTasks", project_id=project_id, status_id=1)
     if not isinstance(active_cards, list):
         raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
     for candidate in active_cards:
         if isinstance(candidate, dict) and candidate.get("reference") == reference:
             return candidate
     return card
+
+
+def project_card_by_id(
+    client: KanboardClient, project_id: int, task_id: int
+) -> dict[str, Any] | None:
+    """Return the exact board row named by a recorded Kanboard task id."""
+    for card in all_project_cards(client, project_id):
+        if _positive_int(card.get("id")) == task_id:
+            return card
+    return None
 
 
 def next_project_reference(client: KanboardClient, project_id: int, project: str) -> str:
@@ -373,6 +383,20 @@ class TaskReader:
     def show(self, reference: str) -> dict[str, Any]:
         project_id, columns, swimlanes = self._board()
         card = project_card_by_reference(self.client, project_id, reference)
+        return self._show_card(card, columns, swimlanes)
+
+    def show_id(self, task_id: int) -> dict[str, Any]:
+        """Return one row by Kanboard id, without resolving a duplicate reference."""
+        project_id, columns, swimlanes = self._board()
+        card = project_card_by_id(self.client, project_id, task_id)
+        return self._show_card(card, columns, swimlanes)
+
+    def _show_card(
+        self,
+        card: dict[str, Any] | None,
+        columns: dict[int, str],
+        swimlanes: dict[int, str],
+    ) -> dict[str, Any]:
         if not isinstance(card, dict):
             raise TaskError("not_found", "task was not found", 2)
         task_id = _positive_int(card.get("id"))
@@ -903,9 +927,9 @@ class TaskWriter:
             "title_sha256": _digest(title),
             "description_sha256": _digest(description),
         }
-        # A create claims its request id the same way every other write does. Its ref is not
-        # compared: the backend assigns `PROJECT-N` when the caller passes no reference, so the
-        # card this call means is named by `payload["reference"]` and by nothing else yet.
+        # A create claims its request id the same way every other write does. Its reference is
+        # allocated under the board lock for automatic creates, and only becomes part of the
+        # staged event immediately before the atomic backend write.
         committed = self.audit.committed_event(request_id)
         if committed is not None:
             self.audit.require_claim(committed, kind="created", reference=None, identity=payload)
@@ -919,14 +943,14 @@ class TaskWriter:
             self.audit.require_claim(pending, kind="created", reference=None, identity=payload)
             try:
                 self._finish_pending_cleanup(pending, None)
-                task = self.reader.show(str(pending["ref"]))
+                task = self._pending_create_task(pending)
                 pending["task_id"] = task["id"]
                 pending["backend"]["revision"] = _revision(task)
                 self.audit.stage(request_id, pending)
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": "created", "task": self.reader.show(str(pending["ref"])), "event_id": event_id, "replayed": True}
+            return {"action": "created", "task": task, "event_id": event_id, "replayed": True}
 
         event = {
             "event_id": "evt_" + uuid.uuid4().hex,
@@ -1003,7 +1027,7 @@ class TaskWriter:
         request_id: str,
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
-        # read through updateTask prevents two local task-create processes assigning one ref.
+        # read through createTask prevents two local task-create processes assigning one ref.
         with project_reference_allocation_lock(self.data_dir):
             board_id, columns, swimlanes = self.reader._board()
             if reference:
@@ -1016,6 +1040,10 @@ class TaskWriter:
             if column_id is None:
                 raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
             swimlane_id = _matching_swimlane(swimlanes, project)
+            # Persist the allocation before the atomic backend write. A process that dies
+            # after createTask still leaves a recoverable, already-reserved reference.
+            event["ref"] = created_ref
+            self.audit.stage(request_id, event)
             task_id = _positive_int(self.client.call(
                 "createTask",
                 project_id=board_id,
@@ -1023,17 +1051,17 @@ class TaskWriter:
                 description=description,
                 column_id=column_id,
                 swimlane_id=swimlane_id or 0,
+                reference=created_ref,
             ))
             if task_id is None:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            event["ref"] = created_ref
             event["task_id"] = f"task_kanboard_{task_id}"
             event["backend"]["task_id"] = task_id
-            self.audit.stage(request_id, event)
             try:
-                ok = self.client.call("updateTask", id=task_id, reference=created_ref)
-                if not ok:
-                    raise TaskError("backend_error", "Kanboard rejected the write", 1)
+                self.audit.stage(request_id, event)
+            except OSError as exc:
+                raise _CommittedWriteError() from exc
+            try:
                 values = {
                     "record_type": "task",
                     "task_type": task_type,
@@ -1837,7 +1865,7 @@ class TaskWriter:
                     repaired += 1
                     continue
                 self._finish_pending_cleanup(event, None)
-                task = self.reader.show(str(event["ref"]))
+                task = self._pending_create_task(event) if event.get("kind") == "created" else self.reader.show(str(event["ref"]))
                 event["task_id"] = task["id"]
                 event["backend"]["revision"] = _revision(task)
                 self.audit.stage(str(event["request_id"]), event)
@@ -1978,27 +2006,43 @@ class TaskWriter:
         ref = str(event.get("ref") or "")
         if not ref:
             raise TaskError("backend_error", "pending create is missing its task ref", 1)
-        try:
-            task = self.reader.show(ref)
-        except TaskError as exc:
-            if exc.code != "not_found":
-                raise
-            backend = event.get("backend")
-            task_id = _positive_int(backend.get("task_id")) if isinstance(backend, dict) else None
-            if task_id is None:
-                raise
-            if not self.client.call("updateTask", id=task_id, reference=ref):
+        task = self._pending_create_task(event)
+        if task["ref"] != ref:
+            # A pending event written by the pre-atomic create path can still name a row
+            # without its reference. Repair that one recorded row only when no other row
+            # acquired the reference while the writer was down.
+            if task["ref"]:
+                raise TaskError("backend_error", "pending create task reference does not match", 1)
+            board_id, _, _ = self.reader._board()
+            current = project_card_by_reference(self.client, board_id, ref)
+            if current is not None:
+                raise TaskError("backend_error", "pending create reference belongs to another task", 1)
+            if not self.client.call("updateTask", id=_task_number(task), reference=ref):
                 raise TaskError("backend_error", "pending create reference remains incomplete", 1)
-            task = self.reader.show(ref)
+            task = self._pending_create_task(event)
+            if task["ref"] != ref:
+                raise TaskError("backend_error", "pending create reference remains incomplete", 1)
         self.client.call(
             "saveTaskMetadata",
             task_id=_task_number(task),
             values=_create_metadata_values(payload),
         )
-        normalized = self.reader.show(ref)
+        normalized = self._pending_create_task(event)
         expected_mode = _text(payload.get("codex_launch_mode"))
         if expected_mode and normalized["routing"]["codex_launch_mode"] != expected_mode:
             raise TaskError("backend_error", "pending create metadata remains incomplete", 1)
+
+    def _pending_create_task(self, event: dict[str, Any]) -> dict[str, Any]:
+        backend = event.get("backend")
+        task_id = _positive_int(backend.get("task_id")) if isinstance(backend, dict) else None
+        if task_id is not None:
+            return self.reader.show_id(task_id)
+        ref = str(event.get("ref") or "")
+        if not ref:
+            raise TaskError("backend_error", "pending create is missing its backend task id", 1)
+        # The allocation was staged before the atomic createTask(reference=...) call,
+        # so this narrow crash-window fallback cannot select an unreserved reference.
+        return self.reader.show(ref)
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:

@@ -43,6 +43,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    _task_is_active,
     _matching_swimlane,
     _positive_int,
     all_project_cards,
@@ -202,7 +203,12 @@ def _existing_sprints(
 
 
 def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
-    """Read both active and closed Pipeline records before deciding a restore is empty."""
+    """Read both active and closed Pipeline records before deciding a restore is empty.
+
+    The restore loop needs only references here. Keep the live raw row when a
+    pre-recovery duplicate exists, instead of normalizing each closed row through
+    ``TaskReader.show`` and repeatedly scanning all active cards.
+    """
     board_id, _, _ = reader._board()
     raw_cards = all_project_cards(reader.client, board_id)
     result: dict[str, dict[str, Any]] = {}
@@ -211,7 +217,9 @@ def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
             continue
         reference = card.get("reference")
         if isinstance(reference, str) and reference:
-            result[reference] = reader.show(reference)
+            previous = result.get(reference)
+            if previous is None or (_task_is_active(card) and not _task_is_active(previous)):
+                result[reference] = card
     return result
 
 

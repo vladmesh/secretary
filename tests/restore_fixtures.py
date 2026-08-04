@@ -37,7 +37,7 @@ class _EmptyWriteKanboard(WriteKanboard):
             self.next_task_id += 1
             self.tasks.append(
                 {
-                    "id": task_id, "reference": "", "title": params["title"],
+                    "id": task_id, "reference": params.get("reference", ""), "title": params["title"],
                     "description": params.get("description", ""), "column_id": params["column_id"],
                     "position": 1, "swimlane_id": params.get("swimlane_id") or 0,
                     "date_creation": "1720000200", "date_modification": "1720000200",
@@ -71,7 +71,7 @@ class _EmptyBoardsKanboard(SprintKanboard):
             self.next_task_id += 1
             self.tasks.append(
                 {
-                    "id": task_id, "project_id": int(params["project_id"]), "reference": "",
+                    "id": task_id, "project_id": int(params["project_id"]), "reference": params.get("reference", ""),
                     "title": params["title"], "description": params.get("description", ""),
                     "column_id": params["column_id"], "position": len(self.tasks) + 1,
                     "swimlane_id": params.get("swimlane_id") or 0,

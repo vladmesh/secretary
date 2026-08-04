@@ -317,7 +317,7 @@ class WriteKanboard(FakeKanboard):
             task_id = max(int(task["id"]) for task in self.tasks) + 1
             self.tasks.append({
                 "id": task_id,
-                "reference": "",
+                "reference": params.get("reference", ""),
                 "title": params["title"],
                 "description": params.get("description", ""),
                 "column_id": params["column_id"],
@@ -762,8 +762,27 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.reader.show("secretary-468")["state"], "in_progress")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
-    def test_pending_create_repairs_orphaned_reference(self) -> None:
-        self.client.fail_update = True
+    def test_restore_placement_uses_live_duplicate_reference(self) -> None:
+        archived = self.client.tasks[0]
+        archived.update({"column_id": 3, "position": 1, "is_active": 0})
+        live = {
+            "id": 15, "reference": "secretary-468", "title": "Live", "description": "",
+            "column_id": 3, "position": 2, "swimlane_id": 4, "is_active": 1,
+            "date_creation": "1720000000", "date_modification": "1720000000",
+        }
+        self.client.tasks.append(live)
+        self.client.metadata[15] = {"project": "secretary", "task_type": "code"}
+        self.client.comments[15] = []
+
+        self.writer.restore_card(
+            reference="secretary-468", metadata={"claim": "restored"}, target="in_progress", position=1
+        )
+
+        moves = [params for method, params in self.client.calls if method == "moveTaskPosition"]
+        self.assertEqual(moves[-1]["task_id"], 15)
+
+    def test_pending_create_repairs_legacy_orphaned_reference_by_recorded_id(self) -> None:
+        self.client.fail_metadata = True
         with open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.create(
@@ -771,8 +790,10 @@ class TaskWriterTests(unittest.TestCase):
                     title="Restore", reference="secretary-restore", request_id="restore-create",
                     sprint=sprint,
                 )
+            # A staged event left by the pre-atomic create path has the id but not the ref.
+            self.client.tasks[-1]["reference"] = ""
             self.assertEqual(self.client.tasks[-1]["reference"], "")
-            self.client.fail_update = False
+            self.client.fail_metadata = False
 
             result = self.writer.create(
                 role="observer", actor="observer", project="secretary", task_type="code",
@@ -982,6 +1003,92 @@ class TaskWriterTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "backend_error")
         self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
+
+    def test_auto_reference_refuses_null_or_false_enumeration(self) -> None:
+        original_call = self.client.call
+
+        for reply in (None, False):
+            with self.subTest(reply=reply), \
+                 mock.patch.object(
+                     self.client,
+                     "call",
+                     side_effect=lambda method, **params: reply if method == "getAllTasks" else original_call(method, **params),
+                 ), \
+                 mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), \
+                 open_sprint() as sprint:
+                with self.assertRaisesRegex(TaskError, "invalid task list") as raised:
+                    self.writer.create(
+                        role="observer", actor="observer", project="secretary", task_type="code",
+                        title="No fallback", request_id=f"null-reference-{reply}", sprint=sprint,
+                    )
+
+            self.assertEqual(raised.exception.code, "backend_error")
+            self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
+
+    def test_create_passes_reference_to_atomic_backend_write(self) -> None:
+        with mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), open_sprint() as sprint:
+            result = self.writer.create(
+                role="observer", actor="observer", project="secretary", task_type="code",
+                title="Atomic reference", request_id="atomic-reference", sprint=sprint,
+            )
+
+        created = [params for method, params in self.client.calls if method == "createTask"]
+        self.assertEqual(created[-1]["reference"], result["task"]["ref"])
+        self.assertFalse(any(method == "updateTask" for method, _params in self.client.calls))
+
+    def test_pending_atomic_create_recovers_after_backend_id_audit_crash(self) -> None:
+        original_stage = self.writer.audit.stage
+        stages = 0
+
+        def lose_backend_id_stage(request_id: str, event: dict[str, object]) -> None:
+            nonlocal stages
+            stages += 1
+            if stages == 3:
+                raise OSError("lost after create")
+            original_stage(request_id, event)  # type: ignore[arg-type]
+
+        with mock.patch.object(self.writer.audit, "stage", side_effect=lose_backend_id_stage), open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Crash safe", request_id="atomic-create-crash", sprint=sprint,
+                )
+
+        self.assertEqual(self.client.tasks[-1]["reference"], "secretary-469")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        with open_sprint() as sprint:
+            result = self.writer.create(
+                role="observer", actor="observer", project="secretary", task_type="code",
+                title="Crash safe", request_id="atomic-create-crash", sprint=sprint,
+            )
+
+        self.assertEqual(result["task"]["ref"], "secretary-469")
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_pending_create_does_not_repair_a_different_task_with_its_reference(self) -> None:
+        self.client.fail_metadata = True
+        with open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Interrupted", reference="secretary-interrupted", request_id="interrupted-create",
+                    sprint=sprint,
+                )
+        intended = self.client.tasks[-1]
+        intended["reference"] = ""
+        self.client.tasks.append({
+            "id": 99, "reference": "secretary-interrupted", "title": "Different", "column_id": 2,
+            "position": 1, "swimlane_id": 4, "is_active": 1,
+        })
+        self.client.metadata[99] = {}
+        self.client.comments[99] = []
+        self.client.fail_metadata = False
+
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertEqual(self.client.metadata[int(intended["id"])], {})
+        self.assertEqual(self.client.metadata[99], {})
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
 
     def test_explicit_reference_collision_is_still_refused(self) -> None:
         with open_sprint() as sprint:

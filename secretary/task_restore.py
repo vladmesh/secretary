@@ -127,10 +127,15 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
 def _restore_placement(
     writer: Any, task: dict[str, Any], target: str, position: int | None, swimlane: str
 ) -> None:
-    from secretary.tasks import TaskError, _nonnegative_int, _positive_int
+    from secretary.tasks import (
+        TaskError,
+        _nonnegative_int,
+        _positive_int,
+        project_card_by_reference,
+    )
 
     board_id, _, swimlanes = writer.reader._board()
-    raw = writer.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
+    raw = project_card_by_reference(writer.client, board_id, task["ref"])
     if not isinstance(raw, dict):
         raise TaskError("not_found", "task was not found", 2)
     swimlane_id = 0
