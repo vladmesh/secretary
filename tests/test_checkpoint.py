@@ -179,6 +179,20 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertNotIn("state/board/events.ndjson", self.head_files())
         self.assertIn("state/board/cards.ndjson", self.head_files())
 
+    def test_empty_live_runs_cannot_replace_non_empty_canonical_history(self):
+        self.seed_runs([{"source": "runs.jsonl", "line": 1, "record": {"event": "claim"}}])
+        self.assertEqual(self.write().status, "committed")
+        self.seed_runs([])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("non-empty canonical run history", result.reason)
+        self.assertEqual(
+            len((self.instance_dir / "state" / "runs" / "runs.ndjson").read_text(encoding="utf-8").splitlines()),
+            1,
+        )
+
     def test_derived_board_dump_is_not_part_of_the_checkpoint(self):
         self.write()
 

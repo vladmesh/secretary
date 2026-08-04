@@ -756,6 +756,40 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertTrue((worktree / ".git").is_file())
             self.assertEqual(again.status, "unchanged")
 
+    def test_root_materialization_assigns_linked_worktree_and_git_admin_to_runtime_user(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            product = root / "product"
+            product.mkdir()
+            agent = product / "triggered_agents" / "agents" / "curator"
+            agent.mkdir(parents=True)
+            (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(product), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(product), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(product), "commit", "-m", "product"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(product), "remote", "add", "origin", str(product)], check=True)
+            account = SimpleNamespace(pw_uid=123, pw_gid=456)
+
+            with (
+                mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "workspaces")}),
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown") as chown,
+            ):
+                result = upgrade.step_worktrees(
+                    self.context(FakeUnitInstaller(), product_root=product, runtime_user="operator")
+                )
+
+            worktree = root / "workspaces" / "secretary" / "curator"
+            admin = upgrade._worktree_git_dir(worktree)
+            owned = {Path(call.args[0]) for call in chown.call_args_list}
+            self.assertEqual(result.status, "changed")
+            self.assertIn(worktree, owned)
+            self.assertIsNotNone(admin)
+            self.assertIn(admin, owned)
+
 
 class CommandSurfaceTests(unittest.TestCase):
     """The health and materialize commands as an operator and a gate see them."""

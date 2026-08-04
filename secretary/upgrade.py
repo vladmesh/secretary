@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import pwd
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -336,6 +338,30 @@ def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list
     return [root / name for name in names]
 
 
+def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
+    """Repair root-created role worktree files for the user who runs the units."""
+    if not runtime_user or os.geteuid() != 0 or not path.exists():
+        return
+    account = pwd.getpwnam(runtime_user)
+    try:
+        os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+        for child in path.rglob("*"):
+            os.chown(child, account.pw_uid, account.pw_gid, follow_symlinks=False)
+    except OSError as exc:
+        raise GitError(f"could not assign {path} to runtime user {runtime_user}: {exc}") from None
+
+
+def _worktree_git_dir(worktree: Path) -> Path | None:
+    """Return the linked-worktree administrative directory named by its .git file."""
+    try:
+        line = (worktree / ".git").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir: "):
+        return None
+    return Path(line.removeprefix("gitdir: ")).expanduser().resolve()
+
+
 def step_worktrees(context: UpgradeContext) -> StepResult:
     worktrees = desired_role_worktrees(context.product_root, context.runtime_home)
     if not worktrees:
@@ -343,7 +369,22 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
     created: list[str] = []
     moved: list[str] = []
     stuck: list[str] = []
+    # `recover` and `upgrade` may run under sudo.  Git makes both the linked
+    # checkout and its administration directory as that invoking user, while
+    # the systemd units subsequently run as `runtime_user`.
+    try:
+        _set_runtime_owner(worktrees[0].parent, context.runtime_user)
+    except GitError as exc:
+        return StepResult("role-worktrees", "failed", str(exc))
     for worktree in worktrees:
+        try:
+            _set_runtime_owner(worktree, context.runtime_user)
+            admin = _worktree_git_dir(worktree)
+            if admin is not None:
+                _set_runtime_owner(admin, context.runtime_user)
+        except GitError as exc:
+            stuck.append(f"{worktree.name}: {exc}")
+            continue
         if not (worktree / ".git").exists():
             if worktree.exists() and any(worktree.iterdir()):
                 stuck.append(f"{worktree.name}: target exists and is not a managed worktree")
@@ -358,6 +399,11 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
                     ["worktree", "add", "--detach", str(worktree), "HEAD"],
                     timeout=300,
                 )
+                _set_runtime_owner(worktree, context.runtime_user)
+                admin = _worktree_git_dir(worktree)
+                if admin is None:
+                    raise GitError(f"could not locate Git administration for {worktree}")
+                _set_runtime_owner(admin, context.runtime_user)
             except (GitError, OSError) as exc:
                 stuck.append(f"{worktree.name}: {exc}")
                 continue

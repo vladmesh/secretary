@@ -139,6 +139,7 @@ class CheckpointWriter:
             )
 
         board, runs = self._regenerate()
+        self._prevent_run_history_loss(runs)
         self._publish(
             "board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE,
             lambda staging: _validate_board(staging, instance=self.instance_dir),
@@ -158,6 +159,29 @@ class CheckpointWriter:
         except RuntimeError as exc:
             raise CheckpointBlocked(str(exc)) from None
         return board.count, runs.count
+
+    def _prevent_run_history_loss(self, run_records: int) -> None:
+        """Never replace a non-empty canonical journal with an empty live source.
+
+        A recovered host used to restore the normalized ``state/runs`` data
+        plane but not the pipeline-worktree source that ``export_runs`` reads.
+        The first timer tick then committed an empty export.  Normal operation
+        appends history, so an empty replacement is an unsafe recovery signal,
+        not routine compaction.
+        """
+        if run_records:
+            return
+        canonical = self.instance_dir / "state" / "runs" / "runs.ndjson"
+        try:
+            existing = sum(1 for line in canonical.read_text(encoding="utf-8").splitlines() if line.strip())
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError) as exc:
+            raise CheckpointBlocked(f"could not inspect canonical run history: {exc}") from None
+        if existing:
+            raise CheckpointBlocked(
+                "refusing to replace non-empty canonical run history with an empty live export"
+            )
 
     def _publish(
         self,

@@ -33,8 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from secretary._fsutil import publish_component_entries, write_json, write_text_atomic
-from secretary.automations import OrcaAutomationClient
+from secretary._fsutil import publish_component_entries, publish_state_atomic, write_json, write_text_atomic
+from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
 from secretary.host_apply import LiveOrcaRegistrar, SystemdUnitInstaller, resolve_runtime_owner
@@ -505,6 +505,92 @@ def materialize_checkpoint(
     return len(cards), run_count
 
 
+def _restored_run_journals(runs_source: Path) -> dict[Path, str]:
+    """Rebuild the JSONL files whose records the checkpoint normalizes.
+
+    ``runs.ndjson`` deliberately wraps every source line with its relative
+    source and line number.  It is the portable representation of the live
+    pipeline journal; watermarks only describe the other state files and are
+    not a second copy of their contents.
+    """
+    grouped: dict[Path, list[tuple[int, object]]] = {}
+    try:
+        lines = (runs_source / "runs.ndjson").read_text(encoding="utf-8").splitlines()
+        for raw in lines:
+            if not raw.strip():
+                continue
+            entry = json.loads(raw)
+            source = entry.get("source") if isinstance(entry, dict) else None
+            line = entry.get("line") if isinstance(entry, dict) else None
+            if not isinstance(source, str) or not source or not isinstance(line, int) or line < 1:
+                raise ValueError
+            relative = Path(source)
+            if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".jsonl":
+                raise ValueError
+            grouped.setdefault(relative, []).append((line, entry.get("record")))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise InstallError("private checkpoint contains invalid run journal records") from None
+
+    journals: dict[Path, str] = {}
+    for relative, records in grouped.items():
+        ordered = sorted(records, key=lambda item: item[0])
+        if [number for number, _ in ordered] != list(range(1, len(ordered) + 1)):
+            raise InstallError(
+                f"private checkpoint has non-contiguous run journal lines for {relative.as_posix()}"
+            )
+        try:
+            journals[relative] = "".join(
+                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                for _, record in ordered
+            )
+        except (TypeError, ValueError):
+            raise InstallError(
+                f"private checkpoint contains an unserializable run journal record for {relative.as_posix()}"
+            ) from None
+    return journals
+
+
+def materialize_pipeline_state(
+    instance_dir: Path, state_dir: Path, *, dry_run: bool = False,
+) -> int:
+    """Put canonical run journals back where the dispatcher checkpoint reads them.
+
+    Recovery creates the role worktrees after it restores ``state/runs`` into
+    the data plane.  The dispatcher, however, exports from its pipeline
+    worktree.  This bridge is intentionally narrow: it restores only the
+    JSONL content that the canonical checkpoint actually carries, and refuses
+    to overwrite a different non-empty live journal.
+    """
+    runs_source = Path(instance_dir).expanduser().resolve() / "state" / "runs"
+    journals = _restored_run_journals(runs_source)
+    state_dir = Path(state_dir).expanduser().resolve()
+    existing: dict[Path, str] = {}
+    if state_dir.is_dir():
+        for path in state_dir.rglob("*.jsonl"):
+            if path.is_file():
+                existing[path.relative_to(state_dir)] = path.read_text(encoding="utf-8")
+    non_empty = {relative: contents for relative, contents in existing.items() if contents.strip()}
+    if non_empty and non_empty != journals:
+        raise InstallError(
+            f"live pipeline state at {state_dir} differs from the checkpoint; refusing to overwrite it"
+        )
+    if dry_run:
+        return sum(contents.count("\n") for contents in journals.values())
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        writes = [(state_dir / relative, contents) for relative, contents in journals.items()]
+        if writes:
+            publish_state_atomic(writes)
+    except (OSError, RuntimeError) as exc:
+        raise InstallError(f"could not materialize live pipeline state: {exc}") from None
+    return sum(contents.count("\n") for contents in journals.values())
+
+
+def pipeline_state_path(runtime_home: Path) -> Path:
+    """The dispatcher-owned state source below the installation user's worktree."""
+    return workspaces_root(runtime_home) / "secretary" / "pipeline" / "state" / "pipeline"
+
+
 def materialize_host(
     instance: Path,
     product_root: Path,
@@ -794,6 +880,12 @@ def install(args: argparse.Namespace) -> InstallResult:
                 "changed" if changed else "unchanged",
                 f"materializer complete ({changed} changed step(s))",
             )
+            _, runtime_home = resolve_runtime_owner(target, args.installation_user)
+            restored_runs = materialize_pipeline_state(
+                target, pipeline_state_path(runtime_home), dry_run=False,
+            )
+            _set_installation_owner(pipeline_state_path(runtime_home), args.installation_user)
+            result.add("pipeline-state", "changed", f"materialized {restored_runs} run record(s)")
             findings = restore_findings(data_dir)
             if findings:
                 raise InstallError("status findings: " + "; ".join(findings))

@@ -120,6 +120,7 @@ class RecoveryCase(unittest.TestCase):
                 "secretary.installation.materialize_host",
                 return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
             ),
+            mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
             mock.patch("secretary.installation.restore_findings", return_value=[]),
             mock.patch("secretary.bootstrap.ensure_pipeline_board"),
         )

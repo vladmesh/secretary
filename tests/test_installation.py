@@ -22,6 +22,7 @@ from secretary.installation import (
     check_prerequisites,
     install,
     materialize_checkpoint,
+    materialize_pipeline_state,
     provision_codex_home,
     provision_project_checkouts,
 )
@@ -95,6 +96,46 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_pipeline_state_materialization_rebuilds_the_checkpointed_journal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            source = instance / "state" / "runs"
+            source.mkdir(parents=True)
+            record = {"event": "claim", "reference": "secretary-1"}
+            (source / "runs.ndjson").write_text(
+                json.dumps({"source": "runs.jsonl", "line": 1, "record": record}) + "\n",
+                encoding="utf-8",
+            )
+            state_dir = root / "home" / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
+
+            self.assertEqual(materialize_pipeline_state(instance, state_dir), 1)
+
+            self.assertEqual(
+                [json.loads(line) for line in (state_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()],
+                [record],
+            )
+
+    def test_pipeline_state_materialization_refuses_to_overwrite_different_live_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            source = instance / "state" / "runs"
+            source.mkdir(parents=True)
+            (source / "runs.ndjson").write_text(
+                json.dumps({"source": "runs.jsonl", "line": 1, "record": {"event": "checkpoint"}}) + "\n",
+                encoding="utf-8",
+            )
+            state_dir = root / "pipeline-state"
+            state_dir.mkdir()
+            journal = state_dir / "runs.jsonl"
+            journal.write_text(json.dumps({"event": "live"}) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(InstallError, "differs from the checkpoint"):
+                materialize_pipeline_state(instance, state_dir)
+
+            self.assertEqual(journal.read_text(encoding="utf-8"), json.dumps({"event": "live"}) + "\n")
+
     def test_missing_project_checkout_is_cloned_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -405,10 +446,11 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.import_normalized_board", return_value=1),
                 mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
                 mock.patch("secretary.installation.materialize_host", return_value=host),
+                mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
                 mock.patch("secretary.installation.restore_findings", return_value=[]),
                 mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
-            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
 

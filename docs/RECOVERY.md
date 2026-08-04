@@ -39,6 +39,13 @@ The canon, the normalised minimum needed to resume work:
 - knowledge documents: `state/knowledge/**` (free-form markdown, see
   [Architecture](ARCHITECTURE.md#knowledge-planes)).
 
+`runs.ndjson` is a normalized, portable journal: each entry records its source
+path and line number. During recovery, after the pipeline role worktree exists,
+Secretary materializes those entries back into that worktree's live
+`state/pipeline/` source before the dispatcher starts. A non-empty live journal
+that differs from the checkpoint is never overwritten. Likewise, a checkpoint
+refuses to publish an empty live run export over a non-empty canonical journal.
+
 Outside the canon, because it is derived or bulky raw material, rebuilt or kept in an optional cold
 archive:
 
@@ -232,8 +239,11 @@ install, prints no values and adds it to no commit.
 5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
    runtime-home files for the agent CLIs. Provider authentication stays manual.
 6. Runs the same materialiser as `secretary upgrade`: recreates role worktrees, installs units,
-   registers session-manager resources and applies automations.
-7. Checks restore status. Heads are connected after bootstrap as a separate step.
+   registers session-manager resources and applies automations. When it runs under `sudo`, role
+   worktrees and their Git administrative directories are assigned to `--installation-user`, so
+   the user services can read and update them.
+7. Rebuilds the pipeline worktree's live run journal from the checkpointed normalized journal.
+8. Checks restore status. Heads are connected after bootstrap as a separate step.
 
 Parity is checked separately for cards and for sprints, and both checks are fail-closed: a mismatch
 leaves recovery unfinished and visible in `doctor` rather than silently counting the restore as
