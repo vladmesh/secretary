@@ -2049,22 +2049,11 @@ class TaskWriter:
         task_id = _positive_int(backend.get("task_id")) if isinstance(backend, dict) else None
         if task_id is not None:
             return self.reader.show_id(task_id)
-        ref = str(event.get("ref") or "")
-        if not ref:
-            raise TaskError("backend_error", "pending create is missing its backend task id", 1)
-        task = self.reader.show(ref)
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            raise TaskError("backend_error", "pending create is missing its identity", 1)
-        if (
-            _text(payload.get("title_sha256")) != _digest(task["title"])
-            or _text(payload.get("description_sha256")) != _digest(task["description"])
-            or task["state"] != _text(payload.get("target"))
-        ):
-            raise TaskError("backend_error", "pending create identity cannot be proven", 1)
-        # An interrupted allocation has no backend id. It may be resumed only when the
-        # ref, title, description and requested target all prove the later board row is it.
-        return task
+        raise TaskError(
+            "backend_error",
+            "pending create is missing its backend task id; reconcile it manually",
+            1,
+        )
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:

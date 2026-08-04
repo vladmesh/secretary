@@ -1040,7 +1040,7 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(created[-1]["reference"], result["task"]["ref"])
         self.assertFalse(any(method == "updateTask" for method, _params in self.client.calls))
 
-    def test_pending_atomic_create_recovers_after_backend_id_audit_crash(self) -> None:
+    def test_pending_atomic_create_without_recorded_id_stays_unresolved(self) -> None:
         original_stage = self.writer.audit.stage
         stages = 0
 
@@ -1061,16 +1061,18 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.client.tasks[-1]["reference"], "secretary-469")
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
         with open_sprint() as sprint:
-            result = self.writer.create(
-                role="observer", actor="observer", project="secretary", task_type="code",
-                title="Crash safe", request_id="atomic-create-crash", sprint=sprint,
-            )
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Crash safe", request_id="atomic-create-crash", sprint=sprint,
+                )
 
-        self.assertEqual(result["task"]["ref"], "secretary-469")
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
-        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.client.metadata[int(self.client.tasks[-1]["id"])], {})
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
 
-    def test_sigint_before_atomic_create_does_not_adopt_later_unrelated_reference(self) -> None:
+    def test_sigint_before_atomic_create_does_not_adopt_same_identity_later_reference(self) -> None:
         original_call = self.client.call
 
         def interrupt_create(method: str, **params: object) -> object:
@@ -1088,7 +1090,8 @@ class TaskWriterTests(unittest.TestCase):
 
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
         self.client.tasks.append({
-            "id": 99, "reference": "secretary-469", "title": "Later unrelated", "description": "different",
+            "id": 99, "reference": "secretary-469", "title": "Interrupted before create",
+            "description": "never reached board",
             "column_id": 2, "position": 1, "swimlane_id": 4, "is_active": 1,
         })
         self.client.metadata[99] = {}
