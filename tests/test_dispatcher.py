@@ -1650,14 +1650,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         self.assertEqual(payload["checkpoint"]["commit"], "abc123")
 
-    def test_blocked_checkpoint_does_not_fail_the_tick(self) -> None:
+    def test_blocked_checkpoint_degrades_the_tick(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(
             CheckpointResult(status="blocked", reason="secret detected in state/board/cards.ndjson")
         )
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["status"], "degraded")
         self.assertEqual(result["actions"][0]["step"], "claim")
         self.assertEqual(result["checkpoint"]["status"], "blocked")
         self.assertIn("secret detected", result["checkpoint"]["reason"])
@@ -1722,7 +1722,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["status"], "degraded")
         self.assertEqual(result["checkpoint"]["status"], "blocked")
         self.assertIn("git is gone", result["checkpoint"]["reason"])
 

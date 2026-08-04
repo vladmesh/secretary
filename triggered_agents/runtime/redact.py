@@ -44,6 +44,23 @@ PATTERNS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "private-key-block"),
 ]
 
+# `runtime.env` is an environment *configuration* file, not a list of secret
+# values.  In particular a local board URL is deliberately long enough to have
+# tripped the old length-only rule.  Treating every long value as a secret made
+# mentioning KANBOARD_URL on a card stop the checkpoint and, worse, made a
+# normal config value look like leaked credential material.
+#
+# Names remain the primary signal for exact-value redaction.  A URL with user
+# info is the exception: it can carry a password even when its variable is
+# named DATABASE_URL or KANBOARD_URL, so its value is protected too.  Pattern
+# redaction below remains the backstop for credentials that arrive outside the
+# selected runtime file.
+_SECRET_ENV_NAME_RE = re.compile(
+    r"(?:^|_)(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)(?:_|$)",
+    re.IGNORECASE,
+)
+_URL_WITH_USERINFO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
+
 
 def _load_env_values(env_files) -> list[str]:
     values = []
@@ -55,9 +72,12 @@ def _load_env_values(env_files) -> list[str]:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
-            _, _, val = line.partition("=")
+            name, _, val = line.partition("=")
+            name = name.strip()
             val = val.strip().strip('"').strip("'")
-            if len(val) >= MIN_ENV_VALUE_LEN:
+            if len(val) >= MIN_ENV_VALUE_LEN and (
+                _SECRET_ENV_NAME_RE.search(name) or _URL_WITH_USERINFO_RE.match(val)
+            ):
                 values.append(val)
     # Longest first so a value that contains another gets scrubbed whole.
     return sorted(set(values), key=len, reverse=True)
@@ -79,7 +99,14 @@ def redact(text: str, env_files=None) -> str:
 # before posting. `redact` above catches known .env values and token shapes; on top of that:
 # KEY=value assignments whose name smells like a secret, and long base64/hex-ish blobs
 # (no `/`, so filesystem paths survive).
-_ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
+# Keep a marker emitted by an upstream scrubber verbatim.  TaskWriter applies
+# this final board-boundary scrub even when a dispatcher already scrubbed its
+# diagnostic, and replacing one safe marker with another only makes audit
+# evidence noisier.
+_ASSIGN_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)"
+    r"\s*=\s*(?!<redacted>|«REDACTED»)(\S+)"
+)
 _BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
@@ -91,13 +118,13 @@ def _is_git_sha(blob: str) -> bool:
     return bool(_HEX_RE.match(blob))
 
 
-def scrub_secrets(text: str) -> str:
+def scrub_secrets(text: str, env_files=None) -> str:
     """Mask secret-looking material in `text` before it reaches a board comment. `_BLOB_RE` casts
     a wide net over long alnum runs, so a git sha or any other hex-shaped identifier is spared —
     only the rest (base64/token-looking blobs) gets masked."""
     if not text:
         return text
-    text = redact(text)
+    text = redact(text, env_files=env_files)
     text = _ASSIGN_RE.sub(rf"\1={REDACTED}", text)
     return _BLOB_RE.sub(lambda m: m.group(0) if _is_git_sha(m.group(0)) else f"{REDACTED}:blob", text)
 

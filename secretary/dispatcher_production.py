@@ -452,8 +452,12 @@ def _production_tick_body(
     # reconciliation and the active pass both return `degraded` outcomes without adding an error
     # (a launch head that would not stop), and reporting that tick as `ok` told the unit, the
     # health line and the steward alike that nothing had happened.
+    # A checkpoint gate protects the only recoverable copy of the live board.
+    # The card work may continue for this tick, but reporting it as healthy hid
+    # an active durability incident from the unit health line and steward.
+    checkpoint_blocked = bool(checkpoint and checkpoint.get("status") == "blocked")
     result = {
-        "status": "ok" if not errors and not degraded_actions(outcomes) else "degraded",
+        "status": "ok" if not errors and not degraded_actions(outcomes) and not checkpoint_blocked else "degraded",
         "step": "production-tick",
         "owner": runtime.owner,
         "actions": outcomes,
@@ -539,6 +543,8 @@ def _frozen_tick_body(
     if checkpoint is not None:
         payload["checkpoint"] = checkpoint
         result["checkpoint"] = checkpoint
+        if checkpoint.get("status") == "blocked":
+            result["status"] = "degraded"
     push = _push_checkpoint(runtime, payload)
     if push is not None:
         payload["checkpoint_push"] = push

@@ -229,7 +229,12 @@ class CheckpointWriter:
         try:
             staged = self._stage(source, staging, entries, required, component)
             validate(staging)
-            _scan_for_secrets(staging, staged, component)
+            _scan_for_secrets(
+                staging,
+                staged,
+                component,
+                runtime_env=self.instance_dir / "runtime.env",
+            )
             _publish_component_entries(staging, destination, list(staged), f"checkpoint {component}")
             _drop_vanished(destination, entries, staged)
         except RuntimeError as exc:
@@ -662,11 +667,20 @@ def _drop_vanished(destination: Path, entries: tuple[str, ...], staged: tuple[st
             ) from None
 
 
-def _scan_for_secrets(staging: Path, staged: tuple[str, ...], component: str) -> None:
+def _scan_for_secrets(
+    staging: Path,
+    staged: tuple[str, ...],
+    component: str,
+    *,
+    runtime_env: Path,
+) -> None:
     """`state/` is what leaves the host, so a pasted token stops the commit here."""
     for entry in staged:
         text = _read_text(staging / entry, entry)
-        if redact(text) != text:
+        # Scan against this installation rather than the process home default:
+        # a recovery/doctor can intentionally point at another instance, and a
+        # credential in that instance must still fail closed.
+        if redact(text, env_files=[runtime_env]) != text:
             raise CheckpointBlocked(f"secret detected in state/{component}/{entry}")
 
 

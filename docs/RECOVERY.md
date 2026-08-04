@@ -168,6 +168,12 @@ at-rest encryption. A private key on the same host as the data does not protect 
 compromise; what at-rest encryption did protect was copies that left the host, in Git and offsite, and
 this contract removes those.
 
+The checkpoint's exact-value scan reads only values whose runtime variable names identify credentials
+(`*_TOKEN`, `*_KEY`, `*_SECRET`, passwords, credentials or auth), plus URLs that embed user info.
+Ordinary configuration values such as `KANBOARD_URL` are not secrets merely because they are long and
+may safely appear in a card. Before protocol text reaches the board or audit, the same scoped scrubber
+replaces real credential values; known token formats remain a second fail-closed scan layer.
+
 The installation key belongs to the installation user, the same user that owns the host and the
 installation, not a narrower role. Centralising secrets in one store neither narrowed nor widened the
 trust boundary: any process that could previously read `runtime.env` can read the installation key today
@@ -182,6 +188,10 @@ values.
 `status` and `doctor` show checkpoint freshness: the time and hash of the last commit, the time of the
 last successful push, checkpoint lag in minutes and commits, the reason the gate is blocked, and the
 `remote diverged` state.
+
+A blocked checkpoint degrades the production tick and its durable telemetry. The dispatcher still
+contains the failure and retries the checkpoint on the next tick, but unit health and the steward must
+not read the tick as healthy while the recoverable snapshot cannot be written.
 
 `status --json` carries a `secret_store` section: whether the store is initialised, how many secrets it
 holds, when the catalog last changed, whether a usable installation key exists, and a summary of

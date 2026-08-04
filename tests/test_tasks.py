@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -410,6 +411,30 @@ class TaskWriterTests(unittest.TestCase):
         audit = TaskAudit(self.tmpdir.name)
         with open(audit.events_path, encoding="utf-8") as events:
             self.assertEqual(len(events.readlines()), 1)
+
+    def test_comment_scrubs_runtime_secret_before_board_and_audit(self) -> None:
+        runtime = Path(self.tmpdir.name) / "runtime.env"
+        secret = "opaque-token-value"
+        url = "https://board.example.invalid/jsonrpc.php"
+        runtime.write_text(
+            f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN={secret}\n", encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(runtime)}):
+            self.writer.comment(
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                body=f"Check {url}; token {secret}",
+                request_id="scrubbed-comment",
+            )
+
+        comment = [call for call in self.client.calls if call[0] == "createComment"][-1]
+        content = str(comment[1]["content"])
+        self.assertIn(url, content)
+        self.assertNotIn(secret, content)
+        self.assertIn("«REDACTED»:env-value", content)
+        events = Path(self.writer.audit.events_path).read_text(encoding="utf-8")
+        self.assertNotIn(secret, events)
 
     def test_backend_failure_removes_uncommitted_pending_record(self) -> None:
         self.client.fail_comments = True

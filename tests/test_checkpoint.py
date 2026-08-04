@@ -384,6 +384,34 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
         self.assertNotIn("state/board/cards.ndjson", self.head_files())
 
+    def test_board_url_in_a_card_does_not_block_the_checkpoint(self):
+        url = "https://board.example.invalid/jsonrpc.php"
+        (self.instance_dir / "runtime.env").write_text(
+            f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN=opaque-token-value\n",
+            encoding="utf-8",
+        )
+        self.seed_board([{**CARD, "description": f"See {url} for the board"}])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(url, published)
+
+    def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
+        secret = "opaque-token-value"
+        (self.instance_dir / "runtime.env").write_text(
+            f"KANBOARD_API_TOKEN={secret}\n", encoding="utf-8"
+        )
+        self.seed_board([{**CARD, "description": f"token {secret}"}])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
+
     def test_blocked_snapshot_leaves_the_previous_checkpoint_intact(self):
         first = self.write()
         self.seed_board([{**CARD, "description": "token ghp_" + "a" * 40}])

@@ -8,8 +8,10 @@ being masked and, just as important, what must not be: a git sha in a CI-failure
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import tempfile
 
-from triggered_agents.runtime.redact import REDACTED, scrub_secrets
+from triggered_agents.runtime.redact import REDACTED, redact, scrub_secrets
 
 
 class ScrubSecretsTests(unittest.TestCase):
@@ -43,6 +45,35 @@ class ScrubSecretsTests(unittest.TestCase):
         path = "/home/dev/orca/workspaces/secretary/secretary-1135-drop-pipeline/tests"
 
         self.assertEqual(scrub_secrets(f"cwd {path}"), f"cwd {path}")
+
+    def test_plain_runtime_url_is_not_an_exact_value_secret(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            url = "https://board.example.invalid/jsonrpc.php"
+            runtime.write_text(
+                f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN=opaque-token-value\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(redact(f"board is {url}", env_files=[runtime]), f"board is {url}")
+
+    def test_named_runtime_secret_is_an_exact_value_secret(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            runtime.write_text("KANBOARD_API_TOKEN=opaque-token-value\n", encoding="utf-8")
+
+            self.assertEqual(
+                redact("token opaque-token-value", env_files=[runtime]),
+                f"token {REDACTED}:env-value",
+            )
+
+    def test_url_with_embedded_credentials_stays_an_exact_value_secret(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            url = "https://operator:password@board.example.invalid/jsonrpc.php"
+            runtime.write_text(f"KANBOARD_URL={url}\n", encoding="utf-8")
+
+            self.assertEqual(redact(f"board is {url}", env_files=[runtime]), f"board is {REDACTED}:env-value")
 
 
 if __name__ == "__main__":
