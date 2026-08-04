@@ -13,7 +13,7 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
 )
 from secretary import secret_store
-from secretary.secret_store import initialize_store, set_secret
+from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.data import DataExport
 from secretary.routing_journal import attempts
@@ -438,12 +438,21 @@ class CheckpointWriterTests(unittest.TestCase):
             )
         set_secret(
             self.instance_dir,
+            secret_id="binary.value",
+            value=b"\xff\xfe\x00\x80",
+            scope="installation",
+            purpose="a binary credential that cannot appear in text",
+            actor="tester",
+            environment="BINARY_CREDENTIAL",
+        )
+        set_secret(
+            self.instance_dir,
             secret_id="custom.value",
             value=secret,
             scope="installation",
             purpose="a custom integration credential",
             actor="tester",
-            environment="UNUSUAL_INTEGRATION_SETTING",
+            environment="UNUSUAL_INTEGRATION_CREDENTIAL",
         )
         self.seed_board([{**CARD, "description": secret.decode("utf-8")}])
 
@@ -451,6 +460,57 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
+
+    def test_imported_runtime_config_paths_do_not_block_checkpoint(self):
+        runtime = self.instance_dir / "runtime.env"
+        url = "https://board.example.invalid/jsonrpc.php"
+        data_dir = "/srv/secretary-data"
+        product_root = "/srv/secretary"
+        runtime.write_text(
+            "\n".join(
+                [
+                    f"SECRETARY_DATA_DIR={data_dir}",
+                    f"TA_SECRETARY_REPO={product_root}",
+                    f"KANBOARD_URL={url}",
+                    "KANBOARD_API_TOKEN=opaque-token-value",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            secret_store,
+            "_new_key_params",
+            return_value={
+                "format": secret_store.KEY_PARAMS_FORMAT,
+                "version": secret_store.KEY_PARAMS_VERSION,
+                "kdf": {
+                    "id": secret_store.PHRASE_KDF_ID,
+                    "salt": secret_store._b64(b"0123456789abcdef"),
+                    "length": secret_store.KEY_LENGTH,
+                    "n": 2**10,
+                    "r": 8,
+                    "p": 1,
+                },
+            },
+        ):
+            initialize_store(
+                self.instance_dir, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester"
+            )
+        import_env_file(
+            self.instance_dir,
+            source=runtime,
+            scope="installation",
+            purpose="imported runtime",
+            actor="tester",
+        )
+        self.seed_board(
+            [{**CARD, "description": f"data={data_dir} repo={product_root} board={url}"}]
+        )
+
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
 
     def test_blocked_snapshot_leaves_the_previous_checkpoint_intact(self):
         first = self.write()

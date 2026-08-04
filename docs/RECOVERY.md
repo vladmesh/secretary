@@ -170,13 +170,14 @@ this contract removes those.
 
 The checkpoint's exact-value scan reads values whose runtime variable names identify credentials
 (`*_TOKEN`, `*_PAT`, `*_IDENTITY`, `*_KEY`, `*_SECRET`, passwords, credentials, auth or webhooks),
-plus URLs that embed user info. When its installation key is present, it also reads explicit values
-from the secret-store catalog, including custom variable names. A locked or incomplete secret store is
-reported by `doctor` but does not itself halt checkpointing; runtime-file and pattern scans still run.
-Ordinary configuration values such as a plain `KANBOARD_URL` are not secrets merely because they are
-long and may safely appear in a card. Before protocol text reaches the board or audit, the same
-credential-specific redactor replaces real values; it does not mangle ordinary long identifiers or
-restored historical text. Known token and webhook formats remain a second fail-closed scan layer.
+plus URLs that embed user info. When its installation key is present, it also reads catalog values for
+those sensitive names or for values that independently match a credential shape. This keeps legacy
+whole-file imports from treating `SECRETARY_DATA_DIR`, `TA_SECRETARY_REPO`, or a plain `KANBOARD_URL`
+as secrets. A locked or incomplete secret store is reported by `doctor` but does not itself halt
+checkpointing; runtime-file and pattern scans still run. Before protocol text reaches the board or
+audit, the same credential-specific redactor replaces real values; it does not mangle ordinary long
+identifiers or restored historical text. Known token and webhook formats remain a second fail-closed
+scan layer.
 
 The installation key belongs to the installation user, the same user that owns the host and the
 installation, not a narrower role. Centralising secrets in one store neither narrowed nor widened the

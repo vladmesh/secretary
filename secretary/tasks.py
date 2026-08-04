@@ -806,6 +806,31 @@ class TaskWriter:
         self.data_dir = Path(data_dir)
         self.audit = TaskAudit(data_dir)
         self.workspace = Path(workspace) if workspace is not None else None
+        self._redaction_cache: tuple[tuple[tuple[str, int, int], ...], tuple[str, ...]] | None = None
+
+    def _redaction_values(self, runtime_env: Path) -> tuple[str, ...]:
+        """Open the catalog at most once while its on-disk inputs are unchanged."""
+        root = runtime_env.parent / "secrets"
+        paths = [root / "catalog.yaml", root / "installation.key"]
+        values_dir = root / "values"
+        if values_dir.is_dir():
+            paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))
+        fingerprint: list[tuple[str, int, int]] = []
+        for path in paths:
+            try:
+                info = path.stat()
+            except OSError:
+                fingerprint.append((str(path), -1, -1))
+            else:
+                fingerprint.append((str(path), info.st_mtime_ns, info.st_size))
+        key = tuple(fingerprint)
+        if self._redaction_cache is not None and self._redaction_cache[0] == key:
+            return self._redaction_cache[1]
+        from secretary.secret_store import redaction_values
+
+        values = redaction_values(runtime_env.parent)
+        self._redaction_cache = (key, values)
+        return values
 
     def _redact_for_board(self, text: str) -> str:
         """Remove credentials before they reach either board or audit history.
@@ -821,12 +846,10 @@ class TaskWriter:
         # Keep TaskWriter importable while config is loading sprints.  The
         # store depends on that same config module and is needed only at a real
         # protocol write, long after startup imports have settled.
-        from secretary.secret_store import redaction_values
-
         return redact(
             text,
             env_files=[runtime_env],
-            secret_values=redaction_values(runtime_env.parent),
+            secret_values=self._redaction_values(runtime_env),
         )
 
     def create(

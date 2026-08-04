@@ -68,7 +68,7 @@ from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.state_repo import SECRETS_PATHSPEC
 
-from triggered_agents.runtime.redact import redact
+from triggered_agents.runtime.redact import looks_like_credential, redact
 
 
 CATALOG_NAME = "catalog.yaml"
@@ -782,12 +782,12 @@ def read_secret(instance_dir: Path, secret_id: str) -> bytes:
 def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     """Return plaintext values that an instance's writers must redact.
 
-    The catalog is an explicit statement that a custom variable is secret even
-    when its name is innocuous.  Two legacy runtime fields are ordinary board
-    configuration despite older imports storing every runtime line as a
-    "secret": the endpoint URL and API user.  Their values are excluded only
-    when plain; an URL with userinfo still remains a credential through the
-    runtime-file classifier.
+    An old runtime import recorded every line as a secret, including ordinary
+    paths and configuration.  Include an entry only when the canonical runtime
+    name marks it sensitive or its plaintext independently looks like a known
+    credential (including URL userinfo).  That protects custom credential
+    names without turning SECRETARY_DATA_DIR or TA_SECRETARY_REPO into an
+    over-broad exact-value redaction rule.
 
     A locked or partial store contributes no plaintext values.  It remains a
     separate doctor finding; treating it as a checkpoint gate would turn a
@@ -803,11 +803,16 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     try:
         for entry in list_secrets(instance_dir):
             environment = str(entry.get("environment") or "")
-            value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
-            if environment in {"KANBOARD_URL", "KANBOARD_API_USER"}:
+            try:
+                value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
+            except (SecretStoreError, UnicodeDecodeError):
+                # A valid binary secret cannot appear in text verbatim.  A
+                # missing/bad envelope remains visible through store_findings;
+                # one entry must not make us forget other readable credentials.
                 continue
-            values.append(value)
-    except (SecretStoreError, UnicodeDecodeError):
+            if role_env.is_sensitive_env_name(environment) or looks_like_credential(value):
+                values.append(value)
+    except SecretStoreError:
         return ()
     return tuple(values)
 

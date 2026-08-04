@@ -547,7 +547,9 @@ def _frozen_tick_body(
         result["checkpoint"] = checkpoint
         if checkpoint.get("status") == "blocked":
             result["status"] = "degraded"
-            result.setdefault("actions", []).append(_checkpoint_degradation(checkpoint))
+            actions = list(result.get("actions") or ())
+            actions.append(_checkpoint_degradation(checkpoint))
+            result["actions"] = actions
     push = _push_checkpoint(runtime, payload)
     if push is not None:
         payload["checkpoint_push"] = push

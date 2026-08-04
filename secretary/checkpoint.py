@@ -161,11 +161,18 @@ class CheckpointWriter:
 
         board, runs = self._regenerate()
         self._prevent_run_history_loss()
+        from secretary.secret_store import redaction_values
+
+        secret_values = redaction_values(self.instance_dir)
         self._publish(
             "board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE,
             lambda staging: _validate_board(staging, instance=self.instance_dir),
+            secret_values=secret_values,
         )
-        self._publish("runs", RUNS_ENTRIES, RUNS_REQUIRED, RUNS_IGNORE, _validate_runs)
+        self._publish(
+            "runs", RUNS_ENTRIES, RUNS_REQUIRED, RUNS_IGNORE, _validate_runs,
+            secret_values=secret_values,
+        )
         return self._commit(board_cards=board, run_records=runs)
 
     def _regenerate(self) -> tuple[int, int]:
@@ -215,6 +222,8 @@ class CheckpointWriter:
         required: tuple[str, ...],
         ignore: tuple[str, ...],
         validate: Callable[[Path], None],
+        *,
+        secret_values: tuple[str, ...],
     ) -> None:
         source = self.data_dir / component
         destination = self.instance_dir / "state" / component
@@ -234,6 +243,7 @@ class CheckpointWriter:
                 staged,
                 component,
                 runtime_env=self.instance_dir / "runtime.env",
+                secret_values=secret_values,
             )
             _publish_component_entries(staging, destination, list(staged), f"checkpoint {component}")
             _drop_vanished(destination, entries, staged)
@@ -673,6 +683,7 @@ def _scan_for_secrets(
     component: str,
     *,
     runtime_env: Path,
+    secret_values: tuple[str, ...],
 ) -> None:
     """`state/` is what leaves the host, so a pasted token stops the commit here."""
     for entry in staged:
@@ -680,15 +691,10 @@ def _scan_for_secrets(
         # Scan against this installation rather than the process home default:
         # a recovery/doctor can intentionally point at another instance, and a
         # credential in that instance must still fail closed.
-        # Import here: checkpoint is imported while config is assembling its
-        # sprint validators, and secret_store itself validates through config.
-        # The scan only runs after that import graph is complete.
-        from secretary.secret_store import redaction_values
-
         scrubbed = redact(
             text,
             env_files=[runtime_env],
-            secret_values=redaction_values(runtime_env.parent),
+            secret_values=secret_values,
         )
         if scrubbed != text:
             raise CheckpointBlocked(f"secret detected in state/{component}/{entry}")

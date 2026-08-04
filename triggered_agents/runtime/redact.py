@@ -62,6 +62,13 @@ PATTERNS = [
 _URL_WITH_USERINFO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
 
 
+def looks_like_credential(value: str) -> bool:
+    """Whether plaintext itself has a known credential or credential-URL shape."""
+    return bool(_URL_WITH_USERINFO_RE.match(value)) or any(
+        pattern.search(value) for pattern, _label in PATTERNS
+    )
+
+
 def _load_env_values(env_files) -> list[str]:
     values = []
     for path in env_files:
