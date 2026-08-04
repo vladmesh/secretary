@@ -1360,7 +1360,10 @@ class TaskWriter:
                 self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
 
             payload = {"marker": marker, "decision": kind, "body_sha256": _digest(body), "assessment_visit": visit or None}
-            return self._write("decided", role, actor, reference, request_id, payload, mutation, identity=payload)
+            return self._write(
+                "decided", role, actor, reference, request_id, payload, mutation,
+                identity=payload, retry_payload={"decision_body": body},
+            )
 
     def routing(
         self,
@@ -2045,6 +2048,9 @@ class TaskWriter:
         if event.get("kind") == "archived":
             self._finish_pending_archive(event, retry_payload)
             return
+        if event.get("kind") == "decided":
+            self._finish_pending_decided(event, payload, retry_payload)
+            return
         if event.get("kind") == "restored_comment":
             from secretary.task_restore import finish_pending_restore_comment
 
@@ -2093,6 +2099,42 @@ class TaskWriter:
         normalized = self.reader.show(ref)
         if normalized["state"] != "in_progress" or normalized["claim"]["worker"] != worker:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
+
+    def _finish_pending_decided(
+        self, event: dict[str, Any], payload: dict[str, Any], retry_payload: dict[str, Any] | None,
+    ) -> None:
+        """Commit a decision only after its canonical marker and exact body exist on the card."""
+        ref = str(event.get("ref") or "")
+        marker = str(payload.get("marker") or "")
+        expected = str(payload.get("body_sha256") or "")
+
+        def matches(comment: dict[str, Any]) -> bool:
+            if comment.get("marker") != marker:
+                return False
+            rendered = str(comment.get("body") or "")
+            prefix = f"[{marker}]\n"
+            body = rendered[len(prefix):] if rendered.startswith(prefix) else rendered
+            return _digest(body) == expected
+
+        task = self.reader.show(ref)
+        matching = [comment for comment in task.get("comments", []) if matches(comment)]
+        if matching:
+            return
+        body = str((retry_payload or {}).get("decision_body") or "")
+        if not body or _digest(body) != expected:
+            raise TaskError(
+                "audit_pending",
+                "pending decision has no verified board comment; retry its original request and body",
+                4,
+            )
+        if task.get("state") != "assessment":
+            raise TaskError("backend_error", "pending decision no longer matches Assessment", 1)
+        self.client.call(
+            "createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}",
+        )
+        verified = self.reader.show(ref)
+        if not any(matches(comment) for comment in verified.get("comments", [])):
+            raise TaskError("backend_error", "pending decision comment could not be verified", 1)
 
     def _finish_pending_archive(
         self,

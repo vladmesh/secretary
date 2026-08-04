@@ -605,6 +605,20 @@ def _reconcile_open_sprint(
     # head never received its sprint, and reading it as the live observer would park the sprint
     # forever on a head that is doing nothing.
     pending_event: dict[str, Any] | None = None
+    event_state: dict[str, Any] | None = None
+    # A durable cursor is a prerequisite for every existing head path, including a legacy record
+    # left in `pending`. Otherwise a dead/missing head can be relaunched from an unknowable point
+    # and replay or skip board work before the normal recovery branch gets a chance to validate it.
+    if record is not None and not unresolved_intent and (
+        record.delivery.acknowledged_through
+        or (record.delivery.stage != DeliveryStage.IDLE and record.delivery.through_event)
+    ):
+        event_state = _observer_event_state(runtime, ref, record)
+        if not event_state.get("known", True):
+            _set_observer_state(record, "degraded", reason=event_state["reason"])
+            return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
+                    "action": "observer-cursor-unavailable", "head": record.head,
+                    "reason": event_state["reason"]}
     if (
         record is not None
         and not unresolved_intent
@@ -618,7 +632,7 @@ def _reconcile_open_sprint(
             record.state = "running"
             record.stopped_reason = ""
             record.paused_at = 0.0
-        event = _observer_event_state(runtime, ref, record)
+        event = event_state or _observer_event_state(runtime, ref, record)
         if not event.get("known", True):
             _set_observer_state(record, "degraded", reason=event["reason"])
             return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
@@ -667,7 +681,7 @@ def _reconcile_open_sprint(
         and record.state != STATE_STOPPED_BY_PAUSE
         and record.state != "pending"
     ):
-        event = _observer_event_state(runtime, ref, record)
+        event = event_state or _observer_event_state(runtime, ref, record)
         if not event.get("known", True):
             _set_observer_state(record, "degraded", reason=event["reason"])
             return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
@@ -746,7 +760,9 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     from crediting work it never received.
     """
     try:
-        sprint = runtime.sprints.show(ref)
+        # Observer reconciliation needs cards and the event stream, but not the independently
+        # rendered resume-freshness field. Skipping it keeps this path to one audit snapshot.
+        sprint = runtime.sprints.show(ref, include_resume_freshness=False)
         cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
         refs = {
             str(card.get("ref") or "")

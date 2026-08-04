@@ -33,6 +33,7 @@ from secretary.dispatcher_observer import (
     ObserverRecord,
     load_observers,
     observer_alive,
+    _observer_event_state,
     observer_pid_file,
     put_observers,
     observer_request_id,
@@ -1557,6 +1558,45 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(action["action"], "observer-cursor-unavailable")
         self.assertEqual(action["status"], "degraded")
         self.assertEqual(self.host.observer_nudges, [])
+
+    def test_dead_pending_legacy_head_with_unknown_cursor_is_not_relaunched(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        record = observers["sprint:1"]
+        record.state = "pending"
+        record.delivery.stage = DeliveryStage.AWAITING_ACK
+        record.delivery.delivery_id = "legacy-delivery"
+        record.delivery.through_event = "evt_missing"
+        launches = record.launches
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-cursor-unavailable")
+        self.assertEqual(action["status"], "degraded")
+        self.assertEqual(self.observers()["sprint:1"].launches, launches)
+
+    def test_observer_event_reconciliation_reads_one_audit_snapshot(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+        real_events = TaskAudit.events
+        calls: list[TaskAudit] = []
+
+        def counted(audit: TaskAudit, *args: object, **kwargs: object) -> list[dict]:
+            calls.append(audit)
+            return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(TaskAudit, "events", new=counted):
+            state = _observer_event_state(self.runtime, "sprint:1", record)
+
+        self.assertTrue(state["known"])
+        self.assertEqual(len(calls), 1)
 
     def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
         """Orca may rotate the handle while retaining leafId, so status must read the alias."""

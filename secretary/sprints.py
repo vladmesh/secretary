@@ -466,7 +466,7 @@ class SprintReader:
         for raw in raw_sprints:
             if not _is_sprint_row(raw):
                 continue
-            sprint = self._normalize(raw, comments=None)
+            sprint = self._normalize(raw, comments=None, include_resume_freshness=False)
             # Without live cards this value would claim freshness based on incomplete data.  `show`
             # and `status` populate it after reading the linked cards instead.
             sprint.pop("resume_freshness", None)
@@ -499,13 +499,15 @@ class SprintReader:
                 {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
                 for comment in comments_raw if isinstance(comment, dict)
             ]
-            sprint = self._normalize(raw, comments=comments)
+            sprint = self._normalize(raw, comments=comments, include_resume_freshness=False)
             # Freshness needs the linked cards this view deliberately does not read.
             sprint.pop("resume_freshness", None)
             result.append(sprint)
         return sorted(result, key=lambda sprint: (sprint["ref"], sprint["id"]))
 
-    def show(self, reference: str, *, include_cards: bool = True) -> dict[str, Any]:
+    def show(
+        self, reference: str, *, include_cards: bool = True, include_resume_freshness: bool = True,
+    ) -> dict[str, Any]:
         board_id = ensure_sprint_board(self.client)
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
         if not isinstance(raw, dict):
@@ -520,13 +522,19 @@ class SprintReader:
                 {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
                 for comment in comments_raw if isinstance(comment, dict)
             ]
-        sprint = self._normalize(raw, comments=comments)
+        # Freshness depends on the linked-card set, so computing it in `_normalize` would both
+        # scan the audit too early and scan it a second time after the cards are loaded.
+        sprint = self._normalize(raw, comments=comments, include_resume_freshness=False)
         if include_cards:
             sprint["cards"] = TaskReader(self.client).list(sprint=reference)
+        if include_resume_freshness:
             sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"))
         return sprint
 
-    def _normalize(self, raw: dict[str, Any], *, comments: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def _normalize(
+        self, raw: dict[str, Any], *, comments: list[dict[str, Any]] | None,
+        include_resume_freshness: bool = True,
+    ) -> dict[str, Any]:
         task_id = _positive_int(raw.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
@@ -565,7 +573,8 @@ class SprintReader:
             result["comments"] = comments
         resume = _resume(meta.get("sprint_resume"))
         result["resume"] = resume
-        result["resume_freshness"] = self._resume_freshness(result, resume)
+        if include_resume_freshness:
+            result["resume_freshness"] = self._resume_freshness(result, resume)
         return result
 
     def status(self, reference: str, *, observer: dict[str, Any] | None = None) -> dict[str, Any]:

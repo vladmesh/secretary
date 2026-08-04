@@ -1723,6 +1723,45 @@ class AssessmentStateTests(unittest.TestCase):
         replay = self._decide("release", request_id="delivery-after-repair")
         self.assertTrue(replay["replayed"])
 
+    def test_decision_staged_before_comment_fails_closed_until_original_retry(self) -> None:
+        self._park()
+        real_stage = self.writer.audit.stage
+        interrupted = [False]
+
+        def stage_then_crash(request_id: str, event: dict) -> None:
+            real_stage(request_id, event)
+            if event.get("kind") == "decided" and not interrupted[0]:
+                interrupted[0] = True
+                raise KeyboardInterrupt("crash after stage")
+
+        with mock.patch.object(self.writer.audit, "stage", side_effect=stage_then_crash):
+            with self.assertRaises(KeyboardInterrupt):
+                self._decide("release", request_id="staged-before-comment")
+
+        self.assertFalse(any(
+            comment.get("marker") == "decision:release"
+            for comment in self.writer.reader.show("secretary-468")["comments"]
+        ))
+        repaired, unresolved = self.writer.reconcile()
+        self.assertEqual((repaired, unresolved), (0, 1))
+        self.assertEqual(self.writer.audit.events("secretary-468", kind="decided"), [])
+        with self.assertRaisesRegex(TaskError, "recorded decision"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="done",
+                reason="", request_id="must-not-act-on-commentless-decision",
+            )
+
+        retry = self._decide("release", request_id="staged-before-comment")
+
+        self.assertTrue(retry["replayed"])
+        decisions = self.writer.audit.events("secretary-468", kind="decided")
+        self.assertEqual(len(decisions), 1)
+        comments = [
+            comment for comment in self.writer.reader.show("secretary-468")["comments"]
+            if comment.get("marker") == "decision:release"
+        ]
+        self.assertEqual(len(comments), 1)
+
     def test_observer_wake_predicate_excludes_routine_and_self_card_events(self) -> None:
         refs = {"secretary-468"}
 
