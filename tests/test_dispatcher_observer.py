@@ -1482,6 +1482,40 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(closed)], ["observer-stopped"])
         self.assertEqual(self.host.observer_nudges, [])
 
+    def test_human_assessment_to_issues_wakes_for_the_next_cut_but_routine_move_does_not(self) -> None:
+        """Only a human move that removes parked work makes the idle observer choose again."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.tasks[0]["column_id"] = 7  # Assessment: retained worker, no machine decision pending.
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        self.assertEqual(
+            [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-idle"]
+        )
+
+        moved = self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot", target="issues",
+            reason="return this cut to triage", sprint_override=True,
+            sprint_override_reason="operator removes the parked cut", request_id="po-assessment-issues",
+        )
+        woke = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.through_event, moved["event_id"])
+
+        self.audit.append("dispatcher-routine-routing", {
+            "event_id": "evt_dispatcher_routine_routing", "request_id": "dispatcher-routine-routing",
+            "ref": "secretary-510-pilot", "kind": "moved", "outcome": "success",
+            "actor": {"role": "dispatcher", "id": "dispatcher"},
+            "payload": {"from": "validate", "to": "in_progress"}, "occurred_at": _now(),
+        })
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        repeated = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(repeated)], ["observer-wake-pending"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+
     def test_denied_and_failed_card_events_do_not_wake_an_observer(self) -> None:
         self.open_sprint()
         self.board.tasks[0]["column_id"] = 6

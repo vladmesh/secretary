@@ -261,9 +261,22 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     if str(event.get("kind") or "") != "moved":
         return False
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    source = str(payload.get("from") or "")
+    target = str(payload.get("to") or "")
     # Assessment needs an observer decision; Blocked needs classification; Done is the semantic
     # post-release edge where the observer can choose the next cut or close the sprint.
-    return str(payload.get("to") or "") in {"assessment", "blocked", "done"}
+    if target in {"assessment", "blocked", "done"}:
+        return True
+    # A human control-plane move which removes a live or parked card back to Issues also changes
+    # the observer's next-cut decision.  Do not turn every Issues transition into a wake: routine
+    # dispatcher/routing moves are deliberately excluded, and the old state must have held work.
+    # `steward` has no such transition today, but keeping both human control-plane roles here
+    # makes a future permitted equivalent retain the same semantic contract.
+    return (
+        str(actor.get("role") or "") in {"po", "steward"}
+        and source in ACTIVE_STATES
+        and target == "issues"
+    )
 
 
 def is_significant_observer_event(

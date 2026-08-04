@@ -296,7 +296,6 @@ At Assessment, read the structured evidence rather than repeating the mechanics:
 - worker reports and card comments;
 - every reviewer verdict, including non-blocking remarks in a green review: those either go into the next
   card or are explicitly rejected with a reason;
-- the SHA-bound gate receipt and merge/release result;
 - the SHA-bound gate receipt and merge/release result; inspect the pull request, final diff or CI only
   if the preceding evidence is missing, contradictory, RED/Blocked, or signals a real DoD or
   security/data-loss risk;

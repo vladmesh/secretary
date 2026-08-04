@@ -1777,6 +1777,7 @@ class AssessmentStateTests(unittest.TestCase):
             event("reported", actor="worker"),
             event("commented", actor="dispatcher"),
             event("moved", actor="dispatcher", payload={"to": "validate"}),
+            event("moved", actor="dispatcher", payload={"from": "assessment", "to": "issues"}),
             event("routing", actor="dispatcher"),
             event("decided", actor="observer", payload={"decision": "release"}),
         ):
@@ -1787,6 +1788,10 @@ class AssessmentStateTests(unittest.TestCase):
             event("moved", actor="dispatcher", payload={"to": "assessment"}),
             event("moved", actor="dispatcher", payload={"to": "blocked"}),
             event("moved", actor="dispatcher", payload={"to": "done"}),
+            event("moved", actor="po", payload={"from": "in_progress", "to": "issues"}),
+            event("moved", actor="po", payload={"from": "validate", "to": "issues"}),
+            event("moved", actor="po", payload={"from": "assessment", "to": "issues"}),
+            event("moved", actor="steward", payload={"from": "assessment", "to": "issues"}),
             event("budget_recorded", actor="dispatcher", ref=SPRINT),
             event("commented", actor="po", ref=SPRINT),
         ):
