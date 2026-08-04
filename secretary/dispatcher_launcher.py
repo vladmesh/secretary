@@ -16,7 +16,7 @@ from secretary.role_env import (
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
     ROLE_ALLOWLIST,
-    RUNTIME_ENV_FILE_ENV,
+    RUNTIME_ENV_FILE_ENVS,
     UNIT_BOUND_ENV,
     RoleEnvError,
     runtime_env,
@@ -30,7 +30,7 @@ from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 # than the installation, so it comes from the record being launched and is passed per call. The
 # dispatcher's own environment must never answer for it.
 LAUNCH_BOUND_ENV = tuple(
-    name for name in (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
+    name for name in (*RUNTIME_ENV_FILE_ENVS, *UNIT_BOUND_ENV)
     if name not in {OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV}
 )
 

@@ -16,6 +16,10 @@ from pathlib import Path
 from .paths import PRODUCT_ENV, default_instance_path
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
+SECRETARY_RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
+# Packaged automation units predate the dispatcher heads and use the first spelling, while
+# dispatcher-launched heads use the second. The operations guide documents this order.
+RUNTIME_ENV_FILE_ENVS = (RUNTIME_ENV_FILE_ENV, SECRETARY_RUNTIME_ENV_FILE_ENV)
 RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 
 
@@ -25,7 +29,12 @@ def runtime_env_path() -> Path:
     The file is read on every `runtime_env()`, so the name that points at it is read the same way:
     a process moved onto another installation's file gets it without a module reload.
     """
-    return Path(os.environ.get(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT))
+    return Path(next((os.environ[name] for name in RUNTIME_ENV_FILE_ENVS if os.environ.get(name)),
+                     RUNTIME_ENV_DEFAULT))
+
+
+# Kept for secretary.session, whose launch error reports the file selected when this module loaded.
+RUNTIME_ENV = runtime_env_path()
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -56,16 +65,26 @@ BOARD_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
 # (secretary-833 review, round 3).
 NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
 # Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
-# file, which is itself a file inside one installation. See secretary/role_env.py for the same
-# rule on the dispatcher-to-head path.
-UNIT_BOUND_ENV = ("SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
+# file, which is itself a file inside one installation.
+OBSERVER_SPRINT_ENV = "SECRETARY_OBSERVER_SPRINT"
+OBSERVER_GENERATION_ENV = "SECRETARY_OBSERVER_GENERATION"
+UNIT_BOUND_ENV = (
+    "SECRETARY_INSTANCE",
+    "TA_SECRETARY_REPO",
+    OBSERVER_SPRINT_ENV,
+    OBSERVER_GENERATION_ENV,
+)
+# An observer's identity is supplied only by its launcher. A runtime.env entry must never let a
+# head claim another sprint.
+LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV)
 # What a launched process has to be told about the installation it belongs to.
-LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, *UNIT_BOUND_ENV)
+LAUNCH_BOUND_ENV = (*RUNTIME_ENV_FILE_ENVS, "SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": (*BOARD_ENV, *NONSECRET_ENV),
     "worker": (*BOARD_ENV, *NONSECRET_ENV),
     "reviewer": (*BOARD_ENV, *NONSECRET_ENV),
+    "observer": (*BOARD_ENV, *NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
     "steward": (*BOARD_ENV, *NONSECRET_ENV),
     "retro": (*BOARD_ENV, *NONSECRET_ENV),
     "curator": NONSECRET_ENV,
@@ -75,12 +94,15 @@ ROLE_REQUIRED: dict[str, tuple[str, ...]] = {
     "pipeline": BOARD_ENV,
     "worker": BOARD_ENV,
     "reviewer": BOARD_ENV,
+    "observer": BOARD_ENV,
     "steward": BOARD_ENV,
     "retro": BOARD_ENV,
     "curator": (),
 }
 
-BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro"}
+# This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
+# are rejected before reaching this gate; they remain here as the board's declared roles.
+BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_NAME_RE = re.compile(
@@ -160,6 +182,8 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
     for key in allowed:
         if key in base and key in UNIT_BOUND_ENV:
             env[key] = base[key]
+        elif key in LAUNCHER_ONLY_ENV:
+            env.pop(key, None)
         elif key in source:
             env[key] = source[key]
         elif key in base:
@@ -177,6 +201,23 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
                 f"runtime env for role {role!r} missing {names}; check provisioning/launcher"
             )
     return env
+
+
+def observer_binding(sprint: str, generation: str) -> dict[str, str]:
+    """The identity a launcher renders into one observer head's command line."""
+    sprint = str(sprint or "").strip()
+    generation = str(generation or "").strip()
+    if not sprint or not generation:
+        return {}
+    return {OBSERVER_SPRINT_ENV: sprint, OBSERVER_GENERATION_ENV: generation}
+
+
+def declared_observer_sprint(env: dict[str, str] | None = None) -> str:
+    """The sprint this process was launched to observe, or an empty string."""
+    source = os.environ if env is None else env
+    sprint = str(source.get(OBSERVER_SPRINT_ENV, "") or "").strip()
+    generation = str(source.get(OBSERVER_GENERATION_ENV, "") or "").strip()
+    return sprint if generation else ""
 
 
 def launch_binding() -> list[str]:
