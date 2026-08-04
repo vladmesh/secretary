@@ -961,7 +961,10 @@ class TaskWriter:
             "outcome": "success",
             "task_id": "",
             "ref": reference,
-            "backend": {"kind": "kanboard", "task_id": None, "revision": "pending"},
+            "backend": {
+                "kind": "kanboard", "task_id": None, "revision": "pending",
+                "reference_assignment": "atomic",
+            },
             "request_id": request_id,
             "payload": payload,
         }
@@ -1061,6 +1064,12 @@ class TaskWriter:
                 self.audit.stage(request_id, event)
             except OSError as exc:
                 raise _CommittedWriteError() from exc
+            try:
+                reference_persisted = self.reader.show_id(task_id)["ref"] == created_ref
+            except Exception as exc:
+                raise _CommittedWriteError() from exc
+            if not reference_persisted:
+                raise _CommittedWriteError()
             try:
                 values = {
                     "record_type": "task",
@@ -2008,6 +2017,9 @@ class TaskWriter:
             raise TaskError("backend_error", "pending create is missing its task ref", 1)
         task = self._pending_create_task(event)
         if task["ref"] != ref:
+            backend = event.get("backend")
+            if isinstance(backend, dict) and backend.get("reference_assignment") == "atomic":
+                raise TaskError("backend_error", "pending atomic create reference remains incomplete", 1)
             # A pending event written by the pre-atomic create path can still name a row
             # without its reference. Repair that one recorded row only when no other row
             # acquired the reference while the writer was down.
@@ -2040,9 +2052,19 @@ class TaskWriter:
         ref = str(event.get("ref") or "")
         if not ref:
             raise TaskError("backend_error", "pending create is missing its backend task id", 1)
-        # The allocation was staged before the atomic createTask(reference=...) call,
-        # so this narrow crash-window fallback cannot select an unreserved reference.
-        return self.reader.show(ref)
+        task = self.reader.show(ref)
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise TaskError("backend_error", "pending create is missing its identity", 1)
+        if (
+            _text(payload.get("title_sha256")) != _digest(task["title"])
+            or _text(payload.get("description_sha256")) != _digest(task["description"])
+            or task["state"] != _text(payload.get("target"))
+        ):
+            raise TaskError("backend_error", "pending create identity cannot be proven", 1)
+        # An interrupted allocation has no backend id. It may be resumed only when the
+        # ref, title, description and requested target all prove the later board row is it.
+        return task
 
     @staticmethod
     def _role(role: str, allowed: set[str]) -> None:

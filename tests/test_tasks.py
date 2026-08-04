@@ -792,6 +792,10 @@ class TaskWriterTests(unittest.TestCase):
                 )
             # A staged event left by the pre-atomic create path has the id but not the ref.
             self.client.tasks[-1]["reference"] = ""
+            pending = self.writer.audit.pending_event("restore-create")
+            assert pending is not None
+            pending["backend"].pop("reference_assignment")
+            self.writer.audit.stage("restore-create", pending)
             self.assertEqual(self.client.tasks[-1]["reference"], "")
             self.client.fail_metadata = False
 
@@ -1065,6 +1069,54 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(result["task"]["ref"], "secretary-469")
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_sigint_before_atomic_create_does_not_adopt_later_unrelated_reference(self) -> None:
+        original_call = self.client.call
+
+        def interrupt_create(method: str, **params: object) -> object:
+            if method == "createTask":
+                raise KeyboardInterrupt()
+            return original_call(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=interrupt_create), open_sprint() as sprint:
+            with self.assertRaises(KeyboardInterrupt):
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Interrupted before create", description="never reached board",
+                    request_id="sigint-before-create", sprint=sprint,
+                )
+
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.client.tasks.append({
+            "id": 99, "reference": "secretary-469", "title": "Later unrelated", "description": "different",
+            "column_id": 2, "position": 1, "swimlane_id": 4, "is_active": 1,
+        })
+        self.client.metadata[99] = {}
+        self.client.comments[99] = []
+
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertEqual(self.client.metadata[99], {})
+        self.assertFalse(any(method == "updateTask" for method, _params in self.client.calls))
+
+    def test_backend_ignoring_atomic_reference_leaves_pending_create_unrepaired(self) -> None:
+        original_call = self.client.call
+
+        def ignore_reference(method: str, **params: object) -> object:
+            if method == "createTask":
+                params.pop("reference", None)
+            return original_call(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=ignore_reference), open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Reference must persist", request_id="ignored-atomic-reference", sprint=sprint,
+                )
+
+        self.assertEqual(self.client.tasks[-1]["reference"], "")
+        self.assertEqual(self.client.metadata[int(self.client.tasks[-1]["id"])], {})
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertFalse(any(method == "updateTask" for method, _params in self.client.calls))
 
     def test_pending_create_does_not_repair_a_different_task_with_its_reference(self) -> None:
         self.client.fail_metadata = True

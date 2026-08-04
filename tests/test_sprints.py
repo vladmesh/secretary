@@ -83,7 +83,7 @@ class SprintKanboard:
         if method == "createTask":
             task_id = max(int(task["id"]) for task in self.tasks) + 1
             task = {
-                "id": task_id, "project_id": int(params["project_id"]), "reference": "",
+                "id": task_id, "project_id": int(params["project_id"]), "reference": params.get("reference", ""),
                 "title": params["title"], "description": params.get("description", ""),
                 "column_id": params["column_id"], "position": len(self.tasks) + 1,
                 "swimlane_id": params.get("swimlane_id", 0), "date_creation": "1720000001",
