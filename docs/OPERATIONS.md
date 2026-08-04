@@ -53,6 +53,23 @@ opens every secret at once, with the same rights that previously read `runtime.e
 `doctor` raises a finding when catalog and values diverge, when the key is missing or unusable while the
 catalog is non-empty, and when the key's permissions are wider than `0600`.
 
+To migrate an existing canonical `<instance>/runtime.env` into a new store, use the CLI rather than
+copying values through a shell or putting them on an argument list:
+
+```bash
+python3 -m secretary secret init --instance INSTANCE
+python3 -m secretary secret import --instance INSTANCE --file INSTANCE/runtime.env \
+  --scope installation --purpose runtime --materialize runtime-env
+python3 -m secretary secret materialize --instance INSTANCE --target runtime-env
+```
+
+`secret init` is interactive and shows the recovery phrase only once. `runtime-env` is deliberately a
+named target, not a path argument: it resolves to this installation's canonical runtime-env path (including
+the supported runtime-env override), so import, materialization and launched roles name the same file.
+Do not pass `--materialize-path` with `--materialize runtime-env`; it is valid only for the distinct
+`file` target. A plain `KANBOARD_URL` is configuration, not an exact-value secret; a URL containing
+userinfo remains sensitive.
+
 Instance config holds no secret materialisation inputs. `reconcile` builds the host plan from bindings
 and config and never decrypts the store.
 

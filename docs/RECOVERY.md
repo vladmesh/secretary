@@ -43,10 +43,12 @@ The canon, the normalised minimum needed to resume work:
 path and line number. During recovery, after the pipeline role worktree exists,
 Secretary materializes those entries back into that worktree's live
 `state/pipeline/` source before the dispatcher units are installed or started.
-A live journal may already be a valid append-only extension of the checkpoint;
-that extension is retained. A divergent or truncated prefix is never
-overwritten. Likewise, a checkpoint refuses to publish a truncated or rewritten
-live export over a non-empty canonical journal.
+The materializer preserves each source's history and its original line-number
+gaps; it does not compact independent sources into one synthetic stream. A live
+journal may already be a valid append-only extension of the checkpoint; that
+extension is retained. A divergent or truncated prefix is never overwritten.
+Likewise, a checkpoint refuses to publish a truncated or rewritten live export
+over a non-empty canonical journal.
 
 Outside the canon, because it is derived or bulky raw material, rebuilt or kept in an optional cold
 archive:
@@ -173,12 +175,13 @@ at-rest encryption. A private key on the same host as the data does not protect 
 compromise; what at-rest encryption did protect was copies that left the host, in Git and offsite, and
 this contract removes those.
 
-The checkpoint's exact-value scan reads values whose runtime variable names identify credentials
-(`*_TOKEN`, `*_PAT`, `*_IDENTITY`, `*_KEY`, `*_SECRET`, passwords, credentials, auth or webhooks),
-plus URLs that embed user info. When its installation key is present, it also reads catalog values for
-those sensitive names or for values that independently match a credential shape. This keeps legacy
-whole-file imports from treating `SECRETARY_DATA_DIR`, `TA_SECRETARY_REPO`, or a plain `KANBOARD_URL`
-as secrets. A locked or incomplete secret store is reported by `doctor` but does not itself halt
+The checkpoint distinguishes ordinary configuration from secret material. Its exact-value scan reads values
+whose runtime variable names identify credentials (`*_TOKEN`, `*_PAT`, `*_IDENTITY`, `*_KEY`, `*_SECRET`,
+passwords, credentials, auth or webhooks), plus URLs that embed user info. When its installation key is
+present, it also reads catalog values for those sensitive names or for values that independently match a
+credential shape. This keeps legacy whole-file imports from treating `SECRETARY_DATA_DIR`,
+`TA_SECRETARY_REPO`, or a plain `KANBOARD_URL` as secrets: a board URL without userinfo is configuration,
+not a credential. A locked or incomplete secret store is reported by `doctor` but does not itself halt
 checkpointing; runtime-file and pattern scans still run. Before protocol text reaches the board or
 audit, the same credential-specific redactor replaces real values; it does not mangle ordinary long
 identifiers or restored historical text. Known token and webhook formats remain a second fail-closed
@@ -260,11 +263,12 @@ install, prints no values and adds it to no commit.
    that gained an empty `product` its export never carried is a lossy write and fails the check.
 5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
    runtime-home files for the agent CLIs. Provider authentication stays manual.
-6. Runs the same materialiser as `secretary upgrade`: recreates role worktrees, installs units,
-   registers session-manager resources and applies automations. When it runs under `sudo`, role
-   worktrees and their Git administrative directories are assigned to `--installation-user`, so
-   the user services can read and update them.
-7. Rebuilds the pipeline worktree's live run journal from the checkpointed normalized journal.
+6. Recreates the pipeline role worktree, then rebuilds its live JSONL run source from the checkpointed
+   normalized journal before any dispatcher unit is installed or started.
+7. Runs the remainder of the same materialiser as `secretary upgrade`: creates any other role
+   worktrees, installs units, registers session-manager resources and applies automations. When it
+   runs under `sudo`, role worktrees and their Git administrative directories are assigned to
+   `--installation-user`, so the user services can read and update them.
 8. Checks restore status. Heads are connected after bootstrap as a separate step.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
@@ -294,6 +298,24 @@ store or separate backup host is required.
 `secretary recover --dry-run` checks the checkout, credentials, runtime prerequisites and checkpoint
 integrity, then prints the steps as `would-change`. The preview writes no local data plane, does not touch
 the board, and runs neither the memory reindex nor the host materialiser.
+
+## Manual recovery sprint closeout
+
+The manual recovery and durability sprint was deployed in two production batches:
+`dab7508` (recovery, reference allocation and checkpoint safety) followed by `5f79500`
+(exact-SHA gate receipts and sparse observer wakes). Deployment validation recorded a green suite of
+1,978 tests and role-skill delivery synchronized across all nine targets, with zero missing targets and
+zero drift.
+
+The deferred owner-scoped work is intentionally outside this closeout: provision the OpenRouter credential
+and retain/test the installation recovery phrase. Neither is required to inspect checkpoint health, but both
+are required for its respective provider or secret-recovery path.
+
+### Live LLM canary — pending owner validation
+
+No live LLM/card canary is claimed by this closeout. After the OpenRouter credential is supplied, record one
+single-card canary here with its card reference, receipt SHA, checkpoint result and post-run
+`secretary doctor --instance INSTANCE` result.
 
 Fresh mode does not accept an existing installation user or checkout. It refuses with an explicit choice:
 `--recover` for the same installation, or a separate adopt workflow for a live host. Recover does not

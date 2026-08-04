@@ -92,6 +92,8 @@ Observers consume the worker report, reviewer verdict and gate receipt before co
 valid executed exact-SHA receipt suppresses its routine broad rerun; none/noop or missing evidence does
 not, and permits appropriate focused or broad validation. Contradictory evidence, RED/Blocked
 classification, a real Definition-of-Done gap, or a security/data-loss concern also requires research.
+The role that owns a further broad rerun records its reason in the report; a receipt never transfers
+ownership of an unexplained rerun or suppresses a targeted reproduction of a new concrete risk.
 
 A card parks only where a decision can come from: its sprint is open and declares a concrete
 observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
@@ -162,6 +164,15 @@ of its reservations. A closed sprint and an unreserved project are separate erro
 first backend write. Tasks never accept product priority; `--priority` is rejected rather than
 ignored. Execution tasks are created in Ready, never in Issues; the worker, reviewer and retro roles
 create nothing but a proposal in Issues, which a PO later triages to Ready.
+
+When `task create` omits `--ref`, Secretary allocates `PROJECT-N` from the project's board-wide
+high-water mark across both open and closed cards. Allocation, staging and `createTask` are one
+locally serialized operation, so concurrent local creators cannot reserve the same reference. The
+pending audit first records the chosen reference and, once the backend returns it, the Kanboard task id;
+a recovered pending create prefers that recorded live id. An older id-less pending create is repaired only
+when one live row proves its identity. Ambiguous, absent or closed-only matches fail closed rather than
+guessing or creating a duplicate.
+
 `--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
 override, launch mode comes from the head profile.
 
@@ -357,10 +368,20 @@ same entity-derived state for every sprint in `installation.sprints.items`, incl
 its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
 reported in `installation.sprints.error`.
 
+Wakes are intentionally sparse: only the semantic card edges (Assessment, Blocked and Done), an eligible
+human control-plane return to Issues, sprint budget events and PO sprint comments open observer work.
+Claims, routing, reports, validation telemetry and observer-authored writes do not. Prompt acceptance is
+out of band: delivery records only that the pane took the prompt, and the next ordinary reconciliation
+reads one durable audit snapshot to close the batch only on the matching resume. Delivery therefore never
+polls the board or calls an observer-facing `Monitor` command. Legacy broad cursors are narrowed without
+discarding still-unacknowledged semantic work.
+
 An Assessment entry is one decision visit. The first observer `task decide` is canonical for that visit;
 a redelivered observer turn repeating the same kind returns that decision without adding another comment,
 and a different kind is refused until the card enters Assessment again. This protects the release/rework
-seam from delivery retries without weakening RED or Blocked classification.
+seam from delivery retries without weakening RED or Blocked classification. The complete decision
+transaction is serialized per card, including the fresh state read, visit resolution and staged board/audit
+write; two observer processes cannot each make a different decision for the same Assessment visit.
 
 ### The open-sprint limit
 
