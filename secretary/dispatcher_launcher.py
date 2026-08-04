@@ -21,6 +21,7 @@ from secretary.role_env import (
     RoleEnvError,
     runtime_env,
 )
+from triggered_agents.agents.pipeline.heads import CODEX_EFFORTS, CODEX_LAUNCH_MODES
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 
 # What a launched head has to be told about the installation it belongs to. The env file name
@@ -44,17 +45,6 @@ CLAUDE_MANAGED_SETTINGS_DEFAULT = "/etc/claude-code/managed-settings.json"
 CLAUDE_MANAGED_SETTINGS_ENV = "CLAUDE_MANAGED_SETTINGS"
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 CLAUDE_MODEL_ENV = "ANTHROPIC_MODEL"
-CODEX_EFFORTS = {
-    "default": None,
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "extra": "xhigh",
-    "xhigh": "xhigh",
-    "max": "max",
-    "ultra": "ultra",
-}
-CODEX_LAUNCH_MODES = {"exec", "tui"}
 
 
 class HeadLaunchError(RuntimeError):
