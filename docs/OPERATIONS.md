@@ -142,12 +142,19 @@ checkpoint result. `status` and `production-observe` then show the resulting che
 changed normalized board or run export produces one observable local checkpoint commit at the end of that
 60-second tick; it does not imply an immediate remote push.
 
-Repeat the same read-only observation across a routine tick with no relevant board event. Its dispatcher
-evidence must contain no `observer-launched`, `observer-relaunched` or `observer-nudged` action and no
-card transition. The observer snapshot from `production-observe` (also available through `status`) should
-remain at its prior lifecycle state, and checkpoint evidence should show `unchanged` rather than a new
-commit when normalized `state/` did not change. This verifies the quiet path without altering scheduling
-or runtime behavior.
+Repeat the same read-only observation across a routine tick with no relevant board event. It has to prove
+both halves of quietness: no card transition, and no observer wake or launch activity. For every
+`observer-reconcile` result in that tick, accept only the quiescent actions `observer-live`,
+`observer-waiting`, or `observer-idle` (or no observer result at all). Treat every other observer action
+as a failed quiet-tick observation, including delivery actions (`observer-nudged`,
+`observer-wake-pending`, `observer-wake-waiting`, `observer-redelivered`, and
+`observer-wake-deferred`) and launch, relaunch, or adoption actions (`observer-launched`,
+`observer-relaunched`, `observer-launch-pending`, `observer-launch-deferred`,
+`observer-launch-skipped`, and `observer-adopted`). This allow-list also fails closed for a new or
+unrecognized lifecycle action. The observer snapshot from `production-observe` (also available through
+`status`) should remain at its prior lifecycle state, and checkpoint evidence should show `unchanged`
+rather than a new commit when normalized `state/` did not change. This verifies the quiet path without
+altering scheduling or runtime behavior.
 
 ## Status and doctor
 
