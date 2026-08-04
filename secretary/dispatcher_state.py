@@ -214,10 +214,8 @@ class DispatcherRecord:
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
             worker_idle_since=float(payload.get("worker_idle_since") or 0.0),
-            worker_continuation=(
-                WorkerContinuation.from_json(payload.get("worker_continuation"))
-                if "worker_continuation" in payload
-                else WorkerContinuation.from_legacy_record(payload)
+            worker_continuation=WorkerContinuation.from_json(
+                payload.get("worker_continuation")
             ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),

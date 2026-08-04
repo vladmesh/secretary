@@ -729,38 +729,6 @@ class BackupTests(unittest.TestCase):
             any("runs_state component path missing from archive: claims" in item for item in result.findings)
         )
 
-    def test_verify_accepts_legacy_full_archive_without_runs_state_claims(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            archive = root / "legacy-full.tar"
-            payload = root / "payload" / "secretary-backup"
-            _write_complete_payload(payload)
-            journal = payload / "secretary-data" / "memory" / "facts" / ".git"
-            subprocess.run(
-                ["git", "init", str(journal.parent)], check=True, stdout=subprocess.DEVNULL
-            )
-            (payload / "secretary-data" / "runs" / "claims.json").unlink()
-            raw_data = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data"
-            raw_data.mkdir(parents=True)
-            (raw_data / "db.sqlite").write_bytes(b"sqlite")
-            (raw_data.parent / "manifest.json").write_text("{}", encoding="utf-8")
-            manifest_path = payload / "versions.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["checksums"] = {
-                path.relative_to(payload).as_posix(): sha256_file(path)
-                for path in payload.rglob("*")
-                if path.is_file() and path.name != "versions.json"
-            }
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
-
-            result = verify_backup(
-                archive,
-            )
-
-        self.assertEqual(result.code, 0, result.findings)
-
     def test_verify_reports_missing_normalized_board_export_sidecars(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1172,7 +1140,7 @@ class BackupMemoryCanonTests(unittest.TestCase):
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
 
-    def test_create_exports_facts_from_the_private_repo_not_the_seed(self):
+    def test_create_exports_facts_from_the_private_repo(self):
         from secretary import state_repo
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1195,10 +1163,6 @@ class BackupMemoryCanonTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A", "."], cwd=instance, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "facts"], cwd=instance, check=True)
 
-            seed = root / "panelmem-kb"
-            (seed / "global").mkdir(parents=True)
-            (seed / "global" / "foreign.md").write_text("foreign seed fact\n", encoding="utf-8")
-
             def fake_raw(data_dir_arg):
                 raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
                 (raw / "data").mkdir(parents=True)
@@ -1215,12 +1179,6 @@ class BackupMemoryCanonTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
                 mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
-                # The seed resolves to a populated source, so a fallback would
-                # succeed silently instead of failing on a missing panelmem-kb.
-                mock.patch(
-                    "secretary.memory_journal._resolve_memory_source",
-                    return_value=(seed, seed),
-                ),
                 mock.patch("secretary.data.export_board", side_effect=stub("board")),
                 mock.patch("secretary.data.export_runs", side_effect=stub("runs")),
                 mock.patch("secretary.data.export_transcripts", side_effect=stub("transcripts")),
@@ -1235,7 +1193,6 @@ class BackupMemoryCanonTests(unittest.TestCase):
                 exported = member.read().decode("utf-8")
 
             self.assertIn("live fact from the private repo", exported)
-            self.assertNotIn("foreign seed fact", exported)
             # The export is published into the live data dir too; the reindex
             # and memory-mcp read it from there.
             self.assertIn(

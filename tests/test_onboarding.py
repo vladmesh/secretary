@@ -170,19 +170,9 @@ class OnboardingTests(unittest.TestCase):
         self.assertNotIn("policy", artifact["identity"])
         self.assertEqual(load_config(self.binding)["policy"], {"code_concurrency": 2})
 
-    def test_draft_policy_copy_is_refreshed_from_authoritative_binding(self):
-        project_add(str(self.repo), str(self.instance), dry_run=False)
-        draft = load_config(self.draft)
-        draft["identity"]["policy"] = {"code_concurrency": 9}
-        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
-
-        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
-
-        self.assertEqual(code, 0)
-        self.assertNotIn("policy", artifact["identity"])
-        self.assertNotIn("policy", load_config(self.draft)["identity"])
-
-    def test_legacy_identity_keeps_plane_and_policy_in_the_binding_only(self):
+    def test_binding_field_in_draft_identity_is_rejected_not_migrated(self):
+        """`plane` and `policy` belong to the binding. A draft that also declares them is a
+        corrupt contract the schema refuses, and the binding keeps the operator's values."""
         project_add(str(self.repo), str(self.instance), dry_run=False)
         binding = load_config(self.binding)
         binding["plane"] = "project"
@@ -195,9 +185,10 @@ class OnboardingTests(unittest.TestCase):
 
         code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
 
-        self.assertEqual(code, 0, artifact)
-        self.assertEqual(sorted(artifact["identity"]), ["adapter", "default_branch", "id", "repo"])
-        self.assertEqual(sorted(load_config(self.draft)["identity"]), ["adapter", "default_branch", "id", "repo"])
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertEqual(sorted(load_config(self.draft)["identity"]),
+                         ["adapter", "default_branch", "id", "plane", "policy", "repo"])
         stored = load_config(self.binding)
         self.assertEqual(stored["plane"], "project")
         self.assertEqual(stored["policy"], {"code_concurrency": 1})

@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import socket
 import sqlite3
-import subprocess
 import tempfile
 import time
 import uuid
@@ -22,7 +20,6 @@ from secretary._fsutil import (
     ensure_dir as _ensure_dir,
     publish_component_entries as _publish_component_entries,
     regular_files_under as _regular_files_under,
-    remove_path as _remove_path,
     write_json as _write_json,
     write_ndjson as _write_ndjson,
 )
@@ -31,20 +28,7 @@ from secretary import state_repo
 from secretary.state_repo import MEMORY_PATHSPEC, StateRepoError
 
 
-PANELMEM_KB = Path.home() / "panelmem-kb"
-MEMORY_IMPORT_MARKER = "Op: import"
 MEMORY_LOCK_NAME = ".write.lock"
-
-
-@dataclass(frozen=True)
-class MemoryImport:
-    facts_dir: Path
-    count: int
-    source: str
-    source_head: str
-    commit: str | None
-    changed: bool
-    initialized: bool
 
 
 @dataclass(frozen=True)
@@ -66,26 +50,11 @@ class MemoryVerify:
     dirty: bool
 
 
-@dataclass(frozen=True)
-class MemoryMigration:
-    facts_dir: Path
-    migrated: int
-    commit: str | None
-    legacy_removed: bool
-
-
-def init_memory_journal(
-    instance_dir: Path,
-    *,
-    data_dir: Path | None = None,
-) -> tuple[Path, bool]:
-    """Resolve `state/memory/facts` in the private repo, migrating on the way.
+def init_memory_journal(instance_dir: Path) -> tuple[Path, bool]:
+    """Resolve `state/memory/facts` in the private repo.
 
     Contract: docs/RECOVERY.md, "Layout". Facts live flat in the single instance
-    repository; there is no nested journal to initialize. When a pre-flatten
-    `<data_dir>/memory/facts` is still around, its tree is carried over and
-    committed before the nested `.git` goes away, so the first write after the
-    flatten cannot be the thing that drops the facts.
+    repository; there is no nested journal to initialize.
     """
     instance_dir = state_repo.require_repo(instance_dir)
     facts_dir = state_repo.memory_facts_dir(instance_dir)
@@ -94,208 +63,21 @@ def init_memory_journal(
         facts_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise RuntimeError(f"cannot prepare memory facts dir: {exc}") from None
-    if data_dir is not None:
-        migrate_memory_journal(data_dir, instance_dir)
     return facts_dir, created
 
 
-def migrate_memory_journal(data_dir: Path, instance_dir: Path) -> MemoryMigration:
-    """Carry a nested `memory/facts` journal into the private repo, once.
-
-    Commit first, delete second. A crash between the two leaves the facts in
-    both places, which the next run recognizes as already-migrated and finishes;
-    the reverse order would leave a window where they are in neither.
-    """
-    data_dir = data_dir.expanduser().resolve()
-    instance_dir = state_repo.require_repo(instance_dir)
-    facts_dir = state_repo.memory_facts_dir(instance_dir)
-    legacy = data_dir / "memory" / "facts"
-    if not legacy.is_dir():
-        return MemoryMigration(facts_dir=facts_dir, migrated=0, commit=None, legacy_removed=False)
-
-    # A fact already byte-identical in the repo was carried by an earlier run
-    # that died before cleanup; one that differs is a divergence nobody can
-    # resolve automatically without losing a side.
-    carried = [
-        relative
-        for relative in _legacy_fact_files(legacy)
-        if not _same_file(legacy / relative, facts_dir / relative)
-    ]
-    conflicts = [relative for relative in carried if (facts_dir / relative).exists()]
-    if conflicts:
-        raise RuntimeError(
-            "memory flatten refused: "
-            f"{len(conflicts)} fact(s) differ between {legacy} and {facts_dir}, "
-            f"first {conflicts[0]}"
-        )
-
-    commit: str | None = None
-    if carried:
-        for relative in carried:
-            target = facts_dir / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copy2(legacy / relative, target, follow_symlinks=False)
-            except OSError as exc:
-                raise RuntimeError(f"could not carry memory fact {relative}: {exc}") from None
-        with state_repo.state_repo_lock(instance_dir):
-            commit = state_repo.commit(
-                instance_dir,
-                MEMORY_PATHSPEC,
-                _migration_message(len(carried), legacy),
-            )
-
-    _remove_legacy_journal(legacy)
-    return MemoryMigration(
-        facts_dir=facts_dir,
-        migrated=len(carried),
-        commit=commit,
-        legacy_removed=True,
-    )
-
-
-def _migration_message(count: int, legacy: Path) -> str:
-    return (
-        f"memory flatten: carry {count} fact(s) into state/memory/facts\n\n"
-        f"Source: {legacy}\n"
-        f"{MEMORY_IMPORT_MARKER}\n"
-    )
-
-
-def _legacy_fact_files(legacy: Path) -> list[Path]:
-    files: list[Path] = []
-    for path, _stat in _regular_files_under(legacy, context="legacy memory journal"):
-        files.append(path.relative_to(legacy))
-    return sorted(files)
-
-
-def _has_facts(facts_dir: Path) -> bool:
-    if not facts_dir.is_dir():
-        return False
-    found = _regular_files_under(facts_dir, context="memory facts")
-    return any(path.suffix == ".md" for path, _stat in found)
-
-
-def _same_file(left: Path, right: Path) -> bool:
-    try:
-        return left.read_bytes() == right.read_bytes()
-    except OSError:
-        return False
-
-
-def _remove_legacy_journal(legacy: Path) -> None:
-    """Drop the nested journal only once its tree is committed elsewhere."""
-    try:
-        _remove_path(legacy)
-    except OSError as exc:
-        raise RuntimeError(f"could not remove nested memory journal {legacy}: {exc}") from None
-
-
-def import_memory_journal(
-    data_dir: Path,
-    instance_dir: Path,
-    *,
-    source_dir: Path = PANELMEM_KB,
-) -> MemoryImport:
-    data_dir = data_dir.expanduser().resolve()
-    source_root, source_memory = _resolve_memory_source(source_dir)
-    if not source_memory.is_dir():
-        raise RuntimeError(f"memory source not found: {source_memory}")
-
-    memory_dir = data_dir / "memory"
-    _ensure_dir(memory_dir, "memory data dir")
-    facts: list[dict[str, Any]] = []
-    changed = False
-    commit: str | None = None
-    initialized = False
-    with _memory_journal_lock(memory_dir):
-        facts_dir, initialized = init_memory_journal(instance_dir, data_dir=data_dir)
-        instance_dir = state_repo.require_repo(instance_dir)
-        _recover_journal_worktree(instance_dir)
-        _ensure_import_only_journal(instance_dir)
-        source_head = _source_git_head(source_root)
-        staging: Path | None = None
-
-        try:
-            staging = Path(
-                tempfile.mkdtemp(prefix=".memory-import-", suffix=".tmp", dir=memory_dir)
-            )
-        except OSError as exc:
-            raise RuntimeError(f"could not create memory import staging: {exc}") from None
-        rollback: Path | None = None
-        try:
-            _copy_tree(source_memory, staging)
-            facts = _read_memory_facts(staging)
-            changed, rollback = _publish_memory_facts(staging, facts_dir, instance_dir, memory_dir)
-            try:
-                commit = _commit_memory_import(
-                    instance_dir,
-                    source_root=source_root,
-                    source_head=source_head,
-                    changed=changed,
-                )
-            except RuntimeError:
-                _restore_journal_files(facts_dir, rollback)
-                raise
-            _cleanup_staging_dir(rollback)
-            rollback = None
-            _publish_memory_export(
-                memory_dir,
-                facts=facts,
-                source_memory=source_memory,
-                source_root=source_root,
-                source_head=source_head,
-                commit=commit,
-                changed=changed,
-                record_import=True,
-            )
-        except RuntimeError:
-            _cleanup_staging_dir(staging)
-            raise
-        finally:
-            _cleanup_staging_dir(staging)
-            _cleanup_staging_dir(rollback)
-
-    return MemoryImport(
-        facts_dir=facts_dir,
-        count=len(facts),
-        source=str(source_memory),
-        source_head=source_head,
-        commit=commit,
-        changed=changed,
-        initialized=initialized,
-    )
-
-
-def export_memory_snapshot(
-    data_dir: Path,
-    instance_dir: Path | None,
-    *,
-    source_dir: Path = PANELMEM_KB,
-) -> MemoryExportSnapshot:
+def export_memory_snapshot(data_dir: Path, instance_dir: Path) -> MemoryExportSnapshot:
     """Refresh the derived export from the live facts in the private repo.
 
-    The seed source is a fallback for an instance that has no facts yet. An
-    instance that does have them must never silently export `panelmem-kb`
-    instead: that is how a checkpoint ends up carrying somebody else's memory.
-    `instance_dir` has no default so that fallback is always a choice the
-    caller made, never an argument it forgot.
+    The instance repo is the only source, so an export cannot carry facts that
+    are not this installation's canon.
     """
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     _ensure_dir(memory_dir, "memory data dir")
-    facts_dir = state_repo.memory_facts_dir(instance_dir) if instance_dir is not None else None
+    facts_dir = state_repo.memory_facts_dir(instance_dir)
     with _memory_journal_lock(memory_dir):
-        if facts_dir is not None and _has_facts(facts_dir):
-            source_memory = facts_dir
-            source_root = facts_dir
-            source_head = _journal_head(instance_dir) or "unknown"
-        else:
-            source_root, source_memory = _resolve_memory_source(source_dir)
-            if not source_memory.is_dir():
-                raise RuntimeError(f"memory source not found: {source_memory}")
-            source_head = _source_git_head(source_root)
-
+        source_head = _journal_head(instance_dir) or "unknown"
         try:
             staging = Path(
                 tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir)
@@ -303,15 +85,15 @@ def export_memory_snapshot(
         except OSError as exc:
             raise RuntimeError(f"could not create memory export staging: {exc}") from None
         try:
-            _copy_tree(source_memory, staging)
+            _copy_tree(facts_dir, staging)
             facts = _read_memory_facts(staging)
             _publish_memory_export(
                 memory_dir,
                 facts=facts,
-                source_memory=source_memory,
-                source_root=source_root,
+                source_memory=facts_dir,
+                source_root=facts_dir,
                 source_head=source_head,
-                commit=source_head if source_memory == facts_dir else None,
+                commit=source_head,
                 changed=False,
                 record_import=False,
             )
@@ -321,7 +103,7 @@ def export_memory_snapshot(
     return MemoryExportSnapshot(
         path=memory_dir / "export.ndjson",
         count=len(facts),
-        source=str(source_memory),
+        source=str(facts_dir),
     )
 
 
@@ -486,36 +268,6 @@ def _jsonable_metadata(value: Any) -> Any:
     return str(value)
 
 
-def _resolve_memory_source(source_dir: Path) -> tuple[Path, Path]:
-    candidate = source_dir.expanduser().resolve()
-    if (candidate / "memory").is_dir():
-        source_memory = candidate / "memory"
-        source_root = candidate
-    else:
-        source_memory = candidate
-        source_root = _source_git_root(candidate) or candidate.parent
-    return source_root, source_memory
-
-
-def _source_git_root(path: Path) -> Path | None:
-    try:
-        root = _git(path, ["rev-parse", "--show-toplevel"], context="inspect memory source")
-    except RuntimeError:
-        return None
-    return Path(root.strip()).resolve() if root.strip() else None
-
-
-def _source_git_head(source_root: Path) -> str:
-    try:
-        return _git(
-            source_root,
-            ["rev-parse", "HEAD"],
-            context="inspect memory source head",
-        ).strip()
-    except RuntimeError:
-        return "unknown"
-
-
 @contextmanager
 def _memory_journal_lock(memory_dir: Path):
     _ensure_dir(memory_dir, "memory data dir")
@@ -586,88 +338,6 @@ def _remove_stale_lock(lock_path: Path) -> bool:
     except PermissionError:
         return False
     return False
-
-
-def _publish_memory_facts(
-    staging: Path, facts_dir: Path, instance_dir: Path, scratch_dir: Path
-) -> tuple[bool, Path]:
-    """Swap in the new fact tree, keeping a rollback copy outside the pathspec.
-
-    The rollback lives in the data dir, not beside `facts_dir`: anything under
-    `state/memory` would be swept into the very commit this is insurance against.
-    """
-    backup = Path(
-        tempfile.mkdtemp(prefix=".facts-rollback-", suffix=".tmp", dir=scratch_dir)
-    )
-    try:
-        _copy_journal_files(facts_dir, backup)
-        _replace_journal_files(staging, facts_dir)
-    except RuntimeError:
-        _restore_journal_files(facts_dir, backup)
-        _cleanup_staging_dir(backup)
-        raise
-    return bool(_git_status(instance_dir)), backup
-
-
-def _replace_journal_files(source: Path, facts_dir: Path) -> None:
-    try:
-        for path in sorted(facts_dir.iterdir()):
-            if path.name == ".git":
-                continue
-            _remove_path(path)
-        _copy_tree(source, facts_dir)
-    except OSError as exc:
-        raise RuntimeError(f"could not publish memory facts: {exc}") from None
-    except RuntimeError as exc:
-        raise RuntimeError(str(exc).replace("source", "memory import", 1)) from None
-
-
-def _copy_journal_files(facts_dir: Path, destination: Path) -> None:
-    for path in sorted(facts_dir.iterdir()):
-        if path.name == ".git":
-            continue
-        target = destination / path.name
-        try:
-            if path.is_dir() and not path.is_symlink():
-                shutil.copytree(path, target, symlinks=False)
-            elif path.is_file():
-                shutil.copy2(path, target, follow_symlinks=False)
-        except OSError as exc:
-            raise RuntimeError(f"could not prepare memory facts rollback: {exc}") from None
-
-
-def _restore_journal_files(facts_dir: Path, backup: Path) -> None:
-    try:
-        for path in sorted(facts_dir.iterdir()):
-            if path.name == ".git":
-                continue
-            _remove_path(path)
-        _copy_tree(backup, facts_dir)
-    except (OSError, RuntimeError) as exc:
-        raise RuntimeError(f"could not restore memory facts journal: {exc}") from None
-
-
-def _commit_memory_import(
-    instance_dir: Path,
-    *,
-    source_root: Path,
-    source_head: str,
-    changed: bool,
-) -> str | None:
-    current = _journal_head(instance_dir)
-    if not changed:
-        return current
-    subject = "memory import: seed from panelmem-kb"
-    if current is not None:
-        subject = "memory import: sync from panelmem-kb"
-    message = (
-        f"{subject} @ {source_head}\n\n"
-        f"Source: {source_root}\n"
-        f"Source-Head: {source_head}\n"
-        f"{MEMORY_IMPORT_MARKER}\n"
-    )
-    with state_repo.state_repo_lock(instance_dir):
-        return state_repo.commit(instance_dir, MEMORY_PATHSPEC, message) or current
 
 
 def _publish_memory_export(
@@ -775,16 +445,6 @@ def _read_json_file_if_valid(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _ensure_import_only_journal(instance_dir: Path) -> None:
-    """Only memory commits are inspected; board, runs and config share the repo."""
-    for commit_hash, message in _git_log_messages(instance_dir):
-        if MEMORY_IMPORT_MARKER not in message:
-            short = commit_hash[:12]
-            raise RuntimeError(
-                f"memory import refused after non-import memory commit {short}"
-            )
-
-
 def _recover_journal_worktree(instance_dir: Path) -> None:
     """Roll back a half-applied write, touching `state/memory` and nothing else.
 
@@ -807,24 +467,6 @@ def _recover_journal_worktree(instance_dir: Path) -> None:
     )
 
 
-def _git_log_messages(instance_dir: Path) -> list[tuple[str, str]]:
-    if state_repo.head(instance_dir) is None:
-        return []
-    raw = state_repo.git(
-        instance_dir,
-        ["log", "--format=%H%x00%B%x1e", "--", *MEMORY_PATHSPEC],
-        label="inspect memory log",
-    )
-    commits: list[tuple[str, str]] = []
-    for item in raw.split("\x1e"):
-        item = item.strip("\n")
-        if not item:
-            continue
-        commit_hash, _, message = item.partition("\x00")
-        commits.append((commit_hash, message))
-    return commits
-
-
 def _journal_head(instance_dir: Path) -> str | None:
     """The last commit that touched `state/memory`, not the repo tip."""
     if state_repo.head(instance_dir) is None:
@@ -839,21 +481,3 @@ def _journal_head(instance_dir: Path) -> str | None:
 
 def _git_status(instance_dir: Path) -> str:
     return state_repo.status(instance_dir, MEMORY_PATHSPEC)
-
-
-def _git(cwd: Path, args: list[str], *, context: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("git command not found") from None
-    except subprocess.CalledProcessError as exc:
-        reason = (exc.stderr or exc.stdout or f"git {' '.join(args)} failed").strip().splitlines()
-        raise RuntimeError(f"{context}: {reason[-1] if reason else 'git failed'}") from None
-    return result.stdout.strip()

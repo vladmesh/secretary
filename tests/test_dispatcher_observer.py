@@ -3232,27 +3232,6 @@ class ObserverConfigurationTests(unittest.TestCase):
             ObserverRecord(sprint="sprint:1").generation,
         )
 
-    def test_legacy_wake_flags_migrate_to_one_fail_closed_delivery(self) -> None:
-        record = ObserverRecord.from_json({
-            "sprint": "sprint:1",
-            "acknowledged_event_id": "evt_older",
-            "wake_event_id": "evt_pending",
-            "wake_sent": True,
-            "wake_attempts": 2,
-            "wake_next_at": 123.0,
-            "wake_reason": "old wake",
-        })
-
-        self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
-        self.assertEqual(record.delivery.acknowledged_through, "evt_older")
-        self.assertEqual(record.delivery.through_event, "evt_pending")
-        self.assertFalse(record.delivery.resume_cursor_known)
-        persisted = record.to_json()
-        self.assertIn("delivery", persisted)
-        self.assertNotIn("wake_sent", persisted)
-
-
-class ObserverTerminalStatusTests(unittest.TestCase):
     def test_a_busy_pane_survives_the_hosts_non_zero_exit_path(self) -> None:
         """Through the real runner: Orca exits non-zero for a busy pane, and it is still busy.
 

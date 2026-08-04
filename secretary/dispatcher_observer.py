@@ -244,55 +244,6 @@ class ObserverDelivery:
         )
 
 
-def _legacy_delivery(payload: dict[str, Any]) -> ObserverDelivery:
-    """Migrate the former independent wake flags without inventing a causal acknowledgement."""
-
-    acknowledged = str(payload.get("acknowledged_event_id") or "")
-    through = str(payload.get("wake_event_id") or "")
-    wake_sent = bool(payload.get("wake_sent"))
-    attempts = _int(payload.get("wake_attempts"))
-    next_at = _float(payload.get("wake_next_at"))
-    reason = str(payload.get("wake_reason") or "")
-    if wake_sent and through:
-        deadline = next_at or time.time() + observer_ack_deadline_seconds()
-        return ObserverDelivery(
-            stage=DeliveryStage.AWAITING_ACK,
-            acknowledged_through=acknowledged,
-            delivery_id="legacy-" + uuid.uuid4().hex,
-            method="nudge",
-            through_event=through,
-            # The old record has no durable resume fence.  Waiting for the acknowledgement deadline
-            # is the only recovery that cannot falsely credit an earlier resume to this delivery.
-            resume_cursor_known=False,
-            deadline=deadline,
-            attempts=attempts,
-            next_at=deadline,
-            reason=reason or "legacy event delivery awaits its acknowledgement deadline",
-        )
-    if attempts and through:
-        return ObserverDelivery(
-            stage=DeliveryStage.RETRY_DEFERRED,
-            acknowledged_through=acknowledged,
-            pending_from=through,
-            delivery_id="legacy-" + uuid.uuid4().hex,
-            method="nudge",
-            through_event=through,
-            resume_cursor_known=False,
-            attempts=attempts,
-            next_at=next_at,
-            reason=reason,
-        )
-    if through:
-        return ObserverDelivery(
-            stage=DeliveryStage.WAITING_FOR_IDLE,
-            acknowledged_through=acknowledged,
-            pending_from=through,
-            next_at=next_at,
-            reason=reason,
-        )
-    return ObserverDelivery(acknowledged_through=acknowledged)
-
-
 @dataclass
 class ObserverRecord:
     """One observer head as the dispatcher last left it."""
@@ -386,12 +337,7 @@ class ObserverRecord:
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "ObserverRecord":
         run = payload.get("run")
-        delivery_payload = payload.get("delivery")
-        delivery = (
-            ObserverDelivery.from_json(delivery_payload)
-            if isinstance(delivery_payload, dict)
-            else _legacy_delivery(payload)
-        )
+        delivery = ObserverDelivery.from_json(payload.get("delivery"))
         return cls(
             sprint=str(payload.get("sprint") or ""),
             generation=str(payload.get("generation") or "") or uuid.uuid4().hex[:12],

@@ -18,7 +18,6 @@ from secretary.data import (
     export_memory,
     export_runs,
     export_transcripts,
-    import_memory_journal,
     init_layout,
     manifest_for,
     normalize_board_card,
@@ -458,12 +457,13 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(current_summary, old_summary)
         self.assertTrue(raw_dump_preserved)
 
-    def test_export_memory_writes_readonly_ndjson_from_fallback_source(self):
+    def test_export_memory_writes_ndjson_from_the_instance_repo(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "one.md").write_text(
+            instance_dir = init_instance_repo(root / "instance")
+            source = memory_facts_dir(instance_dir)
+            (source / "secretary").mkdir(parents=True)
+            (source / "secretary" / "one.md").write_text(
                 "---\n"
                 "tags: [secretary, memory]\n"
                 "source: test\n"
@@ -472,17 +472,18 @@ class ExportTests(unittest.TestCase):
                 "fact one\n",
                 encoding="utf-8",
             )
-            (source / "memory" / "global").mkdir()
-            (source / "memory" / "global" / "two.md").write_text("fact two\n", encoding="utf-8")
-            init_git_repo(source)
+            (source / "global").mkdir()
+            (source / "global" / "two.md").write_text("fact two\n", encoding="utf-8")
+            git(instance_dir, "add", "-A", ".")
+            git(instance_dir, "commit", "-m", "facts")
             data_dir = root / "secretary-data"
 
-            first = export_memory(data_dir, None, source_dir=source)
+            first = export_memory(data_dir, instance_dir)
             first_payload = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
-            second = export_memory(data_dir, None, source_dir=source)
+            second = export_memory(data_dir, instance_dir)
             facts_dir_exists = (data_dir / "memory" / "facts").exists()
             manifest = json.loads((data_dir / "memory" / "manifest.json").read_text(encoding="utf-8"))
-            source_head = git(source, "rev-parse", "HEAD")
+            source_head = git(instance_dir, "rev-parse", "HEAD")
 
         self.assertEqual(first.count, 2)
         self.assertEqual(second.count, 2)
@@ -495,8 +496,8 @@ class ExportTests(unittest.TestCase):
     def test_export_memory_ndjson_comes_from_readonly_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            fact = source / "memory" / "secretary" / "one.md"
+            instance_dir = init_instance_repo(root / "instance")
+            fact = memory_facts_dir(instance_dir) / "secretary" / "one.md"
             fact.parent.mkdir(parents=True)
             fact.write_text("fact one\n", encoding="utf-8")
             original_copy_tree = memory_journal._copy_tree
@@ -506,7 +507,7 @@ class ExportTests(unittest.TestCase):
                 fact.write_text("changed after snapshot\n", encoding="utf-8")
 
             with mock.patch("secretary.memory_journal._copy_tree", side_effect=copy_then_mutate):
-                export_memory(root / "secretary-data", None, source_dir=source)
+                export_memory(root / "secretary-data", instance_dir)
             exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
                 encoding="utf-8"
             )
@@ -517,15 +518,15 @@ class ExportTests(unittest.TestCase):
     def test_export_memory_skips_symlinked_facts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
+            instance_dir = init_instance_repo(root / "instance")
             secret = root / "secret.env"
             secret.write_text("TOKEN=do-not-export\n", encoding="utf-8")
-            facts = source / "memory" / "secretary"
+            facts = memory_facts_dir(instance_dir) / "secretary"
             facts.mkdir(parents=True)
             (facts / "one.md").write_text("fact one\n", encoding="utf-8")
             (facts / "secret.md").symlink_to(secret)
 
-            result = export_memory(root / "secretary-data", None, source_dir=source)
+            result = export_memory(root / "secretary-data", instance_dir)
             exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
                 encoding="utf-8"
             )
@@ -539,171 +540,35 @@ class ExportTests(unittest.TestCase):
     def test_export_memory_wraps_decode_errors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            fact = source / "memory" / "secretary" / "bad.md"
+            instance_dir = init_instance_repo(root / "instance")
+            fact = memory_facts_dir(instance_dir) / "secretary" / "bad.md"
             fact.parent.mkdir(parents=True)
             fact.write_bytes(b"\xff\xfe")
 
             with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
-                export_memory(root / "secretary-data", None, source_dir=source)
+                export_memory(root / "secretary-data", instance_dir)
 
     def test_export_memory_preserves_previous_snapshot_on_decode_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            facts = source / "memory" / "secretary"
+            instance_dir = init_instance_repo(root / "instance")
+            facts = memory_facts_dir(instance_dir) / "secretary"
             facts.mkdir(parents=True)
             (facts / "good.md").write_text("good fact\n", encoding="utf-8")
             data_dir = root / "secretary-data"
-            export_memory(data_dir, None, source_dir=source)
+            export_memory(data_dir, instance_dir)
             old_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
             (facts / "bad.md").write_bytes(b"\xff\xfe")
 
             with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
-                export_memory(data_dir, None, source_dir=source)
+                export_memory(data_dir, instance_dir)
 
             current_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             facts_dir_exists = (data_dir / "memory" / "facts").exists()
 
         self.assertEqual(current_export, old_export)
         self.assertFalse(facts_dir_exists)
-
-    def test_memory_import_repeated_sync_adds_new_source_fact_once(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            fact_dir = source / "memory" / "secretary"
-            fact_dir.mkdir(parents=True)
-            (fact_dir / "one.md").write_text("fact one\n", encoding="utf-8")
-            init_git_repo(source)
-            data_dir = root / "secretary-data"
-            instance_dir = init_instance_repo(root / "instance")
-
-            first = import_memory_journal(data_dir, instance_dir, source_dir=source)
-            second = import_memory_journal(data_dir, instance_dir, source_dir=source)
-            (fact_dir / "two.md").write_text("fact two\n", encoding="utf-8")
-            git(source, "add", "-A", ".")
-            git(source, "commit", "-m", "Add second fact")
-            third = import_memory_journal(data_dir, instance_dir, source_dir=source)
-            fourth = import_memory_journal(data_dir, instance_dir, source_dir=source)
-            tracked = tracked_facts(instance_dir)
-            log_count = memory_commit_count(instance_dir)
-            manifest = json.loads((data_dir / "memory" / "manifest.json").read_text(encoding="utf-8"))
-
-        self.assertTrue(first.changed)
-        self.assertFalse(second.changed)
-        self.assertTrue(third.changed)
-        self.assertFalse(fourth.changed)
-        self.assertEqual(tracked, ["secretary/one.md", "secretary/two.md"])
-        self.assertEqual(log_count, "2")
-        self.assertEqual(manifest["source"]["head"], third.source_head)
-        self.assertEqual(len(manifest["imports"]), 2)
-
-    def test_memory_import_refuses_after_non_import_commit(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
-            init_git_repo(source)
-            data_dir = root / "secretary-data"
-            instance_dir = init_instance_repo(root / "instance")
-            import_memory_journal(data_dir, instance_dir, source_dir=source)
-            facts_dir = memory_facts_dir(instance_dir)
-            (facts_dir / "secretary" / "manual.md").write_text("manual\n", encoding="utf-8")
-            git(instance_dir, "add", "--", "state/memory")
-            git(instance_dir, "commit", "-m", "Manual protocol write")
-
-            (source / "memory" / "secretary" / "two.md").write_text("fact two\n", encoding="utf-8")
-            git(source, "add", "-A", ".")
-            git(source, "commit", "-m", "Add second fact")
-            with self.assertRaisesRegex(RuntimeError, "refused after non-import"):
-                import_memory_journal(data_dir, instance_dir, source_dir=source)
-
-    def test_memory_import_lock_conflict(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
-            data_dir = root / "secretary-data"
-            (data_dir / "memory").mkdir(parents=True)
-            (data_dir / "memory" / memory_journal.MEMORY_LOCK_NAME).write_text(
-                json.dumps(
-                    {
-                        "pid": os.getpid(),
-                        "host": memory_journal.socket.gethostname(),
-                        "created_at": 1,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            instance_dir = init_instance_repo(root / "instance")
-
-            with self.assertRaisesRegex(RuntimeError, "journal is locked"):
-                import_memory_journal(data_dir, instance_dir, source_dir=source)
-
-    def test_memory_import_removes_proven_stale_lock(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "one.md").write_text("fact one\n", encoding="utf-8")
-            data_dir = root / "secretary-data"
-            (data_dir / "memory").mkdir(parents=True)
-            (data_dir / "memory" / memory_journal.MEMORY_LOCK_NAME).write_text(
-                json.dumps(
-                    {
-                        "pid": 99999999,
-                        "host": memory_journal.socket.gethostname(),
-                        "created_at": 1,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            instance_dir = init_instance_repo(root / "instance")
-
-            result = import_memory_journal(data_dir, instance_dir, source_dir=source)
-
-        self.assertEqual(result.count, 1)
-
-    def test_memory_import_restores_journal_on_copy_error(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            source = root / "panelmem-kb"
-            facts = source / "memory" / "secretary"
-            facts.mkdir(parents=True)
-            (facts / "one.md").write_text("fact one\n", encoding="utf-8")
-            data_dir = root / "secretary-data"
-            instance_dir = init_instance_repo(root / "instance")
-            import_memory_journal(data_dir, instance_dir, source_dir=source)
-            facts_dir = memory_facts_dir(instance_dir)
-            old_tracked = tracked_facts(instance_dir)
-            old_head = memory_head(instance_dir)
-            (facts / "two.md").write_text("fact two\n", encoding="utf-8")
-
-            original_copy_tree = data_module._copy_tree
-            failed = False
-
-            def fail_when_publishing(source_path, destination):
-                nonlocal failed
-                if destination == facts_dir:
-                    if failed:
-                        return original_copy_tree(source_path, destination)
-                    failed = True
-                    raise RuntimeError("copy failed")
-                return original_copy_tree(source_path, destination)
-
-            with mock.patch("secretary.memory_journal._copy_tree", side_effect=fail_when_publishing):
-                with self.assertRaisesRegex(RuntimeError, "copy failed"):
-                    import_memory_journal(data_dir, instance_dir, source_dir=source)
-
-            self.assertEqual(tracked_facts(instance_dir), old_tracked)
-            self.assertEqual(memory_head(instance_dir), old_head)
-            self.assertEqual(memory_status(instance_dir), "")
 
     def test_memory_protocol_commit_writes_one_journal_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1100,12 +965,6 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "secretary-data"
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "external.md").write_text(
-                "external fact\n",
-                encoding="utf-8",
-            )
             protocol_fact = root / "protocol.md"
             protocol_fact.write_text("protocol fact\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
@@ -1126,7 +985,7 @@ class ExportTests(unittest.TestCase):
             before_head = memory_head(instance_dir)
             before_count = memory_commit_count(instance_dir)
 
-            result = export_memory(data_dir, instance_dir, source_dir=source)
+            result = export_memory(data_dir, instance_dir)
             after_head = memory_head(instance_dir)
             after_count = memory_commit_count(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
@@ -1136,19 +995,13 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(after_head, before_head)
         self.assertEqual(after_count, before_count)
         self.assertIn("protocol fact", exported)
-        self.assertNotIn("external fact", exported)
         self.assertEqual(status, "")
 
     def test_export_memory_respects_live_journal_lock(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "secretary-data"
-            source = root / "panelmem-kb"
-            (source / "memory" / "secretary").mkdir(parents=True)
-            (source / "memory" / "secretary" / "external.md").write_text(
-                "external fact\n",
-                encoding="utf-8",
-            )
+            instance_dir = init_instance_repo(root / "instance")
             memory_dir = data_dir / "memory"
             memory_dir.mkdir(parents=True)
             (memory_dir / memory_journal.MEMORY_LOCK_NAME).write_text(
@@ -1163,7 +1016,7 @@ class ExportTests(unittest.TestCase):
             )
 
             with self.assertRaises(MemoryLockError):
-                export_memory(data_dir, None, source_dir=source)
+                export_memory(data_dir, instance_dir)
 
     def test_export_runs_writes_records_watermarks_and_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1367,6 +1220,7 @@ class ExportTests(unittest.TestCase):
     def test_export_all_passes_copy_transcripts_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
+            instance_dir = Path(tmpdir) / "instance"
             calls = []
 
             with (
@@ -1377,7 +1231,7 @@ class ExportTests(unittest.TestCase):
                 ),
                 mock.patch(
                     "secretary.data.export_memory",
-                    side_effect=lambda data_dir_arg, instance_dir_arg=None: calls.append("memory")
+                    side_effect=lambda data_dir_arg, instance_dir_arg: calls.append("memory")
                     or data_module.DataExport(data_dir_arg / "memory.ndjson", 1, "memory"),
                 ) as memory,
                 mock.patch(
@@ -1400,12 +1254,12 @@ class ExportTests(unittest.TestCase):
                     or data_module.DataExport(data_dir_arg / "artifacts.json", 1, "artifacts"),
                 ) as artifacts,
             ):
-                export_all(data_dir, None, copy_transcripts=True)
+                export_all(data_dir, instance_dir, copy_transcripts=True)
 
         self.assertEqual(calls, ["memory", "board", "runs", "transcripts", "artifacts"])
         transcripts.assert_called_once_with(data_dir, copy=True)
         artifacts.assert_called_once_with(data_dir)
-        memory.assert_called_once_with(data_dir, None)
+        memory.assert_called_once_with(data_dir, instance_dir)
 
     def test_default_pipeline_state_uses_secretary_workspace(self):
         self.assertEqual(
@@ -1463,15 +1317,6 @@ def memory_message(instance_dir: Path) -> str:
 
 def memory_status(instance_dir: Path) -> str:
     return git(instance_dir, "status", "--porcelain", "--", "state/memory")
-
-
-def init_git_repo(path: Path) -> None:
-    git(path, "init", "--initial-branch=main")
-    git(path, "config", "user.name", "Test User")
-    git(path, "config", "user.email", "test@example.invalid")
-    git(path, "config", "commit.gpgsign", "false")
-    git(path, "add", "-A", ".")
-    git(path, "commit", "-m", "Initial facts")
 
 
 def git(cwd: Path, *args: str) -> str:

@@ -26,11 +26,7 @@ from secretary._fsutil import (
     write_json as _write_json,
     write_ndjson as _write_ndjson,
 )
-from secretary.memory_journal import (
-    PANELMEM_KB,
-    export_memory_snapshot,
-    import_memory_journal,
-)
+from secretary.memory_journal import export_memory_snapshot
 from secretary.tasks import TaskAudit
 
 
@@ -364,17 +360,10 @@ def _sprint_audit(audit: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def export_memory(
-    data_dir: Path,
-    instance_dir: Path | None,
-    *,
-    source_dir: Path = PANELMEM_KB,
-) -> DataExport:
-    """Export canon facts. `instance_dir` is required: passing `None` opts into
-    the seed fallback, and a caller that forgets it fails instead of silently
-    exporting somebody else's memory."""
+def export_memory(data_dir: Path, instance_dir: Path) -> DataExport:
+    """Export the canon facts of ``instance_dir``, the only source there is."""
     data_dir = data_dir.expanduser().resolve()
-    result = export_memory_snapshot(data_dir, instance_dir, source_dir=source_dir)
+    result = export_memory_snapshot(data_dir, instance_dir)
     return DataExport(
         path=result.path,
         count=result.count,
@@ -608,7 +597,7 @@ def export_artifacts(
 
 def export_all(
     data_dir: Path,
-    instance_dir: Path | None,
+    instance_dir: Path,
     *,
     copy_transcripts: bool = False,
 ) -> dict[str, DataExport]:

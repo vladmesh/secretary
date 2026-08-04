@@ -78,10 +78,6 @@ class GateTests(unittest.TestCase):
         binding["plane"] = "project"
         binding["policy"] = {"code_concurrency": 1}
         self.binding.write_text(yaml.safe_dump(binding, sort_keys=False), encoding="utf-8")
-        draft = load_config(draft_path)
-        draft["identity"]["plane"] = "project"
-        draft["identity"]["policy"] = {"code_concurrency": 1}
-        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
 
         code, result = run_gate(str(self.instance), "sample-project")
 
@@ -143,61 +139,6 @@ class GateTests(unittest.TestCase):
         # touches them, so an operator removes them on their own schedule.
         self.assertTrue(manifest.exists())
         self.assertTrue(record.exists())
-
-    def test_legacy_compatibility_block_in_draft_is_dropped(self):
-        self.provision()
-        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
-        draft = load_config(draft_path)
-        draft["compatibility_manifest"] = {
-            "consumer": "legacy-dispatcher",
-            "role": "derived-transition-consumer",
-            "canonical_source": "onboarding-contract-v1",
-        }
-        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
-
-        code, result = run_gate(str(self.instance), "sample-project")
-
-        self.assertEqual(code, 0, result)
-        self.assertNotIn("compatibility_manifest", load_config(draft_path))
-        self.assertTrue(load_config(self.binding)["enabled"])
-
-    def test_legacy_compatibility_block_in_enabled_draft_is_migrated(self):
-        self.provision()
-        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
-        code, passed = run_gate(str(self.instance), "sample-project")
-        self.assertEqual(code, 0, passed)
-        draft = load_config(draft_path)
-        draft["compatibility_manifest"] = {
-            "consumer": "legacy-dispatcher",
-            "role": "derived-transition-consumer",
-            "canonical_source": "onboarding-contract-v1",
-        }
-        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
-
-        code, result = run_gate(str(self.instance), "sample-project")
-
-        self.assertEqual(code, 0, result)
-        self.assertEqual(result["run_id"], passed["run_id"])
-        migrated = load_config(draft_path)
-        self.assertNotIn("compatibility_manifest", migrated)
-        self.assertEqual(migrated["gate"]["status"], "passed")
-        self.assertEqual(validate(migrated, "onboarding-contract", draft_path.name), [])
-        self.assertTrue(load_config(self.binding)["enabled"])
-
-    def test_legacy_block_migration_failure_is_structured(self):
-        self.provision()
-        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
-        self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
-        draft = load_config(draft_path)
-        draft["compatibility_manifest"] = {"consumer": "legacy-dispatcher"}
-        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
-
-        with mock.patch("secretary.gate.publish_state_atomic", side_effect=OSError(5, "injected")):
-            code, result = run_gate(str(self.instance), "sample-project")
-
-        self.assertEqual(code, 1)
-        self.assertEqual(result["status"], "publication_failed")
-        self.assertTrue(load_config(self.binding)["enabled"])
 
     def test_corrupt_current_result_is_structured_conflict(self):
         self.provision()

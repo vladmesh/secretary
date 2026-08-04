@@ -12,7 +12,6 @@ from secretary.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
 )
-from secretary import contract_migrations
 from secretary.config import ConfigError, load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
@@ -22,7 +21,6 @@ from secretary.data import (
     export_memory,
     export_runs,
     export_transcripts,
-    import_memory_journal,
     init_layout,
     raw_kanboard_dump,
 )
@@ -48,7 +46,7 @@ from secretary.knowledge_write import (
     list_knowledge_documents,
     write_knowledge_document,
 )
-from secretary.memory_journal import PANELMEM_KB, verify_memory_journal
+from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
     MemoryExportPublishError,
     MemoryLockError,
@@ -114,12 +112,6 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 2
-    if getattr(args, "dry_run", False):
-        # A dry run decides everything and writes nothing, contract migrations on
-        # the read path included. Set here rather than per call: a command reaches
-        # that path through helpers that validate the instance on their own.
-        with contract_migrations.suspended():
-            return handler(args)
     return handler(args)
 
 
@@ -231,7 +223,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_memory_command.add_argument("--instance", required=True)
     export_memory_command.add_argument("--data-dir")
-    export_memory_command.add_argument("--source-dir", default=str(PANELMEM_KB))
     export_memory_command.set_defaults(handler=run_export_memory)
 
     export_runs_command = data_subcommands.add_parser(
@@ -377,15 +368,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     memory = subparsers.add_parser("memory", help="manage the memory journal")
     memory_subcommands = memory.add_subparsers(dest="memory_command")
-    memory_import = memory_subcommands.add_parser(
-        "import",
-        help="seed or sync instance state/memory/facts from panelmem-kb",
-    )
-    memory_import.add_argument("--instance", required=True)
-    memory_import.add_argument("--data-dir")
-    memory_import.add_argument("--from", dest="source_dir", default=str(PANELMEM_KB))
-    memory_import.set_defaults(handler=run_memory_import)
-
     memory_verify = memory_subcommands.add_parser(
         "verify",
         help="verify instance memory canon, derived export and index parity",
@@ -938,35 +920,12 @@ def run_export_memory(args: argparse.Namespace) -> int:
     if data_dir is None:
         return 1
     try:
-        result = export_memory(
-            data_dir, _instance_dir(args.instance), source_dir=Path(args.source_dir)
-        )
+        result = export_memory(data_dir, _instance_dir(args.instance))
     except RuntimeError as exc:
         print(f"secretary data export-memory: {exc}")
         return 1
     print(f"memory facts: {result.count}")
     print(f"export: {result.path}")
-    print("status: ok")
-    return 0
-
-
-def run_memory_import(args: argparse.Namespace) -> int:
-    data_dir = _data_dir_from_args(args, validate_tree=True)
-    if data_dir is None:
-        return 1
-    try:
-        result = import_memory_journal(
-            data_dir, _instance_dir(args.instance), source_dir=Path(args.source_dir)
-        )
-    except RuntimeError as exc:
-        print(f"secretary memory import: {exc}")
-        return 1
-    print(f"memory facts: {result.count}")
-    print(f"journal: {result.facts_dir}")
-    print(f"source: {result.source}")
-    print(f"source head: {result.source_head}")
-    print(f"journal commit: {result.commit or '(none)'}")
-    print(f"changed: {'yes' if result.changed else 'no'}")
     print("status: ok")
     return 0
 

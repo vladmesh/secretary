@@ -64,9 +64,3 @@ def review_pane_label(reference: str) -> str:
     its own OSC sequence seconds after launch, and a title-only check would then read the reviewer
     as gone (or as the worker)."""
     return f"{reference} reviewer"
-
-
-def legacy_review_pane_label(reference: str) -> str:
-    """Pre-651 reviewer title. Still matched when re-finding an orphaned pane so a card that was
-    already in review when the dispatcher upgraded does not get a second reviewer."""
-    return f"{reference} review"

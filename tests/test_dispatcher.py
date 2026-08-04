@@ -85,34 +85,6 @@ from tests.observer_identity import bind_observer
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
-    def test_flat_retained_worker_state_is_migrated(self) -> None:
-        record = DispatcherRecord.from_json({
-            "state": "worker_resuming",
-            "worker_retained_at": 10.0,
-            "worker_resume_phase": "merge-gate",
-            "worker_resume_delivery": "pending",
-            "worker_resume_sent_at": 12.0,
-        })
-
-        self.assertEqual(
-            record.worker_continuation.stage,
-            WorkerContinuationStage.DELIVERY_PENDING,
-        )
-        self.assertEqual(record.worker_continuation.phase, "merge-gate")
-        self.assertEqual(record.worker_continuation.retained_at, 10.0)
-        self.assertEqual(record.worker_continuation.sent_at, 12.0)
-
-    def test_flat_pre_validate_checkpoint_is_migrated(self) -> None:
-        record = DispatcherRecord.from_json({
-            "state": "worker_retained",
-            "worker_retained_at": 10.0,
-        })
-
-        self.assertEqual(
-            record.worker_continuation.stage,
-            WorkerContinuationStage.VALIDATION_MOVE_PENDING,
-        )
-
     def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
         """A dropped session ends a plain retention. It does not end a park: the card is still
         waiting for a decision, and a rework decision on it is owed a replacement worker."""
@@ -8967,14 +8939,6 @@ class ReviewLivenessTests(unittest.TestCase):
         all that is left to recognise it by — and a duplicate reviewer is the cost of missing it."""
         host = self._host([
             {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 reviewer", "connected": True},
-        ])
-
-        self.assertTrue(host.review_running(self.task, self._record()))
-
-    def test_label_fallback_still_matches_a_pre_651_reviewer(self) -> None:
-        """A card already in review when the dispatcher upgraded must not get a second reviewer."""
-        host = self._host([
-            {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 review", "connected": True},
         ])
 
         self.assertTrue(host.review_running(self.task, self._record()))
