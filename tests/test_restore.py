@@ -237,7 +237,9 @@ class RestoreTests(unittest.TestCase):
             status_ids = [
                 params.get("status_id") for method, params in client.calls if method == "getAllTasks"
             ]
-            self.assertEqual(status_ids, [1, 0])
+            # The explicit-reference restore check resolves a returned archived
+            # card against live cards before deciding whether it collides.
+            self.assertEqual(status_ids, [1, 0, 1])
             self.assertFalse(any(method == "createTask" for method, _params in client.calls))
 
     def test_normalized_records_reject_duplicate_or_unknown_product_state(self):

@@ -1851,7 +1851,7 @@ class SprintTests(SprintFixture):
         )
         self.assertEqual(TaskReader(self.client).list(sprint=ref)[0]["sprint"], ref)  # type: ignore[arg-type]
         shown = SprintReader(self.client).show(ref)  # type: ignore[arg-type]
-        self.assertEqual([card["ref"] for card in shown["cards"]], ["secretary-26"])
+        self.assertEqual([card["ref"] for card in shown["cards"]], ["secretary-13"])
         self.writer.close(role="po", actor="operator", reference=ref)
         with self.assertRaisesRegex(TaskError, "closed"):
             self.writer.comment(role="worker", actor="worker", reference=ref, body="late")
