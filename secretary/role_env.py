@@ -14,7 +14,6 @@ from triggered_agents.runtime.role_env import (
     ROLE_REQUIRED,
     RUNTIME_ENV,
     RUNTIME_ENV_DEFAULT,
-    RUNTIME_ENV_FILE_ENV,
     RUNTIME_ENV_FILE_ENVS,
     SECRETARY_RUNTIME_ENV_FILE_ENV,
     UNIT_BOUND_ENV,
@@ -22,7 +21,7 @@ from triggered_agents.runtime.role_env import (
     allowlist,
     declared_observer_sprint,
     load_env_file,
-    main,
+    main as _shared_main,
     observer_binding,
     runtime_env,
     runtime_env_path,
@@ -40,7 +39,6 @@ __all__ = [
     "ROLE_REQUIRED",
     "RUNTIME_ENV",
     "RUNTIME_ENV_DEFAULT",
-    "RUNTIME_ENV_FILE_ENV",
     "RUNTIME_ENV_FILE_ENVS",
     "SECRETARY_RUNTIME_ENV_FILE_ENV",
     "UNIT_BOUND_ENV",
@@ -53,6 +51,15 @@ __all__ = [
     "runtime_env",
     "runtime_env_path",
 ]
+
+
+def main(argv=None) -> int:
+    """Run the secretary-facing role-env command."""
+    return _shared_main(
+        argv,
+        prog="python3 -m secretary.role_env",
+        description=__doc__,
+    )
 
 
 if __name__ == "__main__":

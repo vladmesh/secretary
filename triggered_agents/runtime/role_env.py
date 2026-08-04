@@ -18,8 +18,9 @@ from .paths import PRODUCT_ENV, default_instance_path
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 SECRETARY_RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
 # Packaged automation units predate the dispatcher heads and use the first spelling, while
-# dispatcher-launched heads use the second. The operations guide documents this order.
-RUNTIME_ENV_FILE_ENVS = (RUNTIME_ENV_FILE_ENV, SECRETARY_RUNTIME_ENV_FILE_ENV)
+# dispatcher-launched heads use the second. The explicit secretary-side pin wins when both are
+# present, so recovery cannot materialize secrets into an ambient unit's runtime.env.
+RUNTIME_ENV_FILE_ENVS = (SECRETARY_RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_FILE_ENV)
 RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 
 
@@ -256,8 +257,8 @@ def wrap_shell_command(role: str, command: str, *, pythonpath: str | None = None
     return " ".join(parts)
 
 
-def _main_exec(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python3 -m triggered_agents.runtime.role_env exec")
+def _main_exec(argv: list[str], *, prog: str) -> int:
+    parser = argparse.ArgumentParser(prog=f"{prog} exec")
     parser.add_argument("--role", required=True)
     parser.add_argument("--env-file")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -279,14 +280,15 @@ def _main_exec(argv: list[str]) -> int:
         return 126
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, prog: str = "python3 -m triggered_agents.runtime.role_env",
+         description: str | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"-h", "--help", "help"}:
-        print(__doc__)
+        print(description or __doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
     if cmd == "exec":
-        return _main_exec(rest)
+        return _main_exec(rest, prog=prog)
     print(f"role-env: unknown command {cmd!r}", file=sys.stderr)
     return 2
 

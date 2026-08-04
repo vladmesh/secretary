@@ -30,11 +30,12 @@ class RuntimeEnvPathTests(unittest.TestCase):
             },
             clear=True,
         ):
-            self.assertEqual(role_env.runtime_env_path(), Path("/tmp/ta-runtime.env"))
+            self.assertEqual(role_env.runtime_env_path(), Path("/tmp/secretary-runtime.env"))
 
     def test_secretary_reexports_the_shared_runtime_environment(self) -> None:
         self.assertIs(secretary_role_env.runtime_env, role_env.runtime_env)
         self.assertIs(secretary_role_env.ROLE_ALLOWLIST, role_env.ROLE_ALLOWLIST)
+        self.assertFalse(hasattr(secretary_role_env, "RUNTIME_ENV_FILE_ENV"))
 
 
 class RuntimeEnvRoleTests(unittest.TestCase):
@@ -55,15 +56,22 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         self.assertNotIn(role_env.OBSERVER_GENERATION_ENV, env)
 
     def test_every_merged_role_builds_an_environment(self) -> None:
-        base = {
-            "PATH": "/usr/bin",
-            "KANBOARD_URL": "https://board.invalid",
-            "KANBOARD_API_USER": "bot",
-            "KANBOARD_API_TOKEN": "token",
-        }
-        for role in ("worker", "reviewer", "observer", "pipeline", "steward", "retro", "curator"):
-            with self.subTest(role=role):
-                self.assertIsInstance(role_env.runtime_env(role, base_env=base, require=True), dict)
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "runtime.env"
+            env_file.write_text(
+                "KANBOARD_URL=https://board.invalid\n"
+                "KANBOARD_API_USER=bot\n"
+                "KANBOARD_API_TOKEN=token\n",
+                encoding="utf-8",
+            )
+            for role in ("worker", "reviewer", "observer", "pipeline", "steward", "retro", "curator"):
+                with self.subTest(role=role):
+                    self.assertIsInstance(
+                        role_env.runtime_env(
+                            role, base_env={"PATH": "/usr/bin"}, env_file=env_file, require=True
+                        ),
+                        dict,
+                    )
 
 
 if __name__ == "__main__":
