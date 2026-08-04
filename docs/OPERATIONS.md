@@ -620,9 +620,7 @@ throughout and never by itself an idle head.
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
 read from `role_defaults.observer` — a sprint that declares a profile the registry does not have is fenced,
-not silently launched on a default. The one exception is an installation that has not yet run the
-[observer cutover](#sprint-observer-cutover): its rows carry no field, and until the migration those launch
-from `role_defaults.observer` as they always did.
+not silently launched on a default, and there is no exception for a row that carries no field.
 The same resource-readiness gate that runs before claiming a card runs first, with the
 same verdicts (see [Head readiness](#head-readiness)). The head is launched through the role-environment
 wrapper in its own workspace with its own terminal; the prompt is rendered from the live sprint entity at
@@ -843,136 +841,28 @@ it reports success. After it runs, install accepts the board unchanged.
 `python3 -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
 by index, so it refuses a board that holds cards unless the layout already matches, and points here.
 
-## Sprint observer cutover
+## An export whose sprint rows carry no observer
 
-Before this migration a sprint declared no observer and the dispatcher picked a head from
-`role_defaults.observer`. After it every sprint row carries one explicit value and the reader is
-strict. Those two facts cannot hold at different moments on a running installation: a strict reader
-let loose on a row that predates the field calls the live sprint corrupt and fences its projects. So
-the migration is one ordered sequence that stops the pipeline, and it is an operator action.
+Every sprint row carries an observer value, closed rows included, and restore validates the whole
+exported set before its first backend write. A row without the field is named and refused, and the
+refusal does not guess why: an export can lack it because it is damaged or because it was taken
+before the field existed, and nothing in the archive tells the two apart. Either way nothing of the
+export reaches the backend.
 
-Look first, from anywhere, without stopping anything:
+The repair is the same for both. Open the export's `state/board/sprints.json`, add the value to each
+named row, and restore again:
 
-```bash
-python3 -m secretary sprint migrate-observer --instance INSTANCE --dry-run
+```json
+"observer": {"kind": "head", "profile": "<profile>"}
+"observer": {"kind": "none"}
 ```
 
-It prints the value it would write for every row: `{"kind":"head",…}` for the open sprint,
-recovered provenance for each closed row whose last successful `observer_launched` /
-`observer_relaunched` event names a head, and `migration_unknown` for a closed row that never
-launched one. Read that list before going further; a closed row whose provenance looks wrong is
-worth resolving now rather than after it is on the board.
-
-Then the cutover proper:
-
-```bash
-python3 -m secretary pause freeze --instance INSTANCE --reason "observer cutover"
-python3 -m secretary pause-status --instance INSTANCE   # confirm every head is stopped
-python3 -m secretary sprint migrate-observer --instance INSTANCE
-```
-
-The freeze must carry no `--exclude-workspace`: a head left running keeps writing to the board this
-migration rewrites. The command refuses before its first write if the pipeline is not frozen, if the
-freeze carries exclusions, if any record still names a head, if the production state cannot be decoded, or if the head
-registry cannot be read.
-
-"Names a head" is the same rule the freeze stops by, not just a pane handle: a pane leaf, a pid
-heartbeat, or an unresolved launch intent all count, for worker, reviewer and observer alike. A
-head adopted from a launch intent never had a handle, and a stop the host refused leaves the record
-pointing at its head on purpose — those are the heads most likely to still be writing.
-
-The unreadable-state refusal matters more than it looks: `pause freeze` sets the flag and stops
-*nothing* when the records are unreadable, so an empty decode is the one case where a live head is
-both most likely and least visible. Repair
-`DATA_DIR/dispatcher/production-state.json` first.
-
-It then runs, in this order and no other:
-
-1. pre-migration checkpoint, written and pushed to the remote while the tolerant reader is still in
-   force, so there is a state to roll back to that describes the installation as it ran;
-2. the immutable versioned inventory and journal, persisted under
-   `DATA_DIR/sprints/observer-migration/`;
-3. one idempotent write per row, under a request id derived from the inventory digest and the ref;
-4. a strict full rescan of every row, including resolving each open row's declared head against
-   the head registry, so a profile removed between the freeze and the cutover stops the migration
-   instead of activating a reader that would fence the row it just migrated;
-5. the durable `observer_migration_completed` audit event, which is what makes the installation
-   migrated;
-6. post-migration checkpoint, pushed again, now carrying that event;
-7. the durable `observer_migration_activated` event, which records that this cutover reached that
-   recovery point and closes its open interval;
-8. the local strict-reader latch, `DATA_DIR/sprints/observer-strict.json`;
-9. resume.
-
-Both pushes are real pushes. The dispatcher's ordinary pusher runs on a 30-minute window and inside
-it simply hands back the previous state; the cutover bypasses that window and refuses on any
-outcome short of the commit being on the remote, because a checkpoint that never left the machine
-is not a recovery point.
-
-Any step that refuses leaves the freeze in force and the strict reader off. Rerun the same command:
-provenance is read back from the journal rather than recomputed, a row that already carries exactly
-the selected value is skipped without a backend write, and a row carrying a *different* value stops
-the migration for an operator to resolve by hand. A rerun after a crash resumes from wherever the
-sequence stopped and reports `already-migrated` only once the latch at step 7 is in place. Pass
-`--no-resume` to keep the freeze after a successful cutover and lift it yourself with
-`secretary resume --instance INSTANCE`.
-
-The one case the command cannot decide is an open sprint whose running head it cannot prove: no
-tracked observer record and no successful launch event, or the two disagreeing. It names the sprint
-and refuses. Settle which head is running, then rerun. `--dry-run` reports the same refusals under
-`refusals`, so a head that has left the registry is visible before the pipeline is stopped.
-
-After the cutover, `secretary sprint create` and `secretary sprint reopen` both require
-`--observer`, and an open sprint with missing or unreadable metadata fences its own projects with a
-critical outcome instead of falling back to a role default.
-
-### Why the completion event and not the marker file
-
-Whether this installation is migrated is read from the `observer_migration_completed` event in
-`state/board/events.ndjson`, not from the marker file. The audit log is checkpoint canon and a
-replacement host gets it back (see [Recovery](RECOVERY.md#what-the-checkpoint-contains)); the marker
-file is local runtime state and does not survive. Deriving the answer from the log is what stops a
-recovered host from quietly returning to `role_defaults.observer` after a completed migration.
-
-The event alone is not the whole predicate, because it is written at step 5 and the order is not
-finished until step 7. On the host running the cutover there is a live interval in which the event
-exists and the post-migration checkpoint has not been taken and pushed; strict there would be strict
-before the recovery point the order requires. The cutover's own working set under
-`DATA_DIR/sprints/observer-migration/` marks that interval, and it is local by construction — it is
-not checkpoint canon, so a recovered host never has it and is never mistaken for a host mid-cutover.
-The three states are:
-
-| signals | reader |
-| --- | --- |
-| no completion event | tolerant |
-| completion event, plus an inventory on this host with no activation naming it | tolerant — mid-cutover |
-| the latch, or a completion event with no cutover in flight | strict |
-
-The inventory is retained after a successful cutover on purpose — a retry reads it instead of
-recomputing provenance — so its presence alone cannot mean "in flight". The `observer_migration_activated`
-event is what closes the interval, and it is in the append-only log rather than in a file: losing or
-damaging the local latch cannot take strictness away from an installation that finished its migration.
-
-The marker is the latch over that fact: written last, so a rerun after a crash keys its resume on
-it, and so the ordinary read is one stat rather than a scan.
-
-The same rule decides what recovery accepts. A checkpoint taken *after* the migration must carry an
-observer value on every row; one missing it is a corrupt export and the restore refuses before its
-first backend write.
-
-A checkpoint taken *before* the migration carries none. Its closed rows come back as they were, and
-the installation comes back tolerant, with this migration still the way forward. Its one open row is
-the exception, because an open sprint may never be published without an executable value: the
-restore recovers that sprint's head from `state/board/events.ndjson`, which the checkpoint carries,
-by the same latest-successful-launch rule the migration uses, and writes it before the reference
-publishes the row. It is a per-row recovery of a fact, not the migration: no completion event is
-written and the reader stays tolerant.
-
-If that open row has no successful observer launch anywhere in the log, or its recovered head has
-since left the head registry, the restore names the sprint and refuses. The repair is to declare the
-value by hand in the checkpoint's `state/board/sprints.json` before restoring — add
-`"observer": {"kind": "head", "profile": "<profile>"}` or `"observer": {"kind": "none"}` to that
-row — and run the restore again.
+Use `none` for a row that ran without an observer. A closed row whose head you cannot establish takes
+`{"kind": "historical", "profile": null, "source": "migration_unknown"}`, which records that there
+was nothing to recover; it is provenance, never a head to run, so an open row may not carry it. An
+open row that names a head the installation's registry no longer has is refused the same way and
+repaired the same way, by declaring a profile the registry does have. The forms are defined in
+[Protocols](PROTOCOLS.md#the-declared-observer).
 
 ## Recovery
 
@@ -1447,8 +1337,8 @@ this version) or when the snapshot itself is broken.
 
 `[role_defaults]` in that one snapshot routes the dispatcher's worker and reviewer heads and the head the
 curator, retro and steward launch on. It no longer routes the observer: a sprint declares its own observer
-head, and `role_defaults.observer` is read only on an installation that has not yet run the
-[observer cutover](#sprint-observer-cutover). Each background role's `automation.toml` still carries a `head`, but only
+head, and `role_defaults.observer` is read only to label an observer record filled in with no sprint to
+read. Each background role's `automation.toml` still carries a `head`, but only
 as a last resort for a registry that routes that role nowhere. The packaged unit of every one of those roles exports
 `SECRETARY_INSTANCE` and the path of its own `runtime.env`, so each process resolves the same installation's snapshot
 rather than the host's default one. A head the dispatcher launches starts in a terminal Orca creates and inherits none

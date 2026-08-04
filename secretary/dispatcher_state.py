@@ -264,16 +264,6 @@ def new_attempt_id() -> str:
     return f"attempt-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
 
 
-def ensure_attempt(payload: dict[str, Any], reference: str, actor: str, owner: str) -> str:
-    attempt_id = str(payload.get("attempt_id") or "")
-    if attempt_id:
-        return attempt_id
-    attempt_id = new_attempt_id()
-    payload["attempt_id"] = attempt_id
-    record_attempt(payload, attempt_id, reference, actor, owner)
-    return attempt_id
-
-
 def record_attempt(
     payload: dict[str, Any],
     attempt_id: str,

@@ -134,11 +134,6 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
             ) as update_index,
             mock.patch.object(
                 memory_service,
-                "rebuild_index",
-                side_effect=AssertionError("bootstrap_index must not call rebuild_index"),
-            ) as rebuild_index,
-            mock.patch.object(
-                memory_service,
                 "offline_rebuild",
                 side_effect=AssertionError("compatible bootstrap must not rebuild"),
             ),
@@ -148,7 +143,6 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         self.assertEqual(indexed, 1)
         warm_embedder.assert_called_once_with()
         update_index.assert_called_once_with()
-        rebuild_index.assert_not_called()
         self.assertEqual(self.calls, [])
 
     def test_embedder_uses_configured_persistent_cache_and_thread_limit(self):

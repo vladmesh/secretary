@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main as cli_main
-from secretary.backup import create_backup, verify_backup
+from secretary.backup import verify_backup
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary._fsutil import sha256_file
 from secretary.checkpoint import _validate_board
@@ -49,6 +49,7 @@ from tests.test_tasks import WriteKanboard
 
 from tests.restore_fixtures import (
     _EmptyWriteKanboard,
+    create_backup,
     _restore_card,
     _seed_instance_facts,
     _write_instance_to,

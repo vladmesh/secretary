@@ -129,8 +129,8 @@ worse than none.
 The head profile is the sprint's own: `sprint_observer` holds one concrete profile or `none`, and the
 launch resolves that profile against the installation's `heads/heads.yaml` snapshot without any fallback.
 A sprint declaring a profile the snapshot does not have is corrupt and fences its own projects rather than
-launching on a default. `role_defaults.observer` still exists for the installations that have not run the
-observer migration yet, and for nothing else afterwards.
+launching on a default. `role_defaults.observer` never decides what a sprint runs; it only labels an
+observer record that is filled in with no sprint to read.
 The profile is interactive, because an observer is one continuous session for the whole
 sprint: a one-shot launch would exit after the first turn and the tick would read that as a dead
 head. The same resource-readiness gate that runs before claiming a card runs before launch; an

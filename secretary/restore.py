@@ -281,8 +281,11 @@ SPRINT_PARITY_FIELDS = (
 def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | None) -> None:
     """Validate the whole exported observer set before the first backend write of any set.
 
-    Every row carries a readable value.  A row without one is a corrupt export, and restoring it
-    would publish a row the reader this installation comes back with immediately calls corrupt.
+    Every row carries a readable value.  A row without one is either a corrupt export or one taken
+    before the observer migration, and restoring it either way would publish a row the reader this
+    installation comes back with immediately calls corrupt.  The two are not told apart here: the
+    archive carries nothing that dates it against a migration this product no longer runs, and both
+    are repaired the same way, by declaring the value in the export before restoring again.
 
     Nothing is written here: it is the preflight, and its whole job is to decide the entire set
     before the first backend write of any of it.
@@ -301,7 +304,13 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
         reference = str(sprint.get("reference") or "?")
         status = str(sprint.get("status") or "")
         if "observer" not in sprint:
-            problems.append(f"{reference}: a row without observer metadata is a corrupt export")
+            problems.append(
+                f"{reference}: the row carries no observer field. The export is either corrupt or "
+                "was taken before the observer migration; both are refused. Add the value to that "
+                'row in the export\'s state/board/sprints.json ("observer": {"kind": "head", '
+                '"profile": "<profile>"} for a closed row\'s head, or {"kind": "none"}) and run '
+                "the restore again"
+            )
             continue
         value = parse_observer(sprint.get("observer"))
         if value is None:
