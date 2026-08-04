@@ -83,14 +83,21 @@ class CheckpointBlocked(Exception):
     """The snapshot did not pass the gate; nothing is committed this tick."""
 
 
-def _canonical_run_records(path: Path, label: str) -> list[str]:
-    """Compare exported journal entries by JSON value, never incidental spelling."""
+def _canonical_run_journals(path: Path, label: str) -> dict[str, list[str]]:
+    """Compare each source journal by JSON value, never incidental spelling."""
     try:
-        return [
-            json.dumps(json.loads(line), ensure_ascii=False, sort_keys=True)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        journals: dict[str, list[str]] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            source = record.get("source") if isinstance(record, dict) else None
+            if not isinstance(source, str) or not source:
+                raise ValueError("run record has no source")
+            journals.setdefault(source, []).append(
+                json.dumps(record, ensure_ascii=False, sort_keys=True)
+            )
+        return journals
     except FileNotFoundError:
         raise
     except (OSError, UnicodeError, ValueError) as exc:
@@ -186,17 +193,20 @@ class CheckpointWriter:
         canonical = self.instance_dir / "state" / "runs" / "runs.ndjson"
         live = self.data_dir / "runs" / "runs.ndjson"
         try:
-            existing = _canonical_run_records(canonical, "canonical run history")
+            existing = _canonical_run_journals(canonical, "canonical run history")
         except FileNotFoundError:
             return
         try:
-            current = _canonical_run_records(live, "live run export")
+            current = _canonical_run_journals(live, "live run export")
         except (OSError, UnicodeError, ValueError) as exc:
             raise CheckpointBlocked(f"could not inspect canonical run history: {exc}") from None
-        if current[:len(existing)] != existing:
-            raise CheckpointBlocked(
-                "refusing to truncate or rewrite non-empty canonical run history from the live export"
-            )
+        for source, canonical_history in existing.items():
+            live_history = current.get(source, [])
+            if live_history[:len(canonical_history)] != canonical_history:
+                raise CheckpointBlocked(
+                    "refusing to truncate or rewrite non-empty canonical run history "
+                    f"for {source} from the live export"
+                )
 
     def _publish(
         self,

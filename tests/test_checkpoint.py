@@ -207,6 +207,19 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertIn("truncate or rewrite", result.reason)
 
+    def test_new_earlier_sorting_source_is_a_valid_per_journal_extension(self):
+        old = {"source": "z-runs.jsonl", "line": 1, "record": {"event": "claim"}}
+        self.seed_runs([old])
+        self.assertEqual(self.write().status, "committed")
+        self.seed_runs([
+            {"source": "a-runs.jsonl", "line": 1, "record": {"event": "new"}},
+            old,
+        ])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+
     def test_derived_board_dump_is_not_part_of_the_checkpoint(self):
         self.write()
 

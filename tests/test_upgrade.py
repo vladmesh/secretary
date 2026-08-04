@@ -773,7 +773,7 @@ class UpgradeStepTests(unittest.TestCase):
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
             with (
-                mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "workspaces")}),
+                mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "home" / "orca" / "workspaces")}),
                 mock.patch("secretary.upgrade.os.geteuid", return_value=0),
                 mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
                 mock.patch("secretary.upgrade.os.chown") as chown,
@@ -782,12 +782,15 @@ class UpgradeStepTests(unittest.TestCase):
                     self.context(FakeUnitInstaller(), product_root=product, runtime_user="operator")
                 )
 
-            worktree = root / "workspaces" / "secretary" / "curator"
+            workspace_root = root / "home" / "orca" / "workspaces"
+            worktree = workspace_root / "secretary" / "curator"
             admin = upgrade._worktree_git_dir(worktree)
             owned = {Path(call.args[0]) for call in chown.call_args_list}
             self.assertEqual(result.status, "changed")
             self.assertIn(worktree, owned)
             self.assertIn(worktree.parent, owned)
+            self.assertIn(workspace_root, owned)
+            self.assertIn(workspace_root.parent, owned)
             self.assertIsNotNone(admin)
             self.assertIn(admin, owned)
             self.assertIn(admin.parent, owned)

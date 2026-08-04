@@ -54,7 +54,16 @@ from secretary.secret_store import (
 )
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
-from secretary.upgrade import STEPS, UpgradeContext, UpgradeResult, default_product_root, run_steps, step_host
+from secretary.upgrade import (
+    STEPS,
+    GitError,
+    UpgradeContext,
+    UpgradeResult,
+    _set_runtime_owner,
+    default_product_root,
+    run_steps,
+    step_host,
+)
 from triggered_agents.runtime.shared_state import resolve_pipeline_state_dir
 from triggered_agents.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 
@@ -92,6 +101,12 @@ class InstallResult:
             lines.append(f"  {step.status:9} {step.name}{suffix}")
         lines.append("status: " + ("ok" if self.ok else "failed"))
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class PipelineStateMaterialization:
+    records: int
+    changed: bool
 
 
 def _run(
@@ -141,16 +156,11 @@ def _ensure_installation_user(name: str | None, *, recovery: bool, dry_run: bool
 
 
 def _set_installation_owner(path: Path, name: str | None) -> None:
-    """Give the dedicated user runtime paths created while the installer is root."""
-    if not name or os.geteuid() != 0 or not path.exists():
-        return
-    account = pwd.getpwnam(name)
+    """Give root-created installation files safe ownership for the runtime user."""
     try:
-        os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
-        for child in path.rglob("*"):
-            os.chown(child, account.pw_uid, account.pw_gid, follow_symlinks=False)
-    except OSError as exc:
-        raise InstallError(f"could not assign {path} to installation user {name}: {exc}") from None
+        _set_runtime_owner(path, name)
+    except GitError as exc:
+        raise InstallError(str(exc)) from None
 
 
 def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool) -> str:
@@ -506,7 +516,7 @@ def materialize_checkpoint(
     return len(cards), run_count
 
 
-def _restored_run_journals(runs_source: Path) -> dict[Path, list[str]]:
+def _restored_run_journals(runs_source: Path) -> dict[Path, list[tuple[int, str]]]:
     """Rebuild the JSONL files whose records the checkpoint normalizes.
 
     ``runs.ndjson`` deliberately wraps every source line with its relative
@@ -532,7 +542,7 @@ def _restored_run_journals(runs_source: Path) -> dict[Path, list[str]]:
     except (OSError, UnicodeError, ValueError, TypeError):
         raise InstallError("private checkpoint contains invalid run journal records") from None
 
-    journals: dict[Path, list[str]] = {}
+    journals: dict[Path, list[tuple[int, str]]] = {}
     for relative, records in grouped.items():
         ordered = sorted(records, key=lambda item: item[0])
         numbers = [number for number, _ in ordered]
@@ -542,14 +552,25 @@ def _restored_run_journals(runs_source: Path) -> dict[Path, list[str]]:
             )
         try:
             journals[relative] = [
-                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-                for _, record in ordered
+                (number, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                for number, record in ordered
             ]
         except (TypeError, ValueError):
             raise InstallError(
                 f"private checkpoint contains an unserializable run journal record for {relative.as_posix()}"
             ) from None
     return journals
+
+
+def _render_restored_journal(records: list[tuple[int, str]]) -> str:
+    """Keep original physical line numbers; blank source lines are meaningful offsets."""
+    rendered: list[str] = []
+    previous = 0
+    for number, record in records:
+        rendered.append("\n" * (number - previous - 1))
+        rendered.append(record)
+        previous = number
+    return "".join(rendered)
 
 
 def _live_run_journals(state_dir: Path) -> dict[Path, list[str]]:
@@ -574,7 +595,7 @@ def _live_run_journals(state_dir: Path) -> dict[Path, list[str]]:
 
 def materialize_pipeline_state(
     instance_dir: Path, state_dir: Path, *, dry_run: bool = False,
-) -> int:
+) -> PipelineStateMaterialization:
     """Put canonical run journals back where the dispatcher checkpoint reads them.
 
     Recovery creates the role worktrees after it restores ``state/runs`` into
@@ -592,18 +613,21 @@ def materialize_pipeline_state(
     existing = _live_run_journals(state_dir)
     for relative, canonical in journals.items():
         live = existing.get(relative, [])
-        if live and live[:len(canonical)] != canonical:
+        canonical_records = [record for _, record in canonical]
+        if live and live[:len(canonical_records)] != canonical_records:
             raise InstallError(
                 f"live pipeline state at {state_dir} does not extend the checkpoint; refusing to overwrite it"
             )
+    records = sum(len(journal) for journal in journals.values())
     if dry_run:
-        return sum(len(records) for records in journals.values())
+        return PipelineStateMaterialization(records=records, changed=False)
     try:
+        created = not state_dir.exists()
         state_dir.mkdir(parents=True, exist_ok=True)
         # A valid live extension is newer than the checkpoint and must survive a
         # retry. Only absent/empty journals receive the reconstructed prefix.
         writes = [
-            (state_dir / relative, "".join(records))
+            (state_dir / relative, _render_restored_journal(records))
             for relative, records in journals.items()
             if not existing.get(relative)
         ]
@@ -611,7 +635,7 @@ def materialize_pipeline_state(
             publish_state_atomic(writes)
     except (OSError, RuntimeError) as exc:
         raise InstallError(f"could not materialize live pipeline state: {exc}") from None
-    return sum(len(records) for records in journals.values())
+    return PipelineStateMaterialization(records=records, changed=created or bool(writes))
 
 
 def pipeline_state_path(runtime_home: Path) -> Path:
@@ -907,15 +931,17 @@ def install(args: argparse.Namespace) -> InstallResult:
                 f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
             )
             restored_runs = 0
+            pipeline_state_changed = False
 
             def restore_pipeline_source(context: UpgradeContext) -> None:
-                nonlocal restored_runs
-                restored_runs = materialize_pipeline_state(
-                    target, pipeline_state_path(context.runtime_home or Path.home()), dry_run=False,
+                nonlocal restored_runs, pipeline_state_changed
+                state_path = pipeline_state_path(context.runtime_home or Path.home())
+                restored = materialize_pipeline_state(
+                    target, state_path, dry_run=False,
                 )
-                _set_installation_owner(
-                    pipeline_state_path(context.runtime_home or Path.home()), args.installation_user,
-                )
+                restored_runs = restored.records
+                pipeline_state_changed = restored.changed
+                _set_installation_owner(state_path.parent, args.installation_user)
 
             host_result = materialize_host(
                 target,
@@ -931,7 +957,11 @@ def install(args: argparse.Namespace) -> InstallResult:
                 "changed" if changed else "unchanged",
                 f"materializer complete ({changed} changed step(s))",
             )
-            result.add("pipeline-state", "changed", f"materialized {restored_runs} run record(s)")
+            result.add(
+                "pipeline-state",
+                "changed" if pipeline_state_changed else "unchanged",
+                f"materialized {restored_runs} run record(s)",
+            )
             findings = restore_findings(data_dir)
             if findings:
                 raise InstallError("status findings: " + "; ".join(findings))

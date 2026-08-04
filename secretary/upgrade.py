@@ -365,6 +365,33 @@ def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
         raise GitError(f"could not assign {path} to runtime user {runtime_user}: {exc}") from None
 
 
+def _set_runtime_directory_owner(path: Path, runtime_user: str | None) -> None:
+    """Make a created workspace ancestor traversable and writable without walking siblings."""
+    if not runtime_user or os.geteuid() != 0 or not path.exists():
+        return
+    try:
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise GitError(f"runtime user {runtime_user!r} does not exist") from None
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise GitError(f"workspace ancestor is not a real directory: {path}")
+        os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+    except OSError as exc:
+        raise GitError(f"could not assign {path} to runtime user {runtime_user}: {exc}") from None
+
+
+def _workspace_owner_dirs(worktree: Path) -> tuple[Path, ...]:
+    """The exact parents this materializer can create for a role worktree."""
+    secretary_root = worktree.parent
+    workspace_root = secretary_root.parent
+    roots = [workspace_root, secretary_root]
+    if workspace_root.name == "workspaces" and workspace_root.parent.name == "orca":
+        roots.insert(0, workspace_root.parent)
+    return tuple(roots)
+
+
 def _worktree_git_dir(worktree: Path) -> Path | None:
     """Return the linked-worktree administrative directory named by its .git file."""
     try:
@@ -388,6 +415,8 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
     # the systemd units subsequently run as `runtime_user`.
     try:
         _set_runtime_owner(worktrees[0].parent, context.runtime_user)
+        for parent in _workspace_owner_dirs(worktrees[0]):
+            _set_runtime_directory_owner(parent, context.runtime_user)
     except GitError as exc:
         return StepResult("role-worktrees", "failed", str(exc))
     for worktree in worktrees:
@@ -409,6 +438,8 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
                 continue
             try:
                 worktree.parent.mkdir(parents=True, exist_ok=True)
+                for parent in _workspace_owner_dirs(worktree):
+                    _set_runtime_directory_owner(parent, context.runtime_user)
                 _git(
                     context.product_root,
                     ["worktree", "add", "--detach", str(worktree), "HEAD"],

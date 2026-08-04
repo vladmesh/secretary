@@ -15,6 +15,7 @@ from unittest import mock
 
 from secretary import installation
 from secretary.cli import main
+from secretary.data import export_runs
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -132,14 +133,16 @@ class InstallationTests(unittest.TestCase):
             )
             state_dir = root / "home" / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
 
-            self.assertEqual(materialize_pipeline_state(instance, state_dir), 1)
+            first = materialize_pipeline_state(instance, state_dir)
+            self.assertEqual((first.records, first.changed), (1, True))
 
             self.assertEqual(
                 [json.loads(line) for line in (state_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()],
                 [record],
             )
             stamp = (state_dir / "runs.jsonl").stat().st_mtime_ns
-            self.assertEqual(materialize_pipeline_state(instance, state_dir), 1)
+            second = materialize_pipeline_state(instance, state_dir)
+            self.assertEqual((second.records, second.changed), (1, False))
             self.assertEqual((state_dir / "runs.jsonl").stat().st_mtime_ns, stamp)
 
     def test_pipeline_state_path_honors_the_dispatcher_override(self):
@@ -189,9 +192,30 @@ class InstallationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(materialize_pipeline_state(instance, state_dir), 2)
+            result = materialize_pipeline_state(instance, state_dir)
+            self.assertEqual((result.records, result.changed), (2, False))
 
             self.assertIn('{"event":"release"}', journal.read_text(encoding="utf-8"))
+
+    def test_gapped_checkpoint_journal_round_trips_through_the_next_export(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            source = instance / "state" / "runs"
+            source.mkdir(parents=True)
+            rows = [
+                {"source": "runs.jsonl", "line": 1, "record": {"event": "claim"}},
+                {"source": "runs.jsonl", "line": 3, "record": {"event": "review"}},
+            ]
+            canonical = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+            (source / "runs.ndjson").write_text(canonical, encoding="utf-8")
+            state_dir = root / "pipeline-state"
+
+            materialize_pipeline_state(instance, state_dir)
+            export_runs(root / "data", state_dir=state_dir)
+
+            self.assertEqual((state_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()[1], "")
+            self.assertEqual((root / "data" / "runs" / "runs.ndjson").read_text(encoding="utf-8"), canonical)
 
     def test_missing_project_checkout_is_cloned_once(self):
         with tempfile.TemporaryDirectory() as temporary:
