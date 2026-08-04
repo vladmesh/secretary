@@ -120,6 +120,35 @@ The memory writer commits `state/memory` independently on `propose`/`commit`/`su
 does not overlap the tick writer's, and the shared instance-repository lock serialises both writers along
 with the publishing of reviewed instance-repo changes.
 
+### Read-only checkpoint and quiet-tick check
+
+Use an ordinary, already-authorized semantic board transition as the observation point; do not create a
+card change, invoke `production-tick`, change a timer, or force a push for this check. Before and after
+the next scheduled tick, read the installation with:
+
+```bash
+secretary status --json --instance INSTANCE
+secretary dispatcher production-observe --instance INSTANCE
+secretary doctor --instance INSTANCE
+journalctl --user -u secretary-dispatcher-production.service --since "TIME"
+```
+
+These reads do not expose or alter secret values or credentials, head profiles, instance configuration,
+scheduling, `runtime.env`, or implementation.
+
+For the transition, the dispatcher service's normal tick result identifies the card action and the
+checkpoint result. `status` and `production-observe` then show the resulting checkpoint commit in their
+`checkpoint` data, while `doctor` reports any blocked gate, push failure, lag or remote divergence. A
+changed normalized board or run export produces one observable local checkpoint commit at the end of that
+60-second tick; it does not imply an immediate remote push.
+
+Repeat the same read-only observation across a routine tick with no relevant board event. Its dispatcher
+evidence must contain no `observer-launched`, `observer-relaunched` or `observer-nudged` action and no
+card transition. The observer snapshot from `production-observe` (also available through `status`) should
+remain at its prior lifecycle state, and checkpoint evidence should show `unchanged` rather than a new
+commit when normalized `state/` did not change. This verifies the quiet path without altering scheduling
+or runtime behavior.
+
 ## Status and doctor
 
 `secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe to poll:
@@ -913,6 +942,20 @@ parks the card in Assessment (see [Tasks](PROTOCOLS.md#tasks)) once the mechanic
 the merge below runs on the tick that performs a recorded `release` decision. A red or pending gate
 still resolves in Validate, so a card only reaches Assessment with nothing mechanical left to decide.
 A card with no observer to release it merges on the verdict's own tick, as below.
+
+### Exact-SHA gate evidence
+
+An executed local or GitHub mechanical gate can leave a valid receipt only when it names the exact
+commit SHA being judged, its base SHA, completed terminal checks, completion time and check-set digest.
+The receipt is evidence for that SHA and lifecycle stage only. A reviewer or observer may suppress a
+routine repeat of the already-attested broad validation on that unchanged SHA, but must still inspect
+the diff and acceptance criteria; focused reproduction, mandatory CI and the fresh pre-merge gate remain
+independent decisions.
+
+Do not carry that evidence to a new commit, a later lifecycle stage, or a different check set. Missing
+evidence, `gate_mode: none`, and noop execution are explicit absence of a broad-suite attestation, even
+when they preserve dispatcher control flow. In those cases, obtain the focused or broad validation the
+decision needs instead of describing a suite as already passed.
 
 A release the dispatcher cannot carry out takes the card to Blocked with the failure on it, the
 same as any merge that could not land before Assessment existed. It never sends the card back for

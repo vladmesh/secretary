@@ -28,10 +28,10 @@ The canon, the normalised minimum needed to resume work:
 
 - instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `heads/`, `policies/`.
   `heads/` includes this installation's own `heads.toml` canon when it has one, the generated
-  `heads.yaml` snapshot, and the `source.yaml` pin recording which canon, checkout and revision it
-  was made from; after a restore the pin shows which product version the
-  installation was running, and bringing the snapshot up to a new checkout is `secretary upgrade`'s
-  job;
+  `heads.yaml` snapshot, and the `source.yaml` pin recording the installed heads canon, its
+  checkout and its exact revision. After a restore, this pin identifies the heads configuration
+  and product ref the installation was running; bringing the snapshot up to a new checkout is
+  `secretary upgrade`'s job;
 - board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`,
   `state/board/events.ndjson`, `state/board/export.json`;
 - run and audit state: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
@@ -102,10 +102,15 @@ memory.
 ## Cadence and RPO
 
 - commit once per dispatcher tick (60s), on change: if the hash of the normalised `state/` did not
-  move, the tick skips the commit;
-- push to the remote every 30 minutes;
+  move, the end-of-tick checkpoint skips the commit;
+- attempt a remote push in its own 30-minute window, fast-forward only;
 - durable RPO on machine loss is 30 minutes. Local commits give fine-grained history and fast local
   rollback, but they do not survive the machine.
+
+The two operations are deliberately separate. A changed-state tick can make one local checkpoint
+commit; an unchanged tick makes none. The scheduled pusher is not forced: it only publishes when
+the remote tip is an ancestor of local `HEAD`, and it otherwise records the failure or divergence
+for the next window or operator action.
 
 ## Writers
 
@@ -261,6 +266,11 @@ install, prints no values and adds it to no commit.
    the user services can read and update them.
 7. Rebuilds the pipeline worktree's live run journal from the checkpointed normalized journal.
 8. Checks restore status. Heads are connected after bootstrap as a separate step.
+
+The ordering is intentional: recovery first reconstructs the normalized board and run exports,
+validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed
+runtime. It uses `heads/source.yaml` to identify the installed heads canon, checkout and revision;
+the recovery path does not silently substitute a checkout or heads file from the host.
 
 Parity is checked separately for cards and for sprints, and both checks are fail-closed: a mismatch
 leaves recovery unfinished and visible in `doctor` rather than silently counting the restore as
