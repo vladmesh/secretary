@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
+
 
 class TaskError(Exception):
     """A task command failed without exposing backend credentials."""
@@ -95,7 +97,7 @@ _KNOWN_METADATA = {
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
-_CODEX_LAUNCH_MODES = {"exec", "tui"}
+_CODEX_LAUNCH_MODES = CODEX_LAUNCH_MODES
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
 _COMMENT_ROLES = _ROLES
 _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
