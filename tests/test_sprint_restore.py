@@ -19,12 +19,7 @@ from unittest import mock
 
 from secretary.data import export_board, init_layout, normalize_sprint_entity
 from secretary.restore import RestoreError, import_normalized_board, restore_findings, restore_state
-from secretary.sprint_observer import (
-    forget_migration_state,
-    head_choice,
-    none_choice,
-    strict_reader_active,
-)
+from secretary.sprint_observer import head_choice, none_choice
 from secretary.sprints import (
     SprintReader,
     SprintWriter,
@@ -125,33 +120,6 @@ class SprintRestoreTests(unittest.TestCase):
             self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
         )
 
-    def _carry_audit_log(self) -> None:
-        """Bring the source's audit log along, as the real checkpoint does.
-
-        `state/board/events.ndjson` is checkpoint canon and recovery materializes it back. The
-        fixture's own `_export` copies only the normalized card and sprint JSON, so a test that
-        needs the log — recovering an open row's head, or the migration's completion event — puts
-        it there explicitly.
-        """
-        shutil.copy(
-            self.source_data / "board" / "events.ndjson",
-            self.target_data / "board" / "events.ndjson",
-        )
-        forget_migration_state(self.target_data)
-
-    def _record_observer_launch(self, head: str) -> None:
-        events = self.source_data / "board" / "events.ndjson"
-        with events.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({
-                "event_id": "evt_launch_" + head.replace("-", "_"), "schema_version": 1,
-                "occurred_at": "2026-07-20T00:00:00Z",
-                "actor": {"role": "dispatcher", "id": "dispatcher"},
-                "kind": "observer_launched", "outcome": "success", "task_id": "",
-                "ref": self.ref,
-                "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
-                "request_id": "req-launch-" + head, "payload": {"head": head, "launches": 1},
-            }, sort_keys=True) + "\n")
-
     def test_export_carries_the_sprint_set_next_to_the_cards(self) -> None:
         summary = json.loads((self.source_data / "board" / "export.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["card_count"], 1)
@@ -232,95 +200,16 @@ class SprintRestoreTests(unittest.TestCase):
             [],
         )
 
-    def _mark_migrated(self, data_dir: Path) -> None:
-        """Put the migration's completion event in the log this recovery travels with."""
-        events = data_dir / "board" / "events.ndjson"
-        events.parent.mkdir(parents=True, exist_ok=True)
-        with events.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({
-                "event_id": "evt_migration_done", "schema_version": 1,
-                "occurred_at": "2026-08-02T00:00:00Z",
-                "actor": {"role": "steward", "id": "observer-migration"},
-                "kind": "observer_migration_completed", "outcome": "success",
-                "task_id": "", "ref": "",
-                "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
-                "request_id": "observer-migration-completed:test",
-                "payload": {"inventory_digest": "test", "rows": 1},
-            }, sort_keys=True) + "\n")
-        forget_migration_state(data_dir)
-
-    def test_a_migrated_export_missing_an_observer_is_refused(self) -> None:
-        """After the migration a row without the field is a corrupt export, not an old one."""
-        self._mark_migrated(self.target_data)
+    def test_an_export_missing_an_observer_is_refused(self) -> None:
+        """Every row carries the field, so a row without it is a corrupt export."""
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0].pop("observer")
         (self.target_data / "board" / "sprints.json").write_text(
             json.dumps(payload), encoding="utf-8"
         )
 
-        with self.assertRaisesRegex(RestoreError, "completed the observer migration"):
+        with self.assertRaisesRegex(RestoreError, "a row without observer metadata"):
             import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
-
-    def _pre_migration_open_export(self) -> None:
-        """A checkpoint from before the cutover: an open row that declares nothing."""
-        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        payload["sprints"][0].pop("observer")
-        payload["sprints"][0]["status"] = "open"
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
-        forget_migration_state(self.target_data)
-
-    def test_a_pre_migration_open_row_is_republished_with_its_recovered_head(self) -> None:
-        """Recovery may neither publish an open observer-less row nor invent a choice.
-
-        It does not have to do either: the checkpoint carries the same durable lifecycle log the
-        migration recovers a head from, so the head this sprint actually ran is recoverable by the
-        migration's own rule and is written before the reference publishes the row.
-
-        The installation still comes back tolerant — no completion event was written and the closed
-        rows are still the cutover's work — but its one open row carries an executable value.
-        """
-        self._record_observer_launch("claude-observer")
-        self._export()
-        self._pre_migration_open_export()
-        self._carry_audit_log()
-
-        client, _ = self._restore()
-
-        live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
-        self.assertEqual(live["observer"], head_choice("claude-observer"))
-        self.assertEqual(live["status"], "open")
-        self.assertFalse(strict_reader_active(self.target_data))
-        # Written with the fields, so the row was never readable open declaring nothing.
-        order = [
-            method for method, params in client.calls  # type: ignore[attr-defined]
-            if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
-            or (method == "updateTask" and params.get("reference") == self.ref)
-        ]
-        self.assertEqual(order[:2], ["saveTaskMetadata", "updateTask"])
-
-    def test_a_pre_migration_open_row_with_nothing_to_recover_is_refused(self) -> None:
-        """The narrow refusal: no successful launch anywhere in the log this checkpoint carries."""
-        self._pre_migration_open_export()
-        self._carry_audit_log()
-        client = _EmptyBoardsKanboard()
-
-        with self.assertRaisesRegex(RestoreError, "no successful observer launch"):
-            import_normalized_board(  # type: ignore[arg-type]
-                self.target_data, client=client, instance=self.instance,
-            )
-
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
-
-    def test_a_recovered_head_the_registry_no_longer_has_is_refused(self) -> None:
-        self._record_observer_launch("retired-observer")
-        self._export()
-        self._pre_migration_open_export()
-        self._carry_audit_log()
-
-        with self.assertRaisesRegex(RestoreError, "not a profile of this installation"):
-            self._restore()
 
     def test_a_declared_head_the_registry_no_longer_has_is_refused(self) -> None:
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
@@ -338,22 +227,18 @@ class SprintRestoreTests(unittest.TestCase):
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
 
-    def test_a_second_disaster_keeps_the_migrated_strict_state(self) -> None:
-        """The checkpoint of a migrated installation recovers a migrated installation."""
-        self._mark_migrated(self.target_data)
+    def test_a_second_disaster_keeps_the_declared_observer(self) -> None:
+        """The checkpoint of a recovered installation recovers the same declared row again."""
         first, _ = self._restore()
         export_board(self.target_data, command=self._pipeline_command(), sprint_client=first)
-        second_data = self.root / "second-migrated"
+        second_data = self.root / "second-recovery"
         shutil.copytree(self.target_data, second_data)
-        forget_migration_state(second_data)
 
         second = _EmptyBoardsKanboard()
         import_normalized_board(second_data, client=second)  # type: ignore[arg-type]
 
         live = SprintReader(second, data_dir=second_data).show(self.ref)  # type: ignore[arg-type]
         self.assertEqual(live["observer"], head_choice("codex-observer"))
-        self.assertTrue(strict_reader_active(second_data))
-        self.assertFalse((second_data / "sprints" / "observer-strict.json").exists())
 
     def test_an_open_row_is_refused_when_its_export_carries_provenance(self) -> None:
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))

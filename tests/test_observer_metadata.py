@@ -1,10 +1,4 @@
-"""The sprint's declared observer: representation, migration, strict reader and fence.
-
-The live inventory this migration was designed against is reproduced here row for row
-(secretary-1027): seventeen sprints, `sprint:1024` open on `claude-observer`, thirteen closed rows
-whose head is recoverable from durable lifecycle events, `sprint:818` among them because it changed
-head mid-run, and `sprint:878`, `sprint:913` and `sprint:916` with no successful launch at all.
-"""
+"""The sprint's declared observer: representation, reader and fence."""
 
 from __future__ import annotations
 
@@ -31,26 +25,12 @@ from secretary.dispatcher_observer_fence import (
     fenced_task,
     observer_fence,
 )
-from secretary.observer_backfill import (
-    BackfillError,
-    apply_backfill,
-    build_inventory,
-    persist_inventory,
-    plan_cutover,
-    read_inventory,
-    read_journal,
-    recover_observer,
-    run_cutover,
-    scan_rows,
-)
 from secretary.sprint_observer import (
     ObserverMetadataError,
     REASON_HISTORICAL,
     REASON_MALFORMED,
     REASON_MISSING,
     REASON_UNKNOWN_PROFILE,
-    activate_strict_reader,
-    cutover_in_flight,
     encode_observer,
     executable_observer,
     head_choice,
@@ -58,14 +38,10 @@ from secretary.sprint_observer import (
     historical_unknown,
     none_choice,
     observer_choice,
-    forget_migration_state,
-    migration_recorded,
     parse_observer,
-    strict_marker_present,
-    strict_reader_active,
 )
 from secretary.dispatcher_production import _reconcile_production
-from secretary.sprints import SprintReader, SprintWriter
+from secretary.sprints import SprintWriter
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
 from tests.test_dispatcher import (
@@ -75,30 +51,7 @@ from tests.test_dispatcher import (
     TwoOpenSprintAdmission,
 )
 from tests.test_dispatcher_observer import DEAD_PID, install_skill_registry
-from tests.test_sprints import SprintFixture, _write_head_registry
-
-
-# The live inventory, as the PO audit of 2026-08-01T22:03:13Z fixed it. Closed rows carry the head
-# their last successful launch named; `sprint:818` carries two launches so the latest-wins rule is
-# exercised rather than asserted.
-CLOSED_WITH_EVIDENCE = {
-    "sprint:804": "codex-observer",
-    "sprint:808": "codex-observer",
-    "sprint:814": "codex-observer",
-    "sprint:818": "claude-observer",
-    "sprint:877": "claude-observer",
-    "sprint:879": "codex-observer",
-    "sprint:880": "claude-observer",
-    "sprint:881": "claude-observer",
-    "sprint:882": "codex-observer",
-    "sprint:885": "claude-observer",
-    "sprint:886": "codex-observer",
-    "sprint:888": "codex-observer",
-    "sprint:1007": "claude-observer",
-}
-CLOSED_WITHOUT_EVIDENCE = ("sprint:878", "sprint:913", "sprint:916")
-OPEN_SPRINT = "sprint:1024"
-OPEN_HEAD = "claude-observer"
+from tests.test_sprints import SprintFixture
 
 
 class ObserverValueTests(unittest.TestCase):
@@ -290,905 +243,6 @@ class SprintDeclarationTests(SprintFixture):
             )
 
 
-class ObserverBoard(FakeKanboard):
-    """The live sprint inventory, on the fake board, with its durable lifecycle log."""
-
-    def seed_inventory(self, data_dir: Path) -> list[dict]:
-        for reference in sorted(CLOSED_WITH_EVIDENCE) + list(CLOSED_WITHOUT_EVIDENCE):
-            self.add_sprint(reference, status="closed", sprint_reservations='["secretary"]')
-        self.add_sprint(OPEN_SPRINT, status="open", sprint_reservations='["secretary"]')
-        return _write_lifecycle_log(data_dir)
-
-
-def _write_lifecycle_log(data_dir: Path) -> list[dict]:
-    """The observer launch history the migration recovers provenance from.
-
-    `sprint:818` gets two successful launches on different heads, `sprint:878` a deferral and a
-    failed launch, and `sprint:913`/`sprint:916` nothing at all: the three shapes of "no head is
-    recoverable" that the live board actually holds.
-    """
-    events: list[dict] = []
-    stamp = [0]
-
-    def event(ref: str, kind: str, head: str, outcome: str = "success") -> dict:
-        stamp[0] += 1
-        return {
-            "event_id": f"evt_{ref.replace(':', '_')}_{stamp[0]}",
-            "schema_version": 1,
-            "occurred_at": f"2026-07-27T00:{stamp[0]:02d}:00Z",
-            "actor": {"role": "dispatcher", "id": "dispatcher"},
-            "kind": kind,
-            "outcome": outcome,
-            "task_id": "",
-            "ref": ref,
-            "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
-            "request_id": f"req-{ref}-{stamp[0]}",
-            "payload": {"head": head, "launches": 1},
-        }
-
-    for reference, head in sorted(CLOSED_WITH_EVIDENCE.items()):
-        if reference == "sprint:818":
-            # Changed head mid-run: the earlier launch must lose to the later relaunch.
-            events.append(event(reference, "observer_launched", "codex-observer"))
-            events.append(event(reference, "observer_relaunched", head))
-        else:
-            events.append(event(reference, "observer_launched", head))
-    events.append(event("sprint:878", "observer_launch_deferred", "codex-observer"))
-    events.append(event("sprint:878", "observer_launched", "codex-observer", outcome="failure"))
-    events.append(event(OPEN_SPRINT, "observer_launched", OPEN_HEAD))
-    board = data_dir / "board"
-    board.mkdir(parents=True, exist_ok=True)
-    (board / "events.ndjson").write_text(
-        "".join(json.dumps(item, sort_keys=True) + "\n" for item in events), encoding="utf-8"
-    )
-    return events
-
-
-class ObserverBackfillTests(unittest.TestCase):
-    """Every one of the seventeen rows, and what a retry of the write does."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.data_dir = Path(self.tmp.name)
-        self.board = ObserverBoard()
-        self.events = self.board.seed_inventory(self.data_dir)
-        self.reader = SprintReader(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
-        self.writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
-        self.audit = TaskAudit(self.data_dir)
-
-    def inventory(self, running: dict[str, str] | None = None) -> dict:
-        return build_inventory(
-            self.reader.export(), self.audit.events(),
-            running if running is not None else {OPEN_SPRINT: OPEN_HEAD},
-        )
-
-    def test_all_seventeen_rows_get_the_value_the_audit_fixed(self) -> None:
-        rows = {row["ref"]: row["observer"] for row in self.inventory()["rows"]}
-
-        self.assertEqual(len(rows), 17)
-        self.assertEqual(rows[OPEN_SPRINT], head_choice(OPEN_HEAD))
-        for reference in CLOSED_WITHOUT_EVIDENCE:
-            self.assertEqual(rows[reference], historical_unknown())
-        for reference, head in CLOSED_WITH_EVIDENCE.items():
-            self.assertEqual(rows[reference]["kind"], "historical")
-            self.assertEqual(rows[reference]["profile"], head)
-            self.assertEqual(rows[reference]["source"], "observer_lifecycle_audit")
-            self.assertTrue(rows[reference]["event_id"])
-
-    def test_a_sprint_that_changed_head_recovers_its_latest_launch(self) -> None:
-        recovered = recover_observer("sprint:818", self.events)
-
-        self.assertEqual(recovered["profile"], "claude-observer")
-        latest = [
-            item for item in self.events
-            if item["ref"] == "sprint:818" and item["kind"] == "observer_relaunched"
-        ][-1]
-        self.assertEqual(recovered["event_id"], latest["event_id"])
-
-    def test_a_deferral_or_a_failed_launch_is_not_evidence(self) -> None:
-        self.assertIsNone(recover_observer("sprint:878", self.events))
-
-    def test_an_open_row_the_migration_cannot_prove_stops_it(self) -> None:
-        with self.assertRaisesRegex(BackfillError, "declare its observer by hand"):
-            build_inventory(self.reader.export(), [], {})
-
-    def test_a_disagreement_between_record_and_log_stops_the_migration(self) -> None:
-        with self.assertRaisesRegex(BackfillError, "resolve which head is running"):
-            self.inventory(running={OPEN_SPRINT: "codex-observer"})
-
-    def test_the_writes_are_idempotent_and_recognise_their_own_value(self) -> None:
-        inventory = persist_inventory(self.data_dir, self.inventory())
-        first = apply_backfill(self.writer, self.data_dir, inventory)
-        writes = sum(1 for method, _ in self.board.calls if method == "saveTaskMetadata")
-
-        second = apply_backfill(self.writer, self.data_dir, inventory)
-
-        self.assertEqual(len(first), 17)
-        self.assertEqual([row["event_id"] for row in first], [row["event_id"] for row in second])
-        self.assertEqual(
-            sum(1 for method, _ in self.board.calls if method == "saveTaskMetadata"), writes
-        )
-        self.assertEqual(scan_rows(self.reader.export()), [])
-
-    def test_a_retry_reads_the_journal_rather_than_recomputing_provenance(self) -> None:
-        inventory = persist_inventory(self.data_dir, self.inventory())
-        apply_backfill(self.writer, self.data_dir, inventory)
-
-        # The audit log has grown by this migration's own events, and a head could have been
-        # relaunched since. A second run must still write what the first one selected.
-        _write_lifecycle_log(self.data_dir)
-        stored = read_inventory(self.data_dir)
-        self.assertIsNotNone(stored)
-        self.assertEqual(stored, inventory)
-        journalled = {entry["ref"]: entry["observer"] for entry in read_journal(self.data_dir)}
-        self.assertEqual(len(journalled), 17)
-        self.assertEqual(journalled["sprint:818"]["profile"], "claude-observer")
-
-    def test_a_second_inventory_over_a_changed_board_is_refused(self) -> None:
-        persist_inventory(self.data_dir, self.inventory())
-        self.board.add_sprint("sprint:1030", status="closed")
-
-        with self.assertRaisesRegex(BackfillError, "different observer migration inventory"):
-            persist_inventory(self.data_dir, self.inventory())
-
-    def test_a_row_that_already_holds_another_value_is_never_overwritten(self) -> None:
-        inventory = persist_inventory(self.data_dir, self.inventory())
-        row = next(item for item in self.board.sprints if item["reference"] == "sprint:804")
-        self.board.metadata[int(row["id"])]["sprint_observer"] = encode_observer(none_choice())
-
-        with self.assertRaisesRegex(BackfillError, "not the value this migration selected"):
-            apply_backfill(self.writer, self.data_dir, inventory)
-
-    def test_the_scan_names_every_row_the_strict_reader_would_refuse(self) -> None:
-        rows = self.reader.export()
-        self.assertEqual(len(scan_rows(rows)), 17)
-
-        inventory = persist_inventory(self.data_dir, self.inventory())
-        apply_backfill(self.writer, self.data_dir, inventory)
-        row = next(item for item in self.board.sprints if item["reference"] == OPEN_SPRINT)
-        self.board.metadata[int(row["id"])]["sprint_observer"] = encode_observer(
-            historical_unknown()
-        )
-
-        problems = scan_rows(self.reader.export())
-        self.assertEqual(len(problems), 1)
-        self.assertIn("open sprint carries non-executable migration_unknown", problems[0])
-
-
-class StubPause:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-
-    def load(self) -> dict:
-        return dict(self.payload)
-
-
-class StubProductionState:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-        self.path = Path("/nonexistent/dispatcher/production-state.json")
-
-    def load(self) -> dict:
-        return dict(self.payload)
-
-    def records(self, payload: dict) -> dict:
-        from secretary.dispatcher_state import DispatcherRecord
-
-        raw = payload.get("records") or {}
-        return {ref: DispatcherRecord.from_json(value) for ref, value in raw.items()}
-
-
-class StubCheckpoint:
-    def __init__(self, results: list) -> None:
-        self.results = results
-        self.calls = 0
-
-    def write(self):
-        self.calls += 1
-        result = self.results[min(self.calls - 1, len(self.results) - 1)]
-        if isinstance(result, Exception):
-            raise result
-        return _Json(result)
-
-
-class _Json:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-
-    def to_json(self) -> dict:
-        return dict(self.payload)
-
-
-class StubPusher:
-    """The checkpoint pusher, recording what the cutover asked it to do.
-
-    The real pusher answers a call inside its 30-minute window by handing the previous state back
-    untouched. The cutover has to bypass that window, so the calls are kept: a cutover that relied
-    on the scheduler would show up here as a call carrying the tick's push state.
-    """
-
-    def __init__(self, result: dict | None = None) -> None:
-        self.result = result or {"status": "pushed", "commit": "abc123"}
-        self.calls: list[dict] = []
-
-    def push(self, state: dict) -> dict:
-        self.calls.append(dict(state))
-        if isinstance(self.result, Exception):
-            raise self.result
-        return dict(self.result)
-
-
-class WindowedStubPusher:
-    """`CheckpointPusher`'s scheduling, which is the part the cutover has to get past.
-
-    The real one returns the state it was handed, untouched, whenever its 30-minute window is not
-    due (`checkpoint.py`, `_due`). That returned state carries the *previous* run's status, so a
-    caller that reads it as its own result believes in a push that never happened.
-    """
-
-    def __init__(self) -> None:
-        self.attempts = 0
-
-    def push(self, state: dict) -> dict:
-        if state.get("attempted_epoch"):
-            return dict(state)
-        self.attempts += 1
-        return {"status": "pushed", "commit": "abc123", "attempted_epoch": 2.0}
-
-
-class StubRuntime:
-    def __init__(self, *, sprints, audit, pause, production_state, checkpoint, pusher) -> None:
-        self.sprints = sprints
-        self.audit = audit
-        self.pause = pause
-        self.production_state = production_state
-        self.checkpoint = checkpoint
-        self.checkpoint_push = pusher
-
-
-class ObserverCutoverTests(unittest.TestCase):
-    """The ordered sequence, and every boundary it refuses to cross."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.data_dir = Path(self.tmp.name)
-        self.instance = Path(self.tmp.name) / "instance"
-        _write_head_registry(self.instance)
-        self.board = ObserverBoard()
-        self.board.seed_inventory(self.data_dir)
-        self.sprint_reader = SprintReader(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
-        self.sprint_writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
-        self.pause = StubPause({"mode": "freeze", "excluded_worker": []})
-        self.state = StubProductionState({
-            "observers": {OPEN_SPRINT: ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD).to_json()},
-            "records": {},
-        })
-        self.checkpoint = StubCheckpoint([{"status": "ok"}])
-        self.runtime = StubRuntime(
-            sprints=self.sprint_reader,
-            audit=TaskAudit(self.data_dir),
-            pause=self.pause,
-            production_state=self.state,
-            checkpoint=self.checkpoint,
-            pusher=StubPusher(),
-        )
-
-    def cutover(self, **kwargs):
-        return run_cutover(
-            self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
-            instance=self.instance, now="2026-08-02T00:00:00Z", resume=False, **kwargs,
-        )
-
-    def metadata_writes(self) -> int:
-        return sum(
-            1 for method, params in self.board.calls
-            if method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"])
-        )
-
-    def observers_on_board(self) -> dict[str, dict]:
-        return {
-            str(sprint["ref"]): sprint["observer"]
-            for sprint in self.sprint_reader.export()
-            if "observer" in sprint
-        }
-
-    def test_the_whole_sequence_runs_in_order_and_ends_strict(self) -> None:
-        result = self.cutover()
-
-        self.assertEqual(
-            [step["step"] for step in result["steps"]],
-            [
-                "freeze", "heads-stopped", "pre-migration-checkpoint", "inventory", "backfill",
-                "strict-scan", "migration-completed", "post-migration-checkpoint",
-                "migration-activated", "strict-reader", "resume",
-            ],
-        )
-        self.assertTrue(strict_reader_active(self.data_dir))
-        self.assertEqual(len(result["rows"]), 17)
-
-    def test_an_unfrozen_pipeline_is_refused_before_any_write(self) -> None:
-        self.pause.payload = {"mode": ""}
-
-        with self.assertRaisesRegex(BackfillError, "not frozen"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-        self.assertIsNone(read_inventory(self.data_dir))
-        self.assertEqual(scan_rows(self.sprint_reader.export()), scan_rows(self.sprint_reader.export()))
-
-    def test_a_freeze_with_exclusions_is_refused(self) -> None:
-        self.pause.payload = {"mode": "freeze", "excluded_worker": ["/work/backup"]}
-
-        with self.assertRaisesRegex(BackfillError, "workspace exclusions"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-
-    def test_an_unreadable_production_state_is_refused(self) -> None:
-        """An empty decode is not evidence that every head is stopped.
-
-        `pause freeze` sets the flag and stops nothing when the records are unreadable, so this is
-        exactly the state in which a live head is most likely and least visible.
-        """
-        self.state.payload = {"version": 1, "phase": "unavailable"}
-
-        with self.assertRaisesRegex(BackfillError, "production state cannot be read"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-        self.assertIsNone(read_inventory(self.data_dir))
-        self.assertEqual(self.metadata_writes(), 0)
-        self.assertEqual(self.runtime.checkpoint.calls, 0)
-        self.assertEqual(self.pause.payload["mode"], "freeze")
-
-    def test_every_head_identity_a_freeze_can_leave_behind_is_refused(self) -> None:
-        """A handle is not the only thing that names a head, and it is not the likeliest one.
-
-        A head adopted from a launch intent never had a handle; a stop the host refused leaves the
-        record pointing at its head deliberately. `pause freeze` stops by all of these identities,
-        so the migration has to confirm all of them stopped or it rewrites the board under a live
-        head.
-        """
-        base = {
-            "worker": "w1", "workspace": "/tmp/w1", "handle": "", "head": "codex",
-            "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
-            "review_baseline": 0, "state": "adopted", "claimed_at": 0.0,
-        }
-        identities = {
-            "worker pid heartbeat": {"worker_pid_file": "/tmp/w.pid"},
-            "worker pane leaf": {"worker_leaf": "leaf-1"},
-            "reviewer pid heartbeat": {"review_pid_file": "/tmp/r.pid"},
-            "reviewer pane leaf": {"review_leaf": "leaf-2"},
-            "reviewer handle": {"review_handle": "term_r"},
-            "unresolved launch intent": {
-                "launch_intent": {"role": "worker", "action": "claim", "workspace": "/tmp/w1"},
-            },
-        }
-        for name, extra in identities.items():
-            with self.subTest(identity=name):
-                self.setUp()
-                self.state.payload = {
-                    "records": {"secretary-1": {**base, **extra}}, "observers": {},
-                }
-
-                with self.assertRaisesRegex(BackfillError, "still running under the freeze"):
-                    self.cutover()
-
-                self.assertEqual(self.metadata_writes(), 0)
-                self.assertIsNone(read_inventory(self.data_dir))
-                self.assertFalse(strict_reader_active(self.data_dir))
-
-    def test_an_observer_head_without_a_handle_is_refused(self) -> None:
-        """A bring-up that registered its workspace before the host answered still owns a head."""
-        for name, record in {
-            "workspace of an unresolved bring-up": ObserverRecord(
-                sprint=OPEN_SPRINT, head=OPEN_HEAD, head_possible=True,
-                workspace="/tmp/observer-ws",
-            ),
-            "abandoned terminal": ObserverRecord(
-                sprint=OPEN_SPRINT, head=OPEN_HEAD, handle="term_o", abandoned_handle=True,
-            ),
-        }.items():
-            with self.subTest(identity=name):
-                self.setUp()
-                self.state.payload = {"observers": {OPEN_SPRINT: record.to_json()}, "records": {}}
-
-                with self.assertRaisesRegex(BackfillError, "still running under the freeze"):
-                    self.cutover()
-
-                self.assertEqual(self.metadata_writes(), 0)
-
-    def test_an_observer_pid_that_is_still_alive_is_refused(self) -> None:
-        pid_file = self.data_dir / "observer.pid"
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
-        record = ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD, pid_file=str(pid_file))
-        self.state.payload = {"observers": {OPEN_SPRINT: record.to_json()}, "records": {}}
-
-        with self.assertRaisesRegex(BackfillError, "still running under the freeze"):
-            self.cutover()
-
-        self.assertEqual(self.metadata_writes(), 0)
-
-    def test_a_settled_record_with_no_identity_left_does_not_block(self) -> None:
-        """The other half of the rule: a freeze that confirmed its stops clears the way."""
-        self.state.payload = {
-            "records": {
-                "secretary-1": {
-                    "worker": "w1", "workspace": "/tmp/w1", "handle": "", "head": "codex",
-                    "review_head": "codex-reviewer", "attempt_id": "att-1",
-                    "comment_baseline": 0, "review_baseline": 0, "state": "adopted",
-                    "claimed_at": 0.0,
-                }
-            },
-            "observers": {OPEN_SPRINT: ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD).to_json()},
-        }
-
-        result = self.cutover()
-
-        self.assertEqual(len(result["rows"]), 17)
-
-    def test_a_head_the_freeze_could_not_stop_is_refused(self) -> None:
-        record = ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD, handle="term_1")
-        self.state.payload = {"observers": {OPEN_SPRINT: record.to_json()}, "records": {}}
-
-        with self.assertRaisesRegex(BackfillError, "heads are still running"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-
-    def test_a_blocked_pre_migration_checkpoint_stops_the_cutover(self) -> None:
-        self.checkpoint.results = [{"status": "blocked", "reason": "dirty"}]
-
-        with self.assertRaisesRegex(BackfillError, "pre-migration checkpoint"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-        self.assertIsNone(read_inventory(self.data_dir))
-
-    def test_a_crash_after_the_writes_leaves_the_reader_tolerant_and_is_resumable(self) -> None:
-        inventory = persist_inventory(
-            self.data_dir,
-            build_inventory(
-                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
-            ),
-        )
-        apply_backfill(self.sprint_writer, self.data_dir, inventory)
-        # Exactly the state a process killed between the last write and the activation is in.
-        self.assertFalse(strict_reader_active(self.data_dir))
-
-        result = self.cutover()
-
-        self.assertTrue(strict_reader_active(self.data_dir))
-        self.assertEqual(read_inventory(self.data_dir)["digest"], inventory["digest"])
-        self.assertEqual(len(result["rows"]), 17)
-
-    def test_a_failed_scan_never_activates_the_strict_reader(self) -> None:
-        with mock.patch(
-            "secretary.observer_backfill.scan_rows", return_value=["sprint:1024: no observer"]
-        ):
-            with self.assertRaisesRegex(BackfillError, "post-migration scan refused"):
-                self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-
-    def test_a_head_that_left_the_registry_stops_the_scan_before_activation(self) -> None:
-        """Registry drift between the freeze and the cutover is caught by the rescan.
-
-        Activating the strict reader over a row it would immediately fence is not a successful
-        migration, so the scan resolves an open row's head the same way the reader will.
-        """
-        _write_head_registry(self.instance)
-        registry = (self.instance / "heads" / "heads.yaml").read_text(encoding="utf-8")
-        (self.instance / "heads" / "heads.yaml").write_text(
-            registry.replace("  claude-observer:\n    adapter: claude\n    resource: claude-sub\n", ""),
-            encoding="utf-8",
-        )
-
-        with self.assertRaisesRegex(BackfillError, "post-migration scan refused"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-        self.assertFalse(strict_marker_present(self.data_dir))
-
-    def test_an_unreadable_registry_stops_the_cutover_before_any_write(self) -> None:
-        (self.instance / "heads" / "heads.yaml").write_text("profiles: []\n", encoding="utf-8")
-
-        with self.assertRaisesRegex(BackfillError, "cannot validate declared heads"):
-            self.cutover()
-
-        self.assertEqual(self.metadata_writes(), 0)
-        self.assertIsNone(read_inventory(self.data_dir))
-        self.assertEqual(self.runtime.checkpoint.calls, 0)
-
-    def test_the_dry_run_names_a_head_that_has_left_the_registry(self) -> None:
-        registry = (self.instance / "heads" / "heads.yaml").read_text(encoding="utf-8")
-        (self.instance / "heads" / "heads.yaml").write_text(
-            registry.replace("  claude-observer:\n    adapter: claude\n    resource: claude-sub\n", ""),
-            encoding="utf-8",
-        )
-
-        plan = plan_cutover(self.runtime, data_dir=self.data_dir, instance=self.instance)
-
-        self.assertFalse(plan["ok"])
-        self.assertEqual(len(plan["refusals"]), 1)
-        self.assertIn("claude-observer", plan["refusals"][0])
-
-    def test_a_second_cutover_does_nothing_and_says_so(self) -> None:
-        self.cutover()
-
-        again = self.cutover()
-
-        self.assertEqual(again["status"], "already-migrated")
-
-    def test_the_resume_is_the_last_step_and_only_after_a_clean_run(self) -> None:
-        with mock.patch("secretary.dispatcher_pause_ops.resume") as lifted:
-            result = run_cutover(
-                self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
-                instance=self.instance, now="2026-08-02T00:00:00Z",
-            )
-        self.assertEqual(lifted.call_count, 1)
-        self.assertEqual(result["steps"][-1]["step"], "resume")
-
-    # crash boundaries -------------------------------------------------------
-    #
-    # One test per point the process can die, each asserting the same two things: the strict
-    # reader is not on, and the rerun finishes the cutover with the values the first attempt
-    # selected rather than a second set derived from a world that has moved.
-
-    def test_both_checkpoints_are_pushed_past_the_windowed_scheduler(self) -> None:
-        """A recovery point that never left the machine is not one.
-
-        The ordinary pusher answers a call inside its 30-minute window by handing back the state
-        it was given, without attempting anything, and that stale state still says `pushed`. A
-        cutover that handed it the tick's push state would read that as its own push having
-        landed. It passes an empty state instead, which is what makes the window not apply.
-        """
-        pusher = WindowedStubPusher()
-        self.runtime.checkpoint_push = pusher
-        # The tick pushed five minutes ago, so the window is not due for anyone who asks with it.
-        self.state.payload["checkpoint_push"] = {"status": "pushed", "attempted_epoch": 1.0}
-
-        result = self.cutover()
-
-        self.assertEqual(pusher.attempts, 2)
-        self.assertEqual(
-            [
-                step["push"]["status"] for step in result["steps"]
-                if step["step"].endswith("-migration-checkpoint")
-            ],
-            ["pushed", "pushed"],
-        )
-
-    def test_a_checkpoint_that_did_not_reach_the_remote_stops_the_cutover(self) -> None:
-        for outcome in ({"status": "skipped", "reason": "no remote"}, {"status": "failed"},
-                        {"status": "diverged"}, {}):
-            with self.subTest(outcome=outcome):
-                self.setUp()
-                self.runtime.checkpoint_push.result = outcome
-
-                with self.assertRaisesRegex(BackfillError, "was not pushed"):
-                    self.cutover()
-
-                self.assertFalse(strict_reader_active(self.data_dir))
-                self.assertIsNone(read_inventory(self.data_dir))
-                self.assertEqual(self.metadata_writes(), 0)
-
-    def test_a_runtime_without_a_pusher_cannot_run_the_cutover(self) -> None:
-        self.runtime.checkpoint_push = None
-
-        with self.assertRaisesRegex(BackfillError, "no checkpoint pusher"):
-            self.cutover()
-
-        self.assertFalse(strict_reader_active(self.data_dir))
-
-    def test_a_crash_after_the_inventory_before_any_write_resumes_on_it(self) -> None:
-        inventory = persist_inventory(
-            self.data_dir,
-            build_inventory(
-                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
-            ),
-        )
-        self.assertEqual(self.observers_on_board(), {})
-
-        result = self.cutover()
-
-        self.assertEqual(result["digest"], inventory["digest"])
-        self.assertEqual(len(self.observers_on_board()), 17)
-        self.assertTrue(strict_reader_active(self.data_dir))
-
-    def test_a_crash_between_two_per_ref_writes_resumes_without_writing_twice(self) -> None:
-        inventory = persist_inventory(
-            self.data_dir,
-            build_inventory(
-                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
-            ),
-        )
-        real = self.sprint_writer.backfill_observer
-        seen: list[str] = []
-
-        def die_after_five(*, reference: str, value: dict, request_id: str):
-            if len(seen) >= 5:
-                raise RuntimeError("the process died mid-backfill")
-            seen.append(reference)
-            return real(reference=reference, value=value, request_id=request_id)
-
-        with mock.patch.object(self.sprint_writer, "backfill_observer", die_after_five):
-            with self.assertRaises(RuntimeError):
-                apply_backfill(self.sprint_writer, self.data_dir, inventory)
-        self.assertEqual(len(self.observers_on_board()), 5)
-        self.assertFalse(strict_reader_active(self.data_dir))
-        partial_writes = self.metadata_writes()
-
-        result = self.cutover()
-
-        self.assertEqual(len(result["rows"]), 17)
-        # The five rows already carrying their value are recognised, not rewritten.
-        self.assertEqual(self.metadata_writes(), partial_writes + 12)
-        self.assertEqual(len(self.observers_on_board()), 17)
-        self.assertEqual({entry["ref"] for entry in read_journal(self.data_dir)}, set(
-            row["ref"] for row in inventory["rows"]
-        ))
-
-    def test_a_crash_after_the_completion_event_is_not_yet_strict(self) -> None:
-        """Strict follows the order, not the event alone.
-
-        The completion event is the durable signal a recovered host reads, but on the host running
-        the cutover it exists before the post-migration checkpoint has been taken and pushed.
-        Strict there would be strict before the recovery point the order requires, so the interval
-        is tolerant and the rerun finishes the sequence.
-        """
-        self.checkpoint.results = [{"status": "ok"}, RuntimeError("host died")]
-        with self.assertRaisesRegex(BackfillError, "post-migration checkpoint"):
-            self.cutover()
-
-        self.assertTrue(migration_recorded(self.data_dir))
-        self.assertTrue(cutover_in_flight(self.data_dir))
-        self.assertFalse(strict_marker_present(self.data_dir))
-        self.assertFalse(strict_reader_active(self.data_dir))
-        checkpoints_before = self.checkpoint.calls
-
-        self.checkpoint.results = [{"status": "ok"}]
-        self.checkpoint.calls = 0
-        result = self.cutover()
-
-        self.assertGreater(self.checkpoint.calls, 0)
-        self.assertNotEqual(result["status"], "already-migrated")
-        self.assertTrue(strict_marker_present(self.data_dir))
-        self.assertTrue(strict_reader_active(self.data_dir))
-        self.assertFalse(cutover_in_flight(self.data_dir))
-        self.assertGreater(checkpoints_before, 0)
-
-    def test_the_interval_before_the_post_migration_push_is_tolerant_too(self) -> None:
-        self.runtime.checkpoint_push.result = {"status": "failed", "reason": "remote refused"}
-        # The pre-migration push has to land, so it is allowed through and only the second fails.
-        real = self.runtime.checkpoint_push.push
-        calls: list[dict] = []
-
-        def second_push_fails(state: dict) -> dict:
-            calls.append(state)
-            if len(calls) == 1:
-                return {"status": "pushed", "commit": "abc123"}
-            return {"status": "failed", "reason": "remote refused"}
-
-        self.runtime.checkpoint_push.push = second_push_fails  # type: ignore[method-assign]
-        self.assertIsNotNone(real)
-
-        with self.assertRaisesRegex(BackfillError, "was not pushed"):
-            self.cutover()
-
-        self.assertTrue(migration_recorded(self.data_dir))
-        self.assertFalse(strict_reader_active(self.data_dir))
-
-    def test_a_crash_after_the_post_migration_checkpoint_resumes_to_the_marker(self) -> None:
-        with mock.patch(
-            "secretary.observer_backfill.activate_strict_reader",
-            side_effect=RuntimeError("host died"),
-        ):
-            with self.assertRaises(RuntimeError):
-                self.cutover()
-        self.assertFalse(strict_marker_present(self.data_dir))
-
-        result = self.cutover()
-
-        self.assertTrue(strict_marker_present(self.data_dir))
-        self.assertEqual(len(result["rows"]), 17)
-
-    def test_a_crash_after_activation_before_resume_leaves_the_freeze_in_force(self) -> None:
-        self.cutover()  # resume=False is exactly "died before the resume ran"
-
-        self.assertTrue(strict_marker_present(self.data_dir))
-        self.assertEqual(self.pause.payload["mode"], "freeze")
-        with mock.patch("secretary.dispatcher_pause_ops.resume") as lifted:
-            again = run_cutover(
-                self.runtime, sprint_writer=self.sprint_writer, data_dir=self.data_dir,
-                instance=self.instance, now="2026-08-02T00:00:00Z",
-            )
-        # A finished cutover is not re-run, so the operator lifts the freeze themselves.
-        self.assertEqual(again["status"], "already-migrated")
-        self.assertEqual(lifted.call_count, 0)
-
-    def test_a_retry_writes_what_the_first_attempt_selected_not_what_the_log_now_says(self) -> None:
-        """The journal, not the log, is what a retry reads."""
-        inventory = persist_inventory(
-            self.data_dir,
-            build_inventory(
-                self.sprint_reader.export(), self.runtime.audit.events(), {OPEN_SPRINT: OPEN_HEAD},
-            ),
-        )
-        selected = {row["ref"]: row["observer"] for row in inventory["rows"]}
-        self.assertEqual(selected["sprint:818"]["profile"], "claude-observer")
-
-        # The world moves between the two attempts: a later relaunch would now win the recovery.
-        events = (self.data_dir / "board" / "events.ndjson")
-        events.write_text(
-            events.read_text(encoding="utf-8")
-            + json.dumps({
-                "event_id": "evt_818_later", "schema_version": 1,
-                "occurred_at": "2026-07-30T00:00:00Z",
-                "actor": {"role": "dispatcher", "id": "dispatcher"},
-                "kind": "observer_relaunched", "outcome": "success", "task_id": "",
-                "ref": "sprint:818",
-                "backend": {"kind": "dispatcher", "task_id": None, "revision": "n/a"},
-                "request_id": "req-818-later", "payload": {"head": "codex-observer"},
-            }, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        self.assertEqual(
-            recover_observer("sprint:818", self.runtime.audit.events())["profile"],
-            "codex-observer",
-        )
-
-        result = self.cutover()
-
-        self.assertEqual(result["digest"], inventory["digest"])
-        self.assertEqual(self.observers_on_board()["sprint:818"]["profile"], "claude-observer")
-
-    def test_a_dry_run_writes_nothing_and_needs_no_freeze(self) -> None:
-        self.pause.payload = {"mode": ""}
-
-        plan = plan_cutover(self.runtime, data_dir=self.data_dir, instance=self.instance)
-
-        self.assertEqual(len(plan["rows"]), 17)
-        self.assertFalse(plan["strict_reader_active"])
-        self.assertIsNone(read_inventory(self.data_dir))
-        self.assertNotIn(
-            "sprint_observer",
-            self.board.metadata[int(self.board.sprints[0]["id"])],
-        )
-
-
-class MigrationDurabilityTests(unittest.TestCase):
-    """The strict state has to survive the boundary `docs/RECOVERY.md` actually promises."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.addCleanup(forget_migration_state)
-        forget_migration_state()
-        self.data_dir = Path(self.tmp.name) / "data"
-        self.data_dir.mkdir(parents=True)
-        self.instance = Path(self.tmp.name) / "instance"
-        _write_head_registry(self.instance)
-        self.board = ObserverBoard()
-        self.board.seed_inventory(self.data_dir)
-        self.sprint_reader = SprintReader(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
-        self.runtime = StubRuntime(
-            sprints=self.sprint_reader,
-            audit=TaskAudit(self.data_dir),
-            pause=StubPause({"mode": "freeze", "excluded_worker": []}),
-            production_state=StubProductionState({
-                "observers": {
-                    OPEN_SPRINT: ObserverRecord(sprint=OPEN_SPRINT, head=OPEN_HEAD).to_json()
-                },
-                "records": {},
-            }),
-            checkpoint=StubCheckpoint([{"status": "ok"}]),
-            pusher=StubPusher(),
-        )
-        run_cutover(
-            self.runtime,
-            sprint_writer=SprintWriter(self.board, data_dir=self.data_dir),  # type: ignore[arg-type]
-            data_dir=self.data_dir, instance=self.instance, now="2026-08-02T00:00:00Z",
-            resume=False,
-        )
-
-    def recovered_data_dir(self) -> Path:
-        """A replacement host: only the checkpoint canon, nothing else from the old machine.
-
-        `docs/RECOVERY.md` calls the host runtime local and non-canonical and lists exactly these
-        board entries as what comes back. Anything the old data directory held outside them — the
-        strict marker, the migration inventory and journal — is gone by contract.
-        """
-        recovered = Path(self.tmp.name) / "recovered"
-        (recovered / "board").mkdir(parents=True)
-        for name in ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json"):
-            source = self.data_dir / "board" / name
-            if source.is_file():
-                (recovered / "board" / name).write_text(
-                    source.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-        return recovered
-
-    def test_the_migrated_installation_is_strict(self) -> None:
-        self.assertTrue(strict_reader_active(self.data_dir))
-        self.assertTrue(migration_recorded(self.data_dir))
-
-    def test_a_replacement_host_comes_back_strict_without_the_marker(self) -> None:
-        recovered = self.recovered_data_dir()
-
-        self.assertFalse(strict_marker_present(recovered))
-        self.assertFalse((recovered / "sprints" / "observer-migration").exists())
-        self.assertTrue(strict_reader_active(recovered))
-
-    def test_a_damaged_latch_does_not_take_strictness_away(self) -> None:
-        """The latch is a convenience over a durable fact, never the thing holding it up.
-
-        The inventory is deliberately retained after a successful cutover — a retry reads it
-        instead of recomputing provenance — so "an inventory exists" cannot mean "in flight". The
-        activation event in the append-only log is what closed the interval, and a local file that
-        is lost or corrupted cannot unsay it.
-        """
-        marker = self.data_dir / "sprints" / "observer-strict.json"
-        self.assertTrue(marker.is_file())
-        self.assertTrue((self.data_dir / "sprints" / "observer-migration" / "inventory.json").is_file())
-        self.assertTrue(strict_reader_active(self.data_dir))
-
-        for damage in ("", "{not json", '{"version": 1, "strict": false}'):
-            with self.subTest(damage=damage):
-                marker.write_text(damage, encoding="utf-8")
-                forget_migration_state(self.data_dir)
-                self.assertFalse(strict_marker_present(self.data_dir))
-                self.assertFalse(cutover_in_flight(self.data_dir))
-                self.assertTrue(strict_reader_active(self.data_dir))
-
-        marker.unlink()
-        forget_migration_state(self.data_dir)
-        self.assertTrue(strict_reader_active(self.data_dir))
-
-    def test_a_corrupt_row_still_fences_after_the_latch_is_lost(self) -> None:
-        """The consequence that matters: no missing field reaches the role default."""
-        (self.data_dir / "sprints" / "observer-strict.json").unlink()
-        forget_migration_state(self.data_dir)
-        row = next(item for item in self.board.sprints if item["reference"] == OPEN_SPRINT)
-        self.board.metadata[int(row["id"])].pop("sprint_observer")
-
-        with self.assertRaises(ObserverMetadataError) as raised:
-            executable_observer(self.sprint_reader.show(OPEN_SPRINT, include_cards=False))
-
-        self.assertEqual(raised.exception.reason, REASON_MISSING)
-        self.assertEqual(scan_rows(self.sprint_reader.export()), [f"{OPEN_SPRINT}: no observer metadata"])
-
-    def test_a_host_recovered_from_a_pre_migration_checkpoint_stays_tolerant(self) -> None:
-        pre = Path(self.tmp.name) / "pre"
-        (pre / "board").mkdir(parents=True)
-        (pre / "board" / "events.ndjson").write_text(
-            "".join(
-                line + "\n"
-                for line in (self.data_dir / "board" / "events.ndjson")
-                .read_text(encoding="utf-8").splitlines()
-                if "observer_migration_completed" not in line
-            ),
-            encoding="utf-8",
-        )
-
-        self.assertFalse(strict_reader_active(pre))
-
-    def test_half_a_backfill_in_the_log_does_not_read_as_migrated(self) -> None:
-        """The completion event, never a single row's write, is what turns the reader strict."""
-        partial = Path(self.tmp.name) / "partial"
-        (partial / "board").mkdir(parents=True)
-        lines = (self.data_dir / "board" / "events.ndjson").read_text(encoding="utf-8").splitlines()
-        kept = [line for line in lines if "observer_migration_completed" not in line]
-        self.assertTrue(any("observer_backfilled" in line for line in kept))
-        (partial / "board" / "events.ndjson").write_text(
-            "".join(line + "\n" for line in kept), encoding="utf-8"
-        )
-
-        self.assertFalse(strict_reader_active(partial))
-
-
 class ObserverFenceFixture(unittest.TestCase):
     """A production runtime over one open sprint with a declared observer."""
 
@@ -1225,11 +279,6 @@ class ObserverFenceFixture(unittest.TestCase):
             owner="secretary-pilot",
         )
 
-    def go_strict(self) -> None:
-        activate_strict_reader(
-            self.data_dir, inventory_digest="test", rows=1, activated_at="2026-08-02T00:00:00Z",
-        )
-
     def declare(self, observer, *, reference: str = "sprint:1", **metadata) -> None:
         values = {"sprint_reservations": '["secretary"]', **metadata}
         if observer is not None:
@@ -1242,7 +291,6 @@ class ObserverFenceFixture(unittest.TestCase):
 
 class ObserverFenceTests(ObserverFenceFixture):
     def test_a_declared_none_passes_without_a_launch_or_a_probe(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(none_choice()))
 
         result = self.runtime.production_tick()
@@ -1268,7 +316,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         return self.runtime.production_tick()["actions"]
 
     def test_a_sprint_redeclared_as_none_gives_its_head_back(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         self.runtime.production_tick()
         row = next(item for item in self.board.sprints if item["reference"] == "sprint:1")
@@ -1285,7 +332,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(self.fence()["sprints"], set())
 
     def test_a_corrupt_declaration_fences_before_any_card_moves(self) -> None:
-        self.go_strict()
 
         actions = self._tick_twice_with_an_active_card("{not json")
 
@@ -1305,7 +351,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         reserved, and it has left the active cycle. Reconciliation reads such a record as orphaned
         and settles its heads, which is exactly the mutation the fence exists to prevent.
         """
-        self.go_strict()
         self.declare("{not json")
         # An unlinked card of the reserved project, out of the cycle, with a live record.
         self.board.tasks[1]["column_id"] = 5
@@ -1330,7 +375,6 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_the_same_card_advances_once_the_declared_observer_is_adopted(self) -> None:
         """The control for the fence: without it the pass above proves nothing."""
-        self.go_strict()
 
         actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
 
@@ -1343,8 +387,7 @@ class ObserverFenceTests(ObserverFenceFixture):
             ["waiting-worker-report"],
         )
 
-    def test_a_missing_declaration_under_the_strict_reader_is_corruption(self) -> None:
-        self.go_strict()
+    def test_a_missing_declaration_is_corruption(self) -> None:
         self.declare(None)
 
         fence = self.fence()
@@ -1352,15 +395,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["sprints"], {"sprint:1"})
         self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_MISSING)
 
-    def test_the_same_row_before_the_cutover_is_left_alone(self) -> None:
-        self.declare(None)
-
-        fence = self.fence()
-
-        self.assertEqual(fence["sprints"], set())
-
     def test_an_unknown_profile_fences_and_never_falls_back_to_the_role_default(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("retired-observer")))
 
         result = self.runtime.production_tick()
@@ -1374,7 +409,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual([action["action"] for action in reconcile], ["observer-declaration-invalid"])
 
     def test_a_declared_head_launches_on_its_own_profile_and_clears_on_a_later_tick(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
 
         first = self.runtime.production_tick()
@@ -1391,7 +425,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(self.fence()["sprints"], set())
 
     def test_a_dead_declared_head_fences_the_sprint_again(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         self.runtime.production_tick()
         self.runtime.production_tick()
@@ -1404,7 +437,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_DEAD)
 
     def test_fencing_is_project_local(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.board.metadata[13]["project"] = "other"
@@ -1422,7 +454,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         a permissions change can take the audit while the state stays writable. The tick has to end
         there rather than fall back to a fence that permits every card.
         """
-        self.go_strict()
         self.declare("{not json")
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.board.tasks[0]["column_id"] = 3
@@ -1449,7 +480,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         An empty ref set there would hand reconciliation a fenced project's record as an orphan and
         it would stop its heads and remove it — the exact mutation the fence exists to prevent.
         """
-        self.go_strict()
         self.declare("{not json")
         # An unlinked card of the reserved project, out of the active cycle, with a live record:
         # what reconciliation settles when nothing tells it the card is fenced.
@@ -1486,7 +516,6 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_reconciliation_classifies_the_card_it_reads_against_the_fence(self) -> None:
         """The second line: a card absent from the fence's inventory is still fenced by its sprint."""
-        self.go_strict()
         self.declare("{not json")
         self.board.tasks[1]["column_id"] = 5
         self.board.metadata[13]["sprint_ref"] = "sprint:1"
@@ -1516,7 +545,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         relaunched. Releasing another role's cards on that is different: the terminal may have
         died before it ever reached the observer prompt.
         """
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         self.runtime.production_tick()
         record = load_observers(self.runtime.production_state.load())["sprint:1"]
@@ -1531,7 +559,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_NOT_ADOPTED)
 
     def test_a_record_that_names_no_head_is_a_mismatch(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         payload = self.runtime.production_state.load()
         put_observers(payload, {
@@ -1547,7 +574,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["outcomes"][0]["observer_reason"], "observer_head_mismatch")
 
     def test_the_card_of_an_unadopted_observer_does_not_advance(self) -> None:
-        self.go_strict()
         actions = self._tick_twice_with_an_active_card(
             encode_observer(head_choice("claude-observer"))
         )
@@ -1568,7 +594,6 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_a_fenced_sprint_makes_the_tick_report_unhealthy(self) -> None:
         """A stopped project with a healthy-looking tick is how the last outage stayed invisible."""
-        self.go_strict()
         self.declare(encode_observer(head_choice("retired-observer")))
 
         result = self.runtime.production_tick()
@@ -1581,7 +606,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         )
 
     def test_a_fence_writes_its_reason_durably_once_per_reason(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("retired-observer")))
 
         self.runtime.production_tick()
@@ -1597,7 +621,6 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_an_unreadable_sprint_board_fences_what_it_last_saw(self) -> None:
         """The Pipeline board can answer while the sprint board cannot: fail closed, not open."""
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         payload = self.runtime.production_state.load()
         observer_fence(self.runtime, payload)  # one sighted pass, to take the snapshot
@@ -1619,7 +642,6 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_a_blind_tick_still_fences_a_sprint_it_never_saw(self) -> None:
         """A sprint opened since the last snapshot is caught through its cards' own link."""
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
 
@@ -1633,7 +655,6 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
 
     def test_an_unreadable_sprint_board_does_not_advance_the_sprints_cards(self) -> None:
-        self.go_strict()
         actions = self._tick_twice_with_an_active_card(
             encode_observer(head_choice("claude-observer"))
         )
@@ -1653,8 +674,7 @@ class ObserverFenceTests(ObserverFenceFixture):
             ["sprint_board_unavailable"],
         )
 
-    def test_the_decision_never_reads_the_role_default_once_strict(self) -> None:
-        self.go_strict()
+    def test_the_decision_never_reads_the_role_default(self) -> None:
         self.declare(encode_observer(head_choice("claude-observer")))
         sprint = self.runtime.sprints.show("sprint:1", include_cards=False)
         self.catalog.role_defaults["observer"] = "codex-observer"
@@ -1664,7 +684,6 @@ class ObserverFenceTests(ObserverFenceFixture):
 
 class ObserverRecordFenceStateTests(ObserverFenceFixture):
     def test_a_stale_fence_of_a_closed_sprint_is_dropped(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         payload = self.runtime.production_state.load()
         observer_fence(self.runtime, payload)
@@ -1677,7 +696,6 @@ class ObserverRecordFenceStateTests(ObserverFenceFixture):
         self.assertNotIn("observer_fence", payload)
 
     def test_a_head_that_is_not_the_declared_one_fences(self) -> None:
-        self.go_strict()
         self.declare(encode_observer(head_choice("claude-observer")))
         payload = self.runtime.production_state.load()
         put_observers(payload, {
@@ -1705,7 +723,6 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
     HELD = "the sprint holding this project has no working declared observer"
 
     def open_pair(self, *, observer=None, second_observer=None) -> None:
-        self.go_strict()
         self.sprint_writer = self.admit_two_open_sprints(
             observer=observer or head_choice("claude-observer"),
             second_observer=second_observer,

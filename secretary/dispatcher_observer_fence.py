@@ -41,7 +41,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.dispatcher_state import now_rfc3339
 from secretary.dispatcher_types import HostError
-from secretary.sprint_observer import KIND_HEAD, KIND_NONE, ObserverMetadataError
+from secretary.sprint_observer import KIND_NONE, ObserverMetadataError
 from secretary.tasks import TaskError
 
 EVENT_FENCED = "observer_fence_raised"
@@ -214,11 +214,6 @@ def _sprint_verdict(
     except ObserverMetadataError as exc:
         return {"reason": exc.reason, "message": exc.message, "head": ""}
     if decision["kind"] == KIND_NONE:
-        return None
-    if decision["kind"] != KIND_HEAD:
-        # An unmigrated row on an installation the cutover has not reached. The old reader is what
-        # is in force for it, and fencing it would stop the pipeline for the state it has always
-        # been in.
         return None
     head = str(decision["head"])
     if record is None:
