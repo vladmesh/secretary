@@ -416,7 +416,7 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("KANBOARD_API_USER=jsonrpc", published)
         self.assertIn("KANBOARD_API_TOKEN=secretary-local-kanboard-jsonrpc-v1", published)
         exported = (self.instance_dir / "state" / "board" / "export.json").read_text(encoding="utf-8")
-        self.assertIn(contents, exported)
+        self.assertIn(contents, json.loads(exported)["report"])
 
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"
