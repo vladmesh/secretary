@@ -149,6 +149,34 @@ class TaskReaderTests(unittest.TestCase):
             self.reader.show("missing")
         self.assertEqual(raised.exception.code, "not_found")
 
+    def test_show_prefers_live_duplicate_reference(self) -> None:
+        archived = {
+            "id": 14, "reference": "secretary-784", "title": "Archived", "column_id": 6,
+            "position": 1, "swimlane_id": 4, "is_active": 0,
+        }
+        live = {
+            "id": 15, "reference": "secretary-784", "title": "Live", "column_id": 2,
+            "position": 1, "swimlane_id": 4, "is_active": 1,
+        }
+        self.client.tasks.extend([archived, live])
+        self.client.metadata.update({14: {}, 15: {"project": "secretary"}})
+
+        task = self.reader.show("secretary-784")
+
+        self.assertEqual(task["id"], "task_kanboard_15")
+        self.assertEqual(task["title"], "Live")
+        self.assertEqual(
+            [params["status_id"] for method, params in self.client.calls if method == "getAllTasks"],
+            [1],
+        )
+
+    def test_show_returns_archived_reference_when_no_live_duplicate_exists(self) -> None:
+        self.client.tasks[1]["is_active"] = 0
+
+        task = self.reader.show("old-1")
+
+        self.assertEqual(task["id"], "task_kanboard_13")
+
     def test_unknown_column_is_backend_error(self) -> None:
         self.client.tasks[0]["column_id"] = 999
         with self.assertRaisesRegex(TaskError, "schema") as raised:
@@ -853,6 +881,67 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(event["payload"]["codex_launch_mode"], "tui")
         self.assertEqual(event["payload"]["head"], "codex-extra")
         self.assertIn("title_sha256", event["payload"])
+
+    def test_auto_reference_uses_board_wide_project_high_water_mark(self) -> None:
+        # The new Kanboard row will be 14, which is already a historical reference.
+        self.client.tasks[0]["reference"] = "secretary-14"
+        self.client.tasks.append(
+            {
+                "id": 10, "reference": "secretary-1158", "title": "Archived", "column_id": 6,
+                "position": 1, "swimlane_id": 4, "is_active": 0,
+            }
+        )
+        self.client.tasks.extend([
+            {"id": 9, "reference": "secretary-nope", "title": "Malformed", "column_id": 2, "position": 2, "swimlane_id": 4},
+            {"id": 8, "reference": "other-999", "title": "Other project", "column_id": 2, "position": 3, "swimlane_id": 4},
+        ])
+        self.client.metadata.update({8: {}, 9: {}, 10: {}})
+        self.client.comments.update({8: [], 9: [], 10: []})
+
+        with mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), open_sprint() as sprint:
+            result = self.writer.create(
+                role="observer", actor="observer", project="secretary", task_type="code",
+                title="Auto reference", request_id="auto-reference", sprint=sprint,
+            )
+
+        self.assertEqual(result["task"]["ref"], "secretary-1159")
+        self.assertNotEqual(result["task"]["ref"], "secretary-14")
+        self.assertEqual(
+            [params["status_id"] for method, params in self.client.calls if method == "getAllTasks"][:2],
+            [1, 0],
+        )
+
+    def test_auto_reference_enumeration_failure_writes_no_card(self) -> None:
+        original_call = self.client.call
+
+        def invalid_task_list(method: str, **params: object) -> object:
+            if method == "getAllTasks":
+                return {"unexpected": "shape"}
+            return original_call(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=invalid_task_list), \
+             mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), \
+             open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "invalid task list") as raised:
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="No fallback", request_id="auto-reference-failure", sprint=sprint,
+                )
+
+        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
+
+    def test_explicit_reference_collision_is_still_refused(self) -> None:
+        with open_sprint() as sprint:
+            with self.assertRaisesRegex(TaskError, "task reference already exists") as raised:
+                self.writer.create(
+                    role="observer", actor="observer", project="secretary", task_type="code",
+                    title="Duplicate", reference="secretary-468", request_id="explicit-collision",
+                    sprint=sprint,
+                )
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
 
     def test_pending_create_replay_restores_metadata_before_audit(self) -> None:
         self.client.fail_metadata = True

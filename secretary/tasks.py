@@ -303,6 +303,33 @@ def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str,
     return cards
 
 
+def project_card_by_reference(
+    client: KanboardClient, project_id: int, reference: str
+) -> dict[str, Any] | None:
+    """Return the live card for a reference when an archived duplicate exists."""
+    card = client.call("getTaskByReference", project_id=project_id, reference=reference)
+    if not isinstance(card, dict) or _task_is_active(card):
+        return card if isinstance(card, dict) else None
+    active_cards = client.call("getAllTasks", project_id=project_id, status_id=1) or []
+    if not isinstance(active_cards, list):
+        raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+    for candidate in active_cards:
+        if isinstance(candidate, dict) and candidate.get("reference") == reference:
+            return candidate
+    return card
+
+
+def next_project_reference(client: KanboardClient, project_id: int, project: str) -> str:
+    """Allocate the reference immediately after this project's board-wide high-water mark."""
+    pattern = re.compile(rf"^{re.escape(project)}-(\d+)$")
+    highest = 0
+    for card in all_project_cards(client, project_id):
+        match = pattern.fullmatch(str(card.get("reference") or ""))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{project}-{highest + 1}"
+
+
 class TaskReader:
     def __init__(self, client: KanboardClient, board_name: str = "Pipeline") -> None:
         self.client = client
@@ -331,7 +358,7 @@ class TaskReader:
 
     def show(self, reference: str) -> dict[str, Any]:
         project_id, columns, swimlanes = self._board()
-        card = self.client.call("getTaskByReference", project_id=project_id, reference=reference)
+        card = project_card_by_reference(self.client, project_id, reference)
         if not isinstance(card, dict):
             raise TaskError("not_found", "task was not found", 2)
         task_id = _positive_int(card.get("id"))
@@ -962,8 +989,12 @@ class TaskWriter:
         request_id: str,
     ) -> str:
         board_id, columns, swimlanes = self.reader._board()
-        if reference and self.client.call("getTaskByReference", project_id=board_id, reference=reference):
-            raise TaskError("validation", "task reference already exists", 2)
+        if reference:
+            if project_card_by_reference(self.client, board_id, reference):
+                raise TaskError("validation", "task reference already exists", 2)
+            created_ref = reference
+        else:
+            created_ref = next_project_reference(self.client, board_id, project)
         column_id = _target_column_id(columns, target)
         if column_id is None:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
@@ -978,7 +1009,6 @@ class TaskWriter:
         ))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard rejected the write", 1)
-        created_ref = reference or f"{project}-{task_id}"
         event["ref"] = created_ref
         event["task_id"] = f"task_kanboard_{task_id}"
         event["backend"]["task_id"] = task_id
@@ -1695,7 +1725,7 @@ class TaskWriter:
 
     def _current_swimlane_id(self, task: dict[str, Any]) -> int:
         board_id, _, _ = self.reader._board()
-        raw = self.client.call("getTaskByReference", project_id=board_id, reference=task["ref"])
+        raw = project_card_by_reference(self.client, board_id, task["ref"])
         if not isinstance(raw, dict):
             raise TaskError("not_found", "task was not found", 2)
         return _positive_int(raw.get("swimlane_id")) or 0
@@ -1885,7 +1915,7 @@ class TaskWriter:
         if retry_reason and _digest(retry_reason) != expected_digest:
             raise TaskError("validation", "archive retry reason does not match the pending request", 2)
         board_id, _, _ = self.reader._board()
-        raw = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
+        raw = project_card_by_reference(self.client, board_id, ref)
         if not isinstance(raw, dict):
             raise TaskError("not_found", "task was not found", 2)
         if _task_is_active(raw):
@@ -1918,7 +1948,7 @@ class TaskWriter:
             ]
             if not _has_archive_reason({"comments": comments}, expected_digest):
                 raise TaskError("backend_error", "pending archive reason comment is missing", 1)
-        raw = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
+        raw = project_card_by_reference(self.client, board_id, ref)
         if isinstance(raw, dict) and _task_is_active(raw):
             raise TaskError("backend_error", "pending archive remains incomplete", 1)
 
