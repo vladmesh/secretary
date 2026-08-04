@@ -263,13 +263,13 @@ install, prints no values and adds it to no commit.
    that gained an empty `product` its export never carried is a lossy write and fails the check.
 5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
    runtime-home files for the agent CLIs. Provider authentication stays manual.
-6. Recreates the pipeline role worktree, then rebuilds its live JSONL run source from the checkpointed
-   normalized journal before any dispatcher unit is installed or started.
-7. Runs the remainder of the same materialiser as `secretary upgrade`: creates any other role
-   worktrees, installs units, registers session-manager resources and applies automations. When it
+6. Runs the pre-host materialiser: synchronizes role skills and recreates all role worktrees. When it
    runs under `sudo`, role worktrees and their Git administrative directories are assigned to
    `--installation-user`, so the user services can read and update them.
-8. Checks restore status. Heads are connected after bootstrap as a separate step.
+7. Rebuilds the pipeline worktree's live JSONL run source from the checkpointed normalized journal,
+   after those worktrees and skills exist but before any dispatcher unit is installed or started.
+8. Applies host units and session-manager automations, performs any required memory recovery, then
+   verifies restore status. Heads are connected after bootstrap as a separate step.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
 validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed

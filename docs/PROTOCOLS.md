@@ -169,9 +169,10 @@ When `task create` omits `--ref`, Secretary allocates `PROJECT-N` from the proje
 high-water mark across both open and closed cards. Allocation, staging and `createTask` are one
 locally serialized operation, so concurrent local creators cannot reserve the same reference. The
 pending audit first records the chosen reference and, once the backend returns it, the Kanboard task id;
-a recovered pending create prefers that recorded live id. An older id-less pending create is repaired only
-when one live row proves its identity. Ambiguous, absent or closed-only matches fail closed rather than
-guessing or creating a duplicate.
+a recovered pending create verifies and repairs only that durable recorded backend task id, including the
+legacy blank-reference rules. An older id-less pending create has no automatic adoption or repair path:
+it remains fail-closed for manual resolution rather than searching for a plausible live row or creating a
+duplicate.
 
 `--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
 override, launch mode comes from the head profile.
