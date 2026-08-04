@@ -60,14 +60,16 @@ One open sprint per installation is the shipped default. A second one exists as 
 instance setting `open_sprint_limit`, which accepts 1 or 2 and is absent by default: at 2 a second sprint
 is admitted only when it can be proven to share nothing with the first. What that means exactly, restore
 included, is in [Protocols](PROTOCOLS.md#the-open-sprint-limit); the operator's view, the limitations and
-the rollback are in [Operations](OPERATIONS.md#the-two-sprint-pilot). The code is complete and covered by
-tests; the pilot has not been enabled on the live installation, so there is no operational experience of
-two sprints running side by side yet.
+the rollback are in [Operations](OPERATIONS.md#the-two-sprint-pilot). The setting is on for this
+installation and a pair has run side by side, each sprint with its own observer head, through the full
+card cycle.
 
 The pilot deliberately isolates admission and the per-sprint mechanisms (the declared observer, whose
-calls are bound to its own sprint, the observer fence when the board is readable, the budget and its hard
-stop, claim suppression by a blocked card) and nothing else.
-Pause, the single production tick writer and the blind fence stay installation-wide.
+writes of role `observer` are bound to its own sprint, the observer fence when the board is readable, the
+budget and its hard stop, claim suppression by a blocked card) and nothing else.
+Pause, the single production tick writer and the blind fence stay installation-wide, and so does the
+reach of a head that declares a role other than `observer`; see
+[Operations](OPERATIONS.md#the-two-sprint-pilot).
 
 Raising the limit past two needs work that does not exist:
 
@@ -77,8 +79,8 @@ Raising the limit past two needs work that does not exist:
   declaration it can check without that board. The same declaration would close the blind fence's
   current gap, where a sprint admitted since the last readable pass leaves an unlinked card in a project
   it reserves unfenced.
-- evidence from running the pair, plus the exact-string round trip of repository roots through the live
-  Kanboard metadata calls, which is currently covered by in-memory fixtures only.
+- the exact-string round trip of repository roots through the live Kanboard metadata calls, which is
+  covered by in-memory fixtures only.
 
 The model does not yet have typed execution gates, a coded completeness check, per-project overlay
 deviations, an in-house CI runner for private repositories, or cleanup by owner label. Known defects in

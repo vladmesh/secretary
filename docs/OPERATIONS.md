@@ -387,7 +387,15 @@ What admission checks, in what order and at which limit is stated once, in
 [Protocols](PROTOCOLS.md#the-open-sprint-limit). Read it before enabling the setting: it is what decides
 whether a second sprint you have in mind can be opened at all. In operator terms the second sprint has to
 be work that touches nothing the first one touches. Each sprint declares its own observer independently:
-both may run a head, since an observer call is bound to the sprint it is about.
+both may run a head, since a write of role `observer` is bound to the sprint the launcher bound its head
+to.
+
+That binding covers writes made under role `observer`, and the role is what the caller declares. The
+sprint entity's `close`, `reopen` and `record_budget` take role `po`, do not check the binding, and take
+the sprint reference as an argument, so a head that declares `--role po` reaches any open sprint. An
+observer head closing its own sprint is the documented path and uses exactly that route. With two open
+sprints this means an observer of one can close the other; nothing in the product prevents it, and the
+audit records it as `role=po` with the observer's actor id.
 
 ### Enabling it
 

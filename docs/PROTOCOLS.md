@@ -475,6 +475,12 @@ another entity, are refused as `observer_sprint_mismatch`; a head that carries n
 be placed at all. Both refusals are audited as `sprint_guard_denied` with that code, which is how an
 identity failure reads apart from a role that has no such right.
 
+The check keys off the declared role, and the caller declares it. `sprint close`, `sprint reopen` and
+the budget write take role `po` and no binding, and each takes the sprint reference as an argument, so a
+head declaring `--role po` reaches any open sprint rather than only its own. The observer's own close of
+its sprint is that call. Nothing below the CLI distinguishes it from the PO making the same call, and the
+audit shows it as `role=po` with the observer's actor id.
+
 The index of the projects open sprints reserve is kept locally next to the audit log, keyed by project id.
 An index written in an older key space is rebuilt from the sprints board before it answers. For a project
 outside any open
