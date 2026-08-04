@@ -31,7 +31,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from secretary._fsutil import publish_component_entries, publish_state_atomic, write_json, write_text_atomic
 from secretary.automations import OrcaAutomationClient, workspaces_root
@@ -54,7 +54,8 @@ from secretary.secret_store import (
 )
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
-from secretary.upgrade import UpgradeContext, default_product_root, run_steps
+from secretary.upgrade import STEPS, UpgradeContext, UpgradeResult, default_product_root, run_steps, step_host
+from triggered_agents.runtime.shared_state import resolve_pipeline_state_dir
 from triggered_agents.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 
 
@@ -505,7 +506,7 @@ def materialize_checkpoint(
     return len(cards), run_count
 
 
-def _restored_run_journals(runs_source: Path) -> dict[Path, str]:
+def _restored_run_journals(runs_source: Path) -> dict[Path, list[str]]:
     """Rebuild the JSONL files whose records the checkpoint normalizes.
 
     ``runs.ndjson`` deliberately wraps every source line with its relative
@@ -531,22 +532,43 @@ def _restored_run_journals(runs_source: Path) -> dict[Path, str]:
     except (OSError, UnicodeError, ValueError, TypeError):
         raise InstallError("private checkpoint contains invalid run journal records") from None
 
-    journals: dict[Path, str] = {}
+    journals: dict[Path, list[str]] = {}
     for relative, records in grouped.items():
         ordered = sorted(records, key=lambda item: item[0])
-        if [number for number, _ in ordered] != list(range(1, len(ordered) + 1)):
+        numbers = [number for number, _ in ordered]
+        if len(numbers) != len(set(numbers)):
             raise InstallError(
-                f"private checkpoint has non-contiguous run journal lines for {relative.as_posix()}"
+                f"private checkpoint has duplicate run journal lines for {relative.as_posix()}"
             )
         try:
-            journals[relative] = "".join(
+            journals[relative] = [
                 json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
                 for _, record in ordered
-            )
+            ]
         except (TypeError, ValueError):
             raise InstallError(
                 f"private checkpoint contains an unserializable run journal record for {relative.as_posix()}"
             ) from None
+    return journals
+
+
+def _live_run_journals(state_dir: Path) -> dict[Path, list[str]]:
+    """Parse the current journal into the same canonical record spelling as a checkpoint."""
+    journals: dict[Path, list[str]] = {}
+    try:
+        if not state_dir.is_dir():
+            return journals
+        for path in state_dir.rglob("*.jsonl"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(state_dir)
+            journals[relative] = [
+                json.dumps(json.loads(line), ensure_ascii=False, sort_keys=True) + "\n"
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise InstallError(f"could not read live pipeline state at {state_dir}: {exc}") from None
     return journals
 
 
@@ -561,34 +583,40 @@ def materialize_pipeline_state(
     JSONL content that the canonical checkpoint actually carries, and refuses
     to overwrite a different non-empty live journal.
     """
-    runs_source = Path(instance_dir).expanduser().resolve() / "state" / "runs"
+    try:
+        runs_source = Path(instance_dir).expanduser().resolve() / "state" / "runs"
+        state_dir = Path(state_dir).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise InstallError(f"could not resolve pipeline state paths: {exc}") from None
     journals = _restored_run_journals(runs_source)
-    state_dir = Path(state_dir).expanduser().resolve()
-    existing: dict[Path, str] = {}
-    if state_dir.is_dir():
-        for path in state_dir.rglob("*.jsonl"):
-            if path.is_file():
-                existing[path.relative_to(state_dir)] = path.read_text(encoding="utf-8")
-    non_empty = {relative: contents for relative, contents in existing.items() if contents.strip()}
-    if non_empty and non_empty != journals:
-        raise InstallError(
-            f"live pipeline state at {state_dir} differs from the checkpoint; refusing to overwrite it"
-        )
+    existing = _live_run_journals(state_dir)
+    for relative, canonical in journals.items():
+        live = existing.get(relative, [])
+        if live and live[:len(canonical)] != canonical:
+            raise InstallError(
+                f"live pipeline state at {state_dir} does not extend the checkpoint; refusing to overwrite it"
+            )
     if dry_run:
-        return sum(contents.count("\n") for contents in journals.values())
+        return sum(len(records) for records in journals.values())
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        writes = [(state_dir / relative, contents) for relative, contents in journals.items()]
+        # A valid live extension is newer than the checkpoint and must survive a
+        # retry. Only absent/empty journals receive the reconstructed prefix.
+        writes = [
+            (state_dir / relative, "".join(records))
+            for relative, records in journals.items()
+            if not existing.get(relative)
+        ]
         if writes:
             publish_state_atomic(writes)
     except (OSError, RuntimeError) as exc:
         raise InstallError(f"could not materialize live pipeline state: {exc}") from None
-    return sum(contents.count("\n") for contents in journals.values())
+    return sum(len(records) for records in journals.values())
 
 
 def pipeline_state_path(runtime_home: Path) -> Path:
     """The dispatcher-owned state source below the installation user's worktree."""
-    return workspaces_root(runtime_home) / "secretary" / "pipeline" / "state" / "pipeline"
+    return resolve_pipeline_state_dir(workspaces_root(runtime_home))
 
 
 def materialize_host(
@@ -596,6 +624,7 @@ def materialize_host(
     product_root: Path,
     host_fixture: Path | None = None,
     installation_user: str | None = None,
+    before_host: Callable[[UpgradeContext], None] | None = None,
 ):
     report = validate_instance(instance)
     if not report.ok:
@@ -621,7 +650,17 @@ def materialize_host(
     # The steps resolve their own paths against `runtime_home`; HOME is exported for the
     # subprocesses they start, which read the environment and not this context.
     with _runtime_environment({"HOME": str(runtime_home)}):
-        result = run_steps(context)
+        if before_host is None:
+            result = run_steps(context)
+        else:
+            host_index = STEPS.index(step_host)
+            prepared = run_steps(context, steps=STEPS[:host_index])
+            if not prepared.ok:
+                failed = prepared.steps[-1]
+                raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
+            before_host(context)
+            finished = run_steps(context, steps=STEPS[host_index:])
+            result = UpgradeResult(steps=[*prepared.steps, *finished.steps])
     if not result.ok:
         failed = result.steps[-1]
         raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
@@ -867,11 +906,23 @@ def install(args: argparse.Namespace) -> InstallResult:
                 "changed" if cloned or seeded else "unchanged",
                 f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
             )
+            restored_runs = 0
+
+            def restore_pipeline_source(context: UpgradeContext) -> None:
+                nonlocal restored_runs
+                restored_runs = materialize_pipeline_state(
+                    target, pipeline_state_path(context.runtime_home or Path.home()), dry_run=False,
+                )
+                _set_installation_owner(
+                    pipeline_state_path(context.runtime_home or Path.home()), args.installation_user,
+                )
+
             host_result = materialize_host(
                 target,
                 product_root,
                 Path(args.host_fixture).expanduser().resolve() if args.host_fixture else None,
                 args.installation_user,
+                before_host=restore_pipeline_source,
             )
             mark_reconcile_applied(data_dir)
             changed = sum(step.status == "changed" for step in host_result.steps)
@@ -880,11 +931,6 @@ def install(args: argparse.Namespace) -> InstallResult:
                 "changed" if changed else "unchanged",
                 f"materializer complete ({changed} changed step(s))",
             )
-            _, runtime_home = resolve_runtime_owner(target, args.installation_user)
-            restored_runs = materialize_pipeline_state(
-                target, pipeline_state_path(runtime_home), dry_run=False,
-            )
-            _set_installation_owner(pipeline_state_path(runtime_home), args.installation_user)
             result.add("pipeline-state", "changed", f"materialized {restored_runs} run record(s)")
             findings = restore_findings(data_dir)
             if findings:

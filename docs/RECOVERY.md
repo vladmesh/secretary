@@ -42,9 +42,11 @@ The canon, the normalised minimum needed to resume work:
 `runs.ndjson` is a normalized, portable journal: each entry records its source
 path and line number. During recovery, after the pipeline role worktree exists,
 Secretary materializes those entries back into that worktree's live
-`state/pipeline/` source before the dispatcher starts. A non-empty live journal
-that differs from the checkpoint is never overwritten. Likewise, a checkpoint
-refuses to publish an empty live run export over a non-empty canonical journal.
+`state/pipeline/` source before the dispatcher units are installed or started.
+A live journal may already be a valid append-only extension of the checkpoint;
+that extension is retained. A divergent or truncated prefix is never
+overwritten. Likewise, a checkpoint refuses to publish a truncated or rewritten
+live export over a non-empty canonical journal.
 
 Outside the canon, because it is derived or bulky raw material, rebuilt or kept in an optional cold
 archive:

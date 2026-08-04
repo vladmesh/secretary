@@ -83,6 +83,20 @@ class CheckpointBlocked(Exception):
     """The snapshot did not pass the gate; nothing is committed this tick."""
 
 
+def _canonical_run_records(path: Path, label: str) -> list[str]:
+    """Compare exported journal entries by JSON value, never incidental spelling."""
+    try:
+        return [
+            json.dumps(json.loads(line), ensure_ascii=False, sort_keys=True)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"{label} is unreadable: {exc}") from None
+
+
 @dataclass(frozen=True)
 class CheckpointResult:
     status: str
@@ -139,7 +153,7 @@ class CheckpointWriter:
             )
 
         board, runs = self._regenerate()
-        self._prevent_run_history_loss(runs)
+        self._prevent_run_history_loss()
         self._publish(
             "board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE,
             lambda staging: _validate_board(staging, instance=self.instance_dir),
@@ -160,8 +174,8 @@ class CheckpointWriter:
             raise CheckpointBlocked(str(exc)) from None
         return board.count, runs.count
 
-    def _prevent_run_history_loss(self, run_records: int) -> None:
-        """Never replace a non-empty canonical journal with an empty live source.
+    def _prevent_run_history_loss(self) -> None:
+        """Never truncate or rewrite canonical history from a live export.
 
         A recovered host used to restore the normalized ``state/runs`` data
         plane but not the pipeline-worktree source that ``export_runs`` reads.
@@ -169,18 +183,19 @@ class CheckpointWriter:
         appends history, so an empty replacement is an unsafe recovery signal,
         not routine compaction.
         """
-        if run_records:
-            return
         canonical = self.instance_dir / "state" / "runs" / "runs.ndjson"
+        live = self.data_dir / "runs" / "runs.ndjson"
         try:
-            existing = sum(1 for line in canonical.read_text(encoding="utf-8").splitlines() if line.strip())
+            existing = _canonical_run_records(canonical, "canonical run history")
         except FileNotFoundError:
             return
-        except (OSError, UnicodeError) as exc:
+        try:
+            current = _canonical_run_records(live, "live run export")
+        except (OSError, UnicodeError, ValueError) as exc:
             raise CheckpointBlocked(f"could not inspect canonical run history: {exc}") from None
-        if existing:
+        if current[:len(existing)] != existing:
             raise CheckpointBlocked(
-                "refusing to replace non-empty canonical run history with an empty live export"
+                "refusing to truncate or rewrite non-empty canonical run history from the live export"
             )
 
     def _publish(

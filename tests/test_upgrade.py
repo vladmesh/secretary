@@ -787,8 +787,31 @@ class UpgradeStepTests(unittest.TestCase):
             owned = {Path(call.args[0]) for call in chown.call_args_list}
             self.assertEqual(result.status, "changed")
             self.assertIn(worktree, owned)
+            self.assertIn(worktree.parent, owned)
             self.assertIsNotNone(admin)
             self.assertIn(admin, owned)
+            self.assertIn(admin.parent, owned)
+
+    def test_root_ownership_repair_skips_a_hardlinked_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = root / "first"
+            linked = root / "linked"
+            first.write_text("shared\n", encoding="utf-8")
+            os.link(first, linked)
+            account = SimpleNamespace(pw_uid=123, pw_gid=456)
+
+            with (
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown") as chown,
+            ):
+                upgrade._set_runtime_owner(root, "operator")
+
+            owned = {Path(call.args[0]) for call in chown.call_args_list}
+            self.assertIn(root, owned)
+            self.assertNotIn(first, owned)
+            self.assertNotIn(linked, owned)
 
 
 class CommandSurfaceTests(unittest.TestCase):

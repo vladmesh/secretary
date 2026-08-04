@@ -193,6 +193,20 @@ class CheckpointWriterTests(unittest.TestCase):
             1,
         )
 
+    def test_partial_live_history_cannot_truncate_the_canonical_prefix(self):
+        records = [
+            {"source": "runs.jsonl", "line": 1, "record": {"event": "claim"}},
+            {"source": "runs.jsonl", "line": 2, "record": {"event": "review"}},
+        ]
+        self.seed_runs(records)
+        self.assertEqual(self.write().status, "committed")
+        self.seed_runs(records[:1])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("truncate or rewrite", result.reason)
+
     def test_derived_board_dump_is_not_part_of_the_checkpoint(self):
         self.write()
 

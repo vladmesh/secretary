@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import pwd
+import stat
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -339,14 +340,27 @@ def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list
 
 
 def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
-    """Repair root-created role worktree files for the user who runs the units."""
+    """Repair root-created runtime files without traversing links or hardlinks."""
     if not runtime_user or os.geteuid() != 0 or not path.exists():
         return
-    account = pwd.getpwnam(runtime_user)
     try:
-        os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
-        for child in path.rglob("*"):
-            os.chown(child, account.pw_uid, account.pw_gid, follow_symlinks=False)
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise GitError(f"runtime user {runtime_user!r} does not exist") from None
+
+    def assign(candidate: Path) -> None:
+        info = candidate.lstat()
+        if stat.S_ISLNK(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink > 1):
+            return
+        os.chown(candidate, account.pw_uid, account.pw_gid, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode):
+            return
+        with os.scandir(candidate) as children:
+            for child in children:
+                assign(Path(child.path))
+
+    try:
+        assign(path)
     except OSError as exc:
         raise GitError(f"could not assign {path} to runtime user {runtime_user}: {exc}") from None
 
@@ -355,7 +369,7 @@ def _worktree_git_dir(worktree: Path) -> Path | None:
     """Return the linked-worktree administrative directory named by its .git file."""
     try:
         line = (worktree / ".git").read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     if not line.startswith("gitdir: "):
         return None
@@ -381,6 +395,7 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
             _set_runtime_owner(worktree, context.runtime_user)
             admin = _worktree_git_dir(worktree)
             if admin is not None:
+                _set_runtime_owner(admin.parent, context.runtime_user)
                 _set_runtime_owner(admin, context.runtime_user)
         except GitError as exc:
             stuck.append(f"{worktree.name}: {exc}")
@@ -403,6 +418,8 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
                 admin = _worktree_git_dir(worktree)
                 if admin is None:
                     raise GitError(f"could not locate Git administration for {worktree}")
+                _set_runtime_owner(worktree.parent, context.runtime_user)
+                _set_runtime_owner(admin.parent, context.runtime_user)
                 _set_runtime_owner(admin, context.runtime_user)
             except (GitError, OSError) as exc:
                 stuck.append(f"{worktree.name}: {exc}")

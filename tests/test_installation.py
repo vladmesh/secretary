@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from secretary import installation
 from secretary.cli import main
 from secretary.installation import (
     InstallError,
@@ -23,9 +24,11 @@ from secretary.installation import (
     install,
     materialize_checkpoint,
     materialize_pipeline_state,
+    pipeline_state_path,
     provision_codex_home,
     provision_project_checkouts,
 )
+from secretary.upgrade import UpgradeResult, step_host
 from secretary.routing_journal import attempts
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
@@ -96,6 +99,26 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_recovery_materializes_pipeline_state_before_host_steps_can_start_units(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events: list[str] = []
+
+            def run(context, *, steps):
+                events.append("post-host" if step_host in steps else "pre-host")
+                return UpgradeResult()
+
+            with (
+                mock.patch("secretary.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
+                mock.patch("secretary.installation.resolve_runtime_owner", return_value=("operator", root / "home")),
+                mock.patch("secretary.installation.run_steps", side_effect=run),
+            ):
+                installation.materialize_host(
+                    root / "instance", root / "product", before_host=lambda _context: events.append("restore")
+                )
+
+            self.assertEqual(events, ["pre-host", "restore", "post-host"])
+
     def test_pipeline_state_materialization_rebuilds_the_checkpointed_journal(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -115,6 +138,15 @@ class InstallationTests(unittest.TestCase):
                 [json.loads(line) for line in (state_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()],
                 [record],
             )
+            stamp = (state_dir / "runs.jsonl").stat().st_mtime_ns
+            self.assertEqual(materialize_pipeline_state(instance, state_dir), 1)
+            self.assertEqual((state_dir / "runs.jsonl").stat().st_mtime_ns, stamp)
+
+    def test_pipeline_state_path_honors_the_dispatcher_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            override = Path(temporary) / "overridden-pipeline-state"
+            with mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(override)}):
+                self.assertEqual(pipeline_state_path(Path(temporary) / "home"), override)
 
     def test_pipeline_state_materialization_refuses_to_overwrite_different_live_history(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -131,10 +163,35 @@ class InstallationTests(unittest.TestCase):
             journal = state_dir / "runs.jsonl"
             journal.write_text(json.dumps({"event": "live"}) + "\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(InstallError, "differs from the checkpoint"):
+            with self.assertRaisesRegex(InstallError, "does not extend the checkpoint"):
                 materialize_pipeline_state(instance, state_dir)
 
             self.assertEqual(journal.read_text(encoding="utf-8"), json.dumps({"event": "live"}) + "\n")
+
+    def test_pipeline_state_materialization_keeps_a_valid_live_append_and_ignores_blank_lines(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            source = instance / "state" / "runs"
+            source.mkdir(parents=True)
+            canonical = [
+                {"source": "runs.jsonl", "line": 1, "record": {"event": "claim"}},
+                {"source": "runs.jsonl", "line": 3, "record": {"event": "review"}},
+            ]
+            (source / "runs.ndjson").write_text(
+                "\n".join(json.dumps(record) for record in canonical) + "\n", encoding="utf-8"
+            )
+            state_dir = root / "pipeline-state"
+            state_dir.mkdir()
+            journal = state_dir / "runs.jsonl"
+            journal.write_text(
+                '{"event":"claim"}\n\n{"event":"review"}\n{"event":"release"}\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(materialize_pipeline_state(instance, state_dir), 2)
+
+            self.assertIn('{"event":"release"}', journal.read_text(encoding="utf-8"))
 
     def test_missing_project_checkout_is_cloned_once(self):
         with tempfile.TemporaryDirectory() as temporary:
