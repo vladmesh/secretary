@@ -706,3 +706,71 @@ class RestoreTests(unittest.TestCase):
 
             self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
             self.assertEqual(restore_findings(data_dir), ["restore is incomplete"])
+
+
+class RestoredNonTaskSwimlaneTests(unittest.TestCase):
+    """Product и Issue восстанавливаются в свой свимлейн, а отказ борда не маскируется.
+
+    `_create_restored_non_task` слал `swimlane_id=0`: живой Kanboard отвечает на это
+    `false`, а не идентификатором. Проверка `isinstance(task_id, int)` пропускала
+    `false` (bool — подкласс int), поэтому восстановление падало на следующем шаге с
+    сообщением про reference, хотя не создавалась сама запись. Тестовый борд ноль
+    принимал, и баг доехал до живого восстановления 745 карточек — здесь отказ
+    моделируется явно.
+    """
+
+    COLUMNS = [
+        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
+        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+    ]
+
+    def _seed(self, data_dir: Path) -> None:
+        init_layout(data_dir)
+        issue = _restore_card(reference="issue:12", column="Issues", position=2)
+        issue["fields"]["task_type"] = ""
+        issue["fields"]["project"] = ""
+        issue["metadata"] = {
+            "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+            "issue_priority": "P0",
+        }
+        (data_dir / "board" / "cards.json").write_text(
+            json.dumps({"version": 1, "cards": [RestoreTests._product_card(), issue]}), encoding="utf-8"
+        )
+
+    def test_record_lands_in_the_swimlane_the_export_names(self) -> None:
+        class StrictSwimlaneBoard(_EmptyWriteKanboard):
+            """Как настоящий борд: swimlane_id=0 не идентификатор, а отказ."""
+
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return RestoredNonTaskSwimlaneTests.COLUMNS
+                if method == "createTask" and params.get("swimlane_id") == 0:
+                    return False
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            self._seed(data_dir)
+            client = StrictSwimlaneBoard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 2)
+
+            # 4 — идентификатор свимлейна "Secretary" в фикстуре борда
+            self.assertEqual([task["swimlane_id"] for task in client.tasks], [4, 4])
+
+    def test_a_refused_create_is_reported_as_a_create_failure(self) -> None:
+        class RefusingBoard(_EmptyWriteKanboard):
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return RestoredNonTaskSwimlaneTests.COLUMNS
+                if method == "createTask" and params.get("column_id") == 1:
+                    return False
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            self._seed(data_dir)
+
+            with self.assertRaisesRegex(RestoreError, "could not create restored Product or Issue record"):
+                import_normalized_board(data_dir, client=RefusingBoard())

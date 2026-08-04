@@ -43,6 +43,8 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    _matching_swimlane,
+    _positive_int,
     all_project_cards,
 )
 from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
@@ -701,16 +703,27 @@ def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
     The following restore metadata write preserves the export exactly: such a record never
     passes through ``TaskWriter.create``, which stamps a task type it does not have.
     """
-    board_id, columns, _ = writer.reader._board()
+    board_id, columns, swimlanes = writer.reader._board()
     column = str(card.get("column") or "")
     column_id = next((identifier for identifier, title in columns.items() if title == column), None)
     if column_id is None:
         raise RestoreError(f"restored card has an unknown column: {column}")
-    task_id = writer.client.call(
-        "createTask", project_id=board_id, title=card["title"], description=card["description"],
-        column_id=column_id, swimlane_id=0,
-    )
-    if not isinstance(task_id, int):
+    payload: dict[str, Any] = {
+        "project_id": board_id,
+        "title": card["title"],
+        "description": card["description"],
+        "column_id": column_id,
+    }
+    # Свимлейн берётся из экспорта, как и на пути обычных карточек. Kanboard отвергает
+    # swimlane_id=0 (createTask возвращает false), поэтому при отсутствии совпадения
+    # параметр не передаём вовсе и запись уходит в свимлейн по умолчанию.
+    swimlane_id = _matching_swimlane(swimlanes, str(card.get("swimlane") or ""))
+    if swimlane_id is not None:
+        payload["swimlane_id"] = swimlane_id
+    # _positive_int, а не isinstance(..., int): bool наследует int, поэтому false от
+    # Kanboard проходил проверку и падение приписывалось следующему шагу, reference.
+    task_id = _positive_int(writer.client.call("createTask", **payload))
+    if task_id is None:
         raise RestoreError("could not create restored Product or Issue record")
     if writer.client.call("updateTask", id=task_id, reference=card["reference"]) is not True:
         raise RestoreError("could not set restored Product or Issue reference")
