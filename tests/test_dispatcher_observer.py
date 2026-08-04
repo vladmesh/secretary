@@ -18,6 +18,7 @@ from secretary.dispatcher import (
     DispatcherRuntime,
     InstanceCatalog,
 )
+from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_tui import TuiDeliveryError
 from secretary.dispatcher_observer import (
@@ -40,7 +41,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.sprints import SprintReader, SprintWriter
 from secretary.dispatcher_types import HostError
-from secretary.sprint_observer import head_choice
+from secretary.sprint_observer import encode_observer, head_choice
 from secretary.dispatcher_production import _budget_event_type, _production_claim_ready, _reconcile_sprint_budget
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.head_health import HeadReadiness
@@ -166,6 +167,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     # helpers -----------------------------------------------------------------
 
     def open_sprint(self, reference: str = "sprint:1", **metadata: object) -> None:
+        # Every row declares its observer, so the fixture declares one too: the registry default,
+        # which is the head these tests expect the dispatcher to bring up.
+        metadata.setdefault(
+            "sprint_observer", encode_observer(head_choice(self.catalog.observer_head()))
+        )
         self.board.add_sprint(reference, status="open", **metadata)
 
     def close_sprint(self, reference: str = "sprint:1") -> None:
@@ -378,7 +384,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.launches, 1)
         self.assertEqual(self.host.stopped_observers, [])
         kinds = [event["kind"] for event in self.audit.events("sprint:1")]
-        self.assertEqual(kinds, [EVENT_LAUNCHED])
+        self.assertEqual(kinds, [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED])
 
     def test_finished_observer_queue_is_quiet_without_a_new_card_event(self) -> None:
         self.open_sprint()
@@ -557,7 +563,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.delivery.attempts, 0)
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_RELAUNCHED],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_RELAUNCHED],
         )
 
     def test_a_resume_for_a_refused_delivery_stops_the_retry(self) -> None:
@@ -1110,8 +1116,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_burst_of_card_events_coalesces_to_one_observer_nudge(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
+        # A declared row is fenced until its head is adopted, so the card joins the sprint
+        # once the observer is up, the way a card does in production.
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         for request_id in ("burst-one", "burst-two"):
             self.writer.comment(
@@ -1123,8 +1131,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        # The batch's last card event, named explicitly: the tick's own fence line is written
+        # after it and is not what the delivery is cut through.
         self.assertEqual(
-            self.observers()["sprint:1"].delivery.through_event, self.audit.events()[-1]["event_id"]
+            self.observers()["sprint:1"].delivery.through_event,
+            self.audit.events("secretary-510-pilot")[-1]["event_id"],
         )
         entry = {
             "selected_step": "read board", "selected_why": "coalesced batch", "rejected_alternatives": "wait",
@@ -1137,7 +1148,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record = self.observers()["sprint:1"]
         self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
         self.assertEqual(record.delivery.stage, DeliveryStage.IDLE)
-        self.assertEqual(record.delivery.acknowledged_through, self.audit.events()[-2]["event_id"])
+        self.assertEqual(
+            record.delivery.acknowledged_through,
+            self.audit.events("secretary-510-pilot")[-1]["event_id"],
+        )
 
     def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_the_deadline(self) -> None:
         self.open_sprint()
@@ -1416,8 +1430,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_routing_event_and_closed_sprint_do_not_wake_an_observer(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
+        # A declared row is fenced until its head is adopted, so the card joins the sprint
+        # once the observer is up, the way a card does in production.
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         # The dispatcher claim in the initial tick is a real card transition. Acknowledge its
         # delivery first, then prove the later routing-only audit line starts no additional turn.
@@ -1503,9 +1519,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_active_card_does_not_relaunch_a_finished_observer_without_a_new_event(self) -> None:
         self.open_sprint()
+        self.runtime.production_tick()
+        # A declared row is fenced until its head is adopted, so the card joins the sprint
+        # once the observer is up, the way a card does in production.
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.board.metadata[100]["sprint_current_task"] = "secretary-510-pilot"
-        self.runtime.production_tick()
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
             "idle": True,
@@ -1539,7 +1557,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.observers(), {})
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_STOPPED],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED],
         )
 
     def test_vanished_sprint_stops_the_head(self) -> None:
@@ -1568,10 +1586,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         events = self.audit.events("sprint:1")
         self.assertEqual(
             [event["kind"] for event in events],
-            [EVENT_LAUNCHED, EVENT_STOPPED, EVENT_LAUNCHED, EVENT_STOPPED],
+            [
+                EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED,
+                EVENT_LAUNCHED, EVENT_STOPPED,
+            ],
         )
         # The second lifecycle is its own request, not a retry of the first one.
-        self.assertEqual(len({event["request_id"] for event in events}), 4)
+        self.assertEqual(len({event["request_id"] for event in events}), 6)
 
     def test_no_open_sprint_changes_nothing(self) -> None:
         before = len(self.host.calls)
@@ -1739,7 +1760,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.state, "stop-pending")
         self.assertEqual(record.handle, "observer:sprint:1")
         # The head is still alive, so nothing may claim it was stopped.
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED],
+        )
 
         self.host.fail_stop_observer_reason = ""
         retry = self.runtime.production_tick()
@@ -1751,7 +1775,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_STOPPED],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED],
         )
 
     def test_a_refused_stop_never_yields_a_second_head_when_the_sprint_reopens(self) -> None:
@@ -1810,7 +1834,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.launches, 0)
         self.assertIn("terminal close failed", record.deferred_reason)
         # Nothing was launched, so no launch event may be in the log.
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_DEFERRED],
+        )
 
     def test_an_abandoned_terminal_that_will_not_close_never_yields_a_second_head(self) -> None:
         self.open_sprint()
@@ -1895,7 +1922,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.state, "deferred")
         self.assertEqual(record.launches, 0)
         self.assertIn("unauthenticated", record.deferred_reason)
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_DEFERRED],
+        )
 
     # role skill delivery ------------------------------------------------------
 
@@ -1913,7 +1943,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.launches, 0)
         self.assertIn("observe-sprint", record.deferred_reason)
         self.assertIn(str(self.observer_skill), record.deferred_reason)
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_DEFERRED],
+        )
         # The same reason has to be readable from outside, or the sprint just looks headless.
         self.assertIn("observe-sprint", status_observers(self.runtime.production_state.load())[0]["deferred_reason"])
 
@@ -1982,7 +2015,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.runtime.production_tick()
 
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_DEFERRED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_DEFERRED, EVENT_FENCED],
+        )
 
     def test_failed_bring_up_keeps_the_record_intact(self) -> None:
         self.open_sprint()
@@ -2040,10 +2076,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(record.handle)
         # The event is not lost: it waits on disk for the repair pass.
         pending = self.audit.pending_events()
-        self.assertEqual([event["kind"] for event in pending], [EVENT_LAUNCHED])
-        self.assertEqual(pending[0]["payload"]["workspace"], record.workspace)
+        self.assertEqual(
+            sorted(event["kind"] for event in pending), sorted([EVENT_FENCED, EVENT_LAUNCHED])
+        )
+        launched = next(event for event in pending if event["kind"] == EVENT_LAUNCHED)
+        self.assertEqual(launched["payload"]["workspace"], record.workspace)
         self.audit.reconcile()
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+        self.assertEqual(
+            sorted(event["kind"] for event in self.audit.events("sprint:1")),
+            sorted([EVENT_FENCED, EVENT_LAUNCHED]),
+        )
 
     def test_a_refused_audit_append_does_not_yield_a_second_head(self) -> None:
         self.open_sprint()
@@ -2057,6 +2099,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_an_unwritable_audit_defers_the_launch_instead_of_opening_a_head(self) -> None:
         self.open_sprint()
+        # The fence raises on the first tick of a declared row and writes that once. This test is
+        # about the launch's own audit write, so the fence has already said its piece by here.
+        with self.failing_state_save(after=0):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
 
         with self.broken_stage():
             result = self.runtime.production_tick()
@@ -2150,7 +2197,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.state, "running")
         self.assertEqual(record.launches, 1)
         self.assertEqual(record.pending_launch, 0)
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED],
+        )
 
         live = self.runtime.production_tick()
 
@@ -2232,7 +2282,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # The attempt the log already carries is spent, so the new head gets its own line.
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_RELAUNCHED],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED, EVENT_RELAUNCHED],
         )
 
     def test_a_tick_killed_before_the_host_answered_retries_the_same_attempt(self) -> None:
@@ -2255,7 +2305,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].launches, 1)
         self.assertEqual(self.audit.pending_events(), [])
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_FENCED, EVENT_LAUNCHED],
+        )
 
     def test_an_intent_without_a_pid_yet_waits_out_its_grace_window(self) -> None:
         """A head that has been launched but has not written its pid is not a dead head.
@@ -2280,7 +2333,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         intent = self.observers()["sprint:1"]
         self.assertEqual((intent.state, intent.pending_launch, intent.launches), ("launching", 1, 0))
         self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_LAUNCHED])
-        self.assertEqual(self.audit.events("sprint:1"), [])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")], [EVENT_FENCED, EVENT_FENCED]
+        )
 
     def test_a_waiting_intent_whose_head_appears_is_adopted(self) -> None:
         self.open_sprint()
@@ -2317,15 +2372,21 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
         # The terminal is gone, so no record may keep pointing at it.
         self.assertEqual(self.observers(), {})
-        self.assertEqual([event["kind"] for event in self.audit.pending_events()], [EVENT_STOPPED])
+        self.assertEqual(
+            sorted(event["kind"] for event in self.audit.pending_events()),
+            sorted([EVENT_CLEARED, EVENT_STOPPED]),
+        )
         self.audit.reconcile()
         self.assertEqual(
-            [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_STOPPED],
+            sorted(event["kind"] for event in self.audit.events("sprint:1")),
+            sorted([EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED]),
         )
 
     def test_an_unwritable_audit_parks_the_stop_instead_of_performing_it(self) -> None:
         self.open_sprint()
+        self.runtime.production_tick()
+        # The declared row's fence raises on the first tick and clears on the second; the stop
+        # below is then the only thing left with an audit write to make.
         self.runtime.production_tick()
         self.close_sprint()
 
@@ -2348,6 +2409,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_the_repair_pass_commits_a_staged_event_of_a_sprint_that_is_gone(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
+        # The declared row's fence raises on the first tick and clears on the second, so the stop
+        # below is the one event this repair pass has to commit.
+        self.runtime.production_tick()
         self.board.sprints.clear()
         with self.broken_append():
             self.runtime.production_tick()
@@ -2358,7 +2422,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.audit.pending_events(), [])
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_STOPPED],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED],
         )
 
     def test_a_refused_audit_append_still_records_the_freeze_stop(self) -> None:
@@ -2431,7 +2495,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record = self.observers()["sprint:1"]
         self.assertEqual(record.state, "pause-stop-pending")
         self.assertEqual(record.handle, "observer:sprint:1")
-        self.assertEqual([event["kind"] for event in self.audit.events("sprint:1")], [EVENT_LAUNCHED])
+        self.assertEqual(
+            [event["kind"] for event in self.audit.events("sprint:1")],
+            [EVENT_FENCED, EVENT_LAUNCHED],
+        )
 
         self.host.fail_stop_observer_reason = ""
         result = self.runtime.production_tick()
@@ -2445,7 +2512,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
-            [EVENT_LAUNCHED, EVENT_STOPPED],
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_STOPPED],
         )
 
     def test_a_head_that_survived_a_refused_freeze_stop_is_not_relaunched_on_resume(self) -> None:
@@ -2533,7 +2600,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.deferred_reason, "")
         self.assertEqual(self.host.observers, ["sprint:2"])
         kinds = [event["kind"] for event in self.audit.events("sprint:2")]
-        self.assertEqual(kinds, [EVENT_DEFERRED, EVENT_LAUNCHED])
+        self.assertEqual(kinds, [EVENT_FENCED, EVENT_DEFERRED, EVENT_FENCED, EVENT_LAUNCHED])
 
     def test_repeated_drain_ticks_write_one_deferral_event(self) -> None:
         self.open_sprint("sprint:2")
@@ -2547,7 +2614,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.observers()["sprint:2"].launches, 0)
         self.assertEqual(self.host.observers, [])
         self.assertEqual(
-            [event["kind"] for event in self.audit.events("sprint:2")], [EVENT_DEFERRED]
+            [event["kind"] for event in self.audit.events("sprint:2")],
+            [EVENT_FENCED, EVENT_DEFERRED, EVENT_FENCED],
         )
 
     def test_frozen_tick_launches_nothing(self) -> None:
@@ -3801,7 +3869,10 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.board.metadata[int(sprint["id"])]["sprint_status"] = "closed"
 
     def test_a_bring_up_that_dies_after_the_worktree_still_gives_it_back_on_closure(self) -> None:
-        self.board.add_sprint("sprint:1", status="open")
+        self.board.add_sprint(
+            "sprint:1", status="open",
+            sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
+        )
         self.terminal_create_fails = True
 
         deferred = self.runtime.production_tick()
@@ -3834,7 +3905,10 @@ class RealHostObserverTeardownTests(unittest.TestCase):
     def test_a_bring_up_that_never_registered_a_workspace_leaves_nothing_to_remove(self) -> None:
         """The other side of it: the stop asks Orca and takes its answer, rather than removing a
         worktree on the strength of a path the record computed before the host was ever called."""
-        self.board.add_sprint("sprint:1", status="open")
+        self.board.add_sprint(
+            "sprint:1", status="open",
+            sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
+        )
         self.worktree_create_fails = True
 
         self.runtime.production_tick()
@@ -3849,7 +3923,10 @@ class RealHostObserverTeardownTests(unittest.TestCase):
     def test_a_worktree_that_will_not_go_keeps_the_closed_sprint_on_the_books(self) -> None:
         """A refused teardown of a workspace with no head behind it is still a failed stop: the
         record survives as `stop-pending` and the next tick comes back to it."""
-        self.board.add_sprint("sprint:1", status="open")
+        self.board.add_sprint(
+            "sprint:1", status="open",
+            sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
+        )
         self.terminal_create_fails = True
         self.runtime.production_tick()
         self.close_sprint()

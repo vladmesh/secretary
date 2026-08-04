@@ -1541,10 +1541,10 @@ class SprintWriter:
     def _record_observer_preimage(self, document: dict[str, Any], sprint: dict[str, Any]) -> None:
         """Record what the row's observer was, once, before this reopen writes over it.
 
-        A row that carries no value at all has no preimage to record: it predates the
-        observer migration, and the reopen of such a row is refused on ownership long
-        before this.  Its absence is recorded as such, so a rollback knows it cannot put
-        the row back and leaves the reopen repairable instead.
+        A row that carries no value at all has no preimage to record, and the reopen of
+        such a row is refused on ownership long before this.  Its absence is recorded as
+        such, so a rollback knows it cannot put the row back and leaves the reopen
+        repairable instead.
         """
         progress = document.setdefault("progress", {})
         if "observer_preimage" in progress:
@@ -1611,41 +1611,6 @@ class SprintWriter:
 
         return self._write(
             "restored", "steward", "restore", reference, request_id, {"fields": sorted(values)}, mutation
-        )
-
-    def backfill_observer(
-        self, *, reference: str, value: dict[str, Any], request_id: str,
-    ) -> dict[str, Any]:
-        """Write one row's observer metadata for the migration, and never over another value.
-
-        The refusal is the point.  A row that already carries a different value was written by
-        somebody who knew something this migration does not — an operator repairing it, or a
-        second run whose journal disagrees — and overwriting it would destroy that.  An exact
-        match is the retry of this very write and reports success without touching the backend.
-        """
-        encoded = encode_observer(value)
-        current = self.reader.show(reference, include_cards=False)
-        if "observer" in current:
-            existing = current["observer"]
-            if existing is None or encode_observer(existing) != encoded:
-                raise TaskError(
-                    "validation",
-                    f"sprint {reference} already carries observer metadata that is not the value "
-                    "this migration selected; resolve it by hand before running the migration again",
-                    2,
-                )
-
-        def mutation(sprint: dict[str, Any]) -> None:
-            if self.client.call(
-                "saveTaskMetadata",
-                task_id=_sprint_number(sprint),
-                values={OBSERVER_FIELD: encoded},
-            ) is not True:
-                raise TaskError("backend_error", "Kanboard rejected the sprint observer metadata", 1)
-
-        return self._write(
-            "observer_backfilled", "steward", "observer-migration", reference, request_id,
-            {"observer": dict(parse_observer(value) or {})}, mutation,
         )
 
     def restore_comment(self, *, reference: str, body: str, occurrence: int, request_id: str | None = None) -> dict[str, Any]:
@@ -1893,11 +1858,10 @@ def _ownership(meta: dict[str, str]) -> dict[str, Any]:
 def _observer(meta: dict[str, str]) -> dict[str, Any]:
     """The sprint's declared observer, only where the row carries the field.
 
-    Three states have to stay apart, because their repairs differ: the key is missing (a row that
-    predates the field, or one a migration has not reached), the key holds one of the four tagged
-    forms, or the key holds something else.  The last is reported as `None` rather than dropped:
-    a reader that answered "absent" for an unreadable value would let a corrupt row pass for an
-    unmigrated one, and the strict reader is precisely the thing that must tell them apart.
+    Three states have to stay apart, because their repairs differ: the key is missing, the key
+    holds one of the four tagged forms, or the key holds something else.  The last is reported as
+    `None` rather than dropped: a reader that answered "absent" for an unreadable value would let
+    a corrupt row pass for one that carries nothing, and those are repaired differently.
     """
     if OBSERVER_FIELD not in meta:
         return {}

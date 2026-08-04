@@ -60,7 +60,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
@@ -78,7 +77,6 @@ from secretary.sprint_observer import (
     REASON_UNKNOWN_PROFILE,
     ObserverMetadataError,
     executable_observer,
-    strict_reader_active,
 )
 from secretary.tasks import TaskError, is_significant_card_event
 
@@ -1466,35 +1464,20 @@ def _adopt_launch_intent(
     )
 
 
-def runtime_data_dir(runtime: Any) -> Path | None:
-    """Where this runtime's durable board state lives, or None when it has none."""
-    board_dir = getattr(getattr(runtime, "audit", None), "board_dir", None)
-    return Path(board_dir).parent if board_dir is not None else None
-
-
 def observer_decision(runtime: Any, sprint: dict[str, Any]) -> dict[str, Any]:
     """What this sprint's observer metadata says to run. Raises rather than guessing.
 
-    Three answers, and no fourth:
+    Two answers, and no third:
 
       `head`   the sprint declares one concrete profile, and the registry has it
       `none`   the sprint declares that it runs without an observer
-      `legacy` the row predates the field on an installation the migration has not reached, so
-               the head still comes from `role_defaults.observer`
 
-    `legacy` is reachable only while the strict reader is off, which is only before the cutover.
-    Once `secretary sprint migrate-observer` has activated it there is no unmigrated row left and
-    no path back to the role default: a declared observer is read from the sprint or not at all.
+    There is no path back to the role default: a declared observer is read from the sprint or not
+    at all.
 
     `ObserverMetadataError` for an open row whose value is missing, unreadable, provenance rather
     than a declaration, or a profile the registry does not have.
     """
-    if "observer" not in sprint and not strict_reader_active(runtime_data_dir(runtime)):
-        return {
-            "kind": "legacy",
-            "head": _role_default_observer_head(runtime),
-            "value": None,
-        }
     value = executable_observer(sprint)
     if value["kind"] == KIND_NONE:
         return {"kind": KIND_NONE, "head": "", "value": value}
@@ -1511,7 +1494,7 @@ def observer_decision(runtime: Any, sprint: dict[str, Any]) -> dict[str, Any]:
 
 
 def _role_default_observer_head(runtime: Any) -> str:
-    """The registry's observer default, for a row that predates the sprint's own field.
+    """The registry's observer default, for a record filled in without a sprint to read.
 
     Empty when the registry cannot answer: a row is still worth more without a head profile than
     not at all, and the launch path reports the same failure properly.
@@ -1525,8 +1508,8 @@ def _role_default_observer_head(runtime: Any) -> str:
 def _observer_head_or_blank(runtime: Any, sprint: dict[str, Any] | None = None) -> str:
     """The head to fill a record with, without deciding anything the launch has to decide again.
 
-    A declared sprint answers from its own metadata; only an unmigrated row falls back to the
-    registry default.  Corruption is not reported here: this fills in a record, and the fence and
+    A sprint answers from its own metadata; the registry default is only for a record filled in
+    without one.  Corruption is not reported here: this fills in a record, and the fence and
     the launch path are where an unusable observer is answered for.
     """
     if sprint is not None:
@@ -1591,8 +1574,8 @@ def _launch_observer(
     """Bring up one head for one sprint, on the profile that sprint declares.
 
     `head` is decided by the caller from the sprint's own metadata, so nothing between the
-    declaration and the launch can substitute another profile.  Only an unmigrated row reaches
-    here with an empty head, and it takes the registry's observer default the way it always did.
+    declaration and the launch can substitute another profile.  A caller with none passes an empty
+    head and this resolves the declaration itself.
     """
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
