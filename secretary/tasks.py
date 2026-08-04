@@ -211,45 +211,10 @@ def _forbidden_move_message(role: str, source: str, target: str) -> str:
     return f"{role} may not move {source} to {target}"
 
 
-def standing_decision(events: Iterable[dict[str, Any]]) -> str:
-    """The decision a card is holding since it last entered Assessment, or "" for none.
+def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+    """The current Assessment visit and its one canonical decision.
 
-    Scoped to the current stay in the column on purpose: a decision from an earlier round is a
-    decision about earlier work, and letting one release a later verdict is exactly the replay
-    the seam exists to prevent. Both readers use this, the board writer refusing a decision-less
-    move and the dispatcher deciding what to perform, so neither can drift from the other.
-    """
-    parked_at = -1
-    ordered = list(events)
-    for index, event in enumerate(ordered):
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
-            parked_at = index
-    if parked_at < 0:
-        return ""
-    decision = ""
-    for event in ordered[parked_at + 1:]:
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        if event.get("kind") == "decided" and str(payload.get("decision") or ""):
-            decision = str(payload["decision"])
-    return decision
-
-
-def assessment_visit(events: Iterable[dict[str, Any]]) -> str:
-    """Return the durable id of the card's current visit to Assessment, if any."""
-    visit = ""
-    for event in events:
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
-            visit = str(event.get("event_id") or event.get("request_id") or "")
-    return visit
-
-
-def assessment_decision(events: Iterable[dict[str, Any]], *, visit: str) -> dict[str, Any] | None:
-    """The canonical decision for one Assessment visit, if the observer made one.
-
-    Older audit rows did not carry ``assessment_visit``.  They remain readable by ordering them
-    after the latest park, while new rows are explicitly tied to that immutable entry event.
+    All decision readers use this resolver so an older decision can never leak into a later park.
     """
     ordered = list(events)
     latest_park = -1
@@ -257,16 +222,24 @@ def assessment_decision(events: Iterable[dict[str, Any]], *, visit: str) -> dict
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
             latest_park = index
-    if latest_park < 0 or not visit:
-        return None
+    if latest_park < 0:
+        return "", None
+    visit = str(ordered[latest_park].get("event_id") or ordered[latest_park].get("request_id") or "")
     for event in ordered[latest_park + 1:]:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if event.get("kind") != "decided" or not str(payload.get("decision") or ""):
             continue
         recorded_visit = str(payload.get("assessment_visit") or "")
         if not recorded_visit or recorded_visit == visit:
-            return event
-    return None
+            return visit, event
+    return visit, None
+
+
+def standing_decision(events: Iterable[dict[str, Any]]) -> str:
+    """The canonical decision for the current Assessment visit, or an empty string."""
+    _visit, event = assessment_resolution(events)
+    payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+    return str(payload.get("decision") or "")
 
 
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
@@ -424,6 +397,20 @@ def project_reference_allocation_lock(data_dir: Path) -> Iterator[None]:
     board_dir = data_dir / "board"
     board_dir.mkdir(parents=True, exist_ok=True)
     with (board_dir / ".create.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def assessment_decision_lock(data_dir: Path, reference: str) -> Iterator[None]:
+    """Serialize the complete decision transaction for one card, across observer processes."""
+    directory = data_dir / "board" / "assessment-decisions"
+    directory.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(reference.encode("utf-8")).hexdigest() + ".lock"
+    with (directory / name).open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -1341,48 +1328,27 @@ class TaskWriter:
         )
         if not self._sprint_holds_project(current["project"]):
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-        if current["state"] != "assessment":
-            raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
-        events = self.audit.events(reference)
-        visit = assessment_visit(events)
-        existing = assessment_decision(events, visit=visit)
-        # Preserve normal request-id claim validation for an actual retry.  The per-visit
-        # shortcut is only for a second delivery that arrived with a new request id.
-        known_request = (
-            self.audit.committed_event(request_id) is not None
-            or self.audit.pending_event(request_id) is not None
-        )
-        if existing is not None and not known_request:
-            existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
-            existing_kind = str(existing_payload.get("decision") or "")
-            if existing_kind != kind:
-                raise TaskError(
-                    "decision_already_recorded",
-                    f"Assessment visit {visit} already has a {existing_kind} decision",
-                    3,
-                )
-            # A delivery retry can have a different caller UUID.  The decision is still one fact:
-            # return its original event rather than adding a second board comment for the same
-            # Assessment visit.
-            return {
-                "action": "decided", "task": current,
-                "event_id": str(existing.get("event_id") or existing.get("request_id") or ""),
-                "replayed": True,
-            }
-        marker = f"decision:{kind}"
-
-        def mutation(task: dict[str, Any]) -> Any:
-            if task["state"] != "assessment":
+        with assessment_decision_lock(self.data_dir, reference):
+            current = self.reader.show(reference)
+            if current["state"] != "assessment":
                 raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
-            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
+            visit, existing = assessment_resolution(self.audit.events(reference))
+            known_request = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+            if existing is not None and not known_request:
+                existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+                existing_kind = str(existing_payload.get("decision") or "")
+                if existing_kind != kind:
+                    raise TaskError("decision_already_recorded", f"Assessment visit {visit} already has a {existing_kind} decision", 3)
+                return {"action": "decided", "task": current, "event_id": str(existing.get("event_id") or existing.get("request_id") or ""), "replayed": True}
+            marker = f"decision:{kind}"
 
-        payload = {
-            "marker": marker, "decision": kind, "body_sha256": _digest(body),
-            "assessment_visit": visit or None,
-        }
-        return self._write(
-            "decided", role, actor, reference, request_id, payload, mutation, identity=payload,
-        )
+            def mutation(task: dict[str, Any]) -> Any:
+                if task["state"] != "assessment":
+                    raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+                self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
+
+            payload = {"marker": marker, "decision": kind, "body_sha256": _digest(body), "assessment_visit": visit or None}
+            return self._write("decided", role, actor, reference, request_id, payload, mutation, identity=payload)
 
     def routing(
         self,

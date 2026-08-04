@@ -746,30 +746,47 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         events = runtime.audit.events()
     except (TaskError, HostError, OSError, ValueError, TypeError):
         return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
-    significant: list[dict[str, Any]] = []
     resumes: list[dict[str, Any]] = []
     for event in events:
         if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
             resumes.append(event)
-        if is_significant_observer_event(event, linked_refs=refs, sprint_ref=ref):
-            significant.append(event)
     _acknowledge_delivery_from_resume(record.delivery, resumes)
+    # Cursors written before semantic wakes were narrowed may name claim/report/routing telemetry.
+    # Resolve that id in the complete stream first, then filter only later events; filtering first
+    # makes the cursor disappear and replays the whole sprint forever.
+    cursor = record.delivery.acknowledged_through
+    cursor_at = _event_index(events, cursor)
+    if cursor and cursor_at < 0:
+        return {"known": False, "pending": False, "reason": "acknowledged observer cursor is unavailable"}
+    if record.delivery.stage != DeliveryStage.IDLE and record.delivery.through_event:
+        active_at = _event_index(events, record.delivery.through_event)
+        if active_at >= 0 and not is_significant_observer_event(events[active_at], linked_refs=refs, sprint_ref=ref):
+            # The active legacy batch was for noise.  Durably advance past it before considering
+            # later semantic work; the enclosing reconciliation persists this replacement state.
+            _reset_delivery_to_idle(
+                record.delivery,
+                acknowledged_through=record.delivery.through_event,
+                acknowledged_delivery_id=record.delivery.delivery_id,
+                acknowledged_resume_id="",
+            )
+            cursor = record.delivery.acknowledged_through
+            cursor_at = active_at
+    following = events[cursor_at + 1:] if cursor_at >= 0 else events
+    significant = [
+        event for event in following
+        if is_significant_observer_event(event, linked_refs=refs, sprint_ref=ref)
+    ]
     if not significant:
         return {"known": True, "pending": False, "reason": "no significant linked-card event"}
     latest = significant[-1]
     latest_id = _event_id(latest)
     if not latest_id:
         return {"known": False, "pending": False, "reason": "latest card event has no durable id"}
-    acknowledged_at = _event_index(significant, record.delivery.acknowledged_through)
-    pending_events = significant[acknowledged_at + 1:] if acknowledged_at >= 0 else significant
-    if not pending_events:
-        return {"known": True, "pending": False, "reason": "latest significant linked-card event is acknowledged"}
-    first = pending_events[0]
     return {
         "known": True,
         "pending": True,
         "event_id": latest_id,
-        "pending_from": _event_id(first),
+        "pending_from": _event_id(significant[0]),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
         "latest_resume_id": _event_id(resumes[-1]) if resumes else "",

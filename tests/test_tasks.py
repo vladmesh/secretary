@@ -1664,6 +1664,34 @@ class AssessmentStateTests(unittest.TestCase):
             self._decide("rework", request_id="decision-conflicting-delivery")
         self.assertEqual(raised.exception.code, "decision_already_recorded")
 
+    def test_concurrent_assessment_decisions_have_one_canonical_winner(self) -> None:
+        self._park()
+        self.writer._guard_sprint_write = lambda **_kwargs: {}  # type: ignore[method-assign]
+        self.writer._sprint_holds_project = lambda _project: True  # type: ignore[method-assign]
+        gate = threading.Barrier(2)
+        outcomes: list[tuple[str, object]] = []
+
+        def decide(kind: str) -> None:
+            gate.wait()
+            try:
+                with as_observer(SPRINT):
+                    outcomes.append((kind, self.writer.decide(
+                        role="observer", actor="observer", reference="secretary-468", kind=kind,
+                        body=kind, request_id="race-" + kind,
+                    )))
+            except TaskError as exc:
+                outcomes.append((kind, exc))
+
+        threads = [threading.Thread(target=decide, args=(kind,)) for kind in ("release", "rework")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        decisions = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")
+        self.assertEqual(len(decisions), 1, outcomes)
+        self.assertEqual(sum(isinstance(result, dict) for _kind, result in outcomes), 1)
+        self.assertEqual(sum(isinstance(result, TaskError) for _kind, result in outcomes), 1)
+
     def test_observer_wake_predicate_excludes_routine_and_self_card_events(self) -> None:
         refs = {"secretary-468"}
 
