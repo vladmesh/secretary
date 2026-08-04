@@ -32,6 +32,7 @@ from secretary.dispatcher_types import (
 )
 from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
+    initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
     wait_cycle_token as _wait_cycle_token,
 )
@@ -110,14 +111,34 @@ def command_terminal_status(
                 status["idle"] = work != "working"
                 status["idle_reason"] = work
         return status
-    if not pane_known:
-        # A head adopted from a launch intent (secretary-820): its bring-up outlived the tick that
-        # started it, so no pane identity was ever persisted for it. The pid heartbeat proves the
-        # process is running, and respawning it for want of a handle would be exactly the second
-        # head the intent contour exists to prevent.
-        pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
-        if pid_status.get("known") and pid_status.get("alive"):
-            return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
+    # No pane in the inventory answers to this head. Two ways to get here, one verdict:
+    #
+    #   * no identity was ever persisted — a head adopted from a launch intent (secretary-820)
+    #     whose bring-up outlived the tick that started it;
+    #   * an identity was persisted and matches nothing. `orca terminal create` returns a handle
+    #     the inventory does not always list back (measured 2026-08-04: 0/3 on one worktree, 3/3
+    #     on another, stable across a 2s re-read), and `worker_leaf` is empty whenever the leaf
+    #     lookup that keys on that same handle came back empty. `dispatcher_state` already calls
+    #     this the handle-alias problem.
+    #
+    # In both the pid heartbeat is the stronger evidence: it proves this exact process runs. A
+    # pane we cannot name is not a dead head, and respawning over a live one is the second head
+    # the intent contour exists to prevent.
+    pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
+    if pid_status.get("known") and pid_status.get("alive"):
+        return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
+    if not pid_status.get("known"):
+        # `pid_file_path`'s own contract: the dispatcher clears the pid file before every fresh
+        # launch and the new head writes it "the moment it starts", so a respawn opens a window in
+        # which neither identity answers — the handle/leaf just written may alias to nothing in the
+        # inventory (the case above) and the heartbeat has not been written yet either. The observer
+        # path already grants a launch grace window for exactly this reading (`observer_alive`); the
+        # worker/reviewer path did not, so a watchdog tick landing in that window read a live,
+        # just-(re)launched head as missing-terminal and, being the second such tick, escalated
+        # straight to Blocked (secretary-1158).
+        started_at = record.review_started_at if kind == "review" else record.worker_started_at
+        if started_at and time.time() - started_at <= _initial_output_stall_seconds():
+            return {"known": True, "live": True, "reason": "pid-not-written-yet", "pid_confirmed": False}
     return {"known": True, "live": False, "reason": "missing-terminal"}
 
 
