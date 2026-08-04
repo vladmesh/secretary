@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
 
-from secretary.dispatcher_helpers import _legacy_worker_branch, _tail
+from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
 from secretary.dispatcher_types import HostError
 
 # How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog
@@ -65,6 +65,8 @@ _INFRA_MARK_RE = re.compile(
     r"temporary failure in name resolution|failed to fetch|apt-get|npm err! network|"
     r"pip.{0,20}(?:could not find|could not install)|dependency resolution)\b"
 )
+_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_TERMINAL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 
 
 @dataclass
@@ -105,38 +107,29 @@ def gate_check(host, task: dict, record) -> GateResult:
     """Run the mechanical gate for `task` in the worker workspace. Raises HostError on gate infra
     failures (missing workspace, git/gh unreachable); returns a GateResult otherwise."""
     if getattr(host, "mode", "real") == "noop":
-        return GateResult("green", "noop gate", attestation=_attestation(
-            validated_sha="", base_sha="", gate_mode="noop", required_checks=[], source="noop"
-        ))
+        # A noop proves no command ran.  It may preserve dispatcher control flow, but must never
+        # look like reusable validation evidence.
+        return GateResult("green", "noop gate")
     ci = _validation(host, task).get("ci") or "none"
     workspace = record.workspace
     if ci != "none" and (not workspace or not Path(workspace).is_dir()):
         raise HostError("gate workspace is missing")
     base = host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
     if ci == "none":
-        return GateResult("green", "ci none: mechanical gate skipped", attestation=_attestation(
-            validated_sha=_head_sha(host, workspace), base_sha=_base_sha(host, workspace, base),
-            gate_mode="none", required_checks=[], source="none",
-        ))
+        # `none` is an explicit absence of mechanical validation, not an all-green check set.
+        return GateResult("green", "ci none: mechanical gate skipped")
     if _recover_base(host, workspace, base) == "conflict":
         return GateResult(
             "red",
             f"branch fell behind base {base!r} and the merge conflicts — resolve it in the "
             f"workspace and report done again",
             fingerprint=_fingerprint("base-conflict", base),
-            attestation=_attestation(
-                validated_sha=_head_sha(host, workspace), base_sha=_base_sha(host, workspace, base),
-                gate_mode=ci, required_checks=[], source="base-conflict",
-            ),
         )
     if ci == "local":
         return _local_gate(host, task, record, workspace)
     if ci == "github":
         return _github_gate(host, task, workspace, base, _required_checks(host, task))
-    return GateResult("green", f"ci {ci!r}: no mechanical gate", attestation=_attestation(
-        validated_sha=_head_sha(host, workspace), base_sha=_base_sha(host, workspace, base),
-        gate_mode=ci, required_checks=[], source=ci,
-    ))
+    raise HostError(f"unsupported validation ci mode {ci!r}; expected local, github or none")
 
 
 def _validation(host, task: dict) -> dict:
@@ -191,7 +184,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
         base_sha=_base_sha(host, workspace, host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))),
         gate_mode="local",
         required_checks=[{"name": "local validation", "conclusion": "SUCCESS" if completed.returncode == 0 else "FAILURE", "url": ""}],
-        source=command,
+        check_set_identity=command,
     )
     if completed.returncode == 0:
         return GateResult("green", "local validation passed", attestation=receipt)
@@ -214,17 +207,20 @@ def _github_gate(host, task: dict, workspace: str, base: str, required: list[str
         base_sha=_base_sha(host, workspace, base),
         gate_mode="github",
         required_checks=[_terminal_check(item) for item in checked],
-        source=json.dumps([_terminal_check(item) for item in checked], sort_keys=True, separators=(",", ":")),
+        check_set_identity=json.dumps(
+            {"required": sorted(required or [_check_name(item) for item in checked])},
+            sort_keys=True, separators=(",", ":"),
+        ),
     )
     short = sha[:12] or sha
     if rollup == "SUCCESS":
         return GateResult("green", f"CI green for `{branch}` @ `{short}`", attestation=receipt)
     if rollup == "FAILURE":
-        job = (failed or {}).get("name") or (failed or {}).get("context") or "?"
+        job = safe_one_line((failed or {}).get("name") or (failed or {}).get("context") or "?") or "?"
         fragment = _failed_log(host, repo, failed or {})
         where = f"job «{job}»"
         if fragment.step:
-            where += f", step \"{fragment.step}\""
+            where += f", step \"{safe_one_line(fragment.step)}\""
         summary = f"CI red: {where} failed on `{branch}` @ `{short}`"
         if fragment.infra:
             summary += "; this looks like an infrastructure setup failure rather than a test failure"
@@ -313,9 +309,9 @@ def _selected_checks(items: list[dict], required: list[str]) -> list[dict]:
 def _terminal_check(item: dict) -> dict[str, str]:
     conclusion = str(item.get("conclusion") or item.get("state") or item.get("status") or "").upper()
     return {
-        "name": _check_name(item),
+        "name": safe_one_line(_check_name(item)),
         "conclusion": conclusion,
-        "url": str(item.get("details_url") or item.get("html_url") or item.get("target_url") or item.get("targetUrl") or ""),
+        "url": safe_one_line(item.get("details_url") or item.get("html_url") or item.get("target_url") or item.get("targetUrl") or ""),
     }
 
 
@@ -337,21 +333,36 @@ def _base_sha(host, workspace: str, base: str) -> str:
         return ""
 
 
-def _attestation(*, validated_sha: str, base_sha: str, gate_mode: str, required_checks: list[dict[str, str]], source: str) -> dict[str, object]:
+def _attestation(
+    *, validated_sha: str, base_sha: str, gate_mode: str, required_checks: list[dict[str, str]],
+    check_set_identity: str,
+) -> dict[str, object] | None:
     """Canonical, redaction-safe receipt for one mechanical gate result.
 
-    The digest intentionally carries only the command/workflow identity, never command output.
-    Check URLs and conclusions remain inspectable evidence, while any output or secret-like value
-    stays in the existing scrubbed failure path.
+    GitHub exposes a stable check set here, not a durable workflow definition, so its digest is
+    named after that check set.  It deliberately excludes per-run URLs and conclusions; command
+    output remains on the existing scrubbed failure path.
     """
-    digest = hashlib.sha256(source.encode("utf-8", "surrogateescape")).hexdigest()
+    if (
+        gate_mode not in {"local", "github"}
+        or not _GIT_SHA_RE.fullmatch(validated_sha)
+        or not _GIT_SHA_RE.fullmatch(base_sha)
+        or not required_checks
+        or any(
+            not check.get("name")
+            or str(check.get("conclusion") or "").upper() not in _TERMINAL_CONCLUSIONS
+            for check in required_checks
+        )
+    ):
+        return None
+    digest = hashlib.sha256(check_set_identity.encode("utf-8", "surrogateescape")).hexdigest()
     return {
         "validated_sha": validated_sha,
         "base_sha": base_sha,
         "gate_mode": gate_mode,
         "required_checks": required_checks,
         "completed_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
-        "command_or_workflow_digest": digest,
+        "command_or_check_set_digest": digest,
     }
 
 

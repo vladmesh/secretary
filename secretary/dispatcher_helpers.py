@@ -361,5 +361,19 @@ def scrub_host_output(text: str) -> str:
     return _BLOB_RE.sub(lambda match: match.group(0) if _HEX_RE.match(match.group(0)) else "<redacted>", text)
 
 
+def safe_one_line(text: object, *, limit: int = 500) -> str:
+    """Redact and flatten untrusted host/board text before it enters a role prompt or board artifact.
+
+    GitHub check names, URLs and verdict bodies are remote/user-controlled text.  A receipt is
+    evidence, not an instruction channel, so control characters and Markdown-shaped newlines must
+    not be able to create a second prompt section or command.  Keep the result bounded as well:
+    a check title is an identifier, not a log transport.
+    """
+    flattened = "".join(
+        " " if ord(char) < 32 or ord(char) == 127 else char for char in scrub_host_output(str(text))
+    )
+    return re.sub(r"\s+", " ", flattened).strip()[:limit]
+
+
 def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])

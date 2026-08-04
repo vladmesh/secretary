@@ -67,7 +67,9 @@ steward's stale threshold is reported like any other stuck card.
 
 Every real mechanical gate result materializes a reusable receipt bound to one checkout:
 `validated_sha`, `base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion and URL),
-`completed_at`, and a `command_or_workflow_digest`. The dispatcher persists the receipt with the
+`completed_at`, and a `command_or_check_set_digest`. For a local gate this is the configured command's
+digest; for GitHub it is a stable required-check-set identity, not a workflow-definition or run digest.
+The dispatcher persists the receipt with the
 active card, renders it into `REVIEW.md`, writes it with the Assessment delivery, and writes a fresh
 receipt into the release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence,
 not permission to skip the pre-merge check or independent review.
