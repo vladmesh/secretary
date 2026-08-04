@@ -625,6 +625,10 @@ waits for the deadline: a ready pane there may be one the prompt never reached, 
 finished turn would prompt the head twice. A card in Ready, In progress or Validate is an ordinary wait
 throughout and never by itself an idle head.
 
+Prompt delivery does not poll the audit log for the observer's resume. It establishes terminal
+acceptance only; the following production reconciliation reads the durable resume and advances the
+delivery cursor. This keeps a ready or slow pane from multiplying full audit scans inside one tick.
+
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
 read from `role_defaults.observer` — a sprint that declares a profile the registry does not have is fenced,

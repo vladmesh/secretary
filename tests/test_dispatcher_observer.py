@@ -1581,6 +1581,33 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(action["status"], "degraded")
         self.assertEqual(self.observers()["sprint:1"].launches, launches)
 
+    def test_abandoned_dead_launch_intent_validates_unknown_cursor_before_relaunch(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        record = observers["sprint:1"]
+        record.state = "launching"
+        record.pending_launch = record.launches + 1
+        record.delivery.stage = DeliveryStage.AWAITING_ACK
+        record.delivery.delivery_id = "launching-legacy-delivery"
+        record.delivery.through_event = "evt_missing_after_launch_intent"
+        launches = record.launches
+        prepared = list(self.host.observers)
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+
+        result = self.runtime.production_tick()
+
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-cursor-unavailable")
+        self.assertEqual(action["status"], "degraded")
+        after = self.observers()["sprint:1"]
+        self.assertEqual(after.launches, launches)
+        self.assertEqual(after.pending_launch, 0)
+        self.assertEqual(self.host.observers, prepared)
+
     def test_observer_event_reconciliation_reads_one_audit_snapshot(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
@@ -1597,6 +1624,44 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertTrue(state["known"])
         self.assertEqual(len(calls), 1)
+
+    def test_ready_terminal_nudge_does_not_poll_audit_for_confirmation(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        for task in self.board.tasks:
+            task["column_id"] = 6
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card entered assessment", request_id="single-audit-snapshot-event",
+        )
+        real_events = TaskAudit.events
+        calls: list[TaskAudit] = []
+        confirms: list[object] = []
+
+        def counted(audit: TaskAudit, *args: object, **kwargs: object) -> list[dict]:
+            calls.append(audit)
+            return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
+
+        def accept_while_ready(record: ObserverRecord, *, confirm: object = None) -> str:
+            confirms.append(confirm)
+            self.host.observer_nudges.append(str(record.sprint))
+            return "accepted"
+
+        with mock.patch.object(TaskAudit, "events", new=counted), mock.patch.object(
+            self.host, "nudge_observer", side_effect=accept_while_ready,
+        ), mock.patch(
+            "secretary.dispatcher_production._reconcile_sprint_budget", return_value=[],
+        ):
+            result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(confirms, [None])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK,
+        )
 
     def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
         """Orca may rotate the handle while retaining leafId, so status must read the alias."""

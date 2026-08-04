@@ -584,6 +584,10 @@ def _reconcile_open_sprint(
         if adopted is not None:
             return adopted
         _abandon_launch_intent(runtime, ref, record)
+        # Abandoning is a state transition, not a reason for the rest of this tick to keep
+        # treating the record as unresolved. In particular, the now-pending dead head must pass
+        # the same durable-cursor gate as every other relaunch before the host is touched.
+        unresolved_intent = record.state == "launching"
     # A head from before the sprint binding is retired here, whatever its pid says. Its writes are
     # all refused as `observer_identity_unbound`, so it is a live process that cannot work the
     # sprint, and nothing it does can bind it: the binding is in the environment it started with.
@@ -1036,25 +1040,6 @@ def _fail_delivery(
     return replaced
 
 
-def _resume_acknowledged(runtime: Any, ref: str, record: ObserverRecord) -> bool:
-    """Whether this sprint's audit already carries the resume that closes the active delivery.
-
-    This is the observer's delivery criterion, handed to the delivery path so a role that proves
-    its own delivery causally does not need a code path of its own. A turn that started proves
-    nothing here: only a resume written by the observer and naming this delivery does.
-    """
-    try:
-        events = runtime.audit.events()
-    except (TaskError, HostError, OSError, ValueError, TypeError):
-        return False
-    resumes = [
-        event for event in events
-        if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded"
-    ]
-    _acknowledge_delivery_from_resume(record.delivery, resumes)
-    return record.delivery.stage == DeliveryStage.IDLE
-
-
 def _wake_pending(ref: str, record: ObserverRecord) -> dict[str, Any]:
     """A delivery that is on the head and still within its acknowledgement deadline."""
     return {
@@ -1243,27 +1228,14 @@ def _wake_for_event(
     if not _persist_quietly(runtime, payload, observers):
         return _defer_delivery(record, ref, "observer wake intent could not be persisted")
     try:
-        # The criterion travels with the call: this batch is closed by the observer's own resume
-        # naming it, never by the pane merely starting a turn.
-        runtime.host.nudge_observer(
-            record, confirm=lambda _sent_at: _resume_acknowledged(runtime, ref, record)
-        )
+        # Delivery acceptance is a terminal concern. The causal acknowledgement is deliberately
+        # out of band: the next normal reconciliation reads the observer's durable resume once,
+        # instead of polling the complete audit stream while the prompt-delivery loop runs.
+        runtime.host.nudge_observer(record)
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         return _fail_delivery(
             runtime, payload, observers, ref, record, event, f"observer wake failed: {exc}"
         )
-    if delivery.stage == DeliveryStage.IDLE:
-        # The resume for this batch landed while the prompt was being delivered.
-        _set_observer_state(record, "running")
-        return {
-            "status": "ok",
-            "step": "observer-reconcile",
-            "sprint": ref,
-            "action": "observer-nudged",
-            "head": record.head,
-            "delivery_id": delivery.acknowledged_delivery_id,
-            "event_id": delivery.acknowledged_through,
-        }
     delivery.stage = DeliveryStage.AWAITING_ACK
     delivery.sent_at = now
     delivery.held_since = now
@@ -1294,7 +1266,7 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
     provider the observer head runs.
     """
     try:
-        runtime.sprints.show(ref)
+        runtime.sprints.show(ref, include_resume_freshness=False)
     except (HostError, TaskError):
         return {"state": "unknown", "reason": "the sprint could not be read for idle recovery"}
     try:
@@ -1542,7 +1514,7 @@ def observer_skill_delivery(runtime: Any, head: str) -> dict[str, Any]:
 
 def _declared_head(runtime: Any, ref: str) -> str:
     """The profile one open sprint declares, read live. Raises rather than substituting one."""
-    sprint = runtime.sprints.show(ref, include_cards=False)
+    sprint = runtime.sprints.show(ref, include_cards=False, include_resume_freshness=False)
     decision = observer_decision(runtime, sprint)
     if decision["kind"] == KIND_NONE:
         raise ObserverMetadataError(
@@ -1611,7 +1583,7 @@ def _launch_observer(
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
         # when the sprint was created: goal, DoD, repositories and current card all move.
-        sprint = runtime.sprints.show(ref, include_cards=False)
+        sprint = runtime.sprints.show(ref, include_cards=False, include_resume_freshness=False)
     except (HostError, TaskError) as exc:
         return _defer(
             runtime, payload, observers, ref, record, head=head,

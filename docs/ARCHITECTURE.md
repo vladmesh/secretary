@@ -217,10 +217,12 @@ The wake itself goes through the one delivery path every interactive head has, w
 runs and whichever role owns it: a Codex launch, a worker or reviewer continuation and an observer
 wake are the same primitive. Wait for the pane, send, re-enter the prompt while Orca says the pane
 took nothing, which is what carries it past a dialog that swallowed the first Enter, and refuse
-upwards when the retries run out. What closes the delivery is the caller's, and the path has no
-criterion of its own: every caller passes one. A worker or reviewer continuation is delivered once
-its own head's turn has visibly started, which is that role's long-standing criterion; an observer
-batch is closed only by a resume naming that delivery. A wake the pane never took reaches the tick outcome and the
+upwards when the retries run out. A worker or reviewer continuation is delivered once its own
+head's turn has visibly started, which is that role's long-standing criterion. Observer delivery
+acceptance is deliberately separate from its causal acknowledgement: the terminal path proves that
+the prompt was taken, then returns without polling the audit log; the next normal reconciliation
+reads one audit snapshot and closes the batch only if it contains a resume naming that delivery.
+A wake the pane never took reaches the tick outcome and the
 delivery record as an explicit failure with its reason. That failure is retried on the live head a
 bounded number of times (`SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS`, 3 by default) on the existing
 backoff; once they are spent, the batch goes to the ordinary replacement path, which stops that head
