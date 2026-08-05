@@ -321,30 +321,31 @@ class InstallationTests(unittest.TestCase):
             (target / ".git").mkdir(parents=True)
             (target / "runtime.env").write_text("KANBOARD_API_TOKEN=existing\n", encoding="utf-8")
 
-            with mock.patch("secretary.installation._run", return_value="remote"):
+            with mock.patch("secretary.installation.state_repo.git", return_value="remote\n"):
                 with self.assertRaisesRegex(InstallError, "choose --recover"):
                     _clone_or_reuse("remote", target, recovery=False, dry_run=True)
 
             (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
-            with mock.patch("secretary.installation._run", side_effect=("remote", "")):
+            with mock.patch("secretary.installation.state_repo.git", side_effect=("remote\n", "")):
                 self.assertEqual(
                     _clone_or_reuse("remote", target, recovery=False, dry_run=True),
                     "reused checkpoint checkout",
                 )
 
-    def test_reused_checkout_marks_its_path_safe_for_root_recovery(self):
+    def test_reused_checkout_uses_the_owner_scoped_state_repository_boundary(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
             (target / ".git").mkdir(parents=True)
-            with mock.patch("secretary.installation._run", side_effect=("remote", "")) as run:
+            with mock.patch("secretary.installation.state_repo.git", side_effect=("remote\n", "")) as git:
                 self.assertEqual(
                     _clone_or_reuse("remote", target, recovery=True, dry_run=True),
                     "reused checkpoint checkout",
                 )
 
-            for call in run.call_args_list:
-                command = call.args[0]
-                self.assertEqual(command[:4], ["git", "-c", f"safe.directory={target}", "-C"])
+            self.assertEqual(
+                [call.args[1] for call in git.call_args_list],
+                [["remote", "get-url", "origin"], ["status", "--porcelain"]],
+            )
 
     @unittest.skipUnless(os.geteuid() == 0, "requires a root clean-host fixture")
     def test_root_can_reuse_a_checkout_owned_by_installation_user(self):

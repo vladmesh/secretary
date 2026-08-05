@@ -58,6 +58,7 @@ from secretary.secret_store import (
     key_path,
     normalize_phrase,
 )
+from secretary import state_repo
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import (
@@ -182,11 +183,13 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
             f"target {target} is not empty; choose --recover for the same instance or use the "
             "separate adopt workflow, no files were overwritten"
         )
-    # bootstrap leaves the checkout with the dedicated installation user.  Later
-    # recovery commands may be started from a root shell, for which Git otherwise
-    # rejects the deliberately foreign-owned checkout as dubious ownership.
-    git = ["git", "-c", f"safe.directory={target}", "-C", str(target)]
-    origin = _run([*git, "remote", "get-url", "origin"], label="inspect instance remote")
+    # This checkout belongs to the runtime user.  Do not make a root Git process trust it: Git
+    # loads repository configuration before every command, including executable fsmonitor hooks.
+    # state_repo crosses to the owner before Git starts.
+    try:
+        origin = state_repo.git(target, ["remote", "get-url", "origin"], label="inspect instance remote").strip()
+    except state_repo.StateRepoError as exc:
+        raise InstallError(str(exc)) from None
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
     if not recovery:
@@ -197,11 +200,18 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
                 f"target {target} already contains an installation; choose --recover or use the "
                 "separate adopt workflow"
             )
-    if _run([*git, "status", "--porcelain"], label="inspect instance checkout"):
+    try:
+        dirty = state_repo.git(target, ["status", "--porcelain"], label="inspect instance checkout")
+    except state_repo.StateRepoError as exc:
+        raise InstallError(str(exc)) from None
+    if dirty:
         raise InstallError("instance checkout has local changes; recovery will not overwrite them")
     if not dry_run:
-        _run([*git, "fetch", "--quiet", "origin"], label="fetch instance remote")
-        _run([*git, "merge", "--ff-only", "@{u}"], label="fast-forward instance checkout")
+        try:
+            state_repo.git(target, ["fetch", "--quiet", "origin"], label="fetch instance remote")
+            state_repo.git(target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout")
+        except state_repo.StateRepoError as exc:
+            raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
 
 
@@ -879,7 +889,12 @@ def install(args: argparse.Namespace) -> InstallResult:
         except BoardTransportError as exc:
             raise InstallError(str(exc)) from None
         if not args.dry_run:
-            _set_installation_owner(runtime_env, args.installation_user)
+            try:
+                canonical_runtime_env = runtime_env.resolve() == target.resolve() / "runtime.env"
+            except OSError:
+                canonical_runtime_env = False
+            if canonical_runtime_env:
+                _set_installation_owner(runtime_env, args.installation_user)
             _set_installation_owner(transport_path(target), args.installation_user)
             _set_installation_owner(target / ".gitignore", args.installation_user)
             _set_installation_owner(target / ".git", args.installation_user)

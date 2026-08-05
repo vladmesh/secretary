@@ -3410,18 +3410,15 @@ class DispatcherRuntime:
                 record, records, payload, status, kind=kind, now=now
             )
             if idle_trigger:
-                # A status is only a snapshot.  The next operation stops a live pane, so take one
-                # final reading: output can arrive or the TUI can leave its prompt between this
-                # tick's readiness probe and the destructive action.
-                fenced = self._idle_wait_fence(task, record, records, payload, kind=kind)
-                if fenced is None:
+                confirmations = int(getattr(record, f"{kind}_idle_confirmations") or 0) + 1
+                setattr(record, f"{kind}_idle_confirmations", confirmations)
+                self.save_records(payload, records)
+                # Stopping a live pane needs evidence separated in time.  Do not issue a second
+                # status probe inside this tick: a turn can start between two microsecond-adjacent
+                # probes, while the next ordinary dispatcher tick observes that transition and
+                # clears the episode before anything destructive happens.
+                if confirmations < 2:
                     return unavailable() if runtime_reason else None
-                fenced_status, idle_trigger = fenced
-                if not fenced_status.get("live"):
-                    return self._trigger_wait_watchdog(
-                        task, record, records, payload, attempt_id, kind=kind,
-                        trigger=f"terminal {fenced_status.get('reason') or 'missing'}",
-                    )
                 # Degraded, not ok. A head that stopped without delivering is the pipeline failing
                 # to make progress on a card, and the operator learns about it from the tick's own
                 # health: an `ok` bounce would write healthy telemetry over the one signal that
@@ -3472,36 +3469,6 @@ class DispatcherRuntime:
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
 
-    def _idle_wait_fence(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        kind: str,
-    ) -> tuple[dict[str, Any], str] | None:
-        """Confirm an idle watchdog verdict before it stops a live head.
-
-        The first reading has already aged through the idle window.  This second one is deliberately
-        narrow: only continued pid-confirmed idleness with no newer provider/terminal activity may
-        result in a stop.  Any uncertainty gets another ordinary tick instead of killing work.
-        """
-        try:
-            current = self._head_status(task, record, kind=kind)
-        except Exception:
-            return None
-        if not current.get("live"):
-            return current, ""
-        # A momentary heartbeat failure cannot prove a working head and must not erase the idle
-        # episode. The regular fallback remains available on the next tick.
-        if not current.get("pid_confirmed"):
-            return None
-        trigger = self._idle_wait_trigger(
-            record, records, payload, current, kind=kind, now=time.time()
-        )
-        return (current, trigger) if trigger else None
-
     def _head_status(self, task: dict[str, Any], record: DispatcherRecord, *, kind: str) -> dict[str, Any]:
         """Read one worker/reviewer status through the shared host boundary."""
         return self.host.review_status(task, record) if kind == "review" else self.host.worker_status(task, record)
@@ -3538,6 +3505,10 @@ class DispatcherRuntime:
             setattr(record, f"{kind}_idle_since", next_idle_since)
             self.save_records(payload, records)
         if not verdict:
+            confirmation_name = f"{kind}_idle_confirmations"
+            if getattr(record, confirmation_name):
+                setattr(record, confirmation_name, 0)
+                self.save_records(payload, records)
             return ""
         expectation = _wait_expectation(kind)
         if kind == "worker":
@@ -3643,6 +3614,7 @@ class DispatcherRuntime:
         # The replacement head owns its own readiness: whatever the one it replaces was doing when
         # the watchdog fired is not charged against it.
         setattr(record, f"{kind}_idle_since", 0.0)
+        setattr(record, f"{kind}_idle_confirmations", 0)
         respawns = int(getattr(record, f"{kind}_respawns") or 0) + 1
         setattr(record, f"{kind}_respawns", respawns)
         records[ref] = record

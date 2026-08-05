@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import stat
-import subprocess
 from pathlib import Path
 
+from secretary import state_repo
 from triggered_agents.runtime.board_transport import TRANSPORT_ENV
 
 
@@ -50,14 +50,10 @@ def read_runtime_env(
             relative = None
         if relative is not None:
             try:
-                ignored = subprocess.run(
-                    ["git", "-c", f"safe.directory={instance_dir}", "-C", str(instance_dir),
-                     "check-ignore", "--quiet", "--", str(relative)],
-                    capture_output=True, text=True, timeout=30,
-                )
-            except (OSError, subprocess.TimeoutExpired):
+                ignored = state_repo.is_ignored(instance_dir, str(relative))
+            except OSError:
                 raise RuntimeEnvError("could not verify that runtime.env is gitignored") from None
-            if ignored.returncode != 0:
+            if not ignored:
                 raise RuntimeEnvError("runtime.env is inside the instance checkout but is not gitignored")
     try:
         lines = path.read_text(encoding="utf-8").splitlines()

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_values, resolve, transport_path
+from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_values, findings, resolve, transport_path
 from secretary.runtime_env import RuntimeEnvError, read_runtime_env
 from secretary.tasks import KanboardClient, TaskError
 from triggered_agents.runtime import kanboard
@@ -94,7 +94,7 @@ class BoardTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeEnvError, "whitespace-padded legacy"):
                 self.migrate(instance, runtime)
 
-    def test_external_runtime_override_is_the_file_that_is_retired(self) -> None:
+    def test_external_runtime_override_is_imported_but_never_rewritten(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp) / "instance"
             instance.mkdir()
@@ -108,8 +108,11 @@ class BoardTransportTests(unittest.TestCase):
             outcome = ensure_from_runtime_values(
                 instance, legacy_values=values, runtime_env=external,
             )
-            self.assertEqual(outcome.render(), "imported legacy transport; retired legacy runtime values")
-            self.assertEqual(external.read_text(encoding="utf-8"), "OTHER=value\n")
+            self.assertEqual(
+                outcome.render(),
+                "imported legacy transport; external runtime override retains legacy values; retire them manually",
+            )
+            self.assertIn("KANBOARD_API_TOKEN=legacy-token", external.read_text(encoding="utf-8"))
             self.assertFalse((instance / "runtime.env").exists())
 
     def test_dry_run_truthfully_reports_retiring_a_matching_legacy_tuple(self) -> None:
@@ -268,6 +271,22 @@ class BoardTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(BoardTransportError, "contents are unconfirmed"):
                 ensure(instance)
             self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_tracked_transport_is_reported_before_any_token_is_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
+                         ("config", "user.email", "test@example.invalid")):
+                subprocess.run(["git", "-C", str(instance), *args], check=True)
+            path = instance / "board-transport.env"
+            path.write_text("not a transport\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(instance), "add", "board-transport.env"], check=True)
+            subprocess.run(["git", "-C", str(instance), "commit", "--quiet", "-m", "tracked"], check=True)
+
+            reported = findings(instance)
+
+        self.assertEqual(len(reported), 1)
+        self.assertIn("tracked", reported[0])
 
     def test_confirmed_repair_reports_every_simultaneous_lifecycle_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

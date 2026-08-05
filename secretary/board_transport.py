@@ -29,10 +29,12 @@ class TransportOutcome:
     mode_repaired: bool = False
     ignore_added: bool = False
     legacy_retired: bool = False
+    legacy_external: bool = False
 
     @property
     def changed(self) -> bool:
-        return self.source != "existing" or self.mode_repaired or self.ignore_added or self.legacy_retired
+        return (self.source != "existing" or self.mode_repaired or self.ignore_added
+                or self.legacy_retired or self.legacy_external)
 
     def render(self, *, dry_run: bool = False) -> str:
         actions: list[str] = []
@@ -46,6 +48,10 @@ class TransportOutcome:
             actions.append("would add transport ignore" if dry_run else "added transport ignore")
         if self.legacy_retired:
             actions.append("would retire legacy runtime values" if dry_run else "retired legacy runtime values")
+        if self.legacy_external:
+            actions.append(
+                "external runtime override retains legacy values; retire them manually"
+            )
         return "; ".join(actions) if actions else "unchanged"
 
 def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
@@ -135,22 +141,38 @@ def ensure_from_runtime_values(
     outcome = ensure(
         instance_dir, legacy_values=legacy_values, dry_run=dry_run, allow_default=allow_default,
     )
-    legacy_keys = set(TRANSPORT_ENV).intersection(legacy_values)
+    try:
+        retire_source = path.resolve() == (Path(instance_dir).expanduser().resolve() / "runtime.env")
+    except OSError:
+        retire_source = False
+    legacy_keys = set(TRANSPORT_ENV).intersection(legacy_values) if retire_source else set()
     if legacy_keys:
         # After a successful, equality-checked import the legacy tuple has no
         # authority. Preserve unrelated runtime lines and comments verbatim.
-        raw = path.read_text(encoding="utf-8")
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise BoardTransportError(f"could not retire legacy runtime values: {exc}") from None
         retained = [line for line in raw.splitlines(keepends=True)
                     if line.split("=", 1)[0] not in legacy_keys]
         if not dry_run:
             write_text_atomic(path, "".join(retained))
         outcome = replace(outcome, legacy_retired=True)
+    elif set(TRANSPORT_ENV).intersection(legacy_values):
+        # An explicit override belongs to its operator.  It is evidence for the one-time import,
+        # never authority to rewrite or chown a path outside the instance lifecycle.
+        outcome = replace(outcome, legacy_external=True)
     return outcome
 
 
 def findings(instance_dir: Path | str) -> list[str]:
     """Public, non-secret transport health evidence for status and doctor."""
     path = transport_path(instance_dir)
+    if state_repo.is_tracked(path.parent, f"/{TRANSPORT_FILE}"):
+        return [
+            "board transport configuration is tracked in the instance repository; "
+            "remove it from tracked history and rerun upgrade"
+        ]
     # A pre-transport checkout has no lifecycle marker yet; it is not an unhealthy
     # configured installation. Once the durable ignore entry exists, absence is a finding.
     if not path.exists() and not path.is_symlink() and not state_repo.is_ignored(path.parent, f"/{TRANSPORT_FILE}"):

@@ -159,6 +159,7 @@ def reset_wait(record, kind: str) -> None:
     setattr(record, f"{kind}_respawns", 0)
     setattr(record, f"{kind}_progress_at", 0.0)
     setattr(record, f"{kind}_idle_since", 0.0)
+    setattr(record, f"{kind}_idle_confirmations", 0)
 
 
 def wait_cycle_token(record) -> str:

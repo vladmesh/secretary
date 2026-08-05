@@ -5676,6 +5676,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
         self.tick()
         self._rewind_idle()
+        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_an_adopted_card_recovers_the_generation_its_worker_is_holding(self) -> None:
@@ -6181,6 +6182,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         self._rewind_idle()
 
+        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_a_staged_report_event_with_no_comment_ends_nothing(self) -> None:
@@ -6346,6 +6348,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self._rewind_idle()
         bounced = self.tick()
+        self.assertEqual(bounced["action"], "waiting-worker-report")
+        bounced = self.tick()
         self.assertEqual(bounced["status"], "degraded")
         return bounced
 
@@ -6360,6 +6364,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         self._rewind_idle()
 
+        self.tick()
         bounced = self.tick()
 
         self.assertEqual(bounced["action"], "worker-respawned")
@@ -6422,6 +6427,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._rewind_idle()
 
         self.host.worker_status_result["last_activity"] = time.time()
+        self.tick()
         result = self.tick()
 
         self.assertEqual(result["action"], "worker-respawned")
@@ -6433,6 +6439,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         self._rewind_idle()
 
+        self.tick()
         result = self.tick()
 
         self.assertEqual(result["action"], "worker-respawned")
@@ -6449,6 +6456,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         with mock.patch.object(self.host, "worker_status", side_effect=[
             dict(self.host.worker_status_result), fresh_status,
         ]):
+            self.tick()
             result = self.tick()
 
         self.assertEqual(result["action"], "worker-respawned")
@@ -6464,6 +6472,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             dict(self.host.worker_status_result),
             dict(self.host.worker_status_result, idle=False),
         ]):
+            self.tick()
             result = self.tick()
 
         self.assertEqual(result["action"], "waiting-worker-report")
@@ -6482,6 +6491,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             dict(self.host.worker_status_result, pid_confirmed=False),
         ]):
             self.assertEqual(self.tick()["action"], "waiting-worker-report")
+            self.assertEqual(self.tick()["action"], "waiting-worker-report")
 
         self.assertEqual(self._pilot_record()["worker_idle_since"], aged)
         self.assertEqual(self.tick()["action"], "worker-respawned")
@@ -6496,6 +6506,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             dict(self.host.worker_status_result),
             {"known": True, "live": False, "reason": "missing-terminal"},
         ]):
+            self.tick()
             result = self.tick()
 
         self.assertEqual(result["action"], "worker-respawned")
@@ -6539,6 +6550,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "the replacement head owns its own window",
         )
         self._rewind_idle()
+        self.tick()
         escalated = self.tick()
 
         self.assertEqual(escalated["to"], "blocked")
@@ -6568,6 +6580,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
         self.tick()
         self._rewind_idle()
+        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_a_refused_stale_report_ends_in_the_bounded_state(self) -> None:
@@ -6585,6 +6598,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
         self.tick()
         self._rewind_idle()
+        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_an_idle_reviewer_with_no_verdict_is_bounded_the_same_way(self) -> None:
@@ -6597,11 +6611,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.tick()["action"], "waiting-review-verdict")
 
         self._rewind_idle("review")
+        self.tick()
         respawned = self.tick()
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.tick()
         self._rewind_idle("review")
+        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
 

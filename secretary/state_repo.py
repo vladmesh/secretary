@@ -12,6 +12,8 @@ concurrency-safe.
 
 from __future__ import annotations
 
+import os
+import pwd
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -61,7 +63,10 @@ def state_repo_lock(instance_dir: Path) -> Iterator[None]:
     The lock lives in the git dir rather than the worktree so it never shows up
     as an untracked file in the operator's `git status`.
     """
-    with file_lock(_lock_path(Path(instance_dir).expanduser().resolve())):
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    lock_path = _lock_path(instance_dir)
+    with file_lock(lock_path):
+        _make_repo_user_owned(lock_path, instance_dir)
         yield
 
 
@@ -88,9 +93,24 @@ def commit_identity(instance_dir: Path) -> list[str]:
 
 def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:
     instance_dir = Path(instance_dir).expanduser().resolve()
+    command = ["git", "-c", "core.hooksPath=/dev/null", "-C", str(instance_dir), *args]
+    # The instance checkout is runtime-user-owned.  Root install/upgrade may need to reconcile
+    # it, but Git reads repository configuration before a command (including fsmonitor), so a
+    # root Git process would execute runtime-user-controlled configuration.  Cross that boundary
+    # once, before Git starts, rather than trying to suppress every executable Git feature.
+    # `getuid` deliberately tests the process's real privilege.  Some lifecycle tests (and
+    # wrappers) only override effective identity for their own preflight, which must not make an
+    # unprivileged process attempt `runuser`.
+    if os.getuid() == 0:
+        try:
+            owner = instance_dir.stat()
+            if owner.st_uid != 0:
+                command = ["runuser", "--user", pwd.getpwuid(owner.st_uid).pw_name, "--", *command]
+        except (KeyError, OSError) as exc:
+            raise StateRepoError(f"{label} failed: could not select instance runtime user: {exc}") from None
     try:
         result = subprocess.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(instance_dir), *args],
+            command,
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -102,6 +122,18 @@ def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120
         detail = (result.stderr or result.stdout or "").strip().splitlines()
         raise StateRepoError(f"{label} failed: {detail[-1] if detail else 'git error'}")
     return result.stdout
+
+
+def _make_repo_user_owned(path: Path, instance_dir: Path) -> None:
+    """Hand root-created lifecycle files back before the runtime user invokes Git."""
+    if os.getuid() != 0:
+        return
+    try:
+        repo_owner = instance_dir.stat()
+        if repo_owner.st_uid != 0:
+            os.chown(path, repo_owner.st_uid, repo_owner.st_gid)
+    except OSError as exc:
+        raise StateRepoError(f"prepare instance lifecycle file failed: {exc}") from None
 
 
 def require_repo(instance_dir: Path) -> Path:
@@ -172,7 +204,11 @@ def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> 
     changed = entry not in current.splitlines()
     if changed and not dry_run:
         suffix = "" if not current or current.endswith("\n") else "\n"
-        write_text_atomic(ignore, current + suffix + entry + "\n")
+        try:
+            write_text_atomic(ignore, current + suffix + entry + "\n")
+        except RuntimeError as exc:
+            raise StateRepoError(f"write gitignore failed: {exc}") from None
+        _make_repo_user_owned(ignore, instance_dir)
         commit(instance_dir, GITIGNORE_PATHSPEC, f"Ignore local {entry.lstrip('/')}")
     try:
         git(instance_dir, ["check-ignore", "--quiet", "--", entry.lstrip("/")], label="verify exclusion")
