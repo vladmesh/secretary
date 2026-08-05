@@ -442,9 +442,10 @@ def bootstrap(args: argparse.Namespace) -> int:
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         clone_detail = _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
-        transport, _ = ensure_from_runtime_file(
+        transport_outcome = ensure_from_runtime_file(
             target, runtime, dry_run=args.dry_run, allow_default=clone_detail.startswith(("cloned", "would clone")),
         )
+        transport = transport_outcome.transport
         if not args.dry_run:
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)

@@ -68,6 +68,10 @@ and is part of no checkpoint or archive payload. `secretary shell` receives the 
 operator session; dispatcher-launched workers and reviewers receive non-secret runtime switches through
 the role-environment wrapper and resolve board transport from the installation.
 
+`secret import` rejects retired `KANBOARD_URL`, `KANBOARD_API_USER` and `KANBOARD_API_TOKEN` entries.
+Migrate that complete tuple only through the board-transport upgrade path; it is no longer a recoverable
+runtime secret.
+
 The store does not promise worker isolation: it has no broker and no grants, and the installation key
 opens every secret at once, with the same rights that previously read `runtime.env` (see
 [Recovery](RECOVERY.md#secrets)).

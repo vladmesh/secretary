@@ -608,7 +608,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
 def step_board_transport(context: UpgradeContext) -> StepResult:
     """Migrate old runtime values once, or create the deterministic local config."""
     try:
-        _transport, status = ensure_from_runtime_file(context.instance_path, dry_run=context.dry_run)
+        outcome = ensure_from_runtime_file(context.instance_path, dry_run=context.dry_run)
     except BoardTransportError as exc:
         return StepResult("board-transport", "failed", str(exc))
     if not context.dry_run:
@@ -619,8 +619,8 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
             return StepResult("board-transport", "failed", str(exc))
     return StepResult(
         "board-transport",
-        "unchanged" if status == "unchanged" else "changed",
-        status,
+        "unchanged" if not outcome.changed else "changed",
+        outcome.render(dry_run=context.dry_run),
     )
 
 

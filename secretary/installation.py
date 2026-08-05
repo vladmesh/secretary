@@ -908,7 +908,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 _restore_without_credentials(args, target, result)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         try:
-            transport, transport_status = ensure_from_runtime_file(
+            transport_outcome = ensure_from_runtime_file(
                 target,
                 runtime_env,
                 dry_run=args.dry_run,
@@ -919,9 +919,14 @@ def install(args: argparse.Namespace) -> InstallResult:
         if not args.dry_run:
             _set_installation_owner(runtime_env, args.installation_user)
             _set_installation_owner(transport_path(target), args.installation_user)
-        result.add("board-transport", "would-change" if args.dry_run and transport_status != "unchanged" else (
-            "changed" if transport_status != "unchanged" else "unchanged"
-        ), transport_status)
+        transport = transport_outcome.transport
+        result.add(
+            "board-transport",
+            "would-change" if args.dry_run and transport_outcome.changed else (
+                "changed" if transport_outcome.changed else "unchanged"
+            ),
+            transport_outcome.render(dry_run=args.dry_run),
+        )
         result.add(
             "runtime-env",
             "unchanged" if runtime_loaded else "skipped",

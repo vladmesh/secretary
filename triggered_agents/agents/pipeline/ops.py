@@ -87,7 +87,7 @@ def _column_id(pid: int, title: str) -> int:
             return int(c["id"])
     raise KanboardError(
         f"no column {title!r} on board (an empty board is reconciled by `pipeline setup`; a board "
-        "that holds cards needs `python3 -m secretary board migrate-assessment`)"
+        "that holds cards needs `python3 -P -m secretary board migrate-assessment`)"
     )
 
 
@@ -115,7 +115,7 @@ def _proposal_column(pid: int) -> str:
         f"this board's first column is {first!r}, not the Product backlog "
         f"{model.PROPOSAL_COLUMN!r}, so an agent proposal has nowhere to go. An empty board is "
         "reconciled by `pipeline setup`; a board that holds cards is repaired by hand or by "
-        "`python3 -m secretary board migrate-assessment`. Report the proposal in the verdict or "
+        "`python3 -P -m secretary board migrate-assessment`. Report the proposal in the verdict or "
         "the retro output instead."
     )
 
@@ -156,7 +156,7 @@ def ensure_structure() -> dict:
         raise model.GuardError(
             f"board has cards but its columns are {', '.join(titles)} "
             f"(expected: {', '.join(model.COLUMNS)}). Reconciling by index here would rename "
-            "columns under the cards standing in them. Run `python3 -m secretary board "
+            "columns under the cards standing in them. Run `python3 -P -m secretary board "
             "migrate-assessment` if the board carries the earlier six-column layout; any other "
             "layout is a manual repair."
         )
@@ -754,7 +754,7 @@ def report(reference: str, kind: str, body: str = "") -> dict:
         raise model.GuardError(f"report kind must be 'done' or 'blocked', not {kind!r}")
     if kind == "blocked":
         raise model.GuardError(
-            "a blocked report must go through `python3 -m secretary task report --kind blocked "
+            "a blocked report must go through `python3 -P -m secretary task report --kind blocked "
             "--classification ...`, which owns the blocker classification this path cannot write"
         )
     marker = model.MARKER_REPORT_DONE

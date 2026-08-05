@@ -549,6 +549,21 @@ class LegacyBoardSecretTests(SecretStoreCase):
         self.assertIn(transport.token, secret_store.redaction_values(self.instance_dir))
         self.assertIn("still-live-old-token", secret_store.redaction_values(self.instance_dir))
 
+    def test_legacy_board_url_and_user_are_not_global_redaction_needles(self) -> None:
+        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
+            for secret_id, environment, value in (
+                ("kanboard_url", "KANBOARD_URL", b"http://127.0.0.1:8080/jsonrpc.php"),
+                ("kanboard_api_user", "KANBOARD_API_USER", b"jsonrpc"),
+            ):
+                set_secret(
+                    self.instance_dir, secret_id=secret_id, value=value,
+                    scope="installation", purpose="historic board configuration",
+                    environment=environment, actor="tester",
+                )
+        values = secret_store.redaction_values(self.instance_dir)
+        self.assertNotIn("http://127.0.0.1:8080/jsonrpc.php", values)
+        self.assertNotIn("jsonrpc", values)
+
 
 # The three keys the live installation's runtime.env holds, in the order the live
 # file holds them, which is not alphabetical: URL, user, token. The token ends in

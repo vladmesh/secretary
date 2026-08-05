@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from secretary._fsutil import file_lock
+from secretary._fsutil import file_lock, write_text_atomic
 
 
 STATE_LOCK_NAME = "secretary-state-writer.lock"
@@ -168,7 +168,6 @@ def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> 
     changed = entry not in current.splitlines()
     if changed and not dry_run:
         suffix = "" if not current or current.endswith("\n") else "\n"
-        from secretary._fsutil import write_text_atomic
         write_text_atomic(ignore, current + suffix + entry + "\n")
         commit(instance_dir, GITIGNORE_PATHSPEC, f"Ignore local {entry.lstrip('/')}")
     try:

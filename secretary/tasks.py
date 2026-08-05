@@ -890,7 +890,7 @@ class TaskWriter:
     def _redaction_values(self, runtime_env: Path) -> tuple[str, ...]:
         """Open the catalog at most once while its on-disk inputs are unchanged."""
         root = runtime_env.parent / "secrets"
-        paths = [root / "catalog.yaml", root / "installation.key"]
+        paths = [root / "catalog.yaml", root / "installation.key", runtime_env.parent / "board-transport.env"]
         values_dir = root / "values"
         if values_dir.is_dir():
             paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))

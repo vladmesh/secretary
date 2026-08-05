@@ -82,8 +82,6 @@ VALUES_DIRNAME = "values"
 VALUE_SUFFIX = ".enc.json"
 
 GITIGNORE_ENTRY = "secrets/installation.key"
-INIT_PATHSPEC = SECRETS_PATHSPEC
-
 CATALOG_VERSION = 1
 
 KEY_PARAMS_FORMAT = "secretary.installation-key"
@@ -689,7 +687,7 @@ def initialize_store(instance_dir: Path, *, phrase: str, actor: str) -> InitResu
             ]
         )
         commit = state_repo.commit(
-            instance_dir, INIT_PATHSPEC, _commit_message("init", "store initialized", actor)
+            instance_dir, SECRETS_PATHSPEC, _commit_message("init", "store initialized", actor)
         )
         if commit is None:
             raise SecretStoreError("secret store init produced nothing to commit")
@@ -822,8 +820,7 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
                     # missing/bad envelope remains visible through store_findings;
                     # one entry must not make us forget other readable credentials.
                     continue
-                if (secret_id in LEGACY_BOARD_SECRET_IDS or role_env.is_sensitive_env_name(environment)
-                        or looks_like_credential(value)):
+                if role_env.is_sensitive_env_name(environment) or looks_like_credential(value):
                     values.append(value)
         except SecretStoreError:
             pass

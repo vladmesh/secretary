@@ -493,6 +493,89 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn("code or dependencies changed", result.detail)
         self.assertIn(("restart", "secretary-memory.service"), units.calls)
 
+    def test_board_transport_step_imports_retires_and_reports_every_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            subprocess.run(["git", "-C", str(instance), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(instance), "config", "user.email", "test@example.invalid"], check=True)
+            runtime = instance / "runtime.env"
+            runtime.write_text(
+                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o600)
+            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+            retired = runtime.read_text(encoding="utf-8")
+        self.assertEqual(result.status, "changed")
+        self.assertIn("imported legacy transport", result.detail)
+        self.assertIn("retired legacy runtime values", result.detail)
+        self.assertEqual(retired, "")
+
+    def test_board_transport_step_fails_closed_without_writing_on_mismatch_or_missing_tuple(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            runtime = instance / "runtime.env"
+            runtime.write_text(
+                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o600)
+            (instance / "board-transport.env").write_text(
+                "KANBOARD_URL=http://other/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=other-token\n",
+                encoding="utf-8",
+            )
+            (instance / "board-transport.env").chmod(0o600)
+            mismatch = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+            self.assertEqual(mismatch.status, "failed")
+            self.assertIn("mismatch", mismatch.detail)
+            self.assertIn("legacy-token", runtime.read_text(encoding="utf-8"))
+            (instance / "board-transport.env").unlink()
+            runtime.write_text("OTHER=value\n", encoding="utf-8")
+            runtime.chmod(0o600)
+            missing = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+        self.assertEqual(missing.status, "failed")
+        self.assertIn("refuse to guess", missing.detail)
+
+    def test_board_transport_step_dry_run_and_insecure_runtime_do_not_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            runtime = instance / "runtime.env"
+            body = "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n"
+            runtime.write_text(body, encoding="utf-8")
+            runtime.chmod(0o600)
+            preview = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True))
+            self.assertEqual(preview.status, "changed")
+            self.assertIn("would import legacy transport", preview.detail)
+            self.assertIn("would retire legacy runtime values", preview.detail)
+            self.assertEqual(runtime.read_text(encoding="utf-8"), body)
+            self.assertFalse((instance / "board-transport.env").exists())
+            runtime.chmod(0o644)
+            insecure = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+        self.assertEqual(insecure.status, "failed")
+        self.assertIn("regular 0600", insecure.detail)
+
+    def test_board_transport_step_reports_an_already_configured_transport_as_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            (instance / ".gitignore").write_text("/board-transport.env\n", encoding="utf-8")
+            transport = instance / "board-transport.env"
+            transport.write_text(
+                "KANBOARD_URL=http://127.0.0.1:8080/jsonrpc.php\n"
+                "KANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=local-token\n",
+                encoding="utf-8",
+            )
+            transport.chmod(0o600)
+            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+        self.assertEqual((result.status, result.detail), ("unchanged", "unchanged"))
+
     def test_memory_restarts_when_its_unit_file_changed(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
 

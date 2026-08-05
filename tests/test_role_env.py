@@ -77,10 +77,11 @@ class RuntimeEnvRoleTests(unittest.TestCase):
     def test_required_role_rendering_does_not_probe_board_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            env = role_env.runtime_env(
-                "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
-                env_file=instance / "runtime.env",
-            )
+            with mock.patch("triggered_agents.runtime.board_transport.resolve", side_effect=AssertionError):
+                env = role_env.runtime_env(
+                    "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                    env_file=instance / "runtime.env",
+                )
         self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
 
 

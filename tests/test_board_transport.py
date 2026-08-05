@@ -66,13 +66,13 @@ class BoardTransportTests(unittest.TestCase):
             )
             runtime.chmod(0o600)
             transport, status = ensure_from_runtime_file(instance, runtime)
-            self.assertEqual(status, "imported-legacy")
+            self.assertEqual(status, "imported legacy transport; retired legacy runtime values")
             self.assertEqual(transport.token, "legacy-token")
             self.assertEqual(runtime.read_text(encoding="utf-8"), "OTHER=value\n")
             self.assertEqual(resolve(instance), transport)
             self.assertEqual((instance / "board-transport.env").stat().st_mode & 0o777, 0o600)
 
-    def test_whitespace_in_a_valid_runtime_assignment_is_migrated_consistently(self) -> None:
+    def test_padded_runtime_assignment_is_refused_before_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             runtime = instance / "runtime.env"
@@ -83,9 +83,8 @@ class BoardTransportTests(unittest.TestCase):
             )
             runtime.chmod(0o600)
 
-            transport, status = ensure_from_runtime_file(instance, runtime)
-
-        self.assertEqual((transport.token, status), ("legacy-token", "imported-legacy"))
+            with self.assertRaisesRegex(BoardTransportError, "padded with whitespace"):
+                ensure_from_runtime_file(instance, runtime)
 
     def test_dry_run_truthfully_reports_retiring_a_matching_legacy_tuple(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,10 +102,13 @@ class BoardTransportTests(unittest.TestCase):
             )
             runtime.chmod(0o600)
 
-            _, preview = ensure_from_runtime_file(instance, runtime, dry_run=True)
-            _, applied = ensure_from_runtime_file(instance, runtime)
+            preview = ensure_from_runtime_file(instance, runtime, dry_run=True)
+            applied = ensure_from_runtime_file(instance, runtime)
 
-        self.assertEqual((preview, applied), ("would-retire-legacy", "retired-legacy"))
+        self.assertEqual(
+            (preview.render(dry_run=True), applied.render()),
+            ("would retire legacy runtime values", "retired legacy runtime values"),
+        )
 
     def test_conflicting_legacy_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,9 +153,9 @@ class BoardTransportTests(unittest.TestCase):
 
     def test_fresh_bootstrap_may_explicitly_create_the_default_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            transport, status = ensure_from_runtime_file(Path(tmp), allow_default=True)
-        self.assertEqual(status, "created-default")
-        self.assertEqual(transport.token, "secretary-local-kanboard-jsonrpc-v1")
+            outcome = ensure_from_runtime_file(Path(tmp), allow_default=True)
+        self.assertEqual(outcome.render(), "created default transport")
+        self.assertEqual(outcome.transport.token, "secretary-local-kanboard-jsonrpc-v1")
 
     def test_instance_yaml_spelling_and_empty_selection_never_use_the_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,7 +192,7 @@ class BoardTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(BoardTransportError, "permissions are too broad"):
                 resolve(instance)
             repaired, status = ensure(instance)
-            self.assertEqual((repaired, status), (transport, "secured"))
+            self.assertEqual((repaired, status), (transport, "secured transport mode"))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             linked = instance.parent / "linked.env"
             linked.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -207,9 +209,12 @@ class BoardTransportTests(unittest.TestCase):
             for args in (("init", "--quiet"), ("config", "user.name", "Test"),
                          ("config", "user.email", "test@example.invalid")):
                 subprocess.run(["git", "-C", str(instance), *args], check=True)
-            _, preview = ensure(instance, dry_run=True)
-            _, applied = ensure(instance)
-        self.assertEqual((preview, applied), ("would-ignore", "ignored"))
+            preview = ensure(instance, dry_run=True)
+            applied = ensure(instance)
+        self.assertEqual(
+            (preview.render(dry_run=True), applied.render()),
+            ("would add transport ignore", "added transport ignore"),
+        )
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
 # The board's decision column: a card waits there for a person, not for a machine. `secretary`
 # owns the Pipeline board schema and the role/transition model; this surface is a consumer of that
 # board, not a second authority over it, so the po and observer releases out of Assessment are not
-# restated here. They go through `python3 -m secretary task move`, which is the authoritative
+# restated here. They go through `python3 -P -m secretary task move`, which is the authoritative
 # writer. Two role tables for one board is what produced the defect this rule exists to prevent.
 # The one edge kept here is the steward escalation below, because this is the surface the steward
 # actually moves cards with.
@@ -214,7 +214,7 @@ def check_move(role: str, from_col: str, to_col: str) -> None:
         raise GuardError(
             f"role {role!r} may not move {from_col!r} -> {to_col!r} here: moves in and out of "
             f"{ASSESSMENT!r} other than the steward escalation to 'Blocked' go through "
-            "`python3 -m secretary task move`, which owns the role matrix for that column"
+            "`python3 -P -m secretary task move`, which owns the role matrix for that column"
         )
     # Validate->In progress is a legit rework transition (in the matrix); any OTHER move into
     # In progress is the fresh-claim case, which must go through `claim`, not `move`.

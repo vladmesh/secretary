@@ -440,6 +440,10 @@ class InstanceCatalog:
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ) -> HeadLaunch:
+        try:
+            _require_board_transport(role)
+        except HeadLaunchError as exc:
+            raise HostError(str(exc)) from None
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
@@ -1612,10 +1616,6 @@ class CommandHostRuntime:
             return self._launched(
                 f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace
             )
-        try:
-            _require_board_transport(role)
-        except HeadLaunchError as exc:
-            raise HostError(str(exc)) from None
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         if pid_file:
             # Drop any pid a previous launch in this same workspace left behind, so a respawn
@@ -3376,10 +3376,7 @@ class DispatcherRuntime:
             return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
         runtime_reason = ""
         try:
-            status = (
-                self.host.review_status(task, record)
-                if kind == "review" else self.host.worker_status(task, record)
-            )
+            status = self._head_status(task, record, kind=kind)
         except Exception as exc:
             # Orca may be down or between reconnects.  It is not evidence that this particular
             # head died, so do not restart it merely for that.  It also cannot prove progress,
@@ -3496,11 +3493,8 @@ class DispatcherRuntime:
         result in a stop.  Any uncertainty gets another ordinary tick instead of killing work.
         """
         try:
-            current = (
-                self.host.review_status(task, record)
-                if kind == "review" else self.host.worker_status(task, record)
-            )
-        except Exception:
+            current = self._head_status(task, record, kind=kind)
+        except HostError:
             return None
         if not current.get("live"):
             return current, ""
@@ -3512,6 +3506,10 @@ class DispatcherRuntime:
             record, records, payload, current, kind=kind, now=time.time()
         )
         return (current, trigger) if trigger else None
+
+    def _head_status(self, task: dict[str, Any], record: DispatcherRecord, *, kind: str) -> dict[str, Any]:
+        """Read one worker/reviewer status through the shared host boundary."""
+        return self.host.review_status(task, record) if kind == "review" else self.host.worker_status(task, record)
 
     def _idle_wait_trigger(
         self,

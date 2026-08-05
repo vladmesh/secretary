@@ -43,7 +43,7 @@ class LegacyBlockedReportTests(unittest.TestCase):
             self._report("blocked")
 
         message = str(raised.exception)
-        self.assertIn("python3 -m secretary task report --kind blocked", message)
+        self.assertIn("python3 -P -m secretary task report --kind blocked", message)
         self.assertIn("--classification", message)
 
     def test_the_refusal_writes_nothing_to_the_board(self):

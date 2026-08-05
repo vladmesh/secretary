@@ -10,6 +10,7 @@ action, never a silent repair.
 from __future__ import annotations
 
 import stat
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -19,6 +20,40 @@ from triggered_agents.runtime.board_transport import (
     BoardTransport, BoardTransportError, DEFAULT_TOKEN, DEFAULT_TRANSPORT,
     TRANSPORT_ENV, TRANSPORT_FILE, parse as _parse, resolve, transport_path,
 )
+
+
+@dataclass(frozen=True)
+class TransportOutcome:
+    """Independent lifecycle actions taken for one transport reconciliation."""
+    transport: BoardTransport
+    source: str = "existing"
+    mode_repaired: bool = False
+    ignore_added: bool = False
+    legacy_retired: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.source != "existing" or self.mode_repaired or self.ignore_added or self.legacy_retired
+
+    def render(self, *, dry_run: bool = False) -> str:
+        actions: list[str] = []
+        if self.source == "created-default":
+            actions.append("would create default transport" if dry_run else "created default transport")
+        elif self.source == "imported-legacy":
+            actions.append("would import legacy transport" if dry_run else "imported legacy transport")
+        if self.mode_repaired:
+            actions.append("would secure transport mode" if dry_run else "secured transport mode")
+        if self.ignore_added:
+            actions.append("would add transport ignore" if dry_run else "added transport ignore")
+        if self.legacy_retired:
+            actions.append("would retire legacy runtime values" if dry_run else "retired legacy runtime values")
+        return "; ".join(actions) if actions else "unchanged"
+
+    def __iter__(self):
+        """Compatibility for callers consuming the historical two-item result."""
+        yield self.transport
+        yield self.render()
+
 
 def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
     """Turn a complete old runtime tuple into a transport, rejecting partial state."""
@@ -35,7 +70,7 @@ def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
 
 
 def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None = None,
-           dry_run: bool = False, allow_default: bool = False) -> tuple[BoardTransport, str]:
+           dry_run: bool = False, allow_default: bool = False) -> TransportOutcome:
     """Create a deterministic file, or perform the one explicit legacy import."""
     path = transport_path(instance_dir)
     legacy = legacy_transport(legacy_values)
@@ -61,11 +96,9 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
             raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
         if needs_mode_repair and not dry_run:
             path.chmod(0o600)
-        if needs_mode_repair:
-            return configured, "would-secure" if dry_run else "secured"
-        if ignore_changed:
-            return configured, "would-ignore" if dry_run else "ignored"
-        return configured, "unchanged"
+        return TransportOutcome(
+            configured, mode_repaired=needs_mode_repair, ignore_added=ignore_changed,
+        )
     if legacy is None and not allow_default:
         raise BoardTransportError(
             "board transport is missing and legacy runtime.env has no complete Kanboard tuple; "
@@ -81,21 +114,29 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
                 state_repo.ensure_ignored(path.parent, f"/{TRANSPORT_FILE}")
             except state_repo.StateRepoError as exc:
                 raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
-    status = "imported-legacy" if legacy is not None else "created-default"
-    return configured, ("would-" + status if dry_run else status)
+    return TransportOutcome(configured, "imported-legacy" if legacy is not None else "created-default")
 
 
 def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str | None = None,
-                             *, dry_run: bool = False, allow_default: bool = False) -> tuple[BoardTransport, str]:
+                             *, dry_run: bool = False, allow_default: bool = False) -> TransportOutcome:
     """Migration entry point for install/upgrade; only this module reads old names."""
     path = Path(runtime_env) if runtime_env is not None else Path(instance_dir) / "runtime.env"
     values: dict[str, str] = {}
     if path.exists():
         _validate_runtime_file(path)
-        for number, line in enumerate(path.read_text(encoding="utf-8", errors="strict").splitlines(), 1):
-            if "=" in line and not line.lstrip().startswith("#"):
+        for number, raw in enumerate(path.read_text(encoding="utf-8", errors="strict").splitlines(), 1):
+            if raw != raw.strip():
+                raise BoardTransportError(
+                    f"legacy Kanboard runtime configuration line {number} is padded with whitespace"
+                )
+            line = raw.strip()
+            if "=" in line and not line.startswith("#"):
                 key, value = line.split("=", 1)
-                key = key.strip()
+                normalized_key = key.strip()
+                if normalized_key in TRANSPORT_ENV and key != normalized_key:
+                    raise BoardTransportError(
+                        f"legacy Kanboard runtime configuration line {number} has padded variable name"
+                    )
                 if key in TRANSPORT_ENV:
                     if key in values:
                         raise BoardTransportError(
@@ -103,7 +144,7 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
                             f"(line {number})"
                         )
                     values[key] = value
-    transport, status = ensure(
+    outcome = ensure(
         instance_dir, legacy_values=values, dry_run=dry_run, allow_default=allow_default,
     )
     if values:
@@ -114,10 +155,8 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
                     if line.split("=", 1)[0].strip() not in TRANSPORT_ENV]
         if not dry_run:
             write_text_atomic(path, "".join(retained))
-        status = "would-retire-legacy" if dry_run and status == "unchanged" else (
-            "retired-legacy" if status == "unchanged" else status
-        )
-    return transport, status
+        outcome = replace(outcome, legacy_retired=True)
+    return outcome
 
 
 def _validate_runtime_file(path: Path) -> None:
@@ -130,6 +169,6 @@ def _validate_runtime_file(path: Path) -> None:
 
 
 __all__ = [
-    "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "DEFAULT_TRANSPORT", "ensure",
+    "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "DEFAULT_TRANSPORT", "TransportOutcome", "ensure",
     "ensure_from_runtime_file", "resolve", "transport_path",
 ]
